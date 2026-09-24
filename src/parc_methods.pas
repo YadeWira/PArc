@@ -26,7 +26,7 @@ function IsStoring(const Method: string): Boolean;
 implementation
 
 uses
-  StrUtils, parc_os, parc_lzma, parc_filters, parc_lz4, parc_rep, parc_lzp, parc_ppmd, parc_dict, parc_tornado, parc_grzip;
+  StrUtils, parc_os, parc_lzma, parc_filters, parc_lz4, parc_rep, parc_lzp, parc_ppmd, parc_dict, parc_tornado, parc_grzip, parc_parallel;
 
 function IsStoring(const Method: string): Boolean;
 begin
@@ -196,106 +196,54 @@ begin
 end;
 
 type
-  { Un bloque de 4x4 en vuelo: se descomprime en su propio hilo. }
-  T4x4Job = class(TThread)
+  { Un bloque de 4x4: se descomprime entero en memoria con el método interno. }
+  T4x4Job = class(TParallelJob)
   public
     Inner: string;
-    InBuf, OutBuf: TBytes;
-    InSize, OutSize: SizeInt;
+    InBuf: TBytes;
     Stored: Boolean;
-    ErrClass: ExceptClass;
-    ErrMsg: string;
-    constructor Create(const AInner: string);
-    procedure Execute; override;
+    procedure Decode; override;
   end;
 
   { 4x4 (Compression/4x4/C_4x4.cpp): U32 versión (=0) y bloques [Int32 OutSize][U32 InSize][datos].
-    OutSize = -1: bloque guardado. Si no, se descomprime entero en memoria con el método interno.
-    Como en FreeArc, los bloques se descomprimen en paralelo: el hilo que llama lee los bloques en
-    orden (la fuente no es thread-safe), cada uno se decodifica en un hilo propio y la salida se
-    entrega en el mismo orden. }
-  T4x4Stage = class(TInStage)
+    OutSize = -1: bloque guardado. Como en FreeArc, los bloques se descomprimen en paralelo y la
+    salida se entrega en orden (parc_parallel). }
+  T4x4Stage = class(TParallelBlockStage)
   private
     FInner: string;
-    FQueue: array of T4x4Job;   // FIFO de bloques en vuelo
-    FHead, FCount, FMaxJobs: Integer;
-    FCur: T4x4Job;              // bloque que se está entregando
-    FPos: SizeInt;
-    FStarted, FSourceEof, FEof: Boolean;
-    function ReadJob: T4x4Job;
-    procedure FillQueue;
+    FStarted: Boolean;
+  protected
+    function ReadJob: TParallelJob; override;
   public
     constructor Create(ASource: TInStage; const AInner: string);
-    destructor Destroy; override;
-    function Read(Buf: PByte; Count: SizeInt): SizeInt; override;
   end;
 
-constructor T4x4Job.Create(const AInner: string);
+procedure T4x4Job.Decode;
 begin
-  inherited Create(True);   // suspendido: se arranca cuando los datos están cargados
-  FreeOnTerminate := False;
-  Inner := AInner;
-end;
-
-procedure T4x4Job.Execute;
-begin
-  try
-    if Stored then
-      OutBuf := InBuf
-    else
-    begin
-      SetLength(OutBuf, OutSize);
-      DecompressBlockMem(Inner, PByte(InBuf), InSize, PByte(OutBuf), OutSize);
-    end;
-  except
-    // Las excepciones no cruzan hilos: se guardan y se relanzan al entregar el bloque
-    on E: Exception do
-    begin
-      ErrClass := ExceptClass(E.ClassType);
-      ErrMsg := E.Message;
-    end;
+  if Stored then
+    OutBuf := InBuf
+  else
+  begin
+    SetLength(OutBuf, OutSize);
+    DecompressBlockMem(Inner, PByte(InBuf), Length(InBuf), PByte(OutBuf), OutSize);
   end;
+  InBuf := nil;
 end;
 
 constructor T4x4Stage.Create(ASource: TInStage; const AInner: string);
-var
-  Threads: Integer;
 begin
-  inherited Create(ASource);
+  // Por encima de ~16 hilos empeora (contención del heap; medido en una máquina de 64 núcleos).
+  // Un bloque extra por hilo: mientras uno se entrega, los demás ya se están descomprimiendo
+  inherited Create(ASource, 16, 16);
   FInner := AInner;
-  // Dos bloques por hilo: mientras uno se entrega, los demás ya se están descomprimiendo.
-  // Por encima de ~16 hilos empeora (contención del heap; medido en una máquina de 64 núcleos),
-  // así que ese es el tope salvo que PARC_THREADS diga otra cosa
-  Threads := StrToIntDef(GetEnvironmentVariable('PARC_THREADS'), 0);
-  if Threads <= 0 then
-  begin
-    Threads := CpuCount;
-    if Threads > 16 then Threads := 16;
-  end;
-  if Threads > 64 then Threads := 64;
-  FMaxJobs := 2 * Threads;
-  SetLength(FQueue, FMaxJobs);
 end;
 
-destructor T4x4Stage.Destroy;
-var
-  i: Integer;
-begin
-  FCur.Free;
-  for i := 0 to FCount - 1 do
-  begin
-    FQueue[(FHead + i) mod FMaxJobs].WaitFor;
-    FQueue[(FHead + i) mod FMaxJobs].Free;
-  end;
-  inherited Destroy;
-end;
-
-{ Lee el próximo bloque de la fuente (en el hilo que llama). nil al final del stream. }
-function T4x4Stage.ReadJob: T4x4Job;
+function T4x4Stage.ReadJob: TParallelJob;
 var
   Hdr: array[0..3] of Byte;
   OutSize: LongInt;
   InSize: LongWord;
+  Job: T4x4Job;
 begin
   Result := nil;
   if not FStarted then
@@ -308,62 +256,18 @@ begin
   OutSize := LongInt(LongWord(Hdr[0]) or (LongWord(Hdr[1]) shl 8) or (LongWord(Hdr[2]) shl 16) or (LongWord(Hdr[3]) shl 24));
   InSize := Source.ReadU32;
   if (InSize > $7FFFFFFF) or (OutSize < -1) then Corrupt('4x4: tamaño de bloque inválido');
-  Result := T4x4Job.Create(FInner);
+  Job := T4x4Job.Create;
   try
-    Result.InSize := InSize;
-    Result.Stored := OutSize = -1;
-    if Result.Stored then Result.OutSize := InSize else Result.OutSize := OutSize;
-    SetLength(Result.InBuf, InSize);
-    if InSize > 0 then Source.ReadExact(@Result.InBuf[0], InSize);
+    Job.Inner := FInner;
+    Job.Stored := OutSize = -1;
+    if Job.Stored then Job.OutSize := InSize else Job.OutSize := OutSize;
+    SetLength(Job.InBuf, InSize);
+    if InSize > 0 then Source.ReadExact(@Job.InBuf[0], InSize);
   except
-    Result.Free;
+    Job.Free;
     raise;
   end;
-end;
-
-procedure T4x4Stage.FillQueue;
-var
-  Job: T4x4Job;
-begin
-  while not FSourceEof and (FCount < FMaxJobs) do
-  begin
-    Job := ReadJob;
-    if Job = nil then
-    begin
-      FSourceEof := True;
-      Break;
-    end;
-    FQueue[(FHead + FCount) mod FMaxJobs] := Job;
-    Inc(FCount);
-    Job.Start;
-  end;
-end;
-
-function T4x4Stage.Read(Buf: PByte; Count: SizeInt): SizeInt;
-begin
-  while (FCur = nil) or (FPos >= FCur.OutSize) do
-  begin
-    FreeAndNil(FCur);
-    if FEof then Exit(0);
-    FillQueue;
-    if FCount = 0 then
-    begin
-      FEof := True;
-      Exit(0);
-    end;
-    FCur := FQueue[FHead];
-    FHead := (FHead + 1) mod FMaxJobs;
-    Dec(FCount);
-    FCur.WaitFor;
-    FPos := 0;
-    if FCur.ErrClass <> nil then
-      raise FCur.ErrClass.Create(FCur.ErrMsg);
-    FillQueue;   // reponer la cola mientras se entrega este bloque
-  end;
-  Result := FCur.OutSize - FPos;
-  if Result > Count then Result := Count;
-  Move(FCur.OutBuf[FPos], Buf^, Result);
-  Inc(FPos, Result);
+  Result := Job;
 end;
 
 function CreateStage(const Stage: string; Source: TInStage): TInStage;

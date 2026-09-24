@@ -39,60 +39,24 @@ unit parc_grzip;
 interface
 
 uses
-  Classes, SysUtils, parc_bytes, parc_stream;
+  Classes, SysUtils, parc_bytes, parc_stream, parc_parallel;
 
 type
   { Un bloque del stream: se decodifica en un hilo del pool y se entrega en orden. }
-  TGrzipJob = class
+  TGrzipJob = class(TParallelJob)
   public
-    InBuf, OutBuf: TBytes;
-    OutSize: SizeInt;
-    ErrClass: ExceptClass;
-    ErrMsg: string;
-    Done: PRTLEvent;
-    constructor Create;
-    destructor Destroy; override;
-    procedure Run;
+    InBuf: TBytes;
+    procedure Decode; override;
   end;
 
-  TGrzipStage = class;
-
-  TGrzipWorker = class(TThread)
-  private
-    FStage: TGrzipStage;
-  public
-    constructor Create(AStage: TGrzipStage);
-    procedure Execute; override;
-  end;
-
-  { Como GRZipMTDecompressor: el hilo que llama lee los bloques en orden (la fuente no es
-    thread-safe), un pool de hilos los decodifica y la salida se entrega en el mismo orden.
-    Sin TThread.WaitFor en el camino caliente: desde el hilo principal sondea cada 100 ms. }
-  TGrzipStage = class(TInStage)
+  { Como GRZipMTDecompressor: bloques en paralelo con la salida en orden (parc_parallel). }
+  TGrzipStage = class(TParallelBlockStage)
   private
     FLimit: SizeInt;              // BlockSize+LZP_MaxMatchLen: tamaño de los buffers del C
-    FQueue: array of TGrzipJob;   // FIFO de bloques en vuelo (leídos, en orden)
-    FHead, FCount, FMaxJobs: Integer;
-    FPending: array of TGrzipJob; // bloques todavía no tomados por un hilo (anillo)
-    FPendHead, FPendCount: Integer;
-    FLock: TRTLCriticalSection;
-    FWork: PRTLEvent;
-    FStop: Boolean;
-    FWorkers: array of TGrzipWorker;
-    FNumWorkers, FMaxWorkers: Integer;
-    FCur: TGrzipJob;
-    FPos: SizeInt;
-    FSourceEof, FEof: Boolean;
-    FErrClass: ExceptClass;       // error ya lanzado: se repite en cada Read posterior
-    FErrMsg: string;
-    function ReadJob: TGrzipJob;
-    procedure FillQueue;
-    procedure Submit(Job: TGrzipJob);
-    function TakeJob: TGrzipJob;
+  protected
+    function ReadJob: TParallelJob; override;
   public
     constructor Create(ASource: TInStage; const Params: TStringArray);
-    destructor Destroy; override;
-    function Read(Buf: PByte; Count: SizeInt): SizeInt; override;
   end;
 
 { Stream grzip completo en memoria (4x4:grzip). True si decodifica exactamente DstLen bytes;
@@ -1047,157 +1011,32 @@ end;
 
 { ---------- stream (GRZipMTDecompressor: bloques en paralelo) ---------- }
 
-constructor TGrzipJob.Create;
-begin
-  inherited Create;
-  Done := RTLEventCreate;
-end;
-
-destructor TGrzipJob.Destroy;
-begin
-  RTLEventDestroy(Done);
-  inherited Destroy;
-end;
-
 // GRZipMTDecompressor::Process
-procedure TGrzipJob.Run;
+procedure TGrzipJob.Decode;
 begin
-  try
-    SetLength(OutBuf, OutSize + 1);
-    DecodeBlock(PByte(InBuf), Length(InBuf), PByte(OutBuf), OutSize, 0);
-  except
-    // Las excepciones no cruzan hilos: se guardan y se relanzan al entregar el bloque
-    on E: Exception do
-    begin
-      ErrClass := ExceptClass(E.ClassType);
-      ErrMsg := E.Message;
-    end;
-  end;
+  SetLength(OutBuf, OutSize + 1);
+  DecodeBlock(PByte(InBuf), Length(InBuf), PByte(OutBuf), OutSize, 0);
   InBuf := nil;
-  RTLEventSetEvent(Done);
-end;
-
-constructor TGrzipWorker.Create(AStage: TGrzipStage);
-begin
-  FStage := AStage;
-  FreeOnTerminate := False;
-  inherited Create(False);
-end;
-
-procedure TGrzipWorker.Execute;
-var
-  Job: TGrzipJob;
-begin
-  while True do
-  begin
-    Job := FStage.TakeJob;
-    if Job = nil then Break;
-    Job.Run;
-  end;
 end;
 
 constructor TGrzipStage.Create(ASource: TInStage; const Params: TStringArray);
 var
   Limit: SizeInt;
-  Threads: Integer;
 begin
   Limit := ParseGrzipLimit(Params);   // antes de adoptar ASource: si falla, el llamador la libera
-  inherited Create(ASource);
+  // Cada bloque en decodificación usa ~7 veces su tamaño (8mb -> ~60MB): tope de 8 hilos;
+  // + 2 bloques por adelantado (NumExtraBuffers por defecto de GRZIP_METHOD)
+  inherited Create(ASource, 8, 2);
   FLimit := Limit;
-  // Cada bloque en decodificación usa ~7 veces su tamaño (8mb -> ~60MB): tope de 8 hilos
-  Threads := StrToIntDef(GetEnvironmentVariable('PARC_THREADS'), 0);
-  if Threads <= 0 then
-  begin
-    Threads := CpuCount;
-    if Threads > 8 then Threads := 8;
-  end;
-  if Threads > 64 then Threads := 64;
-  FMaxWorkers := Threads;
-  FMaxJobs := Threads + 2;   // + NumExtraBuffers por defecto de GRZIP_METHOD
-  SetLength(FQueue, FMaxJobs);
-  SetLength(FPending, FMaxJobs);
-  SetLength(FWorkers, FMaxWorkers);
-  InitCriticalSection(FLock);
-  FWork := RTLEventCreate;
-end;
-
-destructor TGrzipStage.Destroy;
-var
-  i: Integer;
-begin
-  // Parar el pool: los hilos terminan el bloque que tengan y salen
-  if FWork <> nil then
-  begin
-    EnterCriticalSection(FLock);
-    FStop := True;
-    LeaveCriticalSection(FLock);
-    for i := 0 to FNumWorkers - 1 do RTLEventSetEvent(FWork);
-    for i := 0 to FNumWorkers - 1 do
-    begin
-      while not FWorkers[i].Finished do
-      begin
-        RTLEventSetEvent(FWork);
-        ThreadSwitch;
-      end;
-      FWorkers[i].Free;   // ya terminó: Free solo hace el join
-    end;
-    RTLEventDestroy(FWork);
-    DoneCriticalSection(FLock);
-  end;
-  FCur.Free;
-  for i := 0 to FCount - 1 do FQueue[(FHead + i) mod FMaxJobs].Free;
-  inherited Destroy;
-end;
-
-procedure TGrzipStage.Submit(Job: TGrzipJob);
-begin
-  EnterCriticalSection(FLock);
-  FPending[(FPendHead + FPendCount) mod FMaxJobs] := Job;
-  Inc(FPendCount);
-  LeaveCriticalSection(FLock);
-  RTLEventSetEvent(FWork);
-  // Un hilo más por bloque pendiente, hasta el tope
-  if FNumWorkers < FMaxWorkers then
-  begin
-    FWorkers[FNumWorkers] := TGrzipWorker.Create(Self);
-    Inc(FNumWorkers);
-  end;
-end;
-
-{ En el hilo del pool: el próximo bloque pendiente, o nil si hay que salir. }
-function TGrzipStage.TakeJob: TGrzipJob;
-var
-  More: Boolean;
-begin
-  while True do
-  begin
-    EnterCriticalSection(FLock);
-    if FStop then
-    begin
-      LeaveCriticalSection(FLock);
-      Exit(nil);
-    end;
-    if FPendCount > 0 then
-    begin
-      Result := FPending[FPendHead];
-      FPendHead := (FPendHead + 1) mod FMaxJobs;
-      Dec(FPendCount);
-      More := FPendCount > 0;
-      LeaveCriticalSection(FLock);
-      if More then RTLEventSetEvent(FWork);   // el evento se resetea solo: despertar a otro
-      Exit;
-    end;
-    LeaveCriticalSection(FLock);
-    RTLEventWaitFor(FWork, 50);
-  end;
 end;
 
 { GRZipMTDecompressor::ReaderThread: encabezado de 28 bytes (EOF limpio solo antes de él) y
   H[16] bytes de datos. }
-function TGrzipStage.ReadJob: TGrzipJob;
+function TGrzipStage.ReadJob: TParallelJob;
 var
   H: array[0..HDR-1] of Byte;
   DataSize, OrigSize: LongInt;
+  Job: TGrzipJob;
 begin
   Result := nil;
   if not Source.ReadExactOrEof(@H[0], HDR) then Exit;
@@ -1207,79 +1046,17 @@ begin
   // validación: el C lee en un buffer de BlockSize+LZP_MaxMatchLen (y escribe en otro igual)
   if (DataSize < 0) or (DataSize > FLimit - HDR) then Corrupt('grzip: tamaño de bloque inválido');
   if (OrigSize < 0) or (OrigSize > FLimit) then Corrupt('grzip: tamaño de bloque inválido');
-  Result := TGrzipJob.Create;
+  Job := TGrzipJob.Create;
   try
-    Result.OutSize := OrigSize;
-    SetLength(Result.InBuf, HDR + DataSize);
-    Move(H[0], Result.InBuf[0], HDR);
-    if DataSize > 0 then Source.ReadExact(@Result.InBuf[HDR], DataSize);
+    Job.OutSize := OrigSize;
+    SetLength(Job.InBuf, HDR + DataSize);
+    Move(H[0], Job.InBuf[0], HDR);
+    if DataSize > 0 then Source.ReadExact(@Job.InBuf[HDR], DataSize);
   except
-    Result.Free;
+    Job.Free;
     raise;
   end;
-end;
-
-procedure TGrzipStage.FillQueue;
-var
-  Job: TGrzipJob;
-begin
-  while not FSourceEof and (FCount < FMaxJobs) do
-  begin
-    Job := ReadJob;
-    if Job = nil then
-    begin
-      FSourceEof := True;
-      Break;
-    end;
-    FQueue[(FHead + FCount) mod FMaxJobs] := Job;
-    Inc(FCount);
-    Submit(Job);
-  end;
-end;
-
-function TGrzipStage.Read(Buf: PByte; Count: SizeInt): SizeInt;
-begin
-  if FErrClass <> nil then raise FErrClass.Create(FErrMsg);
-  while (FCur = nil) or (FPos >= FCur.OutSize) do
-  begin
-    FreeAndNil(FCur);
-    if FEof then Exit(0);
-    try
-      FillQueue;
-      if FCount = 0 then
-      begin
-        FEof := True;
-        Exit(0);
-      end;
-      FCur := FQueue[FHead];
-      FHead := (FHead + 1) mod FMaxJobs;
-      Dec(FCount);
-      RTLEventWaitFor(FCur.Done);
-      FPos := 0;
-      if FCur.ErrClass <> nil then
-      begin
-        FErrClass := FCur.ErrClass;
-        FErrMsg := FCur.ErrMsg;
-        FreeAndNil(FCur);
-        raise FErrClass.Create(FErrMsg);
-      end;
-      FillQueue;   // reponer la cola mientras se entrega este bloque
-    except
-      on E: Exception do
-      begin
-        if FErrClass = nil then
-        begin
-          FErrClass := ExceptClass(E.ClassType);
-          FErrMsg := E.Message;
-        end;
-        raise;
-      end;
-    end;
-  end;
-  Result := FCur.OutSize - FPos;
-  if Result > Count then Result := Count;
-  Move(FCur.OutBuf[FPos], Buf^, Result);
-  Inc(FPos, Result);
+  Result := Job;
 end;
 
 end.
