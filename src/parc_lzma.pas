@@ -59,6 +59,7 @@ type
     State, Rep0, Rep1, Rep2, Rep3: LongWord;
     RemainLen: LongWord;       // bytes pendientes de un match cortado por el límite
     FInitialized, FFinished: Boolean;
+    function RefillByte: Byte;
     function NextByte: Byte; inline;
     procedure Normalize; inline;
     function Bit(var Prob: TProb): LongWord; inline;
@@ -150,22 +151,32 @@ begin
   InitProbs(@RepLenDec, SizeOf(RepLenDec) div SizeOf(TProb));
 end;
 
+{ Camino lento de NextByte: recargar el buffer de entrada desde la fuente. Separado para que
+  NextByte (el camino rápido) sí se pueda expandir en línea. }
+function TLzmaDecoder.RefillByte: Byte;
+begin
+  FInLen := FIn.Read(@FInBuf[0], IN_BUF_SIZE);
+  FInPos := 0;
+  if FInLen <= 0 then
+  begin
+    // Más allá del final: marcamos el error y devolvemos 0 para no cortar el flujo
+    FInLen := 0;
+    FOverrun := True;
+    Exit(0);
+  end;
+  Result := FInBuf[0];
+  FInPos := 1;
+end;
+
 function TLzmaDecoder.NextByte: Byte;
 begin
-  if FInPos >= FInLen then
+  if FInPos < FInLen then
   begin
-    FInLen := FIn.Read(@FInBuf[0], IN_BUF_SIZE);
-    FInPos := 0;
-    if FInLen <= 0 then
-    begin
-      // Más allá del final: marcamos el error y devolvemos 0 para no cortar el flujo
-      FInLen := 0;
-      FOverrun := True;
-      Exit(0);
-    end;
-  end;
-  Result := FInBuf[FInPos];
-  Inc(FInPos);
+    Result := FInBuf[FInPos];
+    Inc(FInPos);
+  end
+  else
+    Result := RefillByte;
 end;
 
 procedure TLzmaDecoder.Normalize;
@@ -173,7 +184,14 @@ begin
   if Range < kTopValue then
   begin
     Range := Range shl 8;
-    Code := (Code shl 8) or NextByte;
+    // NextByte escrito a mano: FPC no lo expande en línea y este es el camino más caliente
+    if FInPos < FInLen then
+    begin
+      Code := (Code shl 8) or FInBuf[FInPos];
+      Inc(FInPos);
+    end
+    else
+      Code := (Code shl 8) or RefillByte;
   end;
 end;
 
