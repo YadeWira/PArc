@@ -15,7 +15,7 @@ unit parc_lzp;
 interface
 
 uses
-  SysUtils, parc_stream;
+  SysUtils, parc_stream, parc_outstream;
 
 type
   TLzpParams = record
@@ -44,6 +44,32 @@ function ParseLzpParams(const Params: TStringArray): TLzpParams;
   1 shl HashSizeLog elementos (se reusa entre bloques para no realocar). }
 function LzpDecode(Src: PByte; SrcLen: SizeInt; Dst: PByte; DstCap: SizeInt;
   const Par: TLzpParams; var Hash: array of SizeInt): SizeInt;
+
+{ LZPEncode (C_LZP.cpp): devuelve el tamaño comprimido, o 0 si no conviene.
+  Hash tiene que tener 1 shl HashSizeLog elementos. }
+function LzpEncode(InB, OutB: PByte; Size: SizeInt; MinLen, HashSize, Barrier,
+  SmallestLen: Integer; var Hash: array of SizeInt): SizeInt;
+
+{ Etapa de COMPRESIÓN lzp. Va por bloques de BlockSize, así que la memoria es de
+  uno o dos bloques. Si el bloque no comprime lo suficiente (MinCompression, el
+  "N%" del método) o no comprime nada, se escribe como bloque NEGATIVO (stored),
+  igual que el compresor del C. }
+type
+  TLzpEncStage = class(TOutStage)
+  private
+    FPar: TLzpParams;
+    FMinCompression: Integer;
+    FIn, FOut: array of Byte;
+    FHash: array of SizeInt;
+    FInLen: SizeInt;
+    FEngineErr: Boolean;
+    procedure VolcarBloque;
+  protected
+    procedure DoWrite(Buf: PByte; Count: SizeInt); override;
+    procedure DoFinish; override;
+  public
+    constructor Create(ATarget: TOutStage; const APar: TLzpParams; AMinCompression: Integer);
+  end;
 
 implementation
 
@@ -185,6 +211,171 @@ begin
     k := H32(i, Dst, Op, Mask);
   until Ip >= InEnd;
   Result := Op;
+end;
+
+
+{ Traducción de LZPEncode (C_LZP.cpp:66). Ip/InEnd/Op/OutEnd son offsets.
+  En el C la variable `i` tiene TRES roles distintos en la misma iteración:
+  (1) el contexto de 4 bytes, lzpC(In); (2) el largo del match, que se compara de
+  a 4 y después de a 1; (3) el resto del largo para la cola de a 254. Y `k` pasa
+  de ser el hash a ser el largo (In += (k=i)) y después el contador descendente del
+  backfill. Acá van como Ctx / MatchLen / Resto / H / Back, por separado, para no
+  confundirlos. }
+function LzpEncode(InB, OutB: PByte; Size: SizeInt; MinLen, HashSize, Barrier,
+  SmallestLen: Integer; var Hash: array of SizeInt): SizeInt;
+var
+  Mask: LongWord;
+  Ctx, H: LongWord;
+  MatchLen, Resto, Back: SizeInt;
+  n, n1: LongWord;
+  Ip, InEnd, Op, OutEnd, p, ml, j: SizeInt;
+  EsMatch, ContextoIgual: Boolean;
+begin
+  Result := 0;
+  if Size < 32 then Exit;
+  if (HashSize < 1) or (Length(Hash) < HashSize) then Exit;
+  Mask := LongWord(HashSize) - 1;
+  { LZP_INIT: la tabla apunta a Pattern+5 y los primeros 12 bytes se copian tal cual }
+  for j := 0 to HashSize - 1 do Hash[j] := 5;
+  Move(InB^, OutB^, 12);
+  Ip := 12; Op := 12; InEnd := Size; OutEnd := Size;
+  n1 := 1; n := 1;
+  Ctx := C32(InB, Ip);
+  H := H32(Ctx, InB, Ip, Mask);
+  repeat
+    p := Hash[H];
+    Dec(n);
+    if n = 0 then begin Hash[H] := Ip; n := n1; end;
+    EsMatch := False;
+    ContextoIgual := Ctx = C32(InB, p);
+    if ContextoIgual then
+    begin
+      if Ip - p > Barrier then ml := SmallestLen else ml := MinLen;
+      if (Ip + ml <= InEnd) and (C32(InB, p + ml) = C32(InB, Ip + ml)) then
+      begin
+        MatchLen := 4;
+        while (Ip + MatchLen <= InEnd) and
+              (C32(InB, p + MatchLen) = C32(InB, Ip + MatchLen)) do
+          Inc(MatchLen, 4);
+        Dec(MatchLen, 4);
+        while (Ip + MatchLen < InEnd) and
+              (InB[Ip + MatchLen] = InB[p + MatchLen]) do
+          Inc(MatchLen);
+        EsMatch := MatchLen >= ml;
+      end;
+    end;
+    if not EsMatch then
+    begin
+      OutB[Op] := InB[Ip]; Inc(Op); Inc(Ip);
+      { El escape 255 se emite SOLO en el camino MATCH_NOT_FOUND, o sea cuando el
+        contexto SÍ coincide (i == lzpC(p)) pero el match salió corto. Si el
+        contexto es distinto, un 0xB5 literal se copia SIN escape, porque el
+        decoder en ese caso no consume la cola. Confundir los dos caminos emite
+        exactamente un 0xFF de más por cada 0xB5 con contexto distinto. }
+      if ContextoIgual and (OutB[Op - 1] = LZP_MATCH_FLAG) then
+      begin
+        Dec(OutEnd); OutB[OutEnd] := 255;
+      end;
+    end
+    else
+    begin
+      Hash[H] := Ip;
+      if (Ip - p > (SizeInt(n1) + 1) * HashSize) and (n1 < 7) then Inc(n1);
+      OutB[Op] := LZP_MATCH_FLAG; Inc(Op);
+      Back := MatchLen;              { In += (k=i): k pasa a ser el largo del match }
+      Inc(Ip, MatchLen);
+      Resto := MatchLen - ml;
+      while (Resto >= 254) and (Op < OutEnd) do
+      begin
+        Dec(OutEnd); OutB[OutEnd] := 0;
+        Dec(Resto, 254);
+      end;
+      Dec(OutEnd); OutB[OutEnd] := Byte(Resto + 1);
+      while True do
+      begin
+        Back := Back - (2 * SizeInt(n1) + 1);
+        if not (Back > 0) then Break;      { el C compara con signo: int(k) > 0 }
+        j := Ip - Back;
+        Hash[H32(C32(InB, j), InB, j, Mask)] := j;
+      end;
+    end;
+    Ctx := C32(InB, Ip);
+    H := H32(Ctx, InB, Ip, Mask);
+  until (Ip >= InEnd) or (Op >= OutEnd);
+  if Op >= OutEnd then Exit;
+  { memmove(Out, OutEnd, OutStart+Size-OutEnd): la cola quedó escrita al revés }
+  Move(OutB[OutEnd], OutB[Op], Size - OutEnd);
+  Result := Size - (OutEnd - Op);
+end;
+
+{ --- TLzpEncStage --- }
+
+constructor TLzpEncStage.Create(ATarget: TOutStage; const APar: TLzpParams;
+                                AMinCompression: Integer);
+begin
+  if APar.BlockSize <= 0 then raise EUnsupportedMethod.Create('lzp: tamaño de bloque inválido');
+  if (APar.MinMatchLen < 1) or (APar.SmallestLen < 1) then
+    raise EUnsupportedMethod.Create('lzp: largo mínimo inválido');
+  FPar := APar;
+  FMinCompression := AMinCompression;
+  SetLength(FIn, FPar.BlockSize);
+  SetLength(FOut, FPar.BlockSize + 64);
+  SetLength(FHash, SizeInt(1) shl FPar.HashSizeLog);
+  FInLen := 0;
+  inherited Create(ATarget);
+end;
+
+procedure TLzpEncStage.VolcarBloque;
+var
+  OutSize: SizeInt;
+  hdr: array[0..3] of Byte;
+  n: SizeInt;
+begin
+  if FInLen <= 0 then Exit;
+  OutSize := LzpEncode(@FIn[0], @FOut[0], FInLen, FPar.MinMatchLen,
+                       SizeInt(1) shl FPar.HashSizeLog, Integer(FPar.Barrier),
+                       FPar.SmallestLen, FHash);
+  { Igual que el C: si no comprimió (0) o no alcanza MinCompression, se guarda
+    como bloque negativo (stored). }
+  if (OutSize = 0) or ((FMinCompression > 0) and
+      (OutSize * 100 >= FInLen * FMinCompression)) then
+  begin
+    n := -FInLen;
+    hdr[0] := Byte(LongWord(n)); hdr[1] := Byte(LongWord(n) shr 8);
+    hdr[2] := Byte(LongWord(n) shr 16); hdr[3] := Byte(LongWord(n) shr 24);
+    Emit(@hdr[0], 4);
+    Emit(@FIn[0], FInLen);
+  end
+  else
+  begin
+    n := OutSize;
+    hdr[0] := Byte(LongWord(n)); hdr[1] := Byte(LongWord(n) shr 8);
+    hdr[2] := Byte(LongWord(n) shr 16); hdr[3] := Byte(LongWord(n) shr 24);
+    Emit(@hdr[0], 4);
+    Emit(@FOut[0], OutSize);
+  end;
+  FInLen := 0;
+end;
+
+procedure TLzpEncStage.DoWrite(Buf: PByte; Count: SizeInt);
+var
+  n: SizeInt;
+begin
+  while Count > 0 do
+  begin
+    n := FPar.BlockSize - FInLen;
+    if n > Count then n := Count;
+    Move(Buf^, FIn[FInLen], n);
+    Inc(FInLen, n);
+    Inc(Buf, n);
+    Dec(Count, n);
+    if FInLen >= FPar.BlockSize then VolcarBloque;
+  end;
+end;
+
+procedure TLzpEncStage.DoFinish;
+begin
+  VolcarBloque;
 end;
 
 { TLzpStage }

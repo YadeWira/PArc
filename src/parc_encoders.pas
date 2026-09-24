@@ -67,7 +67,7 @@ function EncoderAvailable(const Method: string): Boolean;
 implementation
 
 uses
-  parc_filters, parc_ppmd, parc_methods, parc_parallel, parc_lzmaenc;
+  parc_filters, parc_ppmd, parc_methods, parc_lzp, parc_parallel, parc_lzmaenc;
 
 type
   T4x4EncJob = class(TParallelJob)
@@ -309,7 +309,7 @@ begin
           Parse4x4(Stage, Inner, Bs);
           if not EncoderAvailable(Inner) then Exit(False);
         end;
-      'storing', 'exe', 'ppmd', 'lzma': ;
+      'storing', 'exe', 'ppmd', 'lzp', 'lzma': ;
     else
       Exit(False);
     end;
@@ -322,6 +322,7 @@ var
   Parts: TStringArray;
   Inner: string;
   Bs: SizeInt;
+  mc, k: Integer;
 begin
   Parts := Stage.Split([':']);
   case StageName(Stage) of
@@ -335,6 +336,15 @@ begin
       // Con marca de fin: en los bloques de datos el decodificador de FreeArc la exige
       Result := TLzmaEncStage.Create(Target, ParseLzmaEncParams(Parts), True);
     'exe':     Result := TBcjEncStage.Create(Target);
+    'lzp':
+      begin
+        { MinCompression ("N%"): lo usa solo el compresor; ParseLzpParams lo saltea. }
+        mc := 0;
+        for k := 1 to High(Parts) do
+          if (Parts[k] <> '') and (Parts[k][Length(Parts[k])] = '%') then
+            mc := StrToIntDef(Copy(Parts[k], 1, Length(Parts[k]) - 1), 0);
+        Result := TLzpEncStage.Create(Target, ParseLzpParams(Parts), mc);
+      end;
     'ppmd':
       begin
         // La misma sintaxis que el decodificador (parse_PPMD): una sola implementación
