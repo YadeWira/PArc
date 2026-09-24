@@ -65,6 +65,8 @@ METODOS=(
   "lzma:-mlzma" "exe_lzma:-mexe+lzma" "delta:-mdelta" "delta_lzma:-mdelta+lzma"
   "rep:-mrep" "rep_lzma:-mrep+lzma" "tor:-mtor" "lz4:-mlz4" "4x4_lzma:-m4x4:lzma"
   "ppmd:-mppmd" "dict_ppmd:-mdict+ppmd" "lzp_ppmd:-mlzp+ppmd" "grzip:-mgrzip"
+  # opciones de multimedia (eligen método según el archivo: $wav->tta, $bmp->mm+...)
+  "mm_plus:-mm+" "mmfast:-mmfast" "mm_minus:-mm-"
 )
 
 [ -x "$PARC_BIN" ] || { echo "no encuentro parc en $PARC_BIN (compilalo; este script no lo toca)" >&2; exit 2; }
@@ -168,6 +170,59 @@ w("raros/tilde_áéíóú_ÿΩ.md", "# diacríticos\n")
 w("raros/" + "muy_largo_" * 20 + ".txt", "nombre de 200 caracteres\n")
 w("raros/emoji_😀_bin.bin", rnd(5000, 9))
 
+# multimedia: es lo que ejercita los grupos $wav (tta) y $bmp (mm+...) y las
+# opciones -mm+ / -mmfast / -mm-  (WAV 8/16/24 bits, mono/estéreo, 44.1/48k,
+# un WAV con cabecera "extensible", y BMP 8/24/32)
+def wavgen(rel, bits, chans, rate, secs=2, extensible=False):
+    import wave as _w, struct as _s, math as _m
+    p = os.path.join(dst, rel); os.makedirs(os.path.dirname(p), exist_ok=True)
+    r = random.Random(hash(rel) & 0xffff)
+    frames = bytearray()
+    for i in range(int(rate * secs)):
+        v = int(9000 * _m.sin(2 * _m.pi * 300 * i / rate))
+        for c in range(chans):
+            vv = max(-(1 << (bits - 1)), min((1 << (bits - 1)) - 1, v + r.randrange(-40, 40) + c * 100))
+            if bits == 8:   frames += _s.pack('<B', vv + 128)
+            elif bits == 16: frames += _s.pack('<h', vv)
+            else:            frames += _s.pack('<i', vv)[0:3]
+    data = bytes(frames)
+    if extensible:
+        # WAVE_FORMAT_EXTENSIBLE (0xFFFE) con subformato PCM y cbSize
+        bw = bits // 8
+        fmt = _s.pack('<HHIIHH', 0xFFFE, chans, rate, rate * chans * bw, chans * bw, bits)
+        fmt += _s.pack('<HHI', 22, bits, 0) + _s.pack('<H', 1) + b'\x00\x00\x00\x00\x10\x00\x80\x00\x00\xaa\x00\x38\x9b\x71'
+        chunks = b'fmt ' + _s.pack('<I', len(fmt)) + fmt + b'data' + _s.pack('<I', len(data)) + data
+        open(p, 'wb').write(b'RIFF' + _s.pack('<I', 4 + len(chunks)) + b'WAVE' + chunks)
+    else:
+        ww = _w.open(p, 'wb'); ww.setnchannels(chans); ww.setsampwidth(bw_ := bits // 8)
+        ww.setframerate(rate); ww.writeframes(data); ww.close()
+
+def bmpgen(rel, bits, wp, hp):
+    import struct as _s
+    p = os.path.join(dst, rel); os.makedirs(os.path.dirname(p), exist_ok=True)
+    row = (wp * bits + 31) // 32 * 4; size = row * hp
+    hdr = b'BM' + _s.pack('<IHHI', 14 + 40 + (1024 if bits == 8 else 0), 0, 0,
+                          14 + 40 + (1024 if bits == 8 else 0))
+    info = _s.pack('<IiiHHIIiiII', 40, wp, hp, 1, bits, 0, size, 2835, 2835,
+                   (256 if bits == 8 else 0), 0)
+    data = bytearray()
+    for y in range(hp):
+        line = bytearray()
+        for x in range(wp):
+            if bits == 8:    line += _s.pack('<B', (x + y) & 0xff)
+            elif bits == 24: line += _s.pack('<BBB', (x*3) & 0xff, (y*5) & 0xff, ((x+y)*7) & 0xff)
+            else:            line += _s.pack('<BBBB', (x*3) & 0xff, (y*5) & 0xff, ((x+y)*7) & 0xff, 0x80)
+        line += bytes(row - len(line)); data += line
+    open(p, 'wb').write(hdr + info + bytes(data))
+
+for bits in (8, 16, 24):
+    for chans in (1, 2):
+        for rate in (44100, 48000):
+            wavgen("multimedia/w%d_%dch_%d.wav" % (bits, chans, rate), bits, chans, rate)
+wavgen("multimedia/w16_extensible.wav", 16, 2, 44100, 1, extensible=True)
+for bits in (8, 24, 32):
+    bmpgen("multimedia/b%d.bmp" % bits, bits, 120, 80)
+
 # archivo vacío y directorio vacío
 w("varios/vacio.bin", b"")
 os.makedirs(os.path.join(dst, "dir_vacio"), exist_ok=True)
@@ -206,11 +261,15 @@ for entrada in "${METODOS[@]}"; do
   # arc.exe t (autoridad) — si esto no da OK, el archivo está mal y no se sigue
   if wine "$ARC_EXE" t "$arc" 2>&1 | grep -q "All OK"; then a_ok=OK; else a_ok=FALLA; fi
 
-  # unarc.i386 t (referencia) + tiempo
+  # unarc.i386 t (referencia) + tiempo.  Se guarda su salida completa: si falla
+  # (p.ej. el 4x4 grande que revienta el heap de 32 bits multihilo) hay que poder
+  # ver POR QUÉ, no sólo que falló.
+  mkdir -p "$WORK/logs"
   t0=$(date +%s%N)
   u_out=$("$UNARC" t "$arc" 2>&1); u_rc=$?
   t1=$(date +%s%N)
   u_ms=$(( (t1-t0)/1000000 ))
+  printf '%s\n' "$u_out" > "$WORK/logs/unarc-$clave.log"
   [ $u_rc -eq 0 ] && u_res=OK || u_res=FALLA
 
   # parc t + tiempo
@@ -254,7 +313,13 @@ for entrada in "${METODOS[@]}"; do
   elif [ "$p_res" = OK ] && [ "$xres" = OK ] && [ "$a_ok" = OK ]; then
     n_ok=$((n_ok+1)); estado=""
     if [ "$u_res" = FALLA ]; then
-      n_reffalla=$((n_reffalla+1)); notas="$notas ref-C++-falla(conocido: lz4.c de este arbol)"
+      n_reffalla=$((n_reffalla+1))
+      # la nota nombra el MÉTODO real (la causa no es siempre lz4) y apunta al log
+      if [ "$clave" = "lz4" ]; then
+        notas="$notas ref-C++-falla(metodo=$clave; lz4.c de este arbol) log=$WORK/logs/unarc-$clave.log"
+      else
+        notas="$notas ref-C++-falla(metodo=$clave) log=$WORK/logs/unarc-$clave.log"
+      fi
     fi
   else
     n_falla=$((n_falla+1)); estado="<-- FALLA"; FALLAS="$FALLAS $clave"

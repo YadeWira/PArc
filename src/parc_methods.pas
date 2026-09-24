@@ -26,7 +26,7 @@ function IsStoring(const Method: string): Boolean;
 implementation
 
 uses
-  StrUtils, parc_os, parc_lzma, parc_filters, parc_lz4, parc_rep, parc_lzp, parc_ppmd, parc_dict, parc_tornado, parc_grzip, parc_parallel;
+  StrUtils, parc_os, parc_lzma, parc_filters, parc_lz4, parc_rep, parc_lzp, parc_ppmd, parc_dict, parc_tornado, parc_grzip, parc_parallel, parc_tta, parc_mm;
 
 function IsStoring(const Method: string): Boolean;
 begin
@@ -305,6 +305,10 @@ begin
       Result := TTornadoStage.Create(Source);
     'grzip':
       Result := TGrzipStage.Create(Source, Params);
+    'tta':
+      Result := TTtaStage.Create(Source, ParseTtaParams(Params));
+    'mm':
+      Result := TMmStage.Create(Source, ParseMmParams(Params));
     'ppmd':
       begin
         pp := ParsePpmdParams(Params);
