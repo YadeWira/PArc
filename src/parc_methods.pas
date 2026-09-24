@@ -63,11 +63,25 @@ begin
   Result := IsCipherName(Name);
 end;
 
+{ Bytes de la contraseña tal como los ve FreeArc 0.67 (Encryption.hs:85 y EncryptionLib.hs:27):
+  - con :f, unicode2utf8: los bytes UTF-8;
+  - sin :f (el caso de siempre), la contraseña llega como caracteres Unicode reales
+    (Charsets.myGetArgs usa CommandLineToArgvW) y withCStringLen de GHC 6.x trunca cada
+    carácter a su byte bajo (castCharToCChar). Para ASCII da lo mismo; para "日" (U+65E5), E5.
+  Nuestra contraseña viene en UTF-8. }
+function PasswordBytes(Fixed: Boolean): RawByteString;
+var
+  W: UnicodeString;
+  i: Integer;
+begin
+  if Fixed then Exit(GPassword);
+  W := UTF8Decode(GPassword);
+  SetLength(Result, Length(W));
+  for i := 1 to Length(W) do Result[i] := Chr(Ord(W[i]) and $FF);
+end;
+
 { Como generateDecryption (Encryption.hs): cada etapa de cifrado sin clave (:k) se reemplaza
-  por su versión con la clave derivada de la contraseña, después de comprobar el check-code.
-  La contraseña se usa tal cual (los bytes UTF-8 que escribió el usuario). Sin :f, FreeArc usaba
-  los bytes "crudos" de la contraseña: para contraseñas ASCII es lo mismo; para el resto, el
-  caso sin :f no está verificado todavía (tests/crypt/README.md). }
+  por su versión con la clave derivada de la contraseña, después de comprobar el check-code. }
 function ApplyKeys(const Method: string): string;
 var
   Stages, Params: TStringArray;
@@ -75,6 +89,7 @@ var
   HasKey: Boolean;
   Par: TCryptParams;
   Key: array of Byte;
+  Pwd: RawByteString;
 begin
   Result := Method;
   if Pos('/', Method) = 0 then Exit;   // atajo: toda etapa de cifrado lleva "/modo"
@@ -91,7 +106,8 @@ begin
       raise EPasswordRequired.Create('el archivo está cifrado: indicá la contraseña con -p<contraseña>');
     Par := ParseCryptParams(Params);
     SetLength(Key, Par.KeySize + 2);
-    if not DeriveKeyAndCheck(Par, PByte(GPassword), Length(GPassword), @Key[0]) then
+    Pwd := PasswordBytes(Par.Fixed);
+    if not DeriveKeyAndCheck(Par, PByte(Pwd), Length(Pwd), @Key[0]) then
       raise EBadPassword.Create('contraseña incorrecta');
     Stages[k] := KeyedMethod(Par, @Key[0]);
   end;
