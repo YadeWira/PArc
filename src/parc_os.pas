@@ -11,11 +11,13 @@ function ArgCount: Integer;
 function Arg(i: Integer): string;          // UTF-8; Arg(0) = ejecutable
 procedure OutLn(const S: string = '');      // S en UTF-8
 procedure ErrLn(const S: string);
+{ Núcleos disponibles. TThread.ProcessorCount de FPC 3.2.2 devuelve siempre 1 en Linux. }
+function CpuCount: Integer;
 
 implementation
 
 uses
-  {$IFDEF WINDOWS}Windows,{$ENDIF} SysUtils;
+  {$IFDEF WINDOWS}Windows,{$ENDIF} Classes, SysUtils;
 
 var
   Args: array of string;
@@ -63,6 +65,22 @@ begin
   for i := 0 to ParamCount do Args[i] := ParamStr(i);
 end;
 {$ENDIF}
+
+{$IFDEF LINUX}
+const
+  _SC_NPROCESSORS_ONLN = 84;   // glibc
+function sysconf(name: LongInt): PtrInt; cdecl; external 'c';
+{$ENDIF}
+
+function CpuCount: Integer;
+begin
+  {$IFDEF LINUX}
+  Result := sysconf(_SC_NPROCESSORS_ONLN);
+  {$ELSE}
+  Result := TThread.ProcessorCount;
+  {$ENDIF}
+  if Result < 1 then Result := 1;
+end;
 
 function ArgCount: Integer;
 begin
