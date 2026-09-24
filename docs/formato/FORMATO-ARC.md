@@ -208,6 +208,29 @@ método:
 
 `<mem>`: número + `b`/`k`/`kb`/`m`/`mb`/`g`/`gb`.
 
+### 7.1b `lzma` en bloques de DATOS (streaming)
+Distinto de los bloques de control: el tamaño de cada etapa intermedia no se conoce, así
+que el stream **termina con marca de fin** (distancia 0xFFFFFFFF) y el decodificador usa un
+**diccionario circular** de `d` bytes (del método; default 64mb). `lzma_decompress2` en
+modo stream falla si la entrada se agota sin marca de fin.
+
+### 7.1c `exe` (BCJ x86)
+Filtro sin parámetros. Estado (`ip`, máscara) continuo entre buffers. **Rareza de FreeArc**
+(`bcj_x86_de_compress`): un tramo de ≤5 bytes se entrega sin convertir. Como el compresor
+recibe buffers llenos, eso solo pasa al final del stream, así que el decodificador **tiene
+que llenar su buffer entero antes de convertir**. Si convierte lo primero que le da la etapa
+anterior, a mitad del stream puede dejar sin convertir un tramo de ≤5 bytes y la salida queda
+corrupta. Es un bug real que tuvo PArc; lo cubre `tests/regress.sh`.
+
+### 7.1d `delta` (Bulat Ziganshin)
+Secuencia de bloques hasta EOF, todos los enteros `U32` LE:
+`DataSize`, `TableSize` (bytes, múltiplo de 4), `TSkip[TableSize]`, `TType[TableSize]`,
+`TRows[TableSize]`, `Data[DataSize]`. Por cada tabla `i`: avanzar `skip`, decodificar
+`type` (el bit más alto da el ancho N; los bits de abajo marcan columnas inmutables),
+"desreordenar" (las columnas inmutables se guardaron juntas primero) y sumar a cada fila la
+anterior, byte a byte en LSB primero, acarreando solo entre columnas mutables contiguas.
+Parámetros (`b<mem>`, `x`): solo afectan al compresor.
+
 ### 7.2 Métodos vistos en datos reales
 `rep`, `tor`, `dict`, `lzp`, `ppmd`, `exe`, `delta`, `lzma` (y, por el código,
 `4x4`, `grzip`, `lz4`, `srep`, `precomp`, externos). Para extraer hacen falta todos;

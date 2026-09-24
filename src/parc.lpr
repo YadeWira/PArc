@@ -1,21 +1,27 @@
 { PArc — reescritura de FreeArc en Pascal.
-  Fase 1: listado de archivos FreeArc (.arc) y PArc (.parc). }
+  Listado, test y extracción de archivos FreeArc (.arc). }
 program parc;
 
 {$mode objfpc}{$H+}
 
 uses
-  SysUtils, DateUtils, parc_os, parc_bytes, parc_methods, parc_archive;
+  Classes, SysUtils, DateUtils, parc_os, parc_bytes, parc_methods, parc_archive, parc_extract;
 
 const
-  PARC_VERSION = '0.0.1';
+  PARC_VERSION = '0.0.2';
 
 procedure Usage;
 begin
   OutLn('PArc ' + PARC_VERSION + ' — archivador compatible con FreeArc');
-  OutLn('Uso: parc <comando> <archivo>');
+  OutLn('Uso: parc <comando> <archivo> [archivos/máscaras...] [opciones]');
   OutLn('  l   lista el contenido');
   OutLn('  lb  lista los bloques (estructura interna)');
+  OutLn('  t   verifica (descomprime y compara CRC, sin escribir)');
+  OutLn('  x   extrae con rutas');
+  OutLn('  e   extrae sin rutas');
+  OutLn('Opciones:');
+  OutLn('  -dp<dir>  directorio de destino');
+  OutLn('  -o+       sobrescribe archivos existentes    -o-  los saltea (default)');
 end;
 
 function FmtTime(t: Int64): string;
@@ -69,9 +75,34 @@ begin
   end;
 end;
 
+procedure LogLine(const Msg: string);
+begin
+  OutLn(Msg);
+end;
+
+function CmdExtract(A: TArchive; const Cmd: string; const Opt0: TExtractOptions): Integer;
 var
-  Cmd: string;
+  Opt: TExtractOptions;
+  St: TExtractStats;
+begin
+  Opt := Opt0;
+  Opt.TestOnly := Cmd = 't';
+  Opt.FlatNames := Cmd = 'e';
+  St := ExtractArchive(A, Opt, @LogLine);
+  if Opt.TestOnly then
+    OutLn(Format('Verificados %d archivo(s), %d bytes. Errores: %d', [St.Files, St.Bytes, St.Errors]))
+  else
+    OutLn(Format('Extraídos %d archivo(s) y %d directorio(s), %d bytes. Saltados: %d. Errores: %d',
+      [St.Files, St.Dirs, St.Bytes, St.Skipped, St.Errors]));
+  if St.Errors > 0 then Result := 2 else Result := 0;
+end;
+
+var
+  Cmd, ArcName, S: string;
   A: TArchive;
+  Opt: TExtractOptions;
+  Filter: TStringList;
+  i, Code: Integer;
 begin
   if ArgCount < 2 then
   begin
@@ -79,22 +110,56 @@ begin
     Halt(1);
   end;
   Cmd := Arg(1);
+  Opt := Default(TExtractOptions);
+  Opt.Overwrite := owSkip;
+  ArcName := '';
+  Filter := TStringList.Create;
+  Code := 0;
   try
-    A := TArchive.Open(Arg(2));
-    try
-      if Cmd = 'l' then CmdList(A)
-      else if Cmd = 'lb' then CmdBlocks(A)
-      else
+    for i := 2 to ArgCount do
+    begin
+      S := Arg(i);
+      if (Length(S) > 1) and (S[1] = '-') then
       begin
-        Usage;
-        Halt(1);
-      end;
-    finally
-      A.Free;
+        if Copy(S, 1, 3) = '-dp' then Opt.DestDir := Copy(S, 4, MaxInt)
+        else if S = '-o+' then Opt.Overwrite := owAll
+        else if S = '-o-' then Opt.Overwrite := owSkip
+        else
+        begin
+          ErrLn('Opción desconocida: ' + S);
+          Halt(1);
+        end;
+      end
+      else if ArcName = '' then ArcName := S
+      else Filter.Add(S);
     end;
-  except
-    on E: EArcCorrupt do begin ErrLn('ERROR: ' + E.Message); Halt(2); end;
-    on E: EUnsupportedMethod do begin ErrLn('ERROR: ' + E.Message); Halt(3); end;
-    on E: Exception do begin ErrLn('ERROR: ' + E.Message); Halt(4); end;
+    if ArcName = '' then
+    begin
+      Usage;
+      Halt(1);
+    end;
+    Opt.Filter := Filter;
+    try
+      A := TArchive.Open(ArcName);
+      try
+        if Cmd = 'l' then CmdList(A)
+        else if Cmd = 'lb' then CmdBlocks(A)
+        else if (Cmd = 't') or (Cmd = 'x') or (Cmd = 'e') then Code := CmdExtract(A, Cmd, Opt)
+        else
+        begin
+          Usage;
+          Code := 1;
+        end;
+      finally
+        A.Free;
+      end;
+    except
+      on E: EArcCorrupt do begin ErrLn('ERROR: ' + E.Message); Code := 2; end;
+      on E: EUnsupportedMethod do begin ErrLn('ERROR: ' + E.Message); Code := 3; end;
+      on E: Exception do begin ErrLn('ERROR: ' + E.Message); Code := 4; end;
+    end;
+  finally
+    Filter.Free;
   end;
+  Halt(Code);
 end.

@@ -7,7 +7,7 @@ unit parc_archive;
 interface
 
 uses
-  Classes, SysUtils, parc_bytes;
+  Classes, SysUtils, parc_bytes, parc_stream;
 
 const
   ARC_SIGNATURE = $01437241;   // "ArC\x01" little-endian
@@ -64,6 +64,8 @@ type
     Comment: RawByteString;
     SFXSize: Int64;
     constructor Open(const AFileName: string);
+    { Los bytes comprimidos de un bloque, como etapa de entrada (no es dueña del archivo). }
+    function OpenBlockData(const Block: TArcBlock): TInStage;
     destructor Destroy; override;
     property FileName: string read FFileName;
   end;
@@ -123,6 +125,13 @@ destructor TArchive.Destroy;
 begin
   FStream.Free;
   inherited Destroy;
+end;
+
+function TArchive.OpenBlockData(const Block: TArcBlock): TInStage;
+begin
+  if (Block.Pos < 0) or (Block.CompSize < 0) or (Block.Pos + Block.CompSize > ArcSize) then
+    Corrupt('bloque de datos fuera del archivo');
+  Result := TFileSliceStage.Create(FStream, Block.Pos, Block.CompSize);
 end;
 
 procedure TArchive.ReadAt(Pos: Int64; var Buf; Count: SizeInt);
