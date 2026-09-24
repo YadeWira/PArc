@@ -237,9 +237,101 @@ Parámetros (`b<mem>`, `x`): solo afectan al compresor.
 para listar, ninguno.
 
 ### 7.3 Cifrado
-Las etapas de cifrado (`aes`, `blowfish`, `serpent`, `twofish` + parámetros de clave/IV)
-aparecen dentro del `Method`. Si el footer o el directorio están cifrados (`-hp`), sin
-contraseña no se puede listar. Pendiente de especificar (§9).
+
+Fuentes: `Encryption.hs` (derivación de clave y armado del método),
+`Compression/_Encryption/C_Encryption.cpp` (`parse_ENCRYPTION`, `docrypt`) y los
+cifrados de LibTomCrypt 1.18.2 embebidos en `Compression/_Encryption/`.
+
+El cifrado **no es un método aparte: es una etapa más de la cadena**, unida con
+`+` después del compresor. En un archivo real:
+
+```
+grzip:198kb:m1:l32:h15+aes-256/ctr:n1000:r0:i<32 hex>:s<64 hex>:c<4 hex>
+```
+
+#### 7.3.1 Gramática de la etapa
+
+```
+<cifrado>-<bits-clave>/<modo>[:f]:n<iteraciones>:r<rondas>
+    [:k<clave-hex>] [:i<iv-hex>] [:s<salt-hex>] [:c<checkcode-hex>]
+```
+
+| campo | significado | default |
+|---|---|---|
+| `cifrado` | `aes`, `blowfish`, `serpent`, `twofish` | `aes` (se elige con `--encryption=` / `-ae`; el perfil lo canoniza a `aes-256/ctr`) |
+| `bits-clave` | tamaño de clave en **bits**, tras `-` | el máximo del cifrado (ver tabla) |
+| `modo` | `ctr` (0) o `cfb` (1), tras `/` | `ctr` |
+| `f` | la contraseña se convierte de Unicode a UTF-8 antes de derivar | ausente = los bytes de la contraseña tal cual |
+| `n` | iteraciones de PBKDF2 | 1000 |
+| `r` | rondas del cifrado | 0 (las del cifrado) |
+| `k` | la clave en hex (**sólo aparece en cabeceras ya descifradas**) | — |
+| `i` | IV en hex | — |
+| `s` | salt en hex | — |
+| `c` | check-code en hex (2 bytes) | — |
+
+#### 7.3.2 Cifrados y tamaños
+
+| cifrado | clave máx. (bits) | bloque / IV (bytes) |
+|---|---|---|
+| `aes` | 256 (128 y 192 válidos) | 16 |
+| `blowfish` | 448 | 8 |
+| `serpent` | 256 | 16 |
+| `twofish` | 256 | 16 |
+
+#### 7.3.3 Modos
+
+- **CTR** con contador **little-endian** (`CTR_COUNTER_LITTLE_ENDIAN`): keystream =
+  `E(IV)` e incrementos sucesivos.
+- Excepción: `aes` + `ctr` con `r0` usa el AES-CTR optimizado de 7-Zip
+  (`7zAES/Aes.c`), que es equivalente pero lleva el contador **desde IV-1** y hace
+  *pre*incremento. Ojo: sólo procesa múltiplos de 16 bytes; `docrypt` se encarga
+  de dejar el resto para el ciclo siguiente (por eso el último bloque se redondea
+  **hacia arriba** y el resto se recorta al escribir).
+- **CFB** del tamaño del bloque (16, o 8 con blowfish).
+- El relleno no existe: la longitud de salida es la de entrada. Lo que queda
+  fuera del bloque de cifrado se copia tal cual (`RemainderSize`).
+
+#### 7.3.4 Derivación de clave (el punto central)
+
+```
+dk       = PBKDF2-HMAC-SHA512(password, salt, iteraciones, keySize + 2)
+clave    = dk[0 .. keySize-1]
+checkCode= dk[keySize .. keySize+1]          (2 bytes)
+```
+
+`Encryption.hs::deriveKey` parte el resultado de `pbkdf2Hmac` con
+`splitAt keySize`, así que la clave y el check-code salen de **una sola**
+derivación. El `salt` mide exactamente `keySize` bytes y el IV `ivSize`.
+
+Con `-hp`, el **footer en claro** (y su copia de respaldo) lleva
+`:s<salt>:c<check>:i<iv>`; el directorio/cabecera descifrados llevan además el
+`:k<clave>`, para no volver a pedir la contraseña.
+
+Comprobado sobre archivos reales de 0.67.1: con `--encryption=aes-128` el salt
+tiene 16 bytes, con `aes-192` 24, con `aes-256` 32, con `blowfish` 56 (448 bits)
+y su IV 8 bytes, y con serpent/twofish 32 y 16.
+
+#### 7.3.5 Detección de contraseña incorrecta
+
+`generateDecryption` reconstruye la clave con cada contraseña candidata y compara
+el check-code derivado con el `:c` del archivo. Si no coincide, la contraseña es
+incorrecta (y FreeArc pregunta de nuevo / aborta). **No** hay verificación de la
+clave contra el texto cifrado: el check-code es lo único que distingue una
+contraseña mala antes de intentar descifrar. Además soporta *keyfiles*: se
+prueban las contraseñas concatenadas con el contenido de cada keyfile.
+
+`f` (contraseñas Unicode): sin `:f`, los bytes de la contraseña se usan tal cual
+(FreeArc histórico); con `:f`, se convierten de Unicode a UTF-8.
+
+#### 7.3.6 Lo que tiene que hacer PArc
+
+1. Sacar `s`, `c`, `n`, `f` y el cifrado/modo de la etapa de cifrado del `Method`.
+2. `PBKDF2-HMAC-SHA512(password, salt, n, keySize+2)` y comparar `dk[keySize..]`
+   con el `c` del archivo: si no coincide → error claro de contraseña.
+3. Si la cabecera está cifrada (`-hp`): leer `s`/`c`/`i` del footer en claro,
+   derivar la clave y descifrar la cabecera/directorio; de ahí sale el `:k`.
+4. Descifrar el bloque de datos con `cifrado` + `modo` + clave + IV, teniendo en
+   cuenta el detalle de AES-CTR/7-Zip y el manejo del sobrante.
 
 ## 8. `.parc` — decisiones abiertas
 
