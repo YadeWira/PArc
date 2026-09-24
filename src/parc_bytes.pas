@@ -29,6 +29,20 @@ type
     function Bytes(N: SizeInt): RawByteString;
   end;
 
+  { Serialización de los tipos primitivos (FORMATO-ARC.md §2) en un buffer que crece. }
+  TByteWriter = record
+    Data: TBytes;
+    Len: SizeInt;
+    procedure Clear;
+    procedure Raw(Buf: Pointer; Count: SizeInt);
+    procedure U8(V: Byte);
+    procedure U32(V: LongWord);
+    procedure I64(V: Int64);
+    procedure VInt(V: QWord);         // siempre en la forma más corta, como FreeArc
+    procedure CStr(const S: RawByteString);
+    function Bytes: TBytes;
+  end;
+
 procedure Corrupt(const Msg: string);
 
 implementation
@@ -129,6 +143,75 @@ begin
   SetLength(Result, N);
   if N > 0 then Move(Data[Pos], Result[1], N);
   Inc(Pos, N);
+end;
+
+{ TByteWriter }
+
+procedure TByteWriter.Clear;
+begin
+  Data := nil;
+  Len := 0;
+end;
+
+procedure TByteWriter.Raw(Buf: Pointer; Count: SizeInt);
+begin
+  if Count <= 0 then Exit;
+  if Len + Count > Length(Data) then SetLength(Data, 2 * (Len + Count) + 256);
+  Move(Buf^, Data[Len], Count);
+  Inc(Len, Count);
+end;
+
+procedure TByteWriter.U8(V: Byte);
+begin
+  Raw(@V, 1);
+end;
+
+procedure TByteWriter.U32(V: LongWord);
+var
+  b: array[0..3] of Byte;
+begin
+  b[0] := Byte(V); b[1] := Byte(V shr 8); b[2] := Byte(V shr 16); b[3] := Byte(V shr 24);
+  Raw(@b[0], 4);
+end;
+
+procedure TByteWriter.I64(V: Int64);
+begin
+  U32(LongWord(QWord(V)));
+  U32(LongWord(QWord(V) shr 32));
+end;
+
+{ Con n+1 bytes (n = 0..7) entran valores < 2^(7*(n+1)): se guarda V shl (n+1) con n bits 1
+  abajo. Desde 2^56: byte 0xFF + 8 bytes (FastBufferData Integer de ByteStream.hs). }
+procedure TByteWriter.VInt(V: QWord);
+var
+  n, i: Integer;
+  X: QWord;
+  b: array[0..8] of Byte;
+begin
+  n := 0;
+  while (n < 8) and (V >= (QWord(1) shl (7 * (n + 1)))) do Inc(n);
+  if n = 8 then
+  begin
+    b[0] := $FF;
+    for i := 1 to 8 do b[i] := Byte(V shr (8 * (i - 1)));
+    Raw(@b[0], 9);
+    Exit;
+  end;
+  X := (V shl (n + 1)) or ((QWord(1) shl n) - 1);
+  for i := 0 to n do b[i] := Byte(X shr (8 * i));
+  Raw(@b[0], n + 1);
+end;
+
+procedure TByteWriter.CStr(const S: RawByteString);
+begin
+  if Pos(#0, S) > 0 then raise Exception.Create('cadena con NUL');
+  Raw(PChar(S), Length(S));
+  U8(0);
+end;
+
+function TByteWriter.Bytes: TBytes;
+begin
+  Result := Copy(Data, 0, Len);
 end;
 
 end.

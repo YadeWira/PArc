@@ -6,10 +6,12 @@ program parc;
 
 uses
   {$IFDEF UNIX}cthreads,{$ENDIF}
-  Classes, SysUtils, DateUtils, parc_os, parc_bytes, parc_methods, parc_archive, parc_extract;
+  Classes, SysUtils, DateUtils, parc_os, parc_bytes, parc_methods, parc_archive, parc_extract, parc_writer, parc_encoders;
 
 const
-  PARC_VERSION = '0.0.2';
+  PARC_VERSION = '0.0.3';
+  // Hasta tener el codificador LZMA, la compresión por defecto es storing
+  DEFAULT_METHOD = 'storing';
 
 procedure Usage;
 begin
@@ -20,9 +22,12 @@ begin
   OutLn('  t   verifica (descomprime y compara CRC, sin escribir)');
   OutLn('  x   extrae con rutas');
   OutLn('  e   extrae sin rutas');
+  OutLn('  a   crea un archivo (.parc; .arc compatible con FreeArc si la extensión es .arc)');
   OutLn('Opciones:');
   OutLn('  -dp<dir>  directorio de destino');
   OutLn('  -o+       sobrescribe archivos existentes    -o-  los saltea (default)');
+  OutLn('  -m<método> método de compresión (a), p. ej. -m0 (storing), -mexe');
+  OutLn('  -fmt=parc|arc  formato de salida (a)');
 end;
 
 function FmtTime(t: Int64): string;
@@ -98,8 +103,105 @@ begin
   if St.Errors > 0 then Result := 2 else Result := 0;
 end;
 
+{ Junta las entradas a agregar: cada argumento es un archivo o un directorio (recursivo).
+  Los nombres guardados son los del argumento, saneados (sin raíz ni ".."). }
+procedure CollectEntries(const Paths: TStringList; const Exclude: string; var Entries: TWriteEntryArray);
+
+  procedure AddEntry(const Disk, Stored: string; const Meta: TFileMeta);
+  var
+    n: Integer;
+  begin
+    if ExpandFileName(Disk) = Exclude then Exit;   // no meter el archivo que se está escribiendo
+    n := Length(Entries);
+    SetLength(Entries, n + 1);
+    Entries[n].DiskPath := Disk;
+    Entries[n].StoredName := Stored;
+    Entries[n].Meta := Meta;
+  end;
+
+  procedure Walk(const Disk, Stored: string);
+  var
+    SR: TSearchRec;
+    Meta: TFileMeta;
+    ChildDisk, ChildStored: string;
+  begin
+    if FindFirst(IncludeTrailingPathDelimiter(Disk) + '*', faAnyFile {$IFDEF UNIX}or faSymLink{$ENDIF}, SR) <> 0 then Exit;
+    try
+      repeat
+        if (SR.Name = '.') or (SR.Name = '..') then Continue;
+        ChildDisk := IncludeTrailingPathDelimiter(Disk) + SR.Name;
+        if Stored <> '' then ChildStored := Stored + '/' + SR.Name else ChildStored := SR.Name;
+        if not GetFileMeta(ChildDisk, Meta) then
+        begin
+          ErrLn('Aviso: no se puede leer ' + ChildDisk);
+          Continue;
+        end;
+        AddEntry(ChildDisk, ChildStored, Meta);
+        // No seguir enlaces simbólicos a directorios: evita ciclos
+        if Meta.IsDir {$IFDEF UNIX}and ((SR.Attr and faSymLink) = 0){$ENDIF} then
+          Walk(ChildDisk, ChildStored);
+      until FindNext(SR) <> 0;
+    finally
+      FindClose(SR);
+    end;
+  end;
+
 var
-  Cmd, ArcName, S: string;
+  i: Integer;
+  Meta: TFileMeta;
+  Stored: string;
+begin
+  for i := 0 to Paths.Count - 1 do
+  begin
+    if not GetFileMeta(Paths[i], Meta) then
+      raise EFOpenError.CreateFmt('no existe: %s', [Paths[i]]);
+    Stored := SanitizePath(Paths[i]);
+    if Stored <> '' then AddEntry(Paths[i], Stored, Meta);   // "." o "/" no se guardan a sí mismos
+    if Meta.IsDir then Walk(ExcludeTrailingPathDelimiter(Paths[i]), Stored);
+  end;
+end;
+
+function CmdAdd(const ArcName: string; const Paths: TStringList; const Method, Fmt: string): Integer;
+var
+  Entries: TWriteEntryArray;
+  Group: TSolidGroup;
+  Opt: TWriteOptions;
+  St: TWriteStats;
+  i, n: Integer;
+begin
+  if Paths.Count = 0 then
+  begin
+    ErrLn('ERROR: no se indicaron archivos para agregar');
+    Exit(1);
+  end;
+  if FileExists(ArcName) then
+  begin
+    ErrLn('ERROR: ' + ArcName + ' ya existe (actualizar un archivo existente todavía no está soportado)');
+    Exit(1);
+  end;
+  Entries := nil;
+  CollectEntries(Paths, ExpandFileName(ArcName), Entries);
+  // Un solo bloque sólido con todos los archivos (la agrupación por tipo viene después)
+  Group.Method := Method;
+  Group.Files := nil;
+  for i := 0 to High(Entries) do
+    if not Entries[i].Meta.IsDir then
+    begin
+      n := Length(Group.Files);
+      SetLength(Group.Files, n + 1);
+      Group.Files[n] := i;
+    end;
+  Opt.DirMethod := 'storing';
+  if Fmt <> '' then Opt.Parc := Fmt = 'parc'
+  else Opt.Parc := LowerCase(ExtractFileExt(ArcName)) <> '.arc';
+  St := WriteArchive(ArcName, Entries, [Group], Opt, @LogLine);
+  OutLn(Format('Creado %s (%s): %d archivo(s) y %d directorio(s), %d bytes -> %d bytes',
+    [ArcName, BoolToStr(Opt.Parc, 'parc', 'arc'), St.Files, St.Dirs, St.Bytes, St.ArcSize]));
+  Result := 0;
+end;
+
+var
+  Cmd, ArcName, S, Method, Fmt: string;
   A: TArchive;
   Opt: TExtractOptions;
   Filter: TStringList;
@@ -114,6 +216,8 @@ begin
   Opt := Default(TExtractOptions);
   Opt.Overwrite := owSkip;
   ArcName := '';
+  Method := DEFAULT_METHOD;
+  Fmt := '';
   Filter := TStringList.Create;
   Code := 0;
   try
@@ -125,6 +229,12 @@ begin
         if Copy(S, 1, 3) = '-dp' then Opt.DestDir := Copy(S, 4, MaxInt)
         else if S = '-o+' then Opt.Overwrite := owAll
         else if S = '-o-' then Opt.Overwrite := owSkip
+        else if Copy(S, 1, 2) = '-m' then
+        begin
+          Method := Copy(S, 3, MaxInt);
+          if Method = '0' then Method := 'storing';
+        end
+        else if Copy(S, 1, 5) = '-fmt=' then Fmt := LowerCase(Copy(S, 6, MaxInt))
         else
         begin
           ErrLn('Opción desconocida: ' + S);
@@ -140,6 +250,16 @@ begin
       Halt(1);
     end;
     Opt.Filter := Filter;
+    if Cmd = 'a' then
+    begin
+      try
+        Code := CmdAdd(ArcName, Filter, Method, Fmt);
+      except
+        on E: EUnsupportedEncoder do begin ErrLn('ERROR: ' + E.Message); Code := 3; end;
+        on E: Exception do begin ErrLn('ERROR: ' + E.Message); Code := 4; end;
+      end;
+      Halt(Code);
+    end;
     try
       A := TArchive.Open(ArcName);
       try

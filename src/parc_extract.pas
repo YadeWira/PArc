@@ -32,7 +32,7 @@ function ExtractArchive(A: TArchive; const Opt: TExtractOptions; Log: TLogProc):
 implementation
 
 uses
-  DateUtils, parc_bytes, parc_crc, parc_stream, parc_methods;
+  DateUtils, parc_os, parc_bytes, parc_crc, parc_stream, parc_methods;
 
 const
   COPY_BUF = 1 shl 20;
@@ -95,9 +95,13 @@ begin
   else Result := Rel;
 end;
 
-procedure SetFileTime(const FileName: string; UnixTime: Int64);
+{ Fecha (con ns si el archivo es .parc) y permisos/atributos. Los permisos van después de la
+  fecha: en Windows un archivo de solo lectura ya no aceptaría el cambio de fecha. }
+procedure RestoreMeta(const FileName: string; const F: TArcFileEntry);
 begin
-  FileSetDate(FileName, DateTimeToFileDate(UnixToDateTime(UnixTime, False)));
+  if F.HasMTimeNs then SetFileMTimeNs(FileName, F.MTimeNs)
+  else SetFileMTimeNs(FileName, F.Time * 1000000000);
+  SetFileAttrs(FileName, F.HasUnixMode, F.UnixMode, F.HasWinAttr, F.WinAttr);
 end;
 
 { Lee y descarta Count bytes de la cadena (archivos no pedidos dentro de un bloque sólido). }
@@ -196,7 +200,7 @@ begin
             OutF.Free;
           end;
           ActualCrc := ActualCrc xor CRC_INIT;
-          if OutF <> nil then SetFileTime(OutName, F.Time);
+          if OutF <> nil then RestoreMeta(OutName, F);
           if ActualCrc <> F.Crc then
           begin
             Log(Format('ERROR de CRC: %s (esperado %.8x, obtenido %.8x)', [F.Name, F.Crc, ActualCrc]));
@@ -230,7 +234,7 @@ begin
   if not Opt.TestOnly and not Opt.FlatNames then
     for i := 0 to High(A.Files) do
       if A.Files[i].IsDir and Wanted(Opt, A.Files[i].Name) then
-        SetFileTime(DiskName(Opt, A.Files[i].Name), A.Files[i].Time);
+        RestoreMeta(DiskName(Opt, A.Files[i].Name), A.Files[i]);
 end;
 
 end.

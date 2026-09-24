@@ -39,7 +39,8 @@ type
     function Read(Buf: PByte; Count: SizeInt): SizeInt; override;
   end;
 
-{ Núcleo BCJ x86 (decodificación). Devuelve cuántos bytes quedaron procesados. }
+{ Núcleo BCJ x86. Devuelve cuántos bytes quedaron procesados. }
+function BcjX86Code(Data: PByte; Size: SizeInt; Pc: LongWord; var State: LongWord; Encoding: Boolean): SizeInt;
 function BcjX86Decode(Data: PByte; Size: SizeInt; Pc: LongWord; var State: LongWord): SizeInt;
 
 implementation
@@ -63,10 +64,10 @@ begin
   Result := ((b + 1) and $FE) = 0;
 end;
 
-{ Traducción directa de Z7_BRANCH_CONV_ST(X86) con encoding=0, conservando su estructura de
-  saltos para poder compararla línea a línea con el original. c = dirección de la instrucción
-  siguiente = Pc + (offset del operando) + 4. }
-function BcjX86Decode(Data: PByte; Size: SizeInt; Pc: LongWord; var State: LongWord): SizeInt;
+{ Traducción directa de Z7_BRANCH_CONV_ST(X86), conservando su estructura de saltos para poder
+  compararla línea a línea con el original. c = dirección de la instrucción siguiente =
+  Pc + (offset del operando) + 4. BR_CONVERT_VAL: al codificar se suma c, al decodificar se resta. }
+function BcjX86Code(Data: PByte; Size: SizeInt; Pc: LongWord; var State: LongWord; Encoding: Boolean): SizeInt;
 label
   cont, start, m0, m1, m2, main_loop, a0, a1, a2, a3, fin_p, fin;
 var
@@ -111,12 +112,12 @@ m2: Dec(p);
   v := v + (1 shl 24);
   if (v and $FE000000) <> 0 then goto cont;
   c := Pc + LongWord(p - Data);
-  v := v - c;
+  if Encoding then v := v + c else v := v - c;
   mask := mask shl 3;
   if NeedConv(v shr mask) then
   begin
     v := v xor ((LongWord($100) shl mask) - 1);
-    v := v - c;
+    if Encoding then v := v + c else v := v - c;
   end;
   mask := 0;
   v := v and ((1 shl 25) - 1);
@@ -147,7 +148,7 @@ a3:
   v := v + (1 shl 24);
   if (v and $FE000000) <> 0 then goto cont;
   c := Pc + LongWord(p - Data);
-  v := v - c;
+  if Encoding then v := v + c else v := v - c;
   v := v and ((1 shl 25) - 1);
   v := v - (1 shl 24);
   SetUi32(p, v);
@@ -159,6 +160,11 @@ fin_p:
 fin:
   State := mask;
   Result := p - Data;
+end;
+
+function BcjX86Decode(Data: PByte; Size: SizeInt; Pc: LongWord; var State: LongWord): SizeInt;
+begin
+  Result := BcjX86Code(Data, Size, Pc, State, False);
 end;
 
 { TBcjX86Stage }

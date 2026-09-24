@@ -11,13 +11,32 @@ function ArgCount: Integer;
 function Arg(i: Integer): string;          // UTF-8; Arg(0) = ejecutable
 procedure OutLn(const S: string = '');      // S en UTF-8
 procedure ErrLn(const S: string);
+type
+  TFileMeta = record
+    Size: Int64;
+    MTimeNs: Int64;          // nanosegundos desde 1970 UTC
+    IsDir: Boolean;
+    HasWinAttr, HasUnixMode: Boolean;
+    WinAttr, UnixMode: LongWord;
+  end;
+
+{ Metadatos de un archivo o directorio (sigue enlaces simbólicos). False si no existe. }
+function GetFileMeta(const Path: string; out Meta: TFileMeta): Boolean;
+
+{ Fija la fecha de modificación (ns desde 1970 UTC) de un archivo o directorio. }
+function SetFileMTimeNs(const Path: string; Ns: Int64): Boolean;
+{ Restaura permisos Unix (st_mode and 7777) o atributos de Windows, según la plataforma:
+  lo que sea de la otra plataforma se ignora. }
+procedure SetFileAttrs(const Path: string; HasUnixMode: Boolean; UnixMode: LongWord;
+  HasWinAttr: Boolean; WinAttr: LongWord);
+
 { Núcleos disponibles. TThread.ProcessorCount de FPC 3.2.2 devuelve siempre 1 en Linux. }
 function CpuCount: Integer;
 
 implementation
 
 uses
-  {$IFDEF WINDOWS}Windows,{$ENDIF} Classes, SysUtils;
+  {$IFDEF WINDOWS}Windows,{$ENDIF}{$IFDEF UNIX}BaseUnix,{$ENDIF} Classes, SysUtils;
 
 var
   Args: array of string;
@@ -81,6 +100,103 @@ begin
   {$ENDIF}
   if Result < 1 then Result := 1;
 end;
+
+{$IFDEF WINDOWS}
+const
+  // Entre 1601-01-01 (FILETIME) y 1970-01-01, en intervalos de 100 ns
+  FILETIME_UNIX_DIFF = 116444736000000000;
+
+function GetFileMeta(const Path: string; out Meta: TFileMeta): Boolean;
+var
+  D: WIN32_FILE_ATTRIBUTE_DATA;
+  W: UnicodeString;
+  T: Int64;
+begin
+  Meta := Default(TFileMeta);
+  W := UTF8Decode(Path);
+  Result := GetFileAttributesExW(PWideChar(W), GetFileExInfoStandard, @D);
+  if not Result then Exit;
+  Meta.IsDir := (D.dwFileAttributes and FILE_ATTRIBUTE_DIRECTORY) <> 0;
+  if not Meta.IsDir then Meta.Size := (Int64(D.nFileSizeHigh) shl 32) or D.nFileSizeLow;
+  T := (Int64(D.ftLastWriteTime.dwHighDateTime) shl 32) or D.ftLastWriteTime.dwLowDateTime;
+  Meta.MTimeNs := (T - FILETIME_UNIX_DIFF) * 100;
+  Meta.HasWinAttr := True;
+  Meta.WinAttr := D.dwFileAttributes;
+end;
+{$ELSE}
+function GetFileMeta(const Path: string; out Meta: TFileMeta): Boolean;
+var
+  St: Stat;
+begin
+  Meta := Default(TFileMeta);
+  Result := FpStat(Path, St) = 0;
+  if not Result then Exit;
+  Meta.IsDir := FpS_ISDIR(St.st_mode);
+  if not Meta.IsDir then Meta.Size := St.st_size;
+  Meta.MTimeNs := Int64(St.st_mtime) * 1000000000 + St.st_mtime_nsec;
+  Meta.HasUnixMode := True;
+  Meta.UnixMode := St.st_mode;
+end;
+{$ENDIF}
+
+{$IFDEF WINDOWS}
+function SetFileMTimeNs(const Path: string; Ns: Int64): Boolean;
+var
+  H: THandle;
+  W: UnicodeString;
+  T: Int64;
+  FT: TFileTime;
+begin
+  W := UTF8Decode(Path);
+  // FILE_FLAG_BACKUP_SEMANTICS: necesario para abrir directorios
+  H := CreateFileW(PWideChar(W), FILE_WRITE_ATTRIBUTES, FILE_SHARE_READ or FILE_SHARE_WRITE, nil,
+                   OPEN_EXISTING, FILE_FLAG_BACKUP_SEMANTICS, 0);
+  if H = INVALID_HANDLE_VALUE then Exit(False);
+  T := Ns div 100 + FILETIME_UNIX_DIFF;
+  FT.dwLowDateTime := DWORD(T);
+  FT.dwHighDateTime := DWORD(T shr 32);
+  Result := SetFileTime(H, nil, nil, @FT);
+  CloseHandle(H);
+end;
+
+procedure SetFileAttrs(const Path: string; HasUnixMode: Boolean; UnixMode: LongWord;
+  HasWinAttr: Boolean; WinAttr: LongWord);
+const
+  // Solo los atributos que tiene sentido restaurar (no directorio, comprimido, etc.)
+  KEEP = FILE_ATTRIBUTE_READONLY or FILE_ATTRIBUTE_HIDDEN or FILE_ATTRIBUTE_SYSTEM or FILE_ATTRIBUTE_ARCHIVE;
+var
+  W: UnicodeString;
+begin
+  if not HasWinAttr then Exit;
+  W := UTF8Decode(Path);
+  SetFileAttributesW(PWideChar(W), WinAttr and KEEP);
+end;
+{$ELSE}
+type
+  TTimeSpec2 = array[0..1] of timespec;
+const
+  AT_FDCWD = -100;
+function utimensat(dirfd: LongInt; path: PChar; times: Pointer; flags: LongInt): LongInt; cdecl; external 'c';
+
+function SetFileMTimeNs(const Path: string; Ns: Int64): Boolean;
+var
+  T: TTimeSpec2;
+  Sec, NSec: Int64;
+begin
+  Sec := Ns div 1000000000;
+  NSec := Ns mod 1000000000;
+  if NSec < 0 then begin Inc(NSec, 1000000000); Dec(Sec); end;
+  T[0].tv_sec := Sec; T[0].tv_nsec := NSec;   // acceso = modificación
+  T[1].tv_sec := Sec; T[1].tv_nsec := NSec;
+  Result := utimensat(AT_FDCWD, PChar(Path), @T[0], 0) = 0;
+end;
+
+procedure SetFileAttrs(const Path: string; HasUnixMode: Boolean; UnixMode: LongWord;
+  HasWinAttr: Boolean; WinAttr: LongWord);
+begin
+  if HasUnixMode then FpChmod(Path, UnixMode and &7777);
+end;
+{$ENDIF}
 
 function ArgCount: Integer;
 begin
