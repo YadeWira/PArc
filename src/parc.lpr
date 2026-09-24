@@ -10,8 +10,10 @@ uses
 
 const
   PARC_VERSION = '0.0.3';
-  // Hasta tener el codificador LZMA, la compresión por defecto es storing
-  DEFAULT_METHOD = 'storing';
+  // Hasta tener todos los codificadores de los presets, el default es LZMA (exe para binarios)
+  DEFAULT_METHOD = 'exe+lzma:16mb:normal/$text=lzma:16mb:normal/$compressed=storing';
+  // Directorio y footer: lo mismo que usa FreeArc
+  DIR_METHOD = 'lzma:1mb:normal:bt4:32';
 
 procedure Usage;
 begin
@@ -246,7 +248,7 @@ begin
     ErrLn('ERROR: todavía no hay codificador para:' + Missing);
     Exit(3);
   end;
-  Opt.DirMethod := 'storing';
+  Opt.DirMethod := DIR_METHOD;
   if Fmt <> '' then Opt.Parc := Fmt = 'parc'
   else Opt.Parc := LowerCase(ExtractFileExt(ArcName)) <> '.arc';
   St := WriteArchive(ArcName, Entries, Groups, Opt, @LogLine);

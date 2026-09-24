@@ -56,13 +56,18 @@ function CreateEncoderChain(const Method: string; Target: TOutStage): TOutStage;
 { Comprime un bloque de control en memoria. }
 function CompressMem(const Method: string; Src: PByte; SrcLen: SizeInt): TBytes;
 
+{ Como SetDictionary de FreeArc: achica el diccionario de lzma (d<mem> o la memoria sin nombre)
+  a la potencia de 2 >= DataSize (mínimo 64kb). El método ajustado es el que se guarda en el
+  archivo, así que el descompresor también reserva solo eso. }
+function LimitMethodToSize(const Method: string; DataSize: Int64): string;
+
 { True si CreateEncoderChain sabe comprimir con Method (sin crear nada). }
 function EncoderAvailable(const Method: string): Boolean;
 
 implementation
 
 uses
-  parc_filters, parc_ppmd, parc_methods, parc_parallel;
+  parc_filters, parc_ppmd, parc_methods, parc_parallel, parc_lzmaenc;
 
 type
   T4x4EncJob = class(TParallelJob)
@@ -268,6 +273,30 @@ begin
   if BlockSize = 0 then BlockSize := 8 shl 20;
 end;
 
+function LimitMethodToSize(const Method: string; DataSize: Int64): string;
+var
+  Stages, Params: TStringArray;
+  k, j: Integer;
+  m, Need: QWord;
+begin
+  Need := 64 shl 10;
+  while (Need < QWord(DataSize)) and (Need < (QWord(1) shl 40)) do Need := Need shl 1;
+  Stages := Method.Split(['+']);
+  for k := 0 to High(Stages) do
+  begin
+    Params := Stages[k].Split([':']);
+    if Params[0] <> 'lzma' then Continue;
+    for j := 1 to High(Params) do
+      if (Params[j] <> '') and (StrToIntDef(Params[j], -1) < 0) and
+         ((Params[j][1] in ['0'..'9']) and ParseMem(Params[j], m) or
+          (Params[j][1] = 'd') and ParseMem(Copy(Params[j], 2, MaxInt), m)) then
+        if m > Need then
+          Params[j] := IntToStr(Need shr 10) + 'kb';
+    Stages[k] := string.Join(':', Params);
+  end;
+  Result := string.Join('+', Stages);
+end;
+
 function EncoderAvailable(const Method: string): Boolean;
 var
   Stage, Inner: string;
@@ -280,7 +309,7 @@ begin
           Parse4x4(Stage, Inner, Bs);
           if not EncoderAvailable(Inner) then Exit(False);
         end;
-      'storing', 'exe', 'ppmd': ;
+      'storing', 'exe', 'ppmd', 'lzma': ;
     else
       Exit(False);
     end;
@@ -302,6 +331,9 @@ begin
         Result := T4x4EncStage.Create(Target, Inner, Bs);
       end;
     'storing': Result := TStoringStage.Create(Target);
+    'lzma':
+      // Con marca de fin: en los bloques de datos el decodificador de FreeArc la exige
+      Result := TLzmaEncStage.Create(Target, ParseLzmaEncParams(Parts), True);
     'exe':     Result := TBcjEncStage.Create(Target);
     'ppmd':
       begin

@@ -270,11 +270,15 @@ var
   Crc: LongWord;
   Size: Int64;
 begin
-  Result.Method := G.Method;
+  // Diccionario ajustado al tamaño del bloque (el método ajustado es el que queda en el archivo)
+  Size := 0;
+  for i := 0 to High(G.Files) do
+    if not Entries[G.Files[i]].Meta.IsDir then Inc(Size, Entries[G.Files[i]].Meta.Size);
+  Result.Method := LimitMethodToSize(G.Method, Size);
   Result.Pos := S.Position;
   SetLength(Result.Files, Length(G.Files));
   SetLength(Buf, COPY_BUF);
-  Chain := CreateEncoderChain(G.Method, TStreamSink.Create(S));
+  Chain := CreateEncoderChain(Result.Method, TStreamSink.Create(S));
   try
     for i := 0 to High(G.Files) do
     begin
