@@ -6,7 +6,7 @@ program parc;
 
 uses
   {$IFDEF UNIX}cthreads,{$ENDIF}
-  Classes, SysUtils, DateUtils, parc_os, parc_bytes, parc_methods, parc_archive, parc_extract, parc_writer, parc_encoders;
+  Classes, SysUtils, DateUtils, parc_os, parc_bytes, parc_methods, parc_archive, parc_extract, parc_writer, parc_encoders, parc_presets;
 
 const
   PARC_VERSION = '0.0.3';
@@ -162,13 +162,43 @@ begin
   end;
 end;
 
+{ Orden dentro de un bloque sólido: grupo de arc.groups, extensión, nombre (inserción simple:
+  los bloques típicos tienen miles de archivos, no millones). }
+procedure SortGroupFiles(var G: TSolidGroup; const Entries: TWriteEntryArray);
+
+  function Key(i: Integer): string;
+  var
+    Name: string;
+  begin
+    Name := Entries[i].StoredName;
+    Result := Format('%.4d', [GroupOrder(FileGroup(Name))]) + #1 +
+              LowerCase(ExtractFileExt(Name)) + #1 + Name;
+  end;
+
+var
+  Keys: TStringList;
+  i: Integer;
+begin
+  Keys := TStringList.Create;
+  try
+    Keys.CaseSensitive := True;
+    for i := 0 to High(G.Files) do Keys.AddObject(Key(G.Files[i]), TObject(PtrInt(G.Files[i])));
+    Keys.Sort;
+    for i := 0 to Keys.Count - 1 do G.Files[i] := PtrInt(Keys.Objects[i]);
+  finally
+    Keys.Free;
+  end;
+end;
+
 function CmdAdd(const ArcName: string; const Paths: TStringList; const Method, Fmt: string): Integer;
 var
   Entries: TWriteEntryArray;
-  Group: TSolidGroup;
+  GM: TGroupMethods;
+  Groups: array of TSolidGroup;
   Opt: TWriteOptions;
   St: TWriteStats;
-  i, n: Integer;
+  i, n, g, k: Integer;
+  M, Missing: string;
 begin
   if Paths.Count = 0 then
   begin
@@ -182,20 +212,44 @@ begin
   end;
   Entries := nil;
   CollectEntries(Paths, ExpandFileName(ArcName), Entries);
-  // Un solo bloque sólido con todos los archivos (la agrupación por tipo viene después)
-  Group.Method := Method;
-  Group.Files := nil;
+  // Cada archivo va al método de su grupo de arc.groups (-m5 -> $text: dict+lzp+ppmd, etc.);
+  // los que comparten método van al mismo bloque sólido
+  GM := DecodeMethod(Method, CpuCount);
+  Groups := nil;
   for i := 0 to High(Entries) do
     if not Entries[i].Meta.IsDir then
     begin
-      n := Length(Group.Files);
-      SetLength(Group.Files, n + 1);
-      Group.Files[n] := i;
+      M := MethodForGroup(GM, FileGroup(Entries[i].StoredName));
+      if M = '' then M := 'storing';
+      k := -1;
+      for g := 0 to High(Groups) do
+        if Groups[g].Method = M then k := g;
+      if k < 0 then
+      begin
+        k := Length(Groups);
+        SetLength(Groups, k + 1);
+        Groups[k].Method := M;
+        Groups[k].Files := nil;
+      end;
+      n := Length(Groups[k].Files);
+      SetLength(Groups[k].Files, n + 1);
+      Groups[k].Files[n] := i;
     end;
+  // Dentro de cada bloque: por grupo de arc.groups, extensión y nombre (archivos parecidos juntos)
+  for g := 0 to High(Groups) do SortGroupFiles(Groups[g], Entries);
+  // Avisar de una vez qué métodos todavía no se pueden comprimir
+  Missing := '';
+  for g := 0 to High(Groups) do
+    if not EncoderAvailable(Groups[g].Method) then Missing := Missing + LineEnding + '  ' + Groups[g].Method;
+  if Missing <> '' then
+  begin
+    ErrLn('ERROR: todavía no hay codificador para:' + Missing);
+    Exit(3);
+  end;
   Opt.DirMethod := 'storing';
   if Fmt <> '' then Opt.Parc := Fmt = 'parc'
   else Opt.Parc := LowerCase(ExtractFileExt(ArcName)) <> '.arc';
-  St := WriteArchive(ArcName, Entries, [Group], Opt, @LogLine);
+  St := WriteArchive(ArcName, Entries, Groups, Opt, @LogLine);
   OutLn(Format('Creado %s (%s): %d archivo(s) y %d directorio(s), %d bytes -> %d bytes',
     [ArcName, BoolToStr(Opt.Parc, 'parc', 'arc'), St.Files, St.Dirs, St.Bytes, St.ArcSize]));
   Result := 0;
@@ -233,8 +287,7 @@ begin
         else if S = '-o-' then Opt.Overwrite := owSkip
         else if Copy(S, 1, 2) = '-m' then
         begin
-          Method := Copy(S, 3, MaxInt);
-          if Method = '0' then Method := 'storing';
+          Method := Copy(S, 3, MaxInt);   // preset (0..9, x, ...) o método explícito
         end
         else if Copy(S, 1, 5) = '-fmt=' then Fmt := LowerCase(Copy(S, 6, MaxInt))
         else if Copy(S, 1, 2) = '-p' then SetArchivePassword(Copy(S, 3, MaxInt))
