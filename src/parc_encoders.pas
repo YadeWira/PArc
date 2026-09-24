@@ -40,7 +40,7 @@ function EncoderAvailable(const Method: string): Boolean;
 implementation
 
 uses
-  parc_filters;
+  parc_filters, parc_ppmd, parc_methods;
 
 const
   BCJ_ENC_BUFFER = 1 shl 20;
@@ -111,7 +111,7 @@ var
 begin
   for Stage in Method.Split(['+']) do
     case StageName(Stage) of
-      'storing', 'exe': ;
+      'storing', 'exe', 'ppmd': ;
     else
       Exit(False);
     end;
@@ -119,10 +119,18 @@ begin
 end;
 
 function CreateStage(const Stage: string; Target: TOutStage): TOutStage;
+var
+  pp: TPpmdParams;
 begin
   case StageName(Stage) of
     'storing': Result := TStoringStage.Create(Target);
     'exe':     Result := TBcjEncStage.Create(Target);
+    'ppmd':
+      begin
+        // La misma sintaxis que el decodificador (parse_PPMD): una sola implementación
+        pp := ParsePpmdParams(Stage.Split([':']));
+        Result := TPpmdEncStage.Create(Target, pp.Order, pp.Mem, pp.MRMethod, pp.Chunk);
+      end;
   else
     raise EUnsupportedEncoder.CreateFmt('todavía no se puede comprimir con "%s"', [Stage]);
   end;
@@ -140,9 +148,14 @@ begin
     raise EUnsupportedEncoder.CreateFmt('todavía no se puede comprimir con "%s"', [Method]);
   end;
   Result := Target;
-  Stages := Method.Split(['+']);
-  for k := High(Stages) downto 0 do
-    Result := CreateStage(Stages[k], Result);
+  try
+    Stages := Method.Split(['+']);
+    for k := High(Stages) downto 0 do
+      Result := CreateStage(Stages[k], Result);
+  except
+    Result.Free;   // libera lo ya armado (y con eso Target)
+    raise;
+  end;
 end;
 
 function CompressMem(const Method: string; Src: PByte; SrcLen: SizeInt): TBytes;

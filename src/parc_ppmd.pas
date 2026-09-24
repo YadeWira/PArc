@@ -24,7 +24,7 @@ unit parc_ppmd;
 interface
 
 uses
-  Classes, SysUtils, parc_bytes, parc_stream;
+  Classes, SysUtils, parc_bytes, parc_stream, parc_outstream;
 
 type
   { Etapa de descompresión PPMd (metodo "ppmd:ORDER:MEM[:chunk]").
@@ -40,6 +40,31 @@ type
     destructor Destroy; override;
     function Read(Buf: PByte; Count: SizeInt): SizeInt; override;
   end;
+
+  { Etapa de COMPRESIÓN PPMd (metodo "ppmd:ORDER:MEM[:chunk]").
+    PPMd es solidario para todo el stream, así que acumula lo que le llega con
+    Write (el escritor manda pedazos de cualquier tamaño, típicamente de 1 MB) y
+    comprime entero en DoFinish, que es donde emite todo. }
+  TPpmdEncStage = class(TOutStage)
+  private
+    FOrder, FMemSize, FMRMethod: Integer;
+    FBuf: PByte;
+    FLen, FCap: SizeInt;
+    FEngine: TObject;
+  protected
+    procedure DoWrite(Buf: PByte; Count: SizeInt); override;
+    procedure DoFinish; override;
+  public
+    constructor Create(ATarget: TOutStage; AOrder: Integer; AMemSize: Int64;
+                       AMRMethod: Integer; AChunk: Int64);
+    destructor Destroy; override;
+  end;
+
+{ Comprime un buffer entero y devuelve el stream tal cual lo lee ppmd_decompress
+  de FreeArc (sin encabezado ni framing). }
+function PpmdCompress(InBuf: PByte; InLen: SizeInt;
+                      AOrder, AMemSize, AMRMethod: Integer;
+                      out Compressed: TBytes): Boolean;
 
 const
   PPMD_MRM_RESTART = 0;
@@ -139,6 +164,8 @@ type
     FAllocFailed: Boolean;
     FInBuf: array[0..IN_BUF_SIZE - 1] of Byte;
     FInLen, FInPos: SizeInt;
+    FEncIn: PByte;
+    FEncInLen, FEncInPos: SizeInt;
     FOutBuf: array of Byte;
     FOutLen, FOutPos: SizeInt;
     FDone: Boolean;
@@ -200,11 +227,23 @@ type
     function  InByte: Integer;
     procedure Emit(b: Byte);
     procedure DecodeMore(ALimit: SizeInt);
+    { --- lado encoder --- }
+    function  EncInByte: Integer;
+    procedure AriInitEncoder;
+    procedure AriEncNormalize;
+    procedure AriEncodeSymbol;
+    procedure AriShiftEncodeSymbol(SHIFT: Integer);
+    procedure AriFlushEncoder;
+    procedure EncodeBinSymbol(ctx: LongWord; symbol: Integer);
+    procedure EncodeSymbol1(ctx: LongWord; symbol: Integer);
+    procedure EncodeSymbol2(ctx: LongWord; symbol: Integer);
   public
     constructor Create(ASource: TInStage; AOrder: Integer; AMemSize: Int64;
                        AMRMethod: Integer; AChunk: Int64);
     destructor Destroy; override;
     function Read(Buf: PByte; Count: SizeInt): SizeInt;
+    { Comprime un buffer entero. El motor de este lado no usa FSource. }
+    function Compress(InBuf: PByte; InLen: SizeInt; out Compressed: TBytes): Boolean;
   end;
 
 { parc_ppmd_arena.inc — submallocador de PPMd con layout de 32 bits.
@@ -1705,6 +1744,317 @@ end;
 function TPpmdStage.Read(Buf: PByte; Count: SizeInt): SizeInt;
 begin
   Result := TPpmdEngine(FEngine).Read(Buf, Count);
+end;
+
+{ --- lado encoder --------------------------------------------------------- }
+{ Espejo del decoder: mismas actualizaciones de modelo y misma elección de
+  subrango, pero acá el símbolo decide y se ESCRIBE el subrango. Fuente:
+  Model.cpp:441 (encodeBinSymbol), 483 (encodeSymbol1), 556 (encodeSymbol2),
+  608 (EncodeFile) y Coder.hpp:64-89 (range encoder). }
+
+function TPpmdEngine.EncInByte: Integer;
+begin
+  if FEncInPos >= FEncInLen then Exit(-1);
+  Result := FEncIn[FEncInPos];
+  Inc(FEncInPos);
+end;
+
+procedure TPpmdEngine.AriInitEncoder;
+begin
+  FLow := 0; FRange := $FFFFFFFF;
+end;
+
+procedure TPpmdEngine.AriEncNormalize;
+begin
+  while True do
+  begin
+    if (FLow xor (FLow + FRange)) < LongWord(TOP) then
+      { sigue }
+    else if FRange < LongWord(BOT) then
+      FRange := (LongWord(0) - FLow) and (LongWord(BOT) - 1)
+    else
+      Break;
+    Emit(Byte(FLow shr 24));
+    FRange := FRange shl 8;
+    FLow := FLow shl 8;
+  end;
+end;
+
+procedure TPpmdEngine.AriEncodeSymbol;
+begin
+  FRange := FRange div FSubScale;
+  Inc(FLow, FSubLow * FRange);
+  FRange := FRange * (FSubHigh - FSubLow);
+end;
+
+procedure TPpmdEngine.AriShiftEncodeSymbol(SHIFT: Integer);
+begin
+  FRange := FRange shr SHIFT;
+  Inc(FLow, FSubLow * FRange);
+  FRange := FRange * (FSubHigh - FSubLow);
+end;
+
+procedure TPpmdEngine.AriFlushEncoder;
+var
+  i: Integer;
+begin
+  for i := 0 to 3 do
+  begin
+    Emit(Byte(FLow shr 24));
+    FLow := FLow shl 8;
+  end;
+end;
+
+procedure TPpmdEngine.EncodeBinSymbol(ctx: LongWord; symbol: Integer);
+var
+  indx, rs: LongWord;
+  bs: PWord;
+begin
+  indx := FNS2BSIndx[CtxOf(CtxOf(ctx)^.Suffix)^.NumStats] + FPrevSuccess + CtxOf(ctx)^.Flags;
+  rs := ctx + 2;
+  bs := @FBinSumm[FQTable[StOf(rs)^.Freq - 1]]
+                 [indx + LongWord((FRunLength shr 26) and $20)];
+  if Integer(StOf(rs)^.Symbol) = symbol then
+  begin
+    FFoundState := rs;
+    if StOf(rs)^.Freq < 196 then Inc(StOf(rs)^.Freq);
+    FSubLow := 0; FSubHigh := bs^;
+    bs^ := bs^ + Word(INTERVAL - GetMean(bs^, PERIOD_BITS, 2));
+    FPrevSuccess := 1; Inc(FRunLength);
+  end
+  else
+  begin
+    FSubLow := bs^;
+    bs^ := bs^ - Word(GetMean(bs^, PERIOD_BITS, 2));
+    FSubHigh := BIN_SCALE;
+    FInitEsc := EXP_ESCAPE[bs^ shr 10];
+    FCharMask[StOf(rs)^.Symbol] := FEscCount;
+    FNumMasked := 0; FPrevSuccess := 0; FFoundState := 0;
+  end;
+end;
+
+procedure TPpmdEngine.EncodeSymbol1(ctx: LongWord; symbol: Integer);
+var
+  i, LoCnt: LongWord;
+  p: LongWord;
+begin
+  p := CtxOf(ctx)^.Stats;
+  FSubScale := CtxOf(ctx)^.SummFreq;
+  if Integer(StOf(p)^.Symbol) = symbol then
+  begin
+    FSubHigh := StOf(p)^.Freq;
+    if 2 * FSubHigh >= FSubScale then FPrevSuccess := 1 else FPrevSuccess := 0;
+    FFoundState := p;
+    Inc(StOf(p)^.Freq, 4); Inc(CtxOf(ctx)^.SummFreq, 4);
+    Inc(FRunLength, FPrevSuccess);
+    if StOf(p)^.Freq > MAX_FREQ then Rescale(ctx);
+    FSubLow := 0;
+    Exit;
+  end;
+  LoCnt := StOf(p)^.Freq;
+  i := CtxOf(ctx)^.NumStats; FPrevSuccess := 0;
+  while True do
+  begin
+    Inc(p, STATE_SIZE);
+    if Integer(StOf(p)^.Symbol) = symbol then Break;
+    Inc(LoCnt, StOf(p)^.Freq);
+    if i = 1 then
+    begin
+      FSubLow := LoCnt;
+      FCharMask[StOf(p)^.Symbol] := FEscCount;
+      i := CtxOf(ctx)^.NumStats;
+      FNumMasked := Byte(i);
+      FFoundState := 0;
+      repeat
+        Dec(p, STATE_SIZE);
+        FCharMask[StOf(p)^.Symbol] := FEscCount;
+        Dec(i);
+      until i = 0;
+      FSubHigh := FSubScale;
+      Exit;
+    end;
+    Dec(i);
+  end;
+  FSubLow := LoCnt;
+  FSubHigh := LoCnt + StOf(p)^.Freq;
+  Update1(ctx, p);
+end;
+
+procedure TPpmdEngine.EncodeSymbol2(ctx: LongWord; symbol: Integer);
+var
+  psee2c: PSee2;
+  i, LoCnt: LongWord;
+  p, p2: LongWord;
+  Sym: Byte;
+begin
+  psee2c := MakeEscFreq2(ctx);          { fija FSubScale }
+  LoCnt := 0;
+  i := CtxOf(ctx)^.NumStats - FNumMasked;
+  p := CtxOf(ctx)^.Stats - STATE_SIZE;  { Stats-1 }
+  while True do
+  begin
+    repeat
+      Inc(p, STATE_SIZE);
+      Sym := StOf(p)^.Symbol;
+    until FCharMask[Sym] <> FEscCount;
+    FCharMask[Sym] := FEscCount;
+    if Integer(Sym) = symbol then Break;
+    Inc(LoCnt, StOf(p)^.Freq);
+    if i = 1 then
+    begin
+      FSubLow := LoCnt;
+      FSubScale := FSubScale + LoCnt;
+      FSubHigh := FSubScale;
+      psee2c^.Summ := Word(psee2c^.Summ + FSubScale);
+      FNumMasked := CtxOf(ctx)^.NumStats;
+      Exit;
+    end;
+    Dec(i);
+  end;
+  { símbolo encontrado }
+  FSubLow := LoCnt;
+  Inc(LoCnt, StOf(p)^.Freq);
+  FSubHigh := LoCnt;
+  p2 := p;
+  Dec(i);
+  while i <> 0 do
+  begin
+    repeat
+      Inc(p2, STATE_SIZE);
+      Sym := StOf(p2)^.Symbol;
+    until FCharMask[Sym] <> FEscCount;
+    Inc(LoCnt, StOf(p2)^.Freq);
+    Dec(i);
+  end;
+  FSubScale := FSubScale + LoCnt;
+  See2Update(psee2c);
+  Update2(ctx, p);
+end;
+
+function TPpmdEngine.Compress(InBuf: PByte; InLen: SizeInt;
+                              out Compressed: TBytes): Boolean;
+label
+  StopEncoding;
+var
+  ns: Byte;
+  c: Integer;
+begin
+  Result := False;
+  FEncIn := InBuf; FEncInLen := InLen; FEncInPos := 0;
+  FOutLen := 0; FOutPos := 0;
+  AriInitEncoder;
+  StartModelRare(FMaxOrder, FMRMethod);
+  FMinContext := FMaxContext;
+  FNs := CtxOf(FMinContext)^.NumStats;
+  while True do
+  begin
+    ns := FNs;
+    { el fin de la entrada se codifica como símbolo, igual que en EncodeFile }
+    c := EncInByte;
+    if ns <> 0 then
+    begin
+      EncodeSymbol1(FMinContext, c);
+      AriEncodeSymbol;
+    end
+    else
+    begin
+      EncodeBinSymbol(FMinContext, c);
+      AriShiftEncodeSymbol(TOT_BITS);
+    end;
+    while FFoundState = 0 do
+    begin
+      AriEncNormalize;
+      repeat
+        Inc(FOrderFall);
+        FMinContext := CtxOf(FMinContext)^.Suffix;
+        if FMinContext = 0 then goto StopEncoding;
+      until CtxOf(FMinContext)^.NumStats <> FNumMasked;
+      EncodeSymbol2(FMinContext, c);
+      AriEncodeSymbol;
+    end;
+    if (FOrderFall = 0) and (StOf(FFoundState)^.Succ >= FUnitsStart) then
+      FMaxContext := StOf(FFoundState)^.Succ
+    else
+    begin
+      UpdateModel(FMinContext);
+      if FEscCount = 0 then ClearMask;
+    end;
+    FMinContext := FMaxContext;
+    FNs := CtxOf(FMinContext)^.NumStats;
+    AriEncNormalize;
+  end;
+StopEncoding:
+  AriFlushEncoder;
+  SetLength(Compressed, FOutLen);
+  if FOutLen > 0 then Move(FOutBuf[0], Compressed[0], FOutLen);
+  Result := True;
+end;
+
+
+function PpmdCompress(InBuf: PByte; InLen: SizeInt;
+                      AOrder, AMemSize, AMRMethod: Integer;
+                      out Compressed: TBytes): Boolean;
+var
+  eng: TPpmdEngine;
+begin
+  Result := False;
+  eng := TPpmdEngine.Create(nil, AOrder, AMemSize, AMRMethod, 1 shl 22);
+  try
+    Result := eng.Compress(InBuf, InLen, Compressed);
+  finally
+    eng.Free;
+  end;
+end;
+
+
+{ --- TPpmdEncStage ------------------------------------------------------- }
+
+constructor TPpmdEncStage.Create(ATarget: TOutStage; AOrder: Integer;
+                                 AMemSize: Int64; AMRMethod: Integer; AChunk: Int64);
+begin
+  { Misma validación y mismo orden que TPpmdStage: validar y crear el motor ANTES
+    de inherited Create, para que un fallo no deje una cadena a medio adoptar. }
+  if (AOrder < MIN_O) or (AOrder > MAX_O) then
+    Corrupt('ppmd: orden fuera de rango');
+  if AMemSize < MIN_MEM then
+    Corrupt('ppmd: memoria del modelo insuficiente');
+  if AMemSize > $FFFFFFFF - 4096 then
+    Corrupt('ppmd: memoria del modelo demasiado grande');
+  FOrder := AOrder; FMemSize := AMemSize; FMRMethod := AMRMethod;
+  FCap := 1 shl 20; FLen := 0;
+  GetMem(FBuf, FCap);
+  FEngine := TPpmdEngine.Create(nil, AOrder, AMemSize, AMRMethod, AChunk);
+  inherited Create(ATarget);
+end;
+
+destructor TPpmdEncStage.Destroy;
+begin
+  FEngine.Free;
+  if FBuf <> nil then FreeMem(FBuf);
+  inherited Destroy;
+end;
+
+procedure TPpmdEncStage.DoWrite(Buf: PByte; Count: SizeInt);
+begin
+  if Count <= 0 then Exit;
+  if FLen + Count > FCap then
+  begin
+    while FCap < FLen + Count do FCap := FCap * 2;
+    ReAllocMem(FBuf, FCap);
+  end;
+  Move(Buf^, FBuf[FLen], Count);
+  Inc(FLen, Count);
+end;
+
+procedure TPpmdEncStage.DoFinish;
+var
+  salida: TBytes;
+begin
+  if FLen > 0 then
+    TPpmdEngine(FEngine).Compress(FBuf, FLen, salida)
+  else
+    TPpmdEngine(FEngine).Compress(nil, 0, salida);
+  if Length(salida) > 0 then Emit(@salida[0], Length(salida));
 end;
 
 end.

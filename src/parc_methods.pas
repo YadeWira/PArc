@@ -14,6 +14,14 @@ type
   EPasswordRequired = class(Exception);   // el archivo está cifrado y no hay contraseña
   EBadPassword = class(Exception);        // el check-code no coincide
 
+  TPpmdParams = record
+    Order, MRMethod: Integer;
+    Mem, Chunk: QWord;
+  end;
+
+{ Parámetros de ppmd como parse_PPMD (compartido por el decodificador y el codificador). }
+function ParsePpmdParams(const Params: TStringArray): TPpmdParams;
+
 { Contraseña para los archivos cifrados (bytes tal como los escribió el usuario, UTF-8). }
 procedure SetArchivePassword(const Pwd: RawByteString);
 
@@ -152,12 +160,6 @@ begin
       Result.DictSize := m;   // "1mb", "103mb"; un entero pelado es numFastBytes
   end;
 end;
-
-type
-  TPpmdParams = record
-    Order, MRMethod: Integer;
-    Mem, Chunk: QWord;
-  end;
 
 { Parámetros como parse_PPMD (C_PPMD.cpp): o<N>, m<mem> (o "mem<mem>"), r / r<N>, c<mem>;
   sin nombre: entero = orden, memoria = mem. Defaults: orden 10, 48mb. }
