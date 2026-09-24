@@ -28,6 +28,7 @@ begin
   OutLn('  -o+       sobrescribe archivos existentes    -o-  los saltea (default)');
   OutLn('  -m<método> método de compresión (a), p. ej. -m0 (storing), -mexe');
   OutLn('  -fmt=parc|arc  formato de salida (a)');
+  OutLn('  -p<contraseña>  contraseña de un archivo cifrado (si falta, se pide por consola)');
 end;
 
 function FmtTime(t: Int64): string;
@@ -205,7 +206,8 @@ var
   A: TArchive;
   Opt: TExtractOptions;
   Filter: TStringList;
-  i, Code: Integer;
+  i, Code, Tries: Integer;
+  Retry: Boolean;
 begin
   if ArgCount < 2 then
   begin
@@ -235,6 +237,7 @@ begin
           if Method = '0' then Method := 'storing';
         end
         else if Copy(S, 1, 5) = '-fmt=' then Fmt := LowerCase(Copy(S, 6, MaxInt))
+        else if Copy(S, 1, 2) = '-p' then SetArchivePassword(Copy(S, 3, MaxInt))
         else
         begin
           ErrLn('Opción desconocida: ' + S);
@@ -260,25 +263,46 @@ begin
       end;
       Halt(Code);
     end;
-    try
-      A := TArchive.Open(ArcName);
+    Tries := 0;
+    repeat
+      Retry := False;
       try
-        if Cmd = 'l' then CmdList(A)
-        else if Cmd = 'lb' then CmdBlocks(A)
-        else if (Cmd = 't') or (Cmd = 'x') or (Cmd = 'e') then Code := CmdExtract(A, Cmd, Opt)
-        else
-        begin
-          Usage;
-          Code := 1;
+        A := TArchive.Open(ArcName);
+        try
+          if Cmd = 'l' then CmdList(A)
+          else if Cmd = 'lb' then CmdBlocks(A)
+          else if (Cmd = 't') or (Cmd = 'x') or (Cmd = 'e') then Code := CmdExtract(A, Cmd, Opt)
+          else
+          begin
+            Usage;
+            Code := 1;
+          end;
+        finally
+          A.Free;
         end;
-      finally
-        A.Free;
+      except
+        on E: EPasswordRequired do
+          // Sin -p: pedirla por consola (hasta 3 intentos), como FreeArc
+          if (Tries < 3) and ReadPassword('Contraseña: ', S) then
+          begin
+            SetArchivePassword(S);
+            Inc(Tries);
+            Retry := True;
+          end
+          else begin ErrLn('ERROR: ' + E.Message); Code := 5; end;
+        on E: EBadPassword do
+          if (Tries > 0) and (Tries < 3) and ReadPassword('Contraseña incorrecta. Contraseña: ', S) then
+          begin
+            SetArchivePassword(S);
+            Inc(Tries);
+            Retry := True;
+          end
+          else begin ErrLn('ERROR: ' + E.Message); Code := 5; end;
+        on E: EArcCorrupt do begin ErrLn('ERROR: ' + E.Message); Code := 2; end;
+        on E: EUnsupportedMethod do begin ErrLn('ERROR: ' + E.Message); Code := 3; end;
+        on E: Exception do begin ErrLn('ERROR: ' + E.Message); Code := 4; end;
       end;
-    except
-      on E: EArcCorrupt do begin ErrLn('ERROR: ' + E.Message); Code := 2; end;
-      on E: EUnsupportedMethod do begin ErrLn('ERROR: ' + E.Message); Code := 3; end;
-      on E: Exception do begin ErrLn('ERROR: ' + E.Message); Code := 4; end;
-    end;
+    until not Retry;
   finally
     Filter.Free;
   end;

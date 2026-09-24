@@ -323,7 +323,49 @@ prueban las contraseñas concatenadas con el contenido de cada keyfile.
 `f` (contraseñas Unicode): sin `:f`, los bytes de la contraseña se usan tal cual
 (FreeArc histórico); con `:f`, se convierten de Unicode a UTF-8.
 
-#### 7.3.6 Lo que tiene que hacer PArc
+#### 7.3.6 Detalle crítico: el hex de `:k` y `:i` se decodifica "mal" a propósito
+
+`Compression/Common.h` define dos conversores de dígito:
+
+```c
+static inline int char2int(char c)       { return isdigit(c)? c-'0' : tolower(c)-'a'+10; }
+static inline int buggy_char2int(char c) { return isdigit(c)? c-'0' : tolower(c)-'a';    }
+```
+
+es decir que el segundo **no suma 10** para las letras: con él `'a'..'f'` valen
+0..5 en vez de 10..15.  Y `ENCRYPTION_METHOD::decompress`/`compress` hacen
+
+```c
+fixed? decode16 (key, key_bytes) : buggy_decode16 (key, key_bytes);
+```
+
+o sea que **la clave y el IV se decodifican con el conversor "buggy"** salvo que
+el método traiga el flag `:f`.  Como el *codificador* usó exactamente el mismo
+camino, la clave (y el IV) que realmente se usan para cifrar son esa
+decodificación "mal decodificada" del hex correcto que escribe el Haskell con
+`encode16`/`decode16` (`Utils.hs`).
+
+El **salt** y el **check-code**, en cambio, los decodifica el Haskell con
+`decode16` (hex normal): son los que entran a PBKDF2.
+
+Consecuencia práctica: hay que implementar los dos decodificadores y elegir según
+el flag `f`.  Si se usa el hex normal para la clave, la derivación y el check-code
+dan bien (el salt está bien) pero el descifrado produce basura.
+
+#### 7.3.7 Varios bloques, varios juegos de parámetros
+
+Un archivo cifrado tiene **más de un bloque** (el de los directorios y el de los
+datos) y **cada bloque lleva su propio IV, salt y check-code** en su propio
+string de método.  Ejemplo real (dos filas de `arc.exe lt`):
+
+```
+*  31        0        0   storing+aes-256/ctr:n1000:r0:i<b13c8d..>:s<69d2fd..>:c<7357>
+*  31  200,000  200,000   storing+aes-256/ctr:n1000:r0:i<eaf24a..>:s<2ad189..>:c<131e>
+```
+
+y cada uno se descifra con la clave derivada de *su* salt (misma contraseña).
+
+#### 7.3.8 Lo que tiene que hacer PArc
 
 1. Sacar `s`, `c`, `n`, `f` y el cifrado/modo de la etapa de cifrado del `Method`.
 2. `PBKDF2-HMAC-SHA512(password, salt, n, keySize+2)` y comparar `dk[keySize..]`

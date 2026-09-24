@@ -30,13 +30,16 @@ function SetFileMTimeNs(const Path: string; Ns: Int64): Boolean;
 procedure SetFileAttrs(const Path: string; HasUnixMode: Boolean; UnixMode: LongWord;
   HasWinAttr: Boolean; WinAttr: LongWord);
 
+{ Pide una contraseña por consola sin mostrarla. False si no hay consola (entrada redirigida). }
+function ReadPassword(const Prompt: string; out Pwd: string): Boolean;
+
 { Núcleos disponibles. TThread.ProcessorCount de FPC 3.2.2 devuelve siempre 1 en Linux. }
 function CpuCount: Integer;
 
 implementation
 
 uses
-  {$IFDEF WINDOWS}Windows,{$ENDIF}{$IFDEF UNIX}BaseUnix,{$ENDIF} Classes, SysUtils;
+  {$IFDEF WINDOWS}Windows,{$ENDIF}{$IFDEF UNIX}BaseUnix, TermIO,{$ENDIF} Classes, SysUtils;
 
 var
   Args: array of string;
@@ -195,6 +198,51 @@ procedure SetFileAttrs(const Path: string; HasUnixMode: Boolean; UnixMode: LongW
   HasWinAttr: Boolean; WinAttr: LongWord);
 begin
   if HasUnixMode then FpChmod(Path, UnixMode and &7777);
+end;
+{$ENDIF}
+
+{$IFDEF WINDOWS}
+function ReadPassword(const Prompt: string; out Pwd: string): Boolean;
+var
+  H: THandle;
+  Mode, Got: DWORD;
+  Buf: array[0..511] of WideChar;
+  W: UnicodeString;
+begin
+  Pwd := '';
+  H := GetStdHandle(STD_INPUT_HANDLE);
+  if not GetConsoleMode(H, Mode) then Exit(False);
+  ErrLn(Prompt);
+  SetConsoleMode(H, Mode and not ENABLE_ECHO_INPUT);
+  try
+    Result := ReadConsoleW(H, @Buf[0], Length(Buf) - 1, Got, nil);
+  finally
+    SetConsoleMode(H, Mode);
+  end;
+  if not Result then Exit;
+  SetString(W, PWideChar(@Buf[0]), Got);
+  while (W <> '') and (W[Length(W)] in [#13, #10]) do SetLength(W, Length(W) - 1);
+  Pwd := UTF8Encode(W);
+end;
+{$ELSE}
+function ReadPassword(const Prompt: string; out Pwd: string): Boolean;
+var
+  Old, New: Termios;
+  c: Char;
+begin
+  Pwd := '';
+  if TCGetAttr(0, Old) <> 0 then Exit(False);   // no es una terminal
+  ErrLn(Prompt);
+  New := Old;
+  New.c_lflag := New.c_lflag and not ECHO;
+  TCSetAttr(0, TCSANOW, New);
+  try
+    while (FpRead(0, c, 1) = 1) and (c <> #10) do Pwd := Pwd + c;
+  finally
+    TCSetAttr(0, TCSANOW, Old);
+  end;
+  ErrLn('');
+  Result := True;
 end;
 {$ENDIF}
 

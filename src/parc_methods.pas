@@ -11,6 +11,11 @@ uses
 
 type
   EUnsupportedMethod = class(Exception);
+  EPasswordRequired = class(Exception);   // el archivo está cifrado y no hay contraseña
+  EBadPassword = class(Exception);        // el check-code no coincide
+
+{ Contraseña para los archivos cifrados (bytes tal como los escribió el usuario, UTF-8). }
+procedure SetArchivePassword(const Pwd: RawByteString);
 
 { Arma la cadena de decodificadores sobre Source (la cadena pasa a ser dueña de Source). }
 function CreateDecoderChain(const Method: string; Source: TInStage): TInStage;
@@ -26,7 +31,64 @@ function IsStoring(const Method: string): Boolean;
 implementation
 
 uses
-  StrUtils, parc_os, parc_lzma, parc_filters, parc_lz4, parc_rep, parc_lzp, parc_ppmd, parc_dict, parc_tornado, parc_grzip, parc_parallel, parc_tta, parc_mm;
+  parc_crypt, StrUtils, parc_os, parc_lzma, parc_filters, parc_lz4, parc_rep, parc_lzp, parc_ppmd, parc_dict, parc_tornado, parc_grzip, parc_parallel, parc_tta, parc_mm;
+
+var
+  GPassword: RawByteString;
+  GHavePassword: Boolean;
+
+procedure SetArchivePassword(const Pwd: RawByteString);
+begin
+  GPassword := Pwd;
+  GHavePassword := True;
+end;
+
+{ ¿La etapa es de cifrado? El nombre va antes de '-' (bits) o '/' (modo): "aes-256/ctr". }
+function IsCipherStage(const Stage: string): Boolean;
+var
+  Name: string;
+  p: Integer;
+begin
+  Name := Stage.Split([':'])[0];
+  p := Pos('-', Name); if p > 0 then Name := Copy(Name, 1, p - 1);
+  p := Pos('/', Name); if p > 0 then Name := Copy(Name, 1, p - 1);
+  Result := IsCipherName(Name);
+end;
+
+{ Como generateDecryption (Encryption.hs): cada etapa de cifrado sin clave (:k) se reemplaza
+  por su versión con la clave derivada de la contraseña, después de comprobar el check-code.
+  La contraseña se usa tal cual (los bytes UTF-8 que escribió el usuario). Sin :f, FreeArc usaba
+  los bytes "crudos" de la contraseña: para contraseñas ASCII es lo mismo; para el resto, el
+  caso sin :f no está verificado todavía (tests/crypt/README.md). }
+function ApplyKeys(const Method: string): string;
+var
+  Stages, Params: TStringArray;
+  k, j: Integer;
+  HasKey: Boolean;
+  Par: TCryptParams;
+  Key: array of Byte;
+begin
+  Result := Method;
+  if Pos('/', Method) = 0 then Exit;   // atajo: toda etapa de cifrado lleva "/modo"
+  Stages := Method.Split(['+']);
+  for k := 0 to High(Stages) do
+  begin
+    if not IsCipherStage(Stages[k]) then Continue;
+    Params := Stages[k].Split([':']);
+    HasKey := False;
+    for j := 1 to High(Params) do
+      if (Params[j] <> '') and (Params[j][1] = 'k') then HasKey := True;
+    if HasKey then Continue;
+    if not GHavePassword then
+      raise EPasswordRequired.Create('el archivo está cifrado: indicá la contraseña con -p<contraseña>');
+    Par := ParseCryptParams(Params);
+    SetLength(Key, Par.KeySize + 2);
+    if not DeriveKeyAndCheck(Par, PByte(GPassword), Length(GPassword), @Key[0]) then
+      raise EBadPassword.Create('contraseña incorrecta');
+    Stages[k] := KeyedMethod(Par, @Key[0]);
+  end;
+  Result := string.Join('+', Stages);
+end;
 
 function IsStoring(const Method: string): Boolean;
 begin
@@ -278,6 +340,8 @@ var
 begin
   Params := Stage.Split([':']);
   if Length(Params) = 0 then raise EUnsupportedMethod.Create('método vacío');
+  if IsCipherStage(Stage) then
+    Exit(TDecryptStage.Create(Source, ParseCryptParams(Params)));
   case Params[0] of
     'storing':
       Result := Source;
@@ -326,7 +390,7 @@ var
 begin
   Result := Source;
   try
-    Stages := Method.Split(['+']);
+    Stages := ApplyKeys(Method).Split(['+']);
     for k := High(Stages) downto 0 do
       Result := CreateStage(Stages[k], Result);
   except
