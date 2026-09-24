@@ -26,7 +26,7 @@ function IsStoring(const Method: string): Boolean;
 implementation
 
 uses
-  StrUtils, parc_os, parc_lzma, parc_filters, parc_lz4, parc_rep, parc_lzp, parc_ppmd, parc_dict, parc_tornado;
+  StrUtils, parc_os, parc_lzma, parc_filters, parc_lz4, parc_rep, parc_lzp, parc_ppmd, parc_dict, parc_tornado, parc_grzip;
 
 function IsStoring(const Method: string): Boolean;
 begin
@@ -399,6 +399,8 @@ begin
     'tor':
       // El stream de Tornado describe su propio formato: los parámetros son del compresor
       Result := TTornadoStage.Create(Source);
+    'grzip':
+      Result := TGrzipStage.Create(Source, Params);
     'ppmd':
       begin
         pp := ParsePpmdParams(Params);
