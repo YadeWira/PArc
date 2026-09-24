@@ -31,7 +31,7 @@ function CreateDecoderChain(const Method: string; Source: TInStage): TInStage;
 { Descomprime un bloque de control (en memoria) a exactamente OrigSize bytes. }
 function DecompressMem(const Method: string; Src: PByte; SrcLen: SizeInt; OrigSize: SizeInt): TBytes;
 
-{ Tamaño de memoria de FreeArc ("1mb", "244kb", "64m", "512b"; sin sufijo = MB). }
+{ Tamaño de memoria de FreeArc ("1mb", "244kb", "64m", "512b"; sin sufijo = 2^N: "24" = 16mb). }
 function ParseMem(const S: string; out Value: QWord): Boolean;
 
 function IsStoring(const Method: string): Boolean;
@@ -123,26 +123,35 @@ function ParseMem(const S: string; out Value: QWord): Boolean;
 var
   i: Integer;
   Num: QWord;
-  Shift: Integer;
+  c: Char;
 begin
+  // parseMem64 de FreeArc (Common.cpp:232): dígitos y un sufijo b/k/m/g; SIN sufijo es una
+  // potencia de 2 ('^', el default de todos los métodos): "24" = 16mb, no 24mb. Solo cuenta
+  // la primera letra del sufijo ("mb" = "m"); un '=' inicial se ignora
   Result := False;
   i := 1;
+  if (i <= Length(S)) and (S[i] = '=') then Inc(i);
+  if (i > Length(S)) or not (S[i] in ['0'..'9']) then Exit;
   Num := 0;
   while (i <= Length(S)) and (S[i] in ['0'..'9']) do
   begin
+    if Num > (High(QWord) div 10) then Exit;
     Num := Num * 10 + Ord(S[i]) - Ord('0');
     Inc(i);
   end;
-  if i = 1 then Exit;
-  case LowerCase(Copy(S, i, MaxInt)) of
-    '', 'm', 'mb': Shift := 20;
-    'b':           Shift := 0;
-    'k', 'kb':     Shift := 10;
-    'g', 'gb':     Shift := 30;
+  if i <= Length(S) then c := LowerCase(S[i]) else c := '^';
+  case c of
+    'b': Value := Num;
+    'k': Value := Num shl 10;
+    'm': Value := Num shl 20;
+    'g': Value := Num shl 30;
+    '^': begin
+           if Num > 63 then Exit;
+           Value := QWord(1) shl Num;
+         end;
   else
     Exit;
   end;
-  Value := Num shl Shift;
   Result := True;
 end;
 
