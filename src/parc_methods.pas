@@ -26,7 +26,7 @@ function IsStoring(const Method: string): Boolean;
 implementation
 
 uses
-  StrUtils, parc_os, parc_lzma, parc_filters, parc_lz4, parc_rep, parc_lzp, parc_ppmd, parc_dict;
+  StrUtils, parc_os, parc_lzma, parc_filters, parc_lz4, parc_rep, parc_lzp, parc_ppmd, parc_dict, parc_tornado;
 
 function IsStoring(const Method: string): Boolean;
 begin
@@ -178,6 +178,10 @@ begin
       end;
     'lz4':
       if not Lz4DecodeMem(Src, SrcLen, Dst, DstLen) then Corrupt('4x4: falló la descompresión lz4');
+    'tor':
+      // Dentro de 4x4 FreeArc usa compress_all_at_once, que cambia cuándo se deshacen las tablas
+      if not TornadoDecodeMem(Src, SrcLen, Dst, DstLen, Written) or (Written <> DstLen) then
+        Corrupt('4x4: falló la descompresión tor');
   else
     begin
       Chain := CreateDecoderChain(Method, TMemStage.Create(Src, SrcLen));
@@ -392,6 +396,9 @@ begin
       Result := TLzpStage.Create(Source, ParseLzpParams(Params));
     'dict':
       Result := TDictStage.Create(Source, ParseDictBlockSize(Params));
+    'tor':
+      // El stream de Tornado describe su propio formato: los parámetros son del compresor
+      Result := TTornadoStage.Create(Source);
     'ppmd':
       begin
         pp := ParsePpmdParams(Params);
