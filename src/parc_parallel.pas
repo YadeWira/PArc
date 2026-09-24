@@ -14,8 +14,8 @@ uses
   Classes, SysUtils, parc_stream;
 
 type
-  { Un bloque: la subclase lo carga en ReadJob y lo decodifica en Decode (en un hilo del pool).
-    Decode deja el resultado en OutBuf[0..OutSize). }
+  { Un trabajo: la subclase lo carga y lo procesa en Process (en un hilo del pool), que deja el
+    resultado en OutBuf[0..OutSize). }
   TParallelJob = class
   private
     FDone: PRTLEvent;
@@ -27,38 +27,51 @@ type
     OutSize: SizeInt;
     constructor Create;
     destructor Destroy; override;
-    procedure Decode; virtual; abstract;
+    procedure Process; virtual; abstract;
   end;
 
-  TParallelBlockStage = class;
+  TJobPool = class;
 
   TParallelWorker = class(TThread)
   private
-    FStage: TParallelBlockStage;
+    FPool: TJobPool;
   public
-    constructor Create(AStage: TParallelBlockStage);
+    constructor Create(APool: TJobPool);
     procedure Execute; override;
   end;
 
-  TParallelBlockStage = class(TInStage)
+  { Pool de hilos: Submit encola un trabajo; WaitJob espera que termine y relanza su error. Los
+    hilos se crean a demanda, hasta MaxWorkers. }
+  TJobPool = class
   private
-    FQueue: array of TParallelJob;    // FIFO de bloques en vuelo, en orden de stream
-    FHead, FCount, FMaxJobs: Integer;
-    FPending: array of TParallelJob;  // bloques todavía no tomados por un hilo (anillo)
+    FPending: array of TParallelJob;  // trabajos todavía no tomados por un hilo (anillo)
     FPendHead, FPendCount: Integer;
     FLock: TRTLCriticalSection;
     FWork: PRTLEvent;
     FStop: Boolean;
     FWorkers: array of TParallelWorker;
     FNumWorkers, FMaxWorkers: Integer;
+    function TakeJob: TParallelJob;
+  public
+    constructor Create(MaxWorkers, MaxPending: Integer);
+    destructor Destroy; override;   // espera que los hilos terminen su trabajo actual
+    procedure Submit(Job: TParallelJob);
+    procedure WaitJob(Job: TParallelJob);   // relanza la excepción del trabajo, si la hubo
+    property MaxWorkers: Integer read FMaxWorkers;
+  end;
+
+
+  TParallelBlockStage = class(TInStage)
+  private
+    FQueue: array of TParallelJob;    // FIFO de bloques en vuelo, en orden de stream
+    FHead, FCount, FMaxJobs: Integer;
+    FPool: TJobPool;
     FCur: TParallelJob;
     FPos: SizeInt;
     FSourceEof, FEof: Boolean;
     FErrClass: ExceptClass;           // error ya lanzado: se repite en cada Read posterior
     FErrMsg: string;
     procedure FillQueue;
-    procedure Submit(Job: TParallelJob);
-    function TakeJob: TParallelJob;
   protected
     { El próximo bloque de la fuente, ya cargado, o nil al final del stream. }
     function ReadJob: TParallelJob; virtual; abstract;
@@ -69,6 +82,9 @@ type
     destructor Destroy; override;
     function Read(Buf: PByte; Count: SizeInt): SizeInt; override;
   end;
+
+{ Hilos a usar: PARC_THREADS si está definido; si no, los núcleos, hasta Cap. }
+function ThreadCount(Cap: Integer): Integer;
 
 implementation
 
@@ -92,7 +108,7 @@ end;
 procedure TParallelJob.Run;
 begin
   try
-    Decode;
+    Process;
   except
     // Las excepciones no cruzan hilos: se guardan y se relanzan al entregar el bloque
     on E: Exception do
@@ -106,9 +122,9 @@ end;
 
 { TParallelWorker }
 
-constructor TParallelWorker.Create(AStage: TParallelBlockStage);
+constructor TParallelWorker.Create(APool: TJobPool);
 begin
-  FStage := AStage;
+  FPool := APool;
   FreeOnTerminate := False;
   inherited Create(False);
 end;
@@ -119,72 +135,68 @@ var
 begin
   while True do
   begin
-    Job := FStage.TakeJob;
+    Job := FPool.TakeJob;
     if Job = nil then Break;
     Job.Run;
   end;
 end;
 
-{ TParallelBlockStage }
-
-constructor TParallelBlockStage.Create(ASource: TInStage; MaxThreads, ExtraJobs: Integer);
-var
-  Threads: Integer;
+function ThreadCount(Cap: Integer): Integer;
 begin
-  inherited Create(ASource);
-  Threads := StrToIntDef(GetEnvironmentVariable('PARC_THREADS'), 0);
-  if Threads <= 0 then
+  Result := StrToIntDef(GetEnvironmentVariable('PARC_THREADS'), 0);
+  if Result <= 0 then
   begin
-    Threads := CpuCount;
-    if Threads > MaxThreads then Threads := MaxThreads;
+    Result := CpuCount;
+    if Result > Cap then Result := Cap;
   end;
-  if Threads > 64 then Threads := 64;
-  if Threads < 1 then Threads := 1;
-  FMaxWorkers := Threads;
-  FMaxJobs := Threads + ExtraJobs;
-  if FMaxJobs < 2 then FMaxJobs := 2;
-  SetLength(FQueue, FMaxJobs);
-  SetLength(FPending, FMaxJobs);
+  if Result > 64 then Result := 64;
+  if Result < 1 then Result := 1;
+end;
+
+{ TJobPool }
+
+constructor TJobPool.Create(MaxWorkers, MaxPending: Integer);
+begin
+  inherited Create;
+  FMaxWorkers := MaxWorkers;
+  if MaxPending < 1 then MaxPending := 1;
+  SetLength(FPending, MaxPending);
   SetLength(FWorkers, FMaxWorkers);
   InitCriticalSection(FLock);
   FWork := RTLEventCreate;
 end;
 
-destructor TParallelBlockStage.Destroy;
+destructor TJobPool.Destroy;
 var
   i: Integer;
 begin
-  // Parar el pool: los hilos terminan el bloque que tengan y salen
-  if FWork <> nil then
+  // Parar el pool: los hilos terminan el trabajo que tengan y salen
+  EnterCriticalSection(FLock);
+  FStop := True;
+  LeaveCriticalSection(FLock);
+  for i := 0 to FNumWorkers - 1 do
   begin
-    EnterCriticalSection(FLock);
-    FStop := True;
-    LeaveCriticalSection(FLock);
-    for i := 0 to FNumWorkers - 1 do
+    while not FWorkers[i].Finished do
     begin
-      while not FWorkers[i].Finished do
-      begin
-        RTLEventSetEvent(FWork);
-        ThreadSwitch;
-      end;
-      FWorkers[i].Free;   // ya terminó: Free solo hace el join
+      RTLEventSetEvent(FWork);
+      ThreadSwitch;
     end;
-    RTLEventDestroy(FWork);
-    DoneCriticalSection(FLock);
+    FWorkers[i].Free;   // ya terminó: Free solo hace el join
   end;
-  FCur.Free;
-  for i := 0 to FCount - 1 do FQueue[(FHead + i) mod FMaxJobs].Free;
+  RTLEventDestroy(FWork);
+  DoneCriticalSection(FLock);
   inherited Destroy;
 end;
 
-procedure TParallelBlockStage.Submit(Job: TParallelJob);
+procedure TJobPool.Submit(Job: TParallelJob);
 begin
   EnterCriticalSection(FLock);
-  FPending[(FPendHead + FPendCount) mod FMaxJobs] := Job;
+  if FPendCount >= Length(FPending) then SetLength(FPending, 2 * Length(FPending));
+  FPending[(FPendHead + FPendCount) mod Length(FPending)] := Job;
   Inc(FPendCount);
   LeaveCriticalSection(FLock);
   RTLEventSetEvent(FWork);
-  // Un hilo más por bloque pendiente, hasta el tope
+  // Un hilo más por trabajo pendiente, hasta el tope
   if FNumWorkers < FMaxWorkers then
   begin
     FWorkers[FNumWorkers] := TParallelWorker.Create(Self);
@@ -192,8 +204,8 @@ begin
   end;
 end;
 
-{ En un hilo del pool: el próximo bloque pendiente, o nil si hay que salir. }
-function TParallelBlockStage.TakeJob: TParallelJob;
+{ En un hilo del pool: el próximo trabajo pendiente, o nil si hay que salir. }
+function TJobPool.TakeJob: TParallelJob;
 var
   More: Boolean;
 begin
@@ -208,7 +220,7 @@ begin
     if FPendCount > 0 then
     begin
       Result := FPending[FPendHead];
-      FPendHead := (FPendHead + 1) mod FMaxJobs;
+      FPendHead := (FPendHead + 1) mod Length(FPending);
       Dec(FPendCount);
       More := FPendCount > 0;
       LeaveCriticalSection(FLock);
@@ -218,6 +230,36 @@ begin
     LeaveCriticalSection(FLock);
     RTLEventWaitFor(FWork, 50);
   end;
+end;
+
+procedure TJobPool.WaitJob(Job: TParallelJob);
+begin
+  RTLEventWaitFor(Job.FDone);
+  if Job.FErrClass <> nil then raise Job.FErrClass.Create(Job.FErrMsg);
+end;
+
+{ TParallelBlockStage }
+
+constructor TParallelBlockStage.Create(ASource: TInStage; MaxThreads, ExtraJobs: Integer);
+var
+  Threads: Integer;
+begin
+  inherited Create(ASource);
+  Threads := ThreadCount(MaxThreads);
+  FMaxJobs := Threads + ExtraJobs;
+  if FMaxJobs < 2 then FMaxJobs := 2;
+  SetLength(FQueue, FMaxJobs);
+  FPool := TJobPool.Create(Threads, FMaxJobs);
+end;
+
+destructor TParallelBlockStage.Destroy;
+var
+  i: Integer;
+begin
+  FPool.Free;   // espera a los hilos antes de liberar los trabajos
+  FCur.Free;
+  for i := 0 to FCount - 1 do FQueue[(FHead + i) mod FMaxJobs].Free;
+  inherited Destroy;
 end;
 
 procedure TParallelBlockStage.FillQueue;
@@ -234,7 +276,7 @@ begin
     end;
     FQueue[(FHead + FCount) mod FMaxJobs] := Job;
     Inc(FCount);
-    Submit(Job);
+    FPool.Submit(Job);
   end;
 end;
 

@@ -282,7 +282,7 @@ type
     Inner: string;
     InBuf: TBytes;
     Stored: Boolean;
-    procedure Decode; override;
+    procedure Process; override;
   end;
 
   { 4x4 (Compression/4x4/C_4x4.cpp): U32 versión (=0) y bloques [Int32 OutSize][U32 InSize][datos].
@@ -298,7 +298,7 @@ type
     constructor Create(ASource: TInStage; const AInner: string);
   end;
 
-procedure T4x4Job.Decode;
+procedure T4x4Job.Process;
 begin
   if Stored then
     OutBuf := InBuf

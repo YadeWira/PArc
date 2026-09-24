@@ -46,7 +46,7 @@ type
   TGrzipJob = class(TParallelJob)
   public
     InBuf: TBytes;
-    procedure Decode; override;
+    procedure Process; override;
   end;
 
   { Como GRZipMTDecompressor: bloques en paralelo con la salida en orden (parc_parallel). }
@@ -1012,7 +1012,7 @@ end;
 { ---------- stream (GRZipMTDecompressor: bloques en paralelo) ---------- }
 
 // GRZipMTDecompressor::Process
-procedure TGrzipJob.Decode;
+procedure TGrzipJob.Process;
 begin
   SetLength(OutBuf, OutSize + 1);
   DecodeBlock(PByte(InBuf), Length(InBuf), PByte(OutBuf), OutSize, 0);
