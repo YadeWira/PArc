@@ -26,7 +26,7 @@ function IsStoring(const Method: string): Boolean;
 implementation
 
 uses
-  StrUtils, parc_os, parc_lzma, parc_filters, parc_lz4, parc_rep;
+  StrUtils, parc_os, parc_lzma, parc_filters, parc_lz4, parc_rep, parc_lzp, parc_ppmd, parc_dict;
 
 function IsStoring(const Method: string): Boolean;
 begin
@@ -88,6 +88,43 @@ begin
     else if (p[1] = 'd') and ParseMem(Copy(p, 2, MaxInt), m) then Result.DictSize := m
     else if (p[1] in ['0'..'9']) and (StrToIntDef(p, -1) < 0) and ParseMem(p, m) then
       Result.DictSize := m;   // "1mb", "103mb"; un entero pelado es numFastBytes
+  end;
+end;
+
+type
+  TPpmdParams = record
+    Order, MRMethod: Integer;
+    Mem, Chunk: QWord;
+  end;
+
+{ Parámetros como parse_PPMD (C_PPMD.cpp): o<N>, m<mem> (o "mem<mem>"), r / r<N>, c<mem>;
+  sin nombre: entero = orden, memoria = mem. Defaults: orden 10, 48mb. }
+function ParsePpmdParams(const Params: TStringArray): TPpmdParams;
+var
+  k, n: Integer;
+  p: string;
+  m: QWord;
+begin
+  Result.Order := 10;
+  Result.Mem := 48 shl 20;
+  Result.MRMethod := 0;
+  Result.Chunk := 0;
+  for k := 1 to High(Params) do
+  begin
+    p := Params[k];
+    if Copy(p, 1, 3) = 'mem' then Delete(p, 1, 2);   // "mem..." como "m..."
+    if p = '' then Continue;
+    if p = 'r' then begin Result.MRMethod := 1; Continue; end;
+    if Length(p) > 1 then
+      case p[1] of
+        'm': begin if ParseMem(Copy(p, 2, MaxInt), m) then Result.Mem := m; Continue; end;
+        'o': begin Result.Order := StrToIntDef(Copy(p, 2, MaxInt), -1); Continue; end;
+        'r': begin Result.MRMethod := StrToIntDef(Copy(p, 2, MaxInt), 0); Continue; end;
+        'c': begin if ParseMem(Copy(p, 2, MaxInt), m) then Result.Chunk := m; Continue; end;
+      end;
+    n := StrToIntDef(p, -1);
+    if n >= 0 then Result.Order := n
+    else if ParseMem(p, m) then Result.Mem := m;
   end;
 end;
 
@@ -329,6 +366,7 @@ function CreateStage(const Stage: string; Source: TInStage): TInStage;
 var
   Params: TStringArray;
   lz: TLzmaParams;
+  pp: TPpmdParams;
 begin
   Params := Stage.Split([':']);
   if Length(Params) = 0 then raise EUnsupportedMethod.Create('método vacío');
@@ -350,6 +388,15 @@ begin
       Result := TRepStage.Create(Source);
     '4x4':
       Result := T4x4Stage.Create(Source, Inner4x4Method(Params));
+    'lzp':
+      Result := TLzpStage.Create(Source, ParseLzpParams(Params));
+    'dict':
+      Result := TDictStage.Create(Source, ParseDictBlockSize(Params));
+    'ppmd':
+      begin
+        pp := ParsePpmdParams(Params);
+        Result := TPpmdStage.Create(Source, pp.Order, pp.Mem, pp.MRMethod, pp.Chunk);
+      end;
   else
     raise EUnsupportedMethod.CreateFmt('método no soportado todavía: "%s"', [Stage]);
   end;
