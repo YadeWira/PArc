@@ -7,6 +7,10 @@ set -u
 cd "$(dirname "$0")/.."
 PARC=./build/linux64/parc
 UNARC=${UNARC:-/mnt/IA_LAB/agentes/PA-Lab/bin/unarc.x64}
+# Plan B cuando unarc falla (p. ej. el LZ4 de 2012 que trae Unarc no lee los lz4 de arc.exe 0.67.1):
+# el arc.exe original bajo wine
+ARCEXE=${ARCEXE:-/mnt/IA_LAB/agentes/PArc/ref/Arc.exe}
+export WINEPREFIX=${WINEPREFIX:-/mnt/IA_LAB/agentes/PArc/wine} WINEDEBUG=-all
 GEN=${GEN:-/mnt/IA_LAB/compartido/parc/samples/gen}
 WORK=${WORK:-/mnt/IA_LAB/agentes/PArc/regress}
 fail=0; pass=0
@@ -20,10 +24,14 @@ echo "== extracción vs unarc"
 for a in "$@"; do
   n=$(basename "$a" .arc)
   rm -rf "${WORK:?}/$n.u" "${WORK:?}/$n.p"; mkdir -p "$WORK/$n.u" "$WORK/$n.p"
-  (cd "$WORK/$n.u" && "$UNARC" x -o+ "$a" >/dev/null 2>&1) || { bad "$n: unarc falló"; continue; }
+  oracle=unarc
+  if ! (cd "$WORK/$n.u" && "$UNARC" x -o+ "$a" >/dev/null 2>&1); then
+    rm -rf "${WORK:?}/$n.u"; mkdir -p "$WORK/$n.u"; oracle=arc.exe
+    (cd "$WORK/$n.u" && wine "$ARCEXE" x -o+ "$a" >/dev/null 2>&1) || { bad "$n: fallaron unarc y arc.exe"; continue; }
+  fi
   if ! "$PARC" t "$a" >/dev/null; then bad "$n: parc t con errores"; continue; fi
   "$PARC" x "$a" -dp"$WORK/$n.p" -o+ >/dev/null || { bad "$n: parc x con errores"; continue; }
-  if diff -r "$WORK/$n.u" "$WORK/$n.p" >/dev/null; then ok "$n"; else bad "$n: el árbol difiere de unarc"; fi
+  if diff -r "$WORK/$n.u" "$WORK/$n.p" >/dev/null; then ok "$n (vs $oracle)"; else bad "$n: el árbol difiere de $oracle"; fi
 done
 
 echo "== corrupción detectada"
