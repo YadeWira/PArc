@@ -45,6 +45,9 @@ rep_lzma:rep:96m+lzma:8mb
 delta_lzma:delta+lzma:8mb
 bin_chain:rep:96m+exe+delta+lzma:96m:normal:32:mc32
 bin_chain_x4:rep:96m+exe+delta+4x4:lzma:96mb:normal:32:mc32
+lz4:lz4
+lz4hc:lz4:hc
+x4_lz4:4x4:lz4
 m1:1
 m2:2
 m3:3

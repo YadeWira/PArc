@@ -21,7 +21,7 @@ function LimitAndCanonize(const Method: string; BlockSize: Int64): string;
 
 implementation
 
-uses SysUtils, Math;
+uses SysUtils, Math, parc_methods;
 
 const
   KB = 1024; MB = 1024*1024; GB = Int64(1024)*1024*1024;
@@ -82,6 +82,24 @@ begin
   else if T[Length(T)] = 'g' then begin Mult := GB; N := 1 end;
   Result := StrToInt64Def(Copy(T, 1, Length(T)-N), -1) * Mult;
   if Result < 0 then Result := Def;
+end;
+
+{ parseMem del C (Common.cpp): sin sufijo es 2^N. }
+function CMem(const S: string; Def: Int64): Int64;
+var
+  q: QWord;
+begin
+  if parc_methods.ParseMem(S, q) then Result := q else Result := Def;
+end;
+
+{ showMem del C (Common.cpp:255): la unidad más grande que divide exacto. }
+function CShowMem(Mem: Int64): string;
+begin
+  if Mem = 0 then Result := '0b'
+  else if Mem mod GB = 0 then Result := IntToStr(Mem div GB) + 'gb'
+  else if Mem mod MB = 0 then Result := IntToStr(Mem div MB) + 'mb'
+  else if Mem mod KB = 0 then Result := IntToStr(Mem div KB) + 'kb'
+  else Result := IntToStr(Mem) + 'b';
 end;
 
 function IsMem(const S: string): Boolean;
@@ -368,6 +386,29 @@ begin
       end;
       Result := 'tta';
       if Lvl <> 3 then Result := Result + (':m' + IntToStr(Lvl));
+      Exit;
+    end;
+
+    { --- lz4 (C_LZ4.cpp/.h). Defaults: c0, b1mb, h0, 100%. Sin SetDictionary propio, así
+          que el límite no lo toca; "hc" es c2. showMem del C: unidad exacta. }
+    if Name = 'lz4' then
+    begin
+      MC := 0; BS := MB; HS := 0; M := 100;
+      for J := 1 to High(Parts) do
+      begin
+        L := LowerCase(Parts[J]);
+        if L = '' then Continue;
+        if L = 'hc' then MC := 2
+        else if L[1] = 'c' then MC := Num(Copy(L,2,MaxInt), 0)
+        else if L[1] = 'b' then BS := CMem(Copy(L,2,MaxInt), MB)
+        else if L[1] = 'h' then HS := CMem(Copy(L,2,MaxInt), 0)
+        else if L[Length(L)] = '%' then M := Num(Copy(L,1,Length(L)-1), 100);
+      end;
+      Result := 'lz4';
+      if MC <> 0 then Result := Result + ':c' + IntToStr(MC);
+      if BS <> MB then Result := Result + ':b' + CShowMem(BS);
+      if HS <> 0 then Result := Result + ':h' + CShowMem(HS);
+      if M <> 100 then Result := Result + ':' + IntToStr(M) + '%';
       Exit;
     end;
 

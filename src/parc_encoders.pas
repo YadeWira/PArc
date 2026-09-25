@@ -81,7 +81,7 @@ implementation
 uses
   Math, parc_filters, parc_ppmd, parc_methods, parc_lzp, parc_parallel, parc_lzmaenc,
   parc_repenc, parc_deltaenc, parc_dictenc, parc_ttaenc, parc_mmenc, parc_torenc, parc_grzipenc,
-  parc_crypt, parc_canon;
+  parc_crypt, parc_canon, parc_lz4enc;
 
 { ¿La etapa es de cifrado? El nombre va antes de '-' (bits) o '/' (modo): "aes-256/ctr". }
 function IsCipherStage(const Stage: string): Boolean;
@@ -131,6 +131,9 @@ begin
   if (MinOrder0Ratio <> 0) and (Length(InBuf) >= 32 * 1024) and
      (Order0Ratio(PByte(InBuf), Length(InBuf)) >= MinOrder0Ratio) then
     Stored := True
+  else if StageName(Inner) = 'lz4' then
+    // LZ4_METHOD::DeCompressMem: versión + un solo bloque LZ4 (no el stream por bloques)
+    Stored := not Lz4EncodeMem(Inner.Split([':']), PByte(InBuf), Length(InBuf), OutBuf)
   else if StageName(Inner) = 'tor' then
     // TORNADO_METHOD::DeCompressMem con compress_all_at_once=1; OutputSize = InSize
     Stored := not TorEncodeMem(Inner.Split([':']), PByte(InBuf), Length(InBuf), Length(InBuf), OutBuf)
@@ -318,6 +321,8 @@ begin
     end;
   if (BlockSize = 0) and (StageName(Inner) = 'tor') then
     BlockSize := TorDictionary(Inner.Split([':']));    // cmethod->GetDictionary()
+  if (BlockSize = 0) and (StageName(Inner) = 'lz4') and Lz4EncAvailable(Inner) then
+    BlockSize := ParseLz4EncParams(Inner.Split([':'])).BlockSize;   // LZ4_METHOD::GetDictionary
   if BlockSize = 0 then
   begin
     Params := Inner.Split([':']);
@@ -353,6 +358,7 @@ begin
           if not EncoderAvailable(Inner) then Exit(False);
         end;
       'tor': if not TorEncAvailable(Stage) then Exit(False);
+      'lz4': if not Lz4EncAvailable(Stage) then Exit(False);
       'storing', 'exe', 'ppmd', 'lzp', 'lzma', 'rep', 'delta', 'dict', 'tta', 'mm', 'grzip': ;
     else
       Exit(False);
@@ -388,6 +394,7 @@ begin
     'delta':   Result := TDeltaEncStage.Create(Target, Parts);
     'dict':    Result := TDictEncStage.Create(Target, Parts);
     'tor':     Result := TTorEncStage.Create(Target, Parts);
+    'lz4':     Result := TLz4EncStage.Create(Target, Parts);
     'grzip':   Result := TGrzipEncStage.Create(Target, Parts);
     'tta':     Result := TTtaEncStage.Create(Target, Parts);
     'mm':      Result := TMmEncStage.Create(Target, Parts);
