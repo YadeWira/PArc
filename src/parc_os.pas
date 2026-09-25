@@ -15,6 +15,8 @@ procedure ErrLn(const S: string);
 procedure ErrWrite(const S: string);
 { ¿stderr es una consola/terminal? (si está redirigida no se muestra el progreso) }
 function ErrIsConsole: Boolean;
+{ ¿stdin es una consola/terminal? (para preguntar algo; redirigida, no) }
+function InIsConsole: Boolean;
 { Ancho de la consola en columnas (80 si no se sabe). }
 function ConsoleWidth: Integer;
 
@@ -352,6 +354,19 @@ end;
 {$ELSE}
 begin
   Result := IsATTY(2) = 1;
+end;
+{$ENDIF}
+
+function InIsConsole: Boolean;
+{$IFDEF WINDOWS}
+var
+  Mode: DWORD;
+begin
+  Result := GetConsoleMode(GetStdHandle(STD_INPUT_HANDLE), Mode);
+end;
+{$ELSE}
+begin
+  Result := IsATTY(0) = 1;
 end;
 {$ENDIF}
 

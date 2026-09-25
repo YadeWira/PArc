@@ -5,8 +5,8 @@ program parc;
 {$mode objfpc}{$H+}
 
 uses
-  {$IFDEF UNIX}cthreads,{$ENDIF}
-  Classes, SysUtils, Types, DateUtils, parc_os, parc_bytes, parc_methods, parc_archive, parc_extract, parc_writer, parc_encoders, parc_presets, parc_recovery, parc_progress, parc_filelist, parc_volume;
+  {$IFDEF UNIX}cthreads, BaseUnix,{$ENDIF}
+  Classes, SysUtils, Types, DateUtils, parc_os, parc_bytes, parc_methods, parc_archive, parc_extract, parc_writer, parc_encoders, parc_presets, parc_recovery, parc_progress, parc_filelist, parc_volume, parc_console;
 
 const
   PARC_VERSION = '0.0.3';
@@ -45,127 +45,12 @@ begin
   OutLn('  -hp[contraseña] cifra también el directorio (sin ella no se ve ni la lista)');
   OutLn('  -ae=<alg>  --encryption=<alg>  aes (default: aes-256/ctr), blowfish, serpent,');
   OutLn('             twofish; con tamaño/modo: serpent-256/cfb, blowfish-448/ctr, ...');
+  OutLn('  -sfx[módulo]  autoextraíble: x.parc -> x.exe (parcsfx de al lado, u otro módulo;');
+  OutLn('             p. ej. -sfx=build/win64/parcsfx.exe para uno de Windows desde Linux)');
   OutLn('  -v<tamaño>  volúmenes de ese tamaño (x.parc.001, .002...; solo .parc): -v100m, -v4g, -v700000k');
   OutLn('  --no-progress  sin línea de progreso (tampoco se muestra si stderr no es una consola)');
   OutLn('Ctrl-C cancela limpiamente (no queda ni el temporal ni un archivo a medio extraer);');
   OutLn('un segundo Ctrl-C corta en el acto. Código de salida al cancelar: 130.');
-end;
-
-const
-  EXIT_CANCELLED = 130;   // como un proceso cortado por SIGINT (128 + 2)
-
-var
-  ProgressShown: Boolean = False;   // hay una línea de progreso dibujada en stderr
-
-procedure ClearProgress;
-begin
-  if not ProgressShown then Exit;
-  ErrWrite(#13 + StringOfChar(' ', ConsoleWidth - 1) + #13);
-  ProgressShown := False;
-end;
-
-{ Caracteres que ocupa en pantalla un texto UTF-8 (sin contar bytes de continuación). }
-function DisplayLen(const S: string): Integer;
-var
-  i: Integer;
-begin
-  Result := 0;
-  for i := 1 to Length(S) do
-    if (Ord(S[i]) and $C0) <> $80 then Inc(Result);
-end;
-
-{ Los últimos Max caracteres de S (el final de una ruta es lo que la identifica). }
-function TailChars(const S: string; Max: Integer): string;
-var
-  i, n: Integer;
-begin
-  if Max <= 0 then Exit('');
-  if DisplayLen(S) <= Max then Exit(S);
-  n := 0;
-  i := Length(S) + 1;
-  while (i > 1) and (n < Max - 1) do
-  begin
-    Dec(i);
-    if (Ord(S[i]) and $C0) <> $80 then Inc(n);
-  end;
-  Result := '…' + Copy(S, i, MaxInt);
-end;
-
-function FmtMB(Bytes: Int64): string;
-begin
-  Result := FormatFloat('0.0', Bytes / 1048576);
-end;
-
-function FmtSecs(Secs: Int64): string;
-begin
-  if Secs >= 3600 then Result := Format('%d:%.2d:%.2d', [Secs div 3600, (Secs div 60) mod 60, Secs mod 60])
-  else Result := Format('%.2d:%.2d', [Secs div 60, Secs mod 60]);
-end;
-
-{ Una línea en stderr que se reescribe: fase, %, MB, velocidad, tiempo restante y archivo. }
-procedure DrawProgress(const P: TProgressInfo);
-var
-  L, Rate: string;
-  Width: Integer;
-  Speed: Double;
-begin
-  if P.Finished then
-  begin
-    ClearProgress;
-    Exit;
-  end;
-  L := P.Phase;
-  if P.Total > 0 then
-    L := L + Format(' %5.1f%%  %s/%s MB', [100.0 * P.Done / P.Total, FmtMB(P.Done), FmtMB(P.Total)])
-  else
-    L := L + '  ' + FmtMB(P.Done) + ' MB';
-  Rate := '';
-  if P.ElapsedMs > 0 then
-  begin
-    Speed := P.Done / (P.ElapsedMs / 1000);   // bytes/s
-    Rate := '  ' + FormatFloat('0.0', Speed / 1048576) + ' MB/s';
-    if (Speed > 0) and (P.Total > P.Done) and (P.ElapsedMs >= 1000) then
-      Rate := Rate + '  ' + FmtSecs(Round((P.Total - P.Done) / Speed)) + ' restante';
-  end;
-  L := L + Rate;
-  Width := ConsoleWidth - 1;
-  if P.CurrentFile <> '' then L := L + '  ' + TailChars(P.CurrentFile, Width - DisplayLen(L) - 2);
-  if DisplayLen(L) > Width then L := Copy(L, 1, Width);
-  ErrWrite(#13 + L + StringOfChar(' ', Width - DisplayLen(L)));
-  ProgressShown := True;
-end;
-
-procedure OnCtrlC;
-begin
-  RequestCancel;
-end;
-
-function FmtTime(t: Int64): string;
-begin
-  Result := FormatDateTime('yyyy-mm-dd hh:nn:ss', UnixToDateTime(t, True));
-end;
-
-procedure CmdList(A: TArchive);
-var
-  i: Integer;
-  TotalSize, TotalComp: Int64;
-  Kind: string;
-begin
-  OutLn('Fecha/hora (UTC)            Tamaño       CRC  Nombre');
-  OutLn('-------------------  --------------  --------  ------');
-  TotalSize := 0;
-  for i := 0 to High(A.Files) do
-    with A.Files[i] do
-    begin
-      if IsDir then Kind := '<DIR>' else Kind := IntToStr(Size);
-      OutLn(Format('%s  %14s  %.8x  %s', [FmtTime(Time), Kind, Crc, Name]));
-      Inc(TotalSize, Size);
-    end;
-  TotalComp := 0;
-  for i := 0 to High(A.DataBlocks) do Inc(TotalComp, A.DataBlocks[i].CompSize);
-  OutLn('-------------------  --------------  --------  ------');
-  OutLn(Format('%d archivo(s), %d bytes, comprimido %d bytes', [Length(A.Files), TotalSize, TotalComp]));
-  if A.Comment <> '' then OutLn('Comentario: ' + A.Comment);
 end;
 
 procedure PrintBlock(const B: TArcBlock);
@@ -225,12 +110,6 @@ begin
   end;
   OutLn(Format('Reparados %d sector(es) -> %s', [Length(Res.Repaired), Dest]));
   Result := 0;
-end;
-
-procedure LogLine(const Msg: string);
-begin
-  ClearProgress;
-  OutLn(Msg);
 end;
 
 function CmdExtract(A: TArchive; const Cmd: string; const Opt0: TExtractOptions): Integer;
@@ -392,6 +271,8 @@ type
     Recovery: string;        // -rr...: '--' si no se dio la opción
     Encryption: string;      // -ae= / --encryption=
     VolumeSize: Int64;       // -v<tamaño>: volúmenes (solo .parc); 0 = como estaba
+    Sfx: Boolean;            // -sfx[módulo]: autoextraíble
+    SfxModule: string;       //   el módulo ('' = parcsfx al lado de parc)
     DataPassword, HeadersPassword: RawByteString;   // '' = sin cifrar
   end;
 
@@ -590,6 +471,56 @@ begin
   end;
 end;
 
+{ El módulo autoextraíble por defecto: parcsfx al lado del ejecutable de parc. }
+function DefaultSfxModule: string;
+begin
+  Result := ExtractFilePath(Arg(0)) + 'parcsfx' + ExtractFileExt(Arg(0));
+end;
+
+{ Antepone Prefix (el módulo) a Target, a través de un temporal. }
+procedure PrependToFile(const Target: string; const Prefix: TBytes);
+var
+  Src, Dst: TFileStream;
+  Tmp: string;
+begin
+  Tmp := Target + '.sfx.tmp';
+  Dst := TFileStream.Create(FsPath(Tmp), fmCreate);
+  try
+    try
+      if Length(Prefix) > 0 then Dst.WriteBuffer(Prefix[0], Length(Prefix));
+      Src := TFileStream.Create(FsPath(Target), fmOpenRead or fmShareDenyWrite);
+      try
+        Dst.CopyFrom(Src, 0);
+      finally
+        Src.Free;
+      end;
+    finally
+      Dst.Free;
+    end;
+  except
+    DeleteFile(FsPath(Tmp));
+    raise;
+  end;
+  if not DeleteFile(FsPath(Target)) or not RenameFile(FsPath(Tmp), FsPath(Target)) then
+    raise EFCreateError.CreateFmt('no se pudo escribir %s', [Target]);
+end;
+
+function ReadWholeFile(const Name: string; MaxLen: Int64 = High(Int64)): TBytes;
+var
+  F: TFileStream;
+  n: Int64;
+begin
+  F := TFileStream.Create(FsPath(Name), fmOpenRead or fmShareDenyWrite);
+  try
+    n := F.Size;
+    if n > MaxLen then n := MaxLen;
+    SetLength(Result, n);
+    if n > 0 then F.ReadBuffer(Result[0], n);
+  finally
+    F.Free;
+  end;
+end;
+
 { a (agregar/reemplazar), u (solo si es más nuevo), f (solo actualizar lo que ya está),
   d (borrar). Sobre un archivo existente, los bloques que se conservan enteros se copian tal
   cual y los que pierden archivos se reempaquetan; se escribe un temporal que reemplaza al
@@ -605,7 +536,8 @@ var
   Opt: TWriteOptions;
   St: TWriteStats;
   i, j, n, Removed, Replaced, Added: Integer;
-  Missing, Verb, OldRR, VolBase, VolInfo: string;
+  Missing, Verb, OldRR, VolBase, VolInfo, SfxModuleName, SfxOut, FinalName: string;
+  SfxPrefix: TBytes;
   NVol: Integer;
   RRSize: Int64;
   Exists, Newer: Boolean;
@@ -619,6 +551,11 @@ var
   end;
 
 begin
+  if MO.Sfx and ((MO.VolumeSize > 0) or IsVolumeSet(ArcName, VolBase)) then
+  begin
+    ErrLn('ERROR: un autoextraíble no puede ir en volúmenes (-sfx con -v)');
+    Exit(1);
+  end;
   if (Cmd <> 'd') and (Paths.Count = 0) then
   begin
     ErrLn('ERROR: no se indicaron archivos');
@@ -633,6 +570,10 @@ begin
   A := nil;
   if Exists then A := TArchive.Open(ArcName);
   try
+    // Un autoextraíble que se actualiza sigue siéndolo: se guarda su módulo (lo que va antes
+    // del archivo) para volver a ponerlo
+    SfxPrefix := nil;
+    if (A <> nil) and (A.SFXSize > 0) then SfxPrefix := ReadWholeFile(ArcName, A.SFXSize);
     if (A <> nil) and A.Locked then
     begin
       ErrLn('ERROR: ' + ArcName + ' está bloqueado contra cambios (-k de FreeArc)');
@@ -763,7 +704,32 @@ begin
     A.Free;
   end;
   FinishArchive(ArcName, Opt.VolumeSize);
+  FinalName := ArcName;
   if not Exists then Verb := 'Creado' else Verb := 'Actualizado';
+  // -sfx: el módulo delante y extensión del módulo (.exe en Windows, ninguna en Linux)
+  if MO.Sfx then
+  begin
+    if MO.SfxModule <> '' then SfxModuleName := MO.SfxModule else SfxModuleName := DefaultSfxModule;
+    if not FileExists(FsPath(SfxModuleName)) then
+      raise EFOpenError.CreateFmt('no está el módulo autoextraíble %s (se compila con build.sh)', [SfxModuleName]);
+    SfxPrefix := ReadWholeFile(SfxModuleName);
+    SfxOut := ChangeFileExt(ArcName, ExtractFileExt(SfxModuleName));
+    PrependToFile(ArcName, SfxPrefix);
+    if SfxOut <> ArcName then   // (un x.exe que se actualiza con -sfx se queda con su nombre)
+    begin
+      if FileExists(FsPath(SfxOut)) then DeleteFile(FsPath(SfxOut));
+      if not RenameFile(FsPath(ArcName), FsPath(SfxOut)) then
+        raise EFCreateError.CreateFmt('no se pudo renombrar %s a %s', [ArcName, SfxOut]);
+    end;
+    {$IFDEF UNIX}FpChmod(SfxOut, &755);{$ENDIF}
+    FinalName := SfxOut;
+  end
+  else if Length(SfxPrefix) > 0 then
+  begin
+    PrependToFile(ArcName, SfxPrefix);
+    // el archivo se reescribió: que siga siendo ejecutable
+    {$IFDEF UNIX}FpChmod(ArcName, &755);{$ENDIF}
+  end;
   VolInfo := '';
   if Opt.VolumeSize > 0 then
   begin
@@ -772,7 +738,7 @@ begin
     VolInfo := Format(', %d volumen(es) de %d bytes: %s ...', [NVol, Opt.VolumeSize, VolumeName(ArcName, 1)]);
   end;
   OutLn(Format('%s %s (%s%s): %d archivo(s) y %d directorio(s), %d bytes -> %d bytes',
-    [Verb, ArcName, BoolToStr(Opt.Parc, 'parc', 'arc'), VolInfo, St.Files, St.Dirs, St.Bytes, St.ArcSize]));
+    [Verb, FinalName, BoolToStr(Opt.Parc, 'parc', 'arc') + BoolToStr(MO.Sfx or (Length(SfxPrefix) > 0), ', autoextraíble', ''), VolInfo, St.Files, St.Dirs, St.Bytes, St.ArcSize]));
   if Exists then
     OutLn(Format('  agregados %d, reemplazados %d, borrados %d', [Added, Replaced, Removed]));
   Result := 0;
@@ -816,6 +782,12 @@ begin
       begin
         if Copy(S, 1, 3) = '-dp' then Opt.DestDir := Copy(S, 4, MaxInt)
         else if S = '--no-progress' then ShowProgress := False
+        else if Copy(S, 1, 4) = '-sfx' then
+        begin
+          MO.Sfx := True;
+          MO.SfxModule := Copy(S, 5, MaxInt);
+          if (MO.SfxModule <> '') and (MO.SfxModule[1] = '=') then Delete(MO.SfxModule, 1, 1);
+        end
         else if (Copy(S, 1, 2) = '-v') and ParseVolumeSize(Copy(S, 3, MaxInt), VolSize) then
           MO.VolumeSize := VolSize
         else if S = '-o+' then Opt.Overwrite := owAll

@@ -11,12 +11,16 @@ uses
 
 type
   TOverwriteMode = (owAsk, owAll, owSkip);
+  TOverwriteAnswer = (oaYes, oaNo, oaAll, oaNone);
+  { Pregunta si se sobrescribe Name (owAsk). "Todos"/"ninguno" valen para el resto. }
+  TAskOverwriteFunc = function(const Name: string): TOverwriteAnswer;
 
   TExtractOptions = record
     TestOnly: Boolean;       // `t`: descomprime y verifica CRC sin escribir
     DestDir: string;         // directorio de salida ('' = actual)
     FlatNames: Boolean;      // `e`: sin rutas
     Overwrite: TOverwriteMode;
+    AskOverwrite: TAskOverwriteFunc;   // para owAsk; nil = saltear (sin consola a quién preguntar)
     Filter: TStringList;     // nombres/máscaras a incluir (nil = todos)
   end;
 
@@ -150,6 +154,8 @@ var
   F: TArcFileEntry;
   DoWrite, Opened: Boolean;
   Total: Int64;
+  Mode: TOverwriteMode;
+  Ask: TOverwriteAnswer;
 
   // Hasta qué archivo hay que descomprimir el bloque b (-1: nada que hacer en él)
   function LastWantedIn(const Blk: TArcBlock): Integer;
@@ -164,6 +170,7 @@ var
 begin
   Result := Default(TExtractStats);
   SetLength(Buf, COPY_BUF);
+  Mode := Opt.Overwrite;
 
   // Total para el progreso: lo que se descomprime, incluidos los archivos no pedidos que hay
   // que atravesar dentro de un bloque sólido
@@ -214,7 +221,16 @@ begin
           if DoWrite then
           begin
             OutName := DiskName(Opt, F.Name);
-            if FileExists(FsPath(OutName)) and (Opt.Overwrite <> owAll) then
+            if FileExists(FsPath(OutName)) and (Mode = owAsk) then
+              if not Assigned(Opt.AskOverwrite) then Ask := oaNo
+              else
+              begin
+                Ask := Opt.AskOverwrite(OutName);
+                if Ask = oaAll then Mode := owAll else if Ask = oaNone then Mode := owSkip;
+              end
+            else if Mode = owAll then Ask := oaYes
+            else Ask := oaNo;
+            if FileExists(FsPath(OutName)) and (Ask in [oaNo, oaNone]) then
             begin
               Log('Saltado (ya existe): ' + OutName);
               Inc(Result.Skipped);
