@@ -19,3 +19,25 @@
 - La verificación siempre es contra archivos creados por FreeArc 0.67.1 (oráculo `arc.exe`
   bajo wine + `unarc` de PA-Lab): una librería nueva no puede cambiar lo que se lee.
 - Los métodos sin upstream se portan desde `Compression/`, usando `unarc` como referencia.
+
+## Estado en PArc (2026-09-25)
+
+PArc no enlaza código de terceros: todo está portado a Pascal. De dónde sale cada parte:
+
+| Componente | Portado desde | Verificación |
+|---|---|---|
+| LZMA (descompresión) | especificación de referencia (LzmaSpec) | archivos de arc.exe; matriz de lectura |
+| LZMA (compresión) | LZMA SDK 26.03 | byte a byte contra el SDK C; arc.exe t/x |
+| BCJ x86 (`exe`) | LZMA SDK 26.03 | contra Bra86.c compilado |
+| LZ4 (descompresión) | semántica de LZ4 1.10 (`LZ4_decompress_safe`), sin CVE-2014-4611 | archivos de arc.exe |
+| LZ4 (compresión) | LZ4 1.10 (fast y HC) | arc.exe t/x |
+| AES, Blowfish, Twofish, SHA-512, PBKDF2 | LibTomCrypt | `tests/crypto_vectors.sh`: 0 diferencias en miles de vectores al azar contra la 1.17 de FreeArc **y** contra la 1.18.2 oficial (las dos dan lo mismo: actualizar no cambia nada) |
+| Serpent | el agregado de FreeArc sobre LibTomCrypt 1.17 (1.18.2 no trae Serpent) | ídem, contra la 1.17 |
+| CTR / CFB | LibTomCrypt (contador little-endian, como FreeArc) | ídem |
+| PPMd, Tornado, REP, 4x4, Dict, LZP, Delta, MM, TTA, GRZip | FreeArc 0.67 (no hay versiones más nuevas compatibles) | matrices de lectura y escritura |
+
+Diferencia que apareció al comparar: LibTomCrypt rechaza claves de Blowfish de menos de 8
+bytes (y AES/Twofish que no sean de 16/24/32); PArc las aceptaba y podía escribir un archivo
+que FreeArc no abre. Ahora las rechaza igual (`CipherKeySizeValid`).
+
+No portados, porque no hacen al formato: Lua 5.1 (scripts de arc.ini), 7z.dll y SREP.

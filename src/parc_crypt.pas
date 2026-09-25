@@ -66,6 +66,9 @@ type
 function ParseCryptParams(const Params: TStringArray): TCryptParams;
 
 function CipherMaxKeySize(const Name: string): Integer;
+{ ¿Acepta el cifrado una clave de Size bytes? Como los *_setup de LibTomCrypt: AES y Twofish
+  16/24/32, Blowfish 8..56, Serpent 1..32. }
+function CipherKeySizeValid(const Name: string; Size: Integer): Boolean;
 function CipherBlockSize(const Name: string): Integer;
 function IsCipherName(const Name: string): Boolean;
 
@@ -1211,6 +1214,14 @@ end;
 
 { ------------------------------------------------------------- parámetros }
 
+function CipherKeySizeValid(const Name: string; Size: Integer): Boolean;
+begin
+  if (Name = 'aes') or (Name = 'twofish') then Result := (Size = 16) or (Size = 24) or (Size = 32)
+  else if Name = 'blowfish' then Result := (Size >= 8) and (Size <= 56)
+  else if Name = 'serpent' then Result := (Size >= 1) and (Size <= 32)
+  else Result := False;
+end;
+
 function CipherMaxKeySize(const Name: string): Integer;
 begin
   if Name = 'aes' then Result := 32
@@ -1536,8 +1547,8 @@ begin
     raise EUnsupportedMethod.Create('cifrado sin clave: falta derivarla del password');
   if (APar.Mode <> 'ctr') and (APar.Mode <> 'cfb') then
     raise EUnsupportedMethod.Create('modo de cifrado no soportado: ' + APar.Mode);
-  if APar.KeySize > CipherMaxKeySize(APar.Cipher) then
-    raise EUnsupportedMethod.Create('clave demasiado larga para ' + APar.Cipher);
+  if not CipherKeySizeValid(APar.Cipher, APar.KeySize) then
+    raise EUnsupportedMethod.Create('tamaño de clave inválido para ' + APar.Cipher);
   inherited Create(ASource);
   FPar := APar;
   FBlockSize := CipherBlockSize(APar.Cipher);
@@ -1715,7 +1726,7 @@ begin
   Result := False;
   ArchiveMethod := ''; EncoderMethod := '';
   par := ParseCryptParams(Cipher.Split([':']));
-  if (par.KeySize < 1) or (par.IVSize < 1) then Exit;
+  if (par.KeySize < 1) or (par.IVSize < 1) or not CipherKeySizeValid(par.Cipher, par.KeySize) then Exit;
   ksz := par.KeySize;
   SetLength(salt, ksz);
   SetLength(iv, par.IVSize);
@@ -1746,7 +1757,7 @@ var
   i: Integer;
   h: string;
 begin
-  if (APar.KeySize < 1) or (APar.IVSize < 1) then
+  if (APar.KeySize < 1) or (APar.IVSize < 1) or not CipherKeySizeValid(APar.Cipher, APar.KeySize) then
     Corrupt('parámetros de cifrado inválidos');
   if APar.KeyHex = '' then Corrupt('el cifrado del encoder necesita :k');
   FPar := APar;
