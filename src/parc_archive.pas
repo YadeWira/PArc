@@ -7,7 +7,7 @@ unit parc_archive;
 interface
 
 uses
-  Classes, SysUtils, parc_os, parc_bytes, parc_stream;
+  Classes, SysUtils, parc_os, parc_bytes, parc_stream, parc_volume;
 
 const
   ARC_SIGNATURE  = $01437241;  // "ArC\x01" little-endian (FreeArc .arc)
@@ -56,7 +56,7 @@ type
 
   TArchive = class
   private
-    FStream: TFileStream;
+    FStream: TStream;           // un archivo, o los volúmenes x.001, x.002... (parc_volume)
     FFileName: string;
     procedure ReadAt(Pos: Int64; var Buf; Count: SizeInt);
     function TryReadDescriptor(const Raw: TBytes; Ofs, Len: SizeInt; DescrPos: Int64;
@@ -129,9 +129,19 @@ constructor TArchive.Open(const AFileName: string);
 begin
   inherited Create;
   FFileName := AFileName;
-  FStream := TFileStream.Create(FsPath(AFileName), fmOpenRead or fmShareDenyWrite);
+  FStream := OpenArchiveStream(AFileName);
   ArcSize := FStream.Size;
-  Footer := FindFooterDescriptor;
+  try
+    Footer := FindFooterDescriptor;
+  except
+    // En volúmenes, lo más probable es que falte el último (el footer va al final)
+    on E: EArcCorrupt do
+      if FStream is TVolumeStream then
+        Corrupt(E.Message + Format('; se leyeron %d volumen(es), hasta %s: ¿falta el siguiente?',
+          [TVolumeStream(FStream).Names.Count, TVolumeStream(FStream).Names[TVolumeStream(FStream).Names.Count - 1]]))
+      else
+        raise;
+  end;
   ParseFooter(Footer);
 end;
 

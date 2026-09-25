@@ -82,7 +82,7 @@ function RecoveryRepair(const ArcName: string; out Res: TRecoveryResult;
 implementation
 
 uses
-  parc_crc, parc_methods;
+  parc_crc, parc_methods, parc_volume;
 
 const
   RECOVERY_BLOCK = 5;
@@ -444,7 +444,7 @@ end;
 function ScanFile(const ArcName: string; const D: TRecoveryData; out Res: TRecoveryResult;
                   var XorAcc: TBytes): Boolean;
 var
-  fs: TFileStream;
+  fs: TStream;
   buf: TBytes;
   i, k, arc_sectors: Int64;
   n, got, idx: SizeInt;
@@ -467,7 +467,7 @@ begin
   SetLength(XorAcc, Int64(D.Info.RecSectors) * D.Info.SectorSize);
   if Length(XorAcc) > 0 then FillChar(XorAcc[0], Length(XorAcc), 0);
   r.Init(@D.Crcs[D.CrcsOfs], Length(D.Crcs) - D.CrcsOfs);
-  fs := TFileStream.Create(ArcName, fmOpenRead or fmShareDenyNone);
+  fs := OpenArchiveStream(ArcName);
   try
     fs.Position := D.Info.InitPos;
     SetLength(buf, D.Info.SectorSize);
@@ -538,7 +538,9 @@ function RecoveryRepair(const ArcName: string; out Res: TRecoveryResult;
 var
   D: TRecoveryData;
   XorAcc, orig: TBytes;
-  fs, out2: TFileStream;
+  fs: TStream;
+  out2: TFileStream;
+  VolBase: string;
   i, k, arc_sectors, base: Int64;
   n, got, idx, j: SizeInt;
   cntBad: array of Integer;
@@ -566,11 +568,13 @@ begin
     if cntBad[(Res.BadSectors[n] + base) mod D.Info.RecSectors] <= 1 then Inc(reparables);
   if reparables = 0 then Exit(True);
 
-  DestName := ExtractFilePath(ArcName) + 'fixed.' + ExtractFileName(ArcName);
+  // (de un archivo en volúmenes sale un fixed.<base> de una pieza)
+  if not IsVolumeSet(ArcName, VolBase) then VolBase := ArcName;
+  DestName := ExtractFilePath(VolBase) + 'fixed.' + ExtractFileName(VolBase);
   if FileExists(DestName) then DeleteFile(DestName);
   out2 := TFileStream.Create(DestName, fmCreate);
   try
-    fs := TFileStream.Create(ArcName, fmOpenRead or fmShareDenyNone);
+    fs := OpenArchiveStream(ArcName);
     try
       out2.CopyFrom(fs, 0);
       SetLength(orig, D.Info.SectorSize);

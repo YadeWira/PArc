@@ -6,7 +6,7 @@ program parc;
 
 uses
   {$IFDEF UNIX}cthreads,{$ENDIF}
-  Classes, SysUtils, Types, DateUtils, parc_os, parc_bytes, parc_methods, parc_archive, parc_extract, parc_writer, parc_encoders, parc_presets, parc_recovery, parc_progress, parc_filelist;
+  Classes, SysUtils, Types, DateUtils, parc_os, parc_bytes, parc_methods, parc_archive, parc_extract, parc_writer, parc_encoders, parc_presets, parc_recovery, parc_progress, parc_filelist, parc_volume;
 
 const
   PARC_VERSION = '0.0.3';
@@ -45,6 +45,7 @@ begin
   OutLn('  -hp[contraseña] cifra también el directorio (sin ella no se ve ni la lista)');
   OutLn('  -ae=<alg>  --encryption=<alg>  aes (default: aes-256/ctr), blowfish, serpent,');
   OutLn('             twofish; con tamaño/modo: serpent-256/cfb, blowfish-448/ctr, ...');
+  OutLn('  -v<tamaño>  volúmenes de ese tamaño (x.parc.001, .002...; solo .parc): -v100m, -v4g, -v700000k');
   OutLn('  --no-progress  sin línea de progreso (tampoco se muestra si stderr no es una consola)');
   OutLn('Ctrl-C cancela limpiamente (no queda ni el temporal ni un archivo a medio extraer);');
   OutLn('un segundo Ctrl-C corta en el acto. Código de salida al cancelar: 130.');
@@ -251,6 +252,30 @@ end;
 
 { Orden en que Windows (NTFS, y wine) devuelve un directorio: sin distinguir mayúsculas,
   comparando en MAYÚSCULAS ('_' va después de las letras); si empatan, por bytes. }
+function FileSizeOf(const Name: string): Int64;
+var
+  M: TFileMeta;
+begin
+  if GetFileMeta(Name, M) then Result := M.Size else Result := 0;
+end;
+
+{ ¿Path es el archivo que se está escribiendo (ArcPath), uno de sus volúmenes (ArcPath.001...)
+  o un temporal (ArcPath.tmp, ArcPath.tmp.001...)? }
+function IsOwnArchiveFile(const Path, ArcPath: string): Boolean;
+var
+  Rest: string;
+  i: Integer;
+begin
+  if Path = ArcPath then Exit(True);
+  if Copy(Path, 1, Length(ArcPath) + 1) <> ArcPath + '.' then Exit(False);
+  Rest := Copy(Path, Length(ArcPath) + 2, MaxInt);
+  if Rest = 'tmp' then Exit(True);
+  if Copy(Rest, 1, 4) = 'tmp.' then Delete(Rest, 1, 4);
+  Result := Length(Rest) >= 3;
+  for i := 1 to Length(Rest) do
+    if not (Rest[i] in ['0'..'9']) then Exit(False);
+end;
+
 function CompareEntryNames(List: TStringList; A, B: Integer): Integer;
 var
   i, n: Integer;
@@ -279,7 +304,7 @@ procedure CollectEntries(const Paths: TStringList; const Exclude: string; Exclud
   var
     n: Integer;
   begin
-    if ExpandFileName(Disk) = Exclude then Exit;   // no meter el archivo que se está escribiendo
+    if IsOwnArchiveFile(ExpandFileName(Disk), Exclude) then Exit;   // ni el archivo que se escribe ni sus volúmenes
     if MatchesAny(Stored, Excludes) then Exit;     // -x<máscara>
     n := Length(Entries);
     SetLength(Entries, n + 1);
@@ -366,6 +391,7 @@ type
     Excludes: TStringList;   // -x<máscara>
     Recovery: string;        // -rr...: '--' si no se dio la opción
     Encryption: string;      // -ae= / --encryption=
+    VolumeSize: Int64;       // -v<tamaño>: volúmenes (solo .parc); 0 = como estaba
     DataPassword, HeadersPassword: RawByteString;   // '' = sin cifrar
   end;
 
@@ -579,7 +605,8 @@ var
   Opt: TWriteOptions;
   St: TWriteStats;
   i, j, n, Removed, Replaced, Added: Integer;
-  Missing, Verb, OldRR: string;
+  Missing, Verb, OldRR, VolBase, VolInfo: string;
+  NVol: Integer;
   RRSize: Int64;
   Exists, Newer: Boolean;
   Old: array of Integer;         // índice en Entries de cada archivo viejo conservado (-1 si no)
@@ -597,7 +624,7 @@ begin
     ErrLn('ERROR: no se indicaron archivos');
     Exit(1);
   end;
-  Exists := FileExists(FsPath(ArcName));
+  Exists := ArchiveExists(ArcName);
   if not Exists and ((Cmd = 'd') or (Cmd = 'f')) then
   begin
     ErrLn('ERROR: no existe ' + ArcName);
@@ -727,14 +754,25 @@ begin
     Opt.Encryption := MO.Encryption;
     Opt.DataPassword := MO.DataPassword;
     Opt.HeadersPassword := MO.HeadersPassword;
+    // Volúmenes: -v, o el tamaño que ya tenían (el del primero) si se actualiza uno partido
+    Opt.VolumeSize := MO.VolumeSize;
+    if (Opt.VolumeSize = 0) and IsVolumeSet(ArcName, VolBase) then
+      Opt.VolumeSize := FileSizeOf(VolumeName(ArcName, 1));
     St := WriteArchive(ArcName, Entries, Groups, Opt, @LogLine);
   finally
     A.Free;
   end;
-  FinishArchive(ArcName);
+  FinishArchive(ArcName, Opt.VolumeSize);
   if not Exists then Verb := 'Creado' else Verb := 'Actualizado';
-  OutLn(Format('%s %s (%s): %d archivo(s) y %d directorio(s), %d bytes -> %d bytes',
-    [Verb, ArcName, BoolToStr(Opt.Parc, 'parc', 'arc'), St.Files, St.Dirs, St.Bytes, St.ArcSize]));
+  VolInfo := '';
+  if Opt.VolumeSize > 0 then
+  begin
+    NVol := 0;
+    while FileExists(FsPath(VolumeName(ArcName, NVol + 1))) do Inc(NVol);
+    VolInfo := Format(', %d volumen(es) de %d bytes: %s ...', [NVol, Opt.VolumeSize, VolumeName(ArcName, 1)]);
+  end;
+  OutLn(Format('%s %s (%s%s): %d archivo(s) y %d directorio(s), %d bytes -> %d bytes',
+    [Verb, ArcName, BoolToStr(Opt.Parc, 'parc', 'arc'), VolInfo, St.Files, St.Dirs, St.Bytes, St.ArcSize]));
   if Exists then
     OutLn(Format('  agregados %d, reemplazados %d, borrados %d', [Added, Replaced, Removed]));
   Result := 0;
@@ -742,6 +780,7 @@ end;
 
 var
   Cmd, ArcName, Pwd2, S: string;
+  VolSize: Int64;
   A: TArchive;
   Opt: TExtractOptions;
   MO: TModifyOptions;
@@ -777,6 +816,8 @@ begin
       begin
         if Copy(S, 1, 3) = '-dp' then Opt.DestDir := Copy(S, 4, MaxInt)
         else if S = '--no-progress' then ShowProgress := False
+        else if (Copy(S, 1, 2) = '-v') and ParseVolumeSize(Copy(S, 3, MaxInt), VolSize) then
+          MO.VolumeSize := VolSize
         else if S = '-o+' then Opt.Overwrite := owAll
         else if S = '-o-' then Opt.Overwrite := owSkip
         else if Copy(S, 1, 2) = '-m' then
@@ -806,6 +847,8 @@ begin
       Halt(1);
     end;
     Opt.Filter := Filter;
+    // "x.parc.001" es lo mismo que "x.parc" (el primero de sus volúmenes)
+    if IsVolumeSet(ArcName, S) then ArcName := S;
     Writing := (Cmd = 'a') or (Cmd = 'u') or (Cmd = 'f') or (Cmd = 'd');
     // Contraseñas como Cmdline.hs: -p solo cifra datos; -hp (con o sin -p) cifra también
     // los encabezados; -p y -hp con valores distintos, uno para cada cosa

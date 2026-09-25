@@ -83,6 +83,26 @@ Agrega datos de paridad que permiten reparar sectores dañados con `parc r` (o `
 Sin `-rr`, al actualizar un archivo se conserva lo que tenía. Los sectores de menos de 512
 bytes se rechazan (FreeArc se queda sin memoria con ellos).
 
+### Volúmenes: `-v` (solo `.parc`)
+
+Parte el archivo en pedazos de tamaño fijo, al estilo de 7-Zip: `copia.parc.001`,
+`copia.parc.002`… (el último, más chico). Es una función de PArc: FreeArc no parte sus `.arc`,
+así que con `.arc` se rechaza.
+
+| opción | efecto |
+|---|---|
+| `-v<N>` | volúmenes de N bytes; con sufijo `k`, `m`, `g`: `-v100m`, `-v4g`, `-v700000k` |
+
+- Para leer, extraer, verificar o actualizar se da el primero (`copia.parc.001`) o la base
+  (`copia.parc`); PArc junta los volúmenes al vuelo.
+- Es el mismo archivo cortado en pedazos: `cat copia.parc.0* > copia.parc` (o `copy /b` en
+  Windows) da un `.parc` normal.
+- Al actualizar un archivo en volúmenes se conserva el tamaño de volumen (el del primero) y
+  se borran los que sobren. `-v` sobre un archivo suelto lo pasa a volúmenes.
+- Con `-rr`, el registro protege todo el conjunto; `parc r` escribe `fixed.<nombre>` de una
+  sola pieza.
+- Si falta un volumen del medio se avisa cuál; si falta el último, el error lo sugiere.
+
 ### Cifrado
 
 | opción | efecto |

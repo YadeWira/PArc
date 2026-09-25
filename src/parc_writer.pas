@@ -42,6 +42,7 @@ type
     Encryption: string;   // algoritmo (--encryption; "aes" = aes-256/ctr, como FreeArc)
     DataPassword: RawByteString;     // -p: cifra los bloques de datos ('' = sin cifrar)
     HeadersPassword: RawByteString;  // -hp: cifra también directorio y footer
+    VolumeSize: Int64;    // -v: volúmenes de este tamaño (FileName.001, .002...); solo .parc
   end;
 
   TWriteStats = record
@@ -57,7 +58,7 @@ function WriteArchive(const FileName: string; const Entries: array of TWriteEntr
   const Groups: array of TSolidGroup; const Opt: TWriteOptions; Log: TLogProc): TWriteStats;
 
 { Reemplaza FileName por el temporal que dejó WriteArchive con KeepTemp. }
-procedure FinishArchive(const FileName: string);
+procedure FinishArchive(const FileName: string; VolumeSize: Int64 = 0);
 
 { Meta de una entrada que viene de un archivo existente. }
 function MetaFromArchive(const F: TArcFileEntry): TFileMeta;
@@ -65,7 +66,8 @@ function MetaFromArchive(const F: TArcFileEntry): TFileMeta;
 implementation
 
 uses
-  parc_bytes, parc_crc, parc_stream, parc_outstream, parc_encoders, parc_methods, parc_recovery, parc_progress;
+  parc_bytes, parc_crc, parc_stream, parc_outstream, parc_encoders, parc_methods, parc_recovery, parc_progress,
+  parc_volume;
 
 const
   VERSION_ARC: array[0..3] of Byte = (0, 0, 6, 7);                // FreeArc 0.67
@@ -138,7 +140,7 @@ end;
 { Registro de recuperación (ArcRecover.hs; FORMATO-ARC.md §7.4): dos RECOVERY_BLOCK storing,
   el de sectores y el de CRCs+info, protegiendo todo lo escrito hasta acá. El info guarda la
   posición del bloque de CRCs, así que hay que saber de antemano cuánto ocupa el de sectores. }
-procedure WriteRecovery(S: TFileStream; Parc: Boolean; const Spec: string; var Control: TBlockInfoArray);
+procedure WriteRecovery(S: TStream; Parc: Boolean; const Spec: string; var Control: TBlockInfoArray);
 var
   ArcSize, SectorsSize, CrcsSize, PosSectors, PosCrcs: Int64;
   SectorSize, RecSectors, n: Integer;
@@ -548,7 +550,7 @@ function WriteArchive(const FileName: string; const Entries: array of TWriteEntr
   const Groups: array of TSolidGroup; const Opt: TWriteOptions; Log: TLogProc): TWriteStats;
 var
   Tmp: string;
-  S: TFileStream;
+  S: TStream;
   Hdr: TByteWriter;
   Control: TBlockInfoArray;
   Blocks: array of TDataBlock;
@@ -576,8 +578,12 @@ begin
 
   Tmp := FileName + '.tmp';
   Ok := False;
+  // Volúmenes: una función propia de PArc (FreeArc no parte los .arc), así que solo .parc
+  if (Opt.VolumeSize > 0) and not Opt.Parc then
+    raise EArgumentException.Create('los volúmenes (-v) son solo para .parc: FreeArc no lee .arc partidos');
   ProgressBegin('Comprimiendo', Total);
-  S := TFileStream.Create(FsPath(Tmp), fmCreate);
+  if Opt.VolumeSize > 0 then S := TVolumeStream.CreateWrite(Tmp, Opt.VolumeSize)
+  else S := TFileStream.Create(FsPath(Tmp), fmCreate);
   try
     try
       // HEADER: firma + versión, sin comprimir
@@ -637,20 +643,42 @@ begin
       S.Free;
     end;
   finally
-    if not Ok then DeleteFile(FsPath(Tmp));
+    if not Ok then
+      if Opt.VolumeSize > 0 then DeleteVolumesFrom(Tmp, 1) else DeleteFile(FsPath(Tmp));
   end;
-  if not Opt.KeepTemp then FinishArchive(FileName);
+  if not Opt.KeepTemp then FinishArchive(FileName, Opt.VolumeSize);
 end;
 
-procedure FinishArchive(const FileName: string);
+procedure FinishArchive(const FileName: string; VolumeSize: Int64);
 var
   Tmp: string;
+  i: Integer;
 begin
   Tmp := FileName + '.tmp';
+  if VolumeSize > 0 then
+  begin
+    // FileName.tmp.001... -> FileName.001...; fuera la versión anterior (suelta o en
+    // volúmenes), incluidos los volúmenes que sobren si ahora son menos
+    if FileExists(FsPath(FileName)) and not DeleteFile(FsPath(FileName)) then
+      raise EFCreateError.CreateFmt('no se pudo reemplazar %s (¿está abierto?)', [FileName]);
+    i := 1;
+    while FileExists(FsPath(VolumeName(Tmp, i))) do
+    begin
+      if FileExists(FsPath(VolumeName(FileName, i))) and not DeleteFile(FsPath(VolumeName(FileName, i))) then
+        raise EFCreateError.CreateFmt('no se pudo reemplazar %s (¿está abierto?); el nuevo quedó en %s',
+          [VolumeName(FileName, i), VolumeName(Tmp, i)]);
+      if not RenameFile(FsPath(VolumeName(Tmp, i)), FsPath(VolumeName(FileName, i))) then
+        raise EFCreateError.CreateFmt('no se pudo renombrar %s a %s', [VolumeName(Tmp, i), VolumeName(FileName, i)]);
+      Inc(i);
+    end;
+    DeleteVolumesFrom(FileName, i);
+    Exit;
+  end;
   if FileExists(FsPath(FileName)) and not DeleteFile(FsPath(FileName)) then
     raise EFCreateError.CreateFmt('no se pudo reemplazar %s (¿está abierto?); el nuevo quedó en %s', [FileName, Tmp]);
   if not RenameFile(FsPath(Tmp), FsPath(FileName)) then
     raise EFCreateError.CreateFmt('no se pudo renombrar %s a %s', [Tmp, FileName]);
+  DeleteVolumesFrom(FileName, 1);   // si antes estaba en volúmenes
 end;
 
 end.
