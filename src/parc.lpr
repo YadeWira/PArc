@@ -6,7 +6,7 @@ program parc;
 
 uses
   {$IFDEF UNIX}cthreads,{$ENDIF}
-  Classes, SysUtils, DateUtils, parc_os, parc_bytes, parc_methods, parc_archive, parc_extract, parc_writer, parc_encoders, parc_presets, parc_recovery, parc_progress, parc_filelist;
+  Classes, SysUtils, Types, DateUtils, parc_os, parc_bytes, parc_methods, parc_archive, parc_extract, parc_writer, parc_encoders, parc_presets, parc_recovery, parc_progress, parc_filelist;
 
 const
   PARC_VERSION = '0.0.3';
@@ -430,6 +430,140 @@ begin
   {$IFDEF WINDOWS}Result := LowerCase(Name);{$ELSE}Result := Name;{$ENDIF}
 end;
 
+{ Bloques de un archivo que se actualiza, como FreeArc 0.67 (join_lists + splitToSolidBlocks):
+  - lista 1: los archivos del archivo viejo en su orden; el que se reemplaza (a/u/f) queda en
+    su lugar pero ahora viene del disco; los borrados no están;
+  - lista 2: los nuevos del disco, en el orden de sort_files;
+  - merge por la clave gerpn (o una detrás de la otra si no se ordena);
+  - parc_filelist tipifica (los viejos, por el compresor de su bloque), agrupa por método y
+    corta con el splitBy de FreeArc, que conserva los bloques viejos que quedaron enteros.
+  Keep/Old: qué archivos viejos siguen y su entrada; NewIdx: las entradas del disco. }
+procedure PlanUpdate(A: TArchive; const Keep: array of Boolean; const Old: array of Integer;
+  const Entries: TWriteEntryArray; const NewIdx: array of Integer; const MO: TModifyOptions;
+  var Groups: TSolidGroupArray);
+var
+  L1, L2, M: array of TFaFile;
+  E1, E2, EM: array of Integer;        // entrada de cada elemento de L1, L2, M
+  Used: array of Boolean;              // entrada nueva ya usada como reemplazo
+  ByName: TStringList;
+  BlockOf, PosOf, CountOf: array of Integer;
+  GM: TGroupMethods;
+  Blocks: TFaBlocks;
+  Order: TIntegerDynArray;
+  b, j, k, n, pos, g, x, y: Integer;
+
+  function DiskFile(e: Integer): TFaFile;
+  begin
+    Result := Default(TFaFile);
+    Result.Name := Entries[e].StoredName;
+    Result.DiskPath := Entries[e].DiskPath;
+    Result.Size := Entries[e].Meta.Size;
+  end;
+
+begin
+  GM := DecodeMethod(MO.Method, CpuCount);
+  // Bloque, posición y cantidad de archivos (sin directorios) de cada archivo viejo
+  SetLength(BlockOf, Length(A.Files)); SetLength(PosOf, Length(A.Files)); SetLength(CountOf, Length(A.Files));
+  for b := 0 to High(A.DataBlocks) do
+  begin
+    n := 0;
+    for j := A.DataBlocks[b].FirstFile to A.DataBlocks[b].FirstFile + A.DataBlocks[b].FileCount - 1 do
+      if not A.Files[j].IsDir then Inc(n);
+    pos := 0;
+    for j := A.DataBlocks[b].FirstFile to A.DataBlocks[b].FirstFile + A.DataBlocks[b].FileCount - 1 do
+      if not A.Files[j].IsDir then
+      begin
+        BlockOf[j] := b; PosOf[j] := pos; CountOf[j] := n;
+        Inc(pos);
+      end;
+  end;
+  // Las entradas nuevas por nombre, para poner cada reemplazo en el lugar del viejo
+  ByName := TStringList.Create;
+  try
+    ByName.Sorted := True;
+    ByName.Duplicates := dupIgnore;
+    for k := 0 to High(NewIdx) do ByName.AddObject(NameKey(Entries[NewIdx[k]].StoredName), TObject(PtrInt(k)));
+    SetLength(Used, Length(NewIdx));
+    SetLength(L1, Length(A.Files) + Length(NewIdx)); SetLength(E1, Length(L1));
+    n := 0;
+    for j := 0 to High(A.Files) do
+    begin
+      if A.Files[j].IsDir then Continue;
+      if Keep[j] then
+      begin
+        L1[n] := Default(TFaFile);
+        L1[n].Name := A.Files[j].Name;
+        L1[n].Size := A.Files[j].Size;
+        L1[n].IsOld := True;
+        L1[n].OldBlock := BlockOf[j];
+        L1[n].OldPos := PosOf[j];
+        L1[n].OldBlockFiles := CountOf[j];
+        L1[n].OldMethod := A.DataBlocks[BlockOf[j]].Method;
+        E1[n] := Old[j];
+        Inc(n);
+      end
+      else
+      begin
+        k := ByName.IndexOf(NameKey(A.Files[j].Name));
+        if k >= 0 then
+        begin
+          k := PtrInt(ByName.Objects[k]);
+          if not Used[k] then
+          begin
+            Used[k] := True;
+            L1[n] := DiskFile(NewIdx[k]); E1[n] := NewIdx[k]; Inc(n);
+          end;
+        end;
+      end;
+    end;
+    SetLength(L1, n); SetLength(E1, n);
+  finally
+    ByName.Free;
+  end;
+  // Los que no estaban, en el orden de sort_files
+  SetLength(L2, Length(NewIdx)); SetLength(E2, Length(NewIdx));
+  n := 0;
+  for k := 0 to High(NewIdx) do
+    if not Used[k] then begin L2[n] := DiskFile(NewIdx[k]); E2[n] := NewIdx[k]; Inc(n); end;
+  SetLength(L2, n); SetLength(E2, n);
+  if FaSortEnabled(GM, MO.Solid) and (n > 1) then
+  begin
+    Order := FaSortFiles(L2);
+    M := Copy(L2); EM := Copy(E2);
+    for k := 0 to High(Order) do begin L2[k] := M[Order[k]]; E2[k] := EM[Order[k]]; end;
+  end;
+  // merge (Utils.hs): si el viejo es mayor, va el nuevo; si no (empate incluido), el viejo
+  SetLength(M, Length(L1) + Length(L2)); SetLength(EM, Length(M));
+  x := 0; y := 0; n := 0;
+  while (x < Length(L1)) or (y < Length(L2)) do
+    if (y >= Length(L2)) or ((x < Length(L1)) and
+       not (FaSortEnabled(GM, MO.Solid) and (FaMergeCompare(L1[x], L2[y]) > 0))) then
+    begin
+      M[n] := L1[x]; EM[n] := E1[x]; Inc(x); Inc(n);
+    end
+    else
+    begin
+      M[n] := L2[y]; EM[n] := E2[y]; Inc(y); Inc(n);
+    end;
+  Blocks := FaSolidBlocks(M, GM, MO.Solid, FaDetectLevel(MO.Method), True);
+  for k := 0 to High(Blocks) do
+  begin
+    g := Length(Groups);
+    SetLength(Groups, g + 1);
+    Groups[g] := Default(TSolidGroup);
+    if Blocks[k].CopyOld then
+    begin
+      Groups[g].CopyFrom := A;
+      Groups[g].CopyBlock := Blocks[k].OldBlock;
+      Groups[g].Method := A.DataBlocks[Blocks[k].OldBlock].Method;
+    end
+    else
+      Groups[g].Method := Blocks[k].Method;
+    SetLength(Groups[g].Files, Length(Blocks[k].Files));
+    for j := 0 to High(Blocks[k].Files) do Groups[g].Files[j] := EM[Blocks[k].Files[j]];
+  end;
+end;
+
 { a (agregar/reemplazar), u (solo si es más nuevo), f (solo actualizar lo que ya está),
   d (borrar). Sobre un archivo existente, los bloques que se conservan enteros se copian tal
   cual y los que pierden archivos se reempaquetan; se escribe un temporal que reemplaza al
@@ -444,7 +578,7 @@ var
   ByName: TStringList;
   Opt: TWriteOptions;
   St: TWriteStats;
-  i, j, n, b, KeptInBlock, Removed, Replaced, Added: Integer;
+  i, j, n, Removed, Replaced, Added: Integer;
   Missing, Verb, OldRR: string;
   RRSize: Int64;
   Exists, Newer: Boolean;
@@ -537,35 +671,6 @@ begin
           Entries[Old[j]].SrcArc := A;
           Entries[Old[j]].SrcIndex := j;
         end;
-      // Bloques viejos: enteros -> copia; con bajas -> reempaquetar; vacíos -> nada
-      Groups := nil;
-      for b := 0 to High(A.DataBlocks) do
-      begin
-        KeptInBlock := 0;
-        n := 0;
-        for j := A.DataBlocks[b].FirstFile to A.DataBlocks[b].FirstFile + A.DataBlocks[b].FileCount - 1 do
-          if not A.Files[j].IsDir then
-          begin
-            Inc(n);
-            if Keep[j] then Inc(KeptInBlock);
-          end;
-        if KeptInBlock = 0 then Continue;
-        i := Length(Groups);
-        SetLength(Groups, i + 1);
-        Groups[i] := Default(TSolidGroup);
-        Groups[i].Method := A.DataBlocks[b].Method;
-        if KeptInBlock = n then
-        begin
-          Groups[i].CopyFrom := A;
-          Groups[i].CopyBlock := b;
-        end;
-        for j := A.DataBlocks[b].FirstFile to A.DataBlocks[b].FirstFile + A.DataBlocks[b].FileCount - 1 do
-          if Keep[j] and not A.Files[j].IsDir then
-          begin
-            SetLength(Groups[i].Files, Length(Groups[i].Files) + 1);
-            Groups[i].Files[High(Groups[i].Files)] := Old[j];
-          end;
-      end;
     end;
     // Archivos nuevos del disco (f solo actualiza: no agrega los que no estaban)
     for i := 0 to High(Disk) do
@@ -589,7 +694,11 @@ begin
       end;
     end;
     Dec(Added, Replaced);
-    GroupNewEntries(Entries, NewIdx, MO, Groups);
+    Groups := nil;
+    if A = nil then
+      GroupNewEntries(Entries, NewIdx, MO, Groups)
+    else
+      PlanUpdate(A, Keep, Old, Entries, NewIdx, MO, Groups);
 
     // Avisar de una vez qué métodos todavía no se pueden comprimir
     Missing := '';

@@ -14,13 +14,18 @@ unit parc_filelist;
 interface
 
 uses
-  SysUtils, parc_presets;
+  SysUtils, Types, parc_presets;
 
 type
   TFaFile = record
     Name: string;       // nombre guardado: UTF-8, '/'
     DiskPath: string;   // de dónde leerlo para la detección por contenido
     Size: Int64;
+    // Archivo que viene de un archivo existente (CompressedFile de FreeArc): se tipifica
+    // por el compresor de su bloque, y un bloque viejo que queda entero se copia
+    IsOld: Boolean;
+    OldBlock, OldPos, OldBlockFiles: Integer;   // su bloque, su posición y cuántos tenía
+    OldMethod: string;                          // el método de ese bloque
   end;
 
   TFaCritKind = (fcNone, fcExt, fcSize, fcBlockSize, fcNumber, fcAll);
@@ -33,6 +38,8 @@ type
   TFaBlock = record
     Method: string;
     Files: array of Integer;   // índices en el arreglo de entrada, en el orden del bloque
+    CopyOld: Boolean;          // es un bloque viejo entero: se copia sin recomprimir
+    OldBlock: Integer;
   end;
   TFaBlocks = array of TFaBlock;
 
@@ -53,7 +60,14 @@ function FaParseSolidOption(const Opt: string; out Crits: TFaCrits): Boolean;
 { Bloques sólidos para Files con los métodos por grupo GM (DecodeMethod). Sort = False
   desactiva el orden (FreeArc no ordena con -s- ni con -m0). }
 function FaSolidBlocks(const Files: array of TFaFile; const GM: TGroupMethods;
-  const Crits: TFaCrits; DetectLevel: Integer): TFaBlocks;
+  const Crits: TFaCrits; DetectLevel: Integer; Presorted: Boolean = False): TFaBlocks;
+
+{ Orden de los archivos como sort_files (gerpn), y la comparación del merge de join_lists
+  (key_func "gerpn": grupo, extensión, directorio, nombre; la r es una constante). }
+function FaSortFiles(const Files: array of TFaFile): TIntegerDynArray;
+function FaMergeCompare(const A, B: TFaFile): Integer;
+{ ¿Ordena FreeArc con estos criterios y métodos? (no con -s- ni con storing o VeryFast) }
+function FaSortEnabled(const GM: TGroupMethods; const Crits: TFaCrits): Boolean;
 
 { La clave de orden de FreeArc, expuesta para los tests: grupo de arc.groups (índice de línea)
   y extensión en minúsculas. }
@@ -471,6 +485,54 @@ begin
     Result := MmDetectByEntropy(@Buf[0], Len, [1, 2, 3, 4], [8, 16, 24, 32], 0.80, IsFloat, NumChan, WordSize, Offset);
 end;
 
+{ typeByCompressor (Compression.hs): el tipo que sugiere el compresor de un bloque viejo, por
+  los nombres de sus etapas. }
+function TypeByCompressor(const Method: string): string;
+var
+  Names: TStringArray;
+  i: Integer;
+
+  function Has(const N: string): Boolean;
+  var
+    k: Integer;
+  begin
+    for k := 0 to High(Names) do
+      if Names[k] = N then Exit(True);
+    Result := False;
+  end;
+
+  function Only(const A: array of string): Boolean;
+  var
+    k: Integer;
+  begin
+    if Length(Names) <> Length(A) then Exit(False);
+    for k := 0 to High(A) do
+      if Names[k] <> A[k] then Exit(False);
+    Result := True;
+  end;
+
+begin
+  Names := Method.Split(['+']);
+  for i := 0 to High(Names) do Names[i] := Names[i].Split([':'])[0];
+  if Has('tta') then Result := '$wav'
+  else if Has('mm') then Result := '$bmp'
+  else if Has('grzip') or Has('ppmd') or Has('pmm') or Has('dict') then Result := '$text'
+  else if Only(['storing']) or Only(['rep', 'tor']) then Result := '$compressed'
+  else if Has('ecm') then Result := '$iso'
+  else if Has('precomp') then Result := '$precomp'
+  else if Only(['precomp', 'rep']) then Result := '$jpgsolid'   // (inalcanzable, como en el fuente)
+  else if Has('jpg') then Result := '$jpg'
+  else if Has('exe') then Result := '$binary'
+  else if Has('lzma') or Has('tor') then Result := '$obj'
+  else Result := 'default';
+end;
+
+function IsTypeByCompressor(const T: string): Boolean;
+begin
+  Result := (T = '$wav') or (T = '$bmp') or (T = '$text') or (T = '$compressed') or (T = '$iso') or
+    (T = '$precomp') or (T = '$jpgsolid') or (T = '$jpg') or (T = '$obj') or (T = '$binary') or (T = '$exe');
+end;
+
 { check: tipos de los trozos (o nil si el archivo no se puede abrir). }
 function Check(f: Integer; const DefaultType: string; BlockSize: Int64; const Positions: array of Int64;
   out Types: TStringArray): Boolean;
@@ -481,6 +543,15 @@ var
   Dummy: Byte;
 begin
   Types := nil;
+  if CurFiles[f].IsOld then
+  begin
+    // Un archivo de un archivo existente no se lee: su tipo sale del compresor de su bloque
+    // (check de ArhiveFileList.hs y typeByCompressor de Compression.hs)
+    SetLength(Types, 1);
+    if IsTypeByCompressor(DefaultType) then Types[0] := TypeByCompressor(CurFiles[f].OldMethod)
+    else Types[0] := DefaultType;
+    Exit(True);
+  end;
   try
     Fs := TFileStream.Create(FsPath(CurFiles[f].DiskPath), fmOpenRead or fmShareDenyNone);
   except
@@ -825,6 +896,20 @@ begin
   end;
 end;
 
+{ isWholeSolidBlock: los Count archivos desde From son, en orden, todo un bloque viejo. }
+function IsWholeOld(const L: TIntArray; From, Count: Integer): Boolean;
+var
+  i: Integer;
+begin
+  if (Count <= 0) or (From + Count > Length(L)) then Exit(False);
+  with CurFiles[L[From]] do
+    if not IsOld or (OldPos <> 0) or (OldBlockFiles <> Count) then Exit(False);
+  for i := From + 1 to From + Count - 1 do
+    if not CurFiles[L[i]].IsOld or (CurFiles[L[i]].OldBlock <> CurFiles[L[From]].OldBlock) or
+       (CurFiles[L[i]].OldPos <= CurFiles[L[i - 1]].OldPos) then Exit(False);
+  Result := True;
+end;
+
 procedure SplitOneType(const Method: string; const L: TIntArray; const Crits0: TFaCrits;
   var R: TFaBlocks);
 var
@@ -838,6 +923,10 @@ var
     SetLength(R, Length(R) + 1);
     R[High(R)].Method := Method;
     R[High(R)].Files := Copy(L, From, Count);
+    // Un bloque que es exactamente uno viejo se copia sin recomprimir (createSolidBlock)
+    R[High(R)].CopyOld := IsWholeOld(L, From, Count);
+    if R[High(R)].CopyOld then R[High(R)].OldBlock := CurFiles[L[From]].OldBlock
+    else R[High(R)].OldBlock := -1;
   end;
 
   procedure Prepend(const C: TFaCrit);
@@ -870,12 +959,17 @@ begin
     bs := BlockSizeOf(Stages[0]);
     if bs > 0 then Prepend(FaCrit(fcBlockSize, bs));
   end;
+  // splitBy. El fuente, con recompress = False, conserva los bloques viejos enteros que
+  // encabezan la lista (oldLen) y corta los nuevos antes del próximo (oldPos); pero arc.exe
+  // 0.67.1 NO lo hace: con archivos nuevos del mismo grupo detrás de un bloque viejo entero,
+  // reempaqueta todo (probado). Se comporta como con --recompress: siempre el largo nuevo, y
+  // un bloque se copia solo si el corte resulta ser exactamente uno viejo entero (Emit).
   a := 0;
   while a <= High(L) do
   begin
     Len := MaxInt;
     for i := 0 to High(Crits) do Len := Min(Len, CritLen(Crits[i], L, a));
-    Len := Min(Len, Length(L) - a);
+    Len := Max(1, Min(Len, Length(L) - a));
     Emit(a, Len);
     Inc(a, Len);
   end;
@@ -902,8 +996,34 @@ begin
   end;
 end;
 
+function FaSortEnabled(const GM: TGroupMethods; const Crits: TFaCrits): Boolean;
+begin
+  Result := not (((Length(Crits) = 1) and (Crits[0].Kind = fcNone)) or
+                 (GM[0].Method = 'storing') or VeryFast(GM[0].Method));
+end;
+
+function FaSortFiles(const Files: array of TFaFile): TIntegerDynArray;
+var
+  Order: TIntArray;
+  i: Integer;
+begin
+  Order := SortGerpn(Files);
+  SetLength(Result, Length(Order));
+  for i := 0 to High(Order) do Result[i] := Order[i];
+end;
+
+function FaMergeCompare(const A, B: TFaFile): Integer;
+begin
+  // key_func "gerpn": OrderGroup find_group, OrderFilePath lcext, OrderGroup (const 1),
+  // OrderPackedStr directorio, OrderPackedStr nombre
+  Result := CompareValue(FaGroupIndex(A.Name), FaGroupIndex(B.Name));
+  if Result = 0 then Result := CompareStr(FaLCExtension(A.Name), FaLCExtension(B.Name));
+  if Result = 0 then Result := FaCompareNames(DirName(A.Name), DirName(B.Name));
+  if Result = 0 then Result := FaCompareNames(BaseName(A.Name), BaseName(B.Name));
+end;
+
 function FaSolidBlocks(const Files: array of TFaFile; const GM: TGroupMethods;
-  const Crits: TFaCrits; DetectLevel: Integer): TFaBlocks;
+  const Crits: TFaCrits; DetectLevel: Integer; Presorted: Boolean): TFaBlocks;
 var
   i, j, k, TypesCount: Integer;
   Order: TIntArray;
@@ -925,9 +1045,9 @@ begin
     CurFiles[i] := Files[i];
     CurType[i] := FindType(Files[i].Name, GM, TypesCount);
   end;
-  // Sin orden con -s- (solo GroupNone) o si el método principal es storing o muy rápido
-  NoSort := ((Length(Crits) = 1) and (Crits[0].Kind = fcNone)) or
-            (GM[0].Method = 'storing') or VeryFast(GM[0].Method);
+  // Sin orden con -s- (solo GroupNone) o si el método principal es storing o muy rápido;
+  // ni cuando la lista ya viene en su orden (la de join_lists al actualizar)
+  NoSort := Presorted or not FaSortEnabled(GM, Crits);
   if NoSort then
   begin
     SetLength(Order, Length(Files));

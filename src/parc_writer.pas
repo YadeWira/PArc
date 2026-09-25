@@ -412,6 +412,7 @@ var
   Remaining: Int64;
   EncMethod, Stored: string;
   Pwd: RawByteString;
+  Encrypted: Boolean;
 
   procedure SkipIn(Count: Int64);
   var
@@ -442,7 +443,18 @@ begin
   // Un bloque que ya estaba cifrado se vuelve a cifrar aunque no se haya dado -p (con la
   // contraseña con que se leyó): borrar un archivo no tiene que dejar el resto en claro
   Pwd := Opt.DataPassword;
-  if (Pwd = '') and (WithoutCipher(G.Method) <> G.Method) then Pwd := ArchivePassword;
+  if Pwd = '' then
+  begin
+    Encrypted := WithoutCipher(G.Method) <> G.Method;
+    // o algún archivo viene de un bloque viejo cifrado (al actualizar, el grupo trae el
+    // método del preset, no el del bloque de donde salió)
+    for i := 0 to High(G.Files) do
+      with Entries[G.Files[i]] do
+        if (SrcArc <> nil) and not Meta.IsDir and
+           (WithoutCipher(SrcArc.DataBlocks[SrcArc.Files[SrcIndex].DataBlock].Method) <>
+            SrcArc.DataBlocks[SrcArc.Files[SrcIndex].DataBlock].Method) then Encrypted := True;
+    if Encrypted then Pwd := ArchivePassword;
+  end;
   if (Pwd <> '') and (Size > 0) then
   begin
     EncMethod := Result.Method + '+' + MakeCipherStage(Opt.Encryption, Pwd, Stored);
