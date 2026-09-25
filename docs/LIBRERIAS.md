@@ -30,7 +30,7 @@ PArc no enlaza código de terceros: todo está portado a Pascal. De dónde sale 
 | LZMA (compresión) | LZMA SDK 26.03 | byte a byte contra el SDK C; arc.exe t/x |
 | BCJ x86 (`exe`) | LZMA SDK 26.03 | contra Bra86.c compilado |
 | LZ4 (descompresión) | semántica de LZ4 1.10 (`LZ4_decompress_safe`), sin CVE-2014-4611 | archivos de arc.exe |
-| LZ4 (compresión) | LZ4 1.10 (fast y HC) | arc.exe t/x |
+| LZ4 (compresión) | en curso: LZ4 1.10 (fast y HC) | — (todavía no hay codificador: `-mlz4` no comprime) |
 | AES, Blowfish, Twofish, SHA-512, PBKDF2 | LibTomCrypt | `tests/crypto_vectors.sh`: 0 diferencias en miles de vectores al azar contra la 1.17 de FreeArc **y** contra la 1.18.2 oficial (las dos dan lo mismo: actualizar no cambia nada) |
 | Serpent | el agregado de FreeArc sobre LibTomCrypt 1.17 (1.18.2 no trae Serpent) | ídem, contra la 1.17 |
 | CTR / CFB | LibTomCrypt (contador little-endian, como FreeArc) | ídem |
