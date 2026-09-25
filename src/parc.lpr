@@ -128,7 +128,13 @@ procedure CollectEntries(const Paths: TStringList; const Exclude: string; var En
     Meta: TFileMeta;
     ChildDisk, ChildStored: string;
   begin
-    if FindFirst(IncludeTrailingPathDelimiter(Disk) + '*', faAnyFile {$IFDEF UNIX}or faSymLink{$ENDIF}, SR) <> 0 then Exit;
+    // FsPath: sin el prefijo \\?\ de Windows, un directorio de ruta larga "no existe" y todo lo
+    // que tiene adentro se perdía en silencio
+    if FindFirst(IncludeTrailingPathDelimiter(FsPath(Disk)) + '*', faAnyFile {$IFDEF UNIX}or faSymLink{$ENDIF}, SR) <> 0 then
+    begin
+      ErrLn('Aviso: no se puede leer el directorio ' + Disk);
+      Exit;
+    end;
     try
       repeat
         if (SR.Name = '.') or (SR.Name = '..') then Continue;
@@ -219,7 +225,7 @@ begin
     ErrLn('ERROR: no se indicaron archivos para agregar');
     Exit(1);
   end;
-  if FileExists(ArcName) then
+  if FileExists(FsPath(ArcName)) then
   begin
     ErrLn('ERROR: ' + ArcName + ' ya existe (actualizar un archivo existente todavía no está soportado)');
     Exit(1);

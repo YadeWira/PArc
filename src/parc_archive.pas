@@ -7,7 +7,7 @@ unit parc_archive;
 interface
 
 uses
-  Classes, SysUtils, parc_bytes, parc_stream;
+  Classes, SysUtils, parc_os, parc_bytes, parc_stream;
 
 const
   ARC_SIGNATURE  = $01437241;  // "ArC\x01" little-endian (FreeArc .arc)
@@ -129,7 +129,7 @@ constructor TArchive.Open(const AFileName: string);
 begin
   inherited Create;
   FFileName := AFileName;
-  FStream := TFileStream.Create(AFileName, fmOpenRead or fmShareDenyWrite);
+  FStream := TFileStream.Create(FsPath(AFileName), fmOpenRead or fmShareDenyWrite);
   ArcSize := FStream.Size;
   Footer := FindFooterDescriptor;
   ParseFooter(Footer);

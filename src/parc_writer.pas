@@ -287,7 +287,7 @@ begin
       Size := 0;
       if not Entries[n].Meta.IsDir then
       begin
-        F := TFileStream.Create(Entries[n].DiskPath, fmOpenRead or fmShareDenyWrite);
+        F := TFileStream.Create(FsPath(Entries[n].DiskPath), fmOpenRead or fmShareDenyWrite);
         try
           repeat
             Got := F.Read(Buf[0], Length(Buf));
@@ -342,7 +342,7 @@ begin
 
   Tmp := FileName + '.tmp';
   Ok := False;
-  S := TFileStream.Create(Tmp, fmCreate);
+  S := TFileStream.Create(FsPath(Tmp), fmCreate);
   try
     try
       // HEADER: firma + versión, sin comprimir
@@ -389,10 +389,10 @@ begin
       S.Free;
     end;
   finally
-    if not Ok then DeleteFile(Tmp);
+    if not Ok then DeleteFile(FsPath(Tmp));
   end;
-  if FileExists(FileName) then DeleteFile(FileName);
-  if not RenameFile(Tmp, FileName) then
+  if FileExists(FsPath(FileName)) then DeleteFile(FsPath(FileName));
+  if not RenameFile(FsPath(Tmp), FsPath(FileName)) then
     raise EFCreateError.CreateFmt('no se pudo renombrar %s a %s', [Tmp, FileName]);
 end;
 

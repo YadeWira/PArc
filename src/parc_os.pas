@@ -20,6 +20,13 @@ type
     WinAttr, UnixMode: LongWord;
   end;
 
+{ Ruta para pasarle al sistema de archivos. En Windows, las rutas de 240 caracteres o más
+  llevan el prefijo \\?\ (absoluta, con '\'), sin el cual las APIs cortan en MAX_PATH (260)
+  y el archivo "no existe"; funciona también en Win7. En los demás sistemas, igual. }
+function FsPath(const P: string): string;
+{ Crea el directorio y los que falten (ForceDirectories no maneja el prefijo \\?\). }
+function MakeDirs(const Dir: string): Boolean;
+
 { Metadatos de un archivo o directorio (sigue enlaces simbólicos). False si no existe. }
 function GetFileMeta(const Path: string; out Meta: TFileMeta): Boolean;
 
@@ -105,6 +112,44 @@ begin
 end;
 
 {$IFDEF WINDOWS}
+function FsPath(const P: string): string;
+var
+  F: string;
+begin
+  if (Length(P) < 240) or (Copy(P, 1, 4) = '\\?\') then Exit(P);
+  F := StringReplace(ExpandFileName(P), '/', '\', [rfReplaceAll]);
+  if Copy(F, 1, 4) = '\\?\' then Result := F
+  else if Copy(F, 1, 2) = '\\' then Result := '\\?\UNC\' + Copy(F, 3, MaxInt)   // \\servidor\recurso
+  else Result := '\\?\' + F;
+end;
+
+function MakeDirs(const Dir: string): Boolean;
+var
+  F, Prefix: string;
+  i, Start: Integer;
+begin
+  if Dir = '' then Exit(True);
+  F := StringReplace(ExpandFileName(Dir), '/', '\', [rfReplaceAll]);
+  F := ExcludeTrailingPathDelimiter(F);
+  // Saltear la raíz: "C:\" o "\\servidor\recurso\"
+  if Copy(F, 1, 2) = '\\' then
+  begin
+    Start := 3;
+    for i := 1 to 2 do
+      while (Start <= Length(F)) and (F[Start] <> '\') do Inc(Start);
+    Inc(Start);
+  end
+  else Start := 4;
+  for i := Start to Length(F) + 1 do
+    if (i > Length(F)) or (F[i] = '\') then
+    begin
+      Prefix := Copy(F, 1, i - 1);
+      if not DirectoryExists(FsPath(Prefix)) then
+        if not CreateDir(FsPath(Prefix)) and not DirectoryExists(FsPath(Prefix)) then Exit(False);
+    end;
+  Result := True;
+end;
+
 const
   // Entre 1601-01-01 (FILETIME) y 1970-01-01, en intervalos de 100 ns
   FILETIME_UNIX_DIFF = 116444736000000000;
@@ -116,7 +161,7 @@ var
   T: Int64;
 begin
   Meta := Default(TFileMeta);
-  W := UTF8Decode(Path);
+  W := UTF8Decode(FsPath(Path));
   Result := GetFileAttributesExW(PWideChar(W), GetFileExInfoStandard, @D);
   if not Result then Exit;
   Meta.IsDir := (D.dwFileAttributes and FILE_ATTRIBUTE_DIRECTORY) <> 0;
@@ -127,6 +172,16 @@ begin
   Meta.WinAttr := D.dwFileAttributes;
 end;
 {$ELSE}
+function FsPath(const P: string): string;
+begin
+  Result := P;
+end;
+
+function MakeDirs(const Dir: string): Boolean;
+begin
+  Result := (Dir = '') or ForceDirectories(Dir);
+end;
+
 function GetFileMeta(const Path: string; out Meta: TFileMeta): Boolean;
 var
   St: Stat;
@@ -150,7 +205,7 @@ var
   T: Int64;
   FT: TFileTime;
 begin
-  W := UTF8Decode(Path);
+  W := UTF8Decode(FsPath(Path));
   // FILE_FLAG_BACKUP_SEMANTICS: necesario para abrir directorios
   H := CreateFileW(PWideChar(W), FILE_WRITE_ATTRIBUTES, FILE_SHARE_READ or FILE_SHARE_WRITE, nil,
                    OPEN_EXISTING, FILE_FLAG_BACKUP_SEMANTICS, 0);
@@ -171,7 +226,7 @@ var
   W: UnicodeString;
 begin
   if not HasWinAttr then Exit;
-  W := UTF8Decode(Path);
+  W := UTF8Decode(FsPath(Path));
   SetFileAttributesW(PWideChar(W), WinAttr and KEEP);
 end;
 {$ELSE}

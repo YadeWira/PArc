@@ -139,7 +139,7 @@ begin
     if A.Files[i].IsDir and Wanted(Opt, A.Files[i].Name) then
     begin
       if not Opt.TestOnly and not Opt.FlatNames then
-        ForceDirectories(DiskName(Opt, A.Files[i].Name));
+        MakeDirs(DiskName(Opt, A.Files[i].Name));
       Inc(Result.Dirs);
     end;
 
@@ -173,7 +173,7 @@ begin
           if DoWrite then
           begin
             OutName := DiskName(Opt, F.Name);
-            if FileExists(OutName) and (Opt.Overwrite <> owAll) then
+            if FileExists(FsPath(OutName)) and (Opt.Overwrite <> owAll) then
             begin
               Log('Saltado (ya existe): ' + OutName);
               Inc(Result.Skipped);
@@ -181,8 +181,8 @@ begin
             end
             else
             begin
-              ForceDirectories(ExtractFileDir(ExpandFileName(OutName)));
-              OutF := TFileStream.Create(OutName, fmCreate);
+              MakeDirs(ExtractFileDir(ExpandFileName(OutName)));
+              OutF := TFileStream.Create(FsPath(OutName), fmCreate);
             end;
           end;
           try
