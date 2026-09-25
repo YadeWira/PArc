@@ -73,7 +73,7 @@ function TorEncodeMem(const Params: TStringArray; Src: PByte; SrcLen: SizeInt; D
 implementation
 
 uses
-  parc_methods;
+  parc_methods, parc_progress;
 
 const
   kb = 1024;
@@ -2690,7 +2690,9 @@ var
   len: LongWord;
   q: PByte;
   SkipRead, found: Boolean;
+  Tick: LongWord;
 begin
+  Tick := 0;
   SkipRead := False;
   if Resuming then
   begin
@@ -2706,6 +2708,9 @@ begin
       Exit;   // esperar datos
     end;
     SkipRead := False;
+    // Cancelación: un bloque de 4x4:tor (en un hilo del pool) son segundos sin volver
+    Inc(Tick);
+    if Tick and $FFFF = 0 then CheckCancel;
     if C.O + 4096 > Length(C.Out) then C.Grow(4096);
     // Tablas que conviene restar
     if UseTables and (P > TableEnd) then
@@ -2884,6 +2889,7 @@ begin
     SkipRead := False;
     if P >= LastP then
     begin
+      CheckCancel;
       EncodeBlock(P);
       Silence := Buf;
       StartBlock(P);

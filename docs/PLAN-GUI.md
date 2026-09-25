@@ -56,6 +56,20 @@ DLLUI.hs, ArcShellExt/). Todavía no hay decisiones tomadas: ver §5.
   (existe desde Win7); cadenas UTF-8; prefijo `\\?\` para rutas largas; probar siempre en la
   VM win7 real.
 
+### Progreso y cancelación (hecho, `src/parc_progress.pas`)
+- Sin dependencias de interfaz: `ProgressHandler` (un procedimiento) recibe `TProgressInfo`
+  (fase, bytes hechos/total, archivo actual, ms transcurridos, `Finished`), a lo sumo cada
+  100 ms, desde el hilo que corre la operación. La GUI copia eso a contadores y lo lee su
+  `TTimer`; la CLI dibuja una línea en stderr (solo si es consola; `--no-progress` la apaga).
+- `RequestCancel` (desde cualquier hilo) → `EOperationCancelled` en el próximo
+  `CheckCancel`. `ResetCancel` antes de cada operación nueva en el mismo proceso.
+- Puntos de cancelación: cada ~1 MB de E/S, `TOutStage.Emit`, cada bloque de lzma (~128 KB),
+  las fases de dict y el bucle de tornado, también dentro de los hilos del pool 4x4. Latencia
+  medida < 0,1 s, salvo un bloque de grzip ya en vuelo (≤ ~1 s).
+- Garantías: `a/u/f/d` cancelado borra el temporal y el archivo original queda intacto;
+  `x/e` cancelado borra el archivo a medio escribir. Probado en Linux, win10 (x64) y Win7 (x86).
+- Pausa: se puede agregar en `CheckCancel` (esperar un evento) sin tocar los codificadores.
+
 ## 3. Integración con el Explorador
 - **Etapa A: solo registro.** `HKCU\Software\Classes`, sin UAC:
   - asociación `.parc`/`.arc`;
@@ -70,7 +84,7 @@ DLLUI.hs, ArcShellExt/). Todavía no hay decisiones tomadas: ver §5.
 ## 4. Fases
 | Fase | Entregable verificable | Qué necesita el núcleo |
 |---|---|---|
-| F0 | `parc_ui`/`parc_ops`; la CLI `x/t` usa `TConsoleUI` (progreso, sobrescritura, Ctrl-C) | extracción con puntos de cancelación (en curso) |
+| F0 | `parc_ui`/`parc_ops`; la CLI `x/t` usa `TConsoleUI` (progreso, sobrescritura, Ctrl-C) | **hecho: progreso y cancelación** (`parc_progress`, ver abajo). Falta: preguntas de sobrescritura/contraseña por callback |
 | F1 | `gui/parcgui.lpi` (gtk2): abrir, árbol + lista virtual, navegar, ordenar | `TArchive` (listo). Check: coincide con `parc l` |
 | F2 (MVP) | extraer/test en worker, progreso con Pausa/Cancelar, diálogos de sobrescritura y contraseña | F0 + errores tipados. Check: cancelar no deja basura; detecta un .arc corrupto |
 | F3 | `parc.ini`, historial, i18n | — |

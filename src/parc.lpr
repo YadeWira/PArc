@@ -6,7 +6,7 @@ program parc;
 
 uses
   {$IFDEF UNIX}cthreads,{$ENDIF}
-  Classes, SysUtils, DateUtils, parc_os, parc_bytes, parc_methods, parc_archive, parc_extract, parc_writer, parc_encoders, parc_presets, parc_recovery;
+  Classes, SysUtils, DateUtils, parc_os, parc_bytes, parc_methods, parc_archive, parc_extract, parc_writer, parc_encoders, parc_presets, parc_recovery, parc_progress;
 
 const
   PARC_VERSION = '0.0.3';
@@ -38,6 +38,98 @@ begin
   OutLn('  -x<máscara>  excluir (puede repetirse)');
   OutLn('  -rr[N%|N*S|-]  registro de recuperación (-rr sin valor: 4%/2%/1% según tamaño; -rr- quita)');
   OutLn('  -p<contraseña>  contraseña de un archivo cifrado (si falta, se pide por consola)');
+  OutLn('  --no-progress  sin línea de progreso (tampoco se muestra si stderr no es una consola)');
+  OutLn('Ctrl-C cancela limpiamente (no queda ni el temporal ni un archivo a medio extraer);');
+  OutLn('un segundo Ctrl-C corta en el acto. Código de salida al cancelar: 130.');
+end;
+
+const
+  EXIT_CANCELLED = 130;   // como un proceso cortado por SIGINT (128 + 2)
+
+var
+  ProgressShown: Boolean = False;   // hay una línea de progreso dibujada en stderr
+
+procedure ClearProgress;
+begin
+  if not ProgressShown then Exit;
+  ErrWrite(#13 + StringOfChar(' ', ConsoleWidth - 1) + #13);
+  ProgressShown := False;
+end;
+
+{ Caracteres que ocupa en pantalla un texto UTF-8 (sin contar bytes de continuación). }
+function DisplayLen(const S: string): Integer;
+var
+  i: Integer;
+begin
+  Result := 0;
+  for i := 1 to Length(S) do
+    if (Ord(S[i]) and $C0) <> $80 then Inc(Result);
+end;
+
+{ Los últimos Max caracteres de S (el final de una ruta es lo que la identifica). }
+function TailChars(const S: string; Max: Integer): string;
+var
+  i, n: Integer;
+begin
+  if Max <= 0 then Exit('');
+  if DisplayLen(S) <= Max then Exit(S);
+  n := 0;
+  i := Length(S) + 1;
+  while (i > 1) and (n < Max - 1) do
+  begin
+    Dec(i);
+    if (Ord(S[i]) and $C0) <> $80 then Inc(n);
+  end;
+  Result := '…' + Copy(S, i, MaxInt);
+end;
+
+function FmtMB(Bytes: Int64): string;
+begin
+  Result := FormatFloat('0.0', Bytes / 1048576);
+end;
+
+function FmtSecs(Secs: Int64): string;
+begin
+  if Secs >= 3600 then Result := Format('%d:%.2d:%.2d', [Secs div 3600, (Secs div 60) mod 60, Secs mod 60])
+  else Result := Format('%.2d:%.2d', [Secs div 60, Secs mod 60]);
+end;
+
+{ Una línea en stderr que se reescribe: fase, %, MB, velocidad, tiempo restante y archivo. }
+procedure DrawProgress(const P: TProgressInfo);
+var
+  L, Rate: string;
+  Width: Integer;
+  Speed: Double;
+begin
+  if P.Finished then
+  begin
+    ClearProgress;
+    Exit;
+  end;
+  L := P.Phase;
+  if P.Total > 0 then
+    L := L + Format(' %5.1f%%  %s/%s MB', [100.0 * P.Done / P.Total, FmtMB(P.Done), FmtMB(P.Total)])
+  else
+    L := L + '  ' + FmtMB(P.Done) + ' MB';
+  Rate := '';
+  if P.ElapsedMs > 0 then
+  begin
+    Speed := P.Done / (P.ElapsedMs / 1000);   // bytes/s
+    Rate := '  ' + FormatFloat('0.0', Speed / 1048576) + ' MB/s';
+    if (Speed > 0) and (P.Total > P.Done) and (P.ElapsedMs >= 1000) then
+      Rate := Rate + '  ' + FmtSecs(Round((P.Total - P.Done) / Speed)) + ' restante';
+  end;
+  L := L + Rate;
+  Width := ConsoleWidth - 1;
+  if P.CurrentFile <> '' then L := L + '  ' + TailChars(P.CurrentFile, Width - DisplayLen(L) - 2);
+  if DisplayLen(L) > Width then L := Copy(L, 1, Width);
+  ErrWrite(#13 + L + StringOfChar(' ', Width - DisplayLen(L)));
+  ProgressShown := True;
+end;
+
+procedure OnCtrlC;
+begin
+  RequestCancel;
 end;
 
 function FmtTime(t: Int64): string;
@@ -129,6 +221,7 @@ end;
 
 procedure LogLine(const Msg: string);
 begin
+  ClearProgress;
   OutLn(Msg);
 end;
 
@@ -554,7 +647,7 @@ var
   Filter, Excludes: TStringList;
   SolidMem: QWord;
   i, Code, Tries: Integer;
-  Retry: Boolean;
+  Retry, ShowProgress: Boolean;
 begin
   if ArgCount < 2 then
   begin
@@ -572,6 +665,7 @@ begin
   MO.Excludes := Excludes;
   MO.Recovery := '--';
   Code := 0;
+  ShowProgress := True;
   try
     for i := 2 to ArgCount do
     begin
@@ -579,6 +673,7 @@ begin
       if (Length(S) > 1) and (S[1] = '-') then
       begin
         if Copy(S, 1, 3) = '-dp' then Opt.DestDir := Copy(S, 4, MaxInt)
+        else if S = '--no-progress' then ShowProgress := False
         else if S = '-o+' then Opt.Overwrite := owAll
         else if S = '-o-' then Opt.Overwrite := owSkip
         else if Copy(S, 1, 2) = '-m' then
@@ -608,6 +703,8 @@ begin
       Halt(1);
     end;
     Opt.Filter := Filter;
+    if ShowProgress and ErrIsConsole then ProgressHandler := @DrawProgress;
+    InstallCancelHandler(@OnCtrlC);
     if Cmd = 'r' then
     begin
       // Antes de abrir el archivo: dañado puede no abrir normalmente
@@ -623,8 +720,14 @@ begin
       try
         Code := CmdModify(Cmd, ArcName, Filter, MO);
       except
-        on E: EUnsupportedEncoder do begin ErrLn('ERROR: ' + E.Message); Code := 3; end;
-        on E: Exception do begin ErrLn('ERROR: ' + E.Message); Code := 4; end;
+        on E: EOperationCancelled do begin
+          ClearProgress;
+          if FileExists(FsPath(ArcName)) then ErrLn('Cancelado: ' + ArcName + ' quedó como estaba.')
+          else ErrLn('Cancelado: no se creó ' + ArcName + '.');
+          Code := EXIT_CANCELLED;
+        end;
+        on E: EUnsupportedEncoder do begin ClearProgress; ErrLn('ERROR: ' + E.Message); Code := 3; end;
+        on E: Exception do begin ClearProgress; ErrLn('ERROR: ' + E.Message); Code := 4; end;
       end;
       Halt(Code);
     end;
@@ -663,9 +766,10 @@ begin
             Retry := True;
           end
           else begin ErrLn('ERROR: ' + E.Message); Code := 5; end;
-        on E: EArcCorrupt do begin ErrLn('ERROR: ' + E.Message); Code := 2; end;
-        on E: EUnsupportedMethod do begin ErrLn('ERROR: ' + E.Message); Code := 3; end;
-        on E: Exception do begin ErrLn('ERROR: ' + E.Message); Code := 4; end;
+        on E: EOperationCancelled do begin ClearProgress; ErrLn('Cancelado.'); Code := EXIT_CANCELLED; end;
+        on E: EArcCorrupt do begin ClearProgress; ErrLn('ERROR: ' + E.Message); Code := 2; end;
+        on E: EUnsupportedMethod do begin ClearProgress; ErrLn('ERROR: ' + E.Message); Code := 3; end;
+        on E: Exception do begin ClearProgress; ErrLn('ERROR: ' + E.Message); Code := 4; end;
       end;
     until not Retry;
   finally

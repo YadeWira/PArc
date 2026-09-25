@@ -61,7 +61,7 @@ function MetaFromArchive(const F: TArcFileEntry): TFileMeta;
 implementation
 
 uses
-  parc_bytes, parc_crc, parc_stream, parc_outstream, parc_encoders, parc_methods, parc_recovery;
+  parc_bytes, parc_crc, parc_stream, parc_outstream, parc_encoders, parc_methods, parc_recovery, parc_progress;
 
 const
   VERSION_ARC: array[0..3] of Byte = (0, 0, 6, 7);                // FreeArc 0.67
@@ -360,7 +360,11 @@ begin
   try
     repeat
       n := Src.Read(@Buf[0], Length(Buf));
-      if n > 0 then S.WriteBuffer(Buf[0], n);
+      if n > 0 then
+      begin
+        S.WriteBuffer(Buf[0], n);
+        ProgressAdd(n);
+      end;
     until n <= 0;
   finally
     Src.Free;
@@ -403,6 +407,7 @@ var
     begin
       if Count > Length(Buf) then m := Length(Buf) else m := Count;
       CurChain.ReadExact(@Buf[0], m);
+      CheckCancel;   // lo salteado no está en el total del progreso
       Dec(Count, m);
     end;
   end;
@@ -425,6 +430,7 @@ begin
       n := G.Files[i];
       Crc := CRC_INIT;
       Size := 0;
+      if not Entries[n].Meta.IsDir then ProgressFile(Entries[n].StoredName);
       if not Entries[n].Meta.IsDir and (Entries[n].SrcArc <> nil) then
       begin
         with Entries[n] do
@@ -450,6 +456,7 @@ begin
             CurChain.ReadExact(@Buf[0], Got);
             Crc := UpdateCRC(Crc, @Buf[0], Got);
             Chain.Write(@Buf[0], Got);
+            ProgressAdd(Got);
             Inc(Size, Got);
             Dec(Remaining, Got);
           end;
@@ -470,6 +477,7 @@ begin
             begin
               Crc := UpdateCRC(Crc, @Buf[0], Got);
               Chain.Write(@Buf[0], Got);
+              ProgressAdd(Got);
               Inc(Size, Got);
             end;
           until Got <= 0;
@@ -508,6 +516,7 @@ var
   i, n: Integer;
   DirData: TBytes;
   Ok: Boolean;
+  Total: Int64;
 begin
   Result := Default(TWriteStats);
   if not EncoderAvailable(Opt.DirMethod) then
@@ -516,8 +525,18 @@ begin
     if (Groups[i].CopyFrom = nil) and not EncoderAvailable(Groups[i].Method) then
       raise EUnsupportedEncoder.CreateFmt('todavía no se puede comprimir con "%s"', [Groups[i].Method]);
 
+  // Total para el progreso: bytes a comprimir, más los comprimidos de los bloques que se copian
+  Total := 0;
+  for i := 0 to High(Groups) do
+    if Groups[i].CopyFrom <> nil then
+      Inc(Total, Groups[i].CopyFrom.DataBlocks[Groups[i].CopyBlock].CompSize)
+    else
+      for n := 0 to High(Groups[i].Files) do
+        if not Entries[Groups[i].Files[n]].Meta.IsDir then Inc(Total, Entries[Groups[i].Files[n]].Meta.Size);
+
   Tmp := FileName + '.tmp';
   Ok := False;
+  ProgressBegin('Comprimiendo', Total);
   S := TFileStream.Create(FsPath(Tmp), fmCreate);
   try
     try
@@ -551,6 +570,9 @@ begin
           SetLength(Blocks, n + 1);
           Blocks[n] := WriteDataBlock(S, Entries, Groups[i], Log, Result);
         end;
+
+      ProgressEnd;
+      CheckCancel;
 
       // Directorio (los offsets de los bloques son relativos a su posición)
       DirData := BuildDirectory(Entries, Blocks, S.Position, Opt.Parc);

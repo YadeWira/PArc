@@ -11,6 +11,18 @@ function ArgCount: Integer;
 function Arg(i: Integer): string;          // UTF-8; Arg(0) = ejecutable
 procedure OutLn(const S: string = '');      // S en UTF-8
 procedure ErrLn(const S: string);
+{ Escribe en stderr sin salto de línea (la línea de progreso, que se reescribe con #13). }
+procedure ErrWrite(const S: string);
+{ ¿stderr es una consola/terminal? (si está redirigida no se muestra el progreso) }
+function ErrIsConsole: Boolean;
+{ Ancho de la consola en columnas (80 si no se sabe). }
+function ConsoleWidth: Integer;
+
+type
+  TCancelProc = procedure;
+{ Ctrl-C (y Ctrl-Break en Windows): el primero llama a Proc (en Windows, desde otro hilo) y
+  el proceso sigue para poder limpiar; el segundo lo termina como siempre. }
+procedure InstallCancelHandler(Proc: TCancelProc);
 type
   TFileMeta = record
     Size: Int64;
@@ -46,7 +58,7 @@ function CpuCount: Integer;
 implementation
 
 uses
-  {$IFDEF WINDOWS}Windows,{$ENDIF}{$IFDEF UNIX}BaseUnix, TermIO,{$ENDIF} Classes, SysUtils;
+  {$IFDEF WINDOWS}Windows,{$ENDIF}{$IFDEF UNIX}BaseUnix, TermIO, Linux,{$ENDIF} Classes, SysUtils;
 
 var
   Args: array of string;
@@ -68,7 +80,7 @@ begin
   LocalFree(HLOCAL(argv));
 end;
 
-procedure WriteHandle(Std: DWORD; const S: string);
+procedure WriteHandle(Std: DWORD; const S: string; NewLine: Boolean = True);
 var
   h: THandle;
   W: UnicodeString;
@@ -76,7 +88,8 @@ var
   U: UTF8String;
 begin
   h := GetStdHandle(Std);
-  U := S + #13#10;
+  U := S;
+  if NewLine then U := U + #13#10;
   if GetConsoleMode(h, Mode) then
   begin
     W := UTF8Decode(U);
@@ -320,6 +333,105 @@ procedure ErrLn(const S: string);
 begin
   {$IFDEF WINDOWS}WriteHandle(STD_ERROR_HANDLE, S);{$ELSE}WriteLn(StdErr, S);{$ENDIF}
 end;
+
+procedure ErrWrite(const S: string);
+begin
+  {$IFDEF WINDOWS}WriteHandle(STD_ERROR_HANDLE, S, False);{$ELSE}Write(StdErr, S); Flush(StdErr);{$ENDIF}
+end;
+
+function ErrIsConsole: Boolean;
+{$IFDEF WINDOWS}
+var
+  Mode: DWORD;
+begin
+  Result := GetConsoleMode(GetStdHandle(STD_ERROR_HANDLE), Mode);
+end;
+{$ELSE}
+begin
+  Result := IsATTY(2) = 1;
+end;
+{$ENDIF}
+
+function ConsoleWidth: Integer;
+{$IFDEF WINDOWS}
+var
+  Info: TConsoleScreenBufferInfo;
+begin
+  if GetConsoleScreenBufferInfo(GetStdHandle(STD_ERROR_HANDLE), Info) then
+    Result := Info.srWindow.Right - Info.srWindow.Left + 1
+  else
+    Result := 80;
+end;
+{$ELSE}
+var
+  WS: TWinSize;
+begin
+  if (FpIOCtl(2, TIOCGWINSZ, @WS) = 0) and (WS.ws_col > 0) then Result := WS.ws_col
+  else Result := 80;
+end;
+{$ENDIF}
+
+var
+  CancelProc: TCancelProc = nil;
+  CancelCount: LongInt = 0;
+
+{$IFDEF WINDOWS}
+function CtrlHandler(CtrlType: DWORD): BOOL; stdcall;
+begin
+  Result := False;
+  if (CtrlType = CTRL_C_EVENT) or (CtrlType = CTRL_BREAK_EVENT) then
+    if InterlockedIncrement(CancelCount) = 1 then
+    begin
+      if CancelProc <> nil then CancelProc;
+      Result := True;           // el primero lo manejamos; el segundo sigue al default (termina)
+    end;
+end;
+
+procedure InstallCancelHandler(Proc: TCancelProc);
+begin
+  CancelProc := Proc;
+  // Un proceso creado con CREATE_NEW_PROCESS_GROUP (y sus hijos: se hereda) ignora Ctrl-C por
+  // completo, sin llegar a los manejadores; reactivarlo, que para eso instalamos uno
+  SetConsoleCtrlHandler(nil, False);
+  SetConsoleCtrlHandler(@CtrlHandler, True);
+end;
+{$ELSE}
+var
+  FirstSigMs: Int64 = 0;
+
+function MonoMs: Int64;
+var
+  T: TTimeSpec;
+begin
+  clock_gettime(CLOCK_MONOTONIC, @T);
+  Result := Int64(T.tv_sec) * 1000 + T.tv_nsec div 1000000;
+end;
+
+procedure SigIntHandler(Sig: CInt); cdecl;
+begin
+  // Solo cosas seguras en un manejador de señal (clock_gettime, kill, sigaction).
+  // Un segundo SIGINT muy pegado al primero se ignora: `timeout` y `kill -INT -<grupo>` lo
+  // mandan dos veces (al proceso y a su grupo) y no es un segundo Ctrl-C del usuario
+  Inc(CancelCount);
+  if CancelCount = 1 then
+  begin
+    FirstSigMs := MonoMs;
+    if CancelProc <> nil then CancelProc;
+  end
+  else if MonoMs - FirstSigMs > 500 then
+  begin
+    // Segundo Ctrl-C de verdad: morir por la señal, como sin manejador (el shell ve 130)
+    FpSignal(SIGINT, SignalHandler(SIG_DFL));
+    FpKill(FpGetPid, SIGINT);
+  end;
+end;
+
+procedure InstallCancelHandler(Proc: TCancelProc);
+begin
+  CancelProc := Proc;
+  FpSignal(SIGINT, @SigIntHandler);
+end;
+{$ENDIF}
 
 initialization
   {$IFDEF WINDOWS}

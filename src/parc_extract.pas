@@ -38,7 +38,7 @@ function MatchesAny(const Name: string; Masks: TStrings): Boolean;
 implementation
 
 uses
-  DateUtils, parc_os, parc_bytes, parc_crc, parc_stream, parc_methods;
+  DateUtils, parc_os, parc_bytes, parc_crc, parc_stream, parc_methods, parc_progress;
 
 const
   COPY_BUF = 1 shl 20;
@@ -131,6 +131,7 @@ begin
   begin
     if Count > Length(Buf) then n := Length(Buf) else n := Count;
     Chain.ReadExact(@Buf[0], n);
+    ProgressAdd(n);
     Dec(Count, n);
   end;
 end;
@@ -147,10 +148,33 @@ var
   n: SizeInt;
   ActualCrc: LongWord;
   F: TArcFileEntry;
-  DoWrite: Boolean;
+  DoWrite, Opened: Boolean;
+  Total: Int64;
+
+  // Hasta qué archivo hay que descomprimir el bloque b (-1: nada que hacer en él)
+  function LastWantedIn(const Blk: TArcBlock): Integer;
+  var
+    k: Integer;
+  begin
+    Result := -1;
+    for k := Blk.FirstFile to Blk.FirstFile + Blk.FileCount - 1 do
+      if not A.Files[k].IsDir and Wanted(Opt, A.Files[k].Name) then Result := k;
+  end;
+
 begin
   Result := Default(TExtractStats);
   SetLength(Buf, COPY_BUF);
+
+  // Total para el progreso: lo que se descomprime, incluidos los archivos no pedidos que hay
+  // que atravesar dentro de un bloque sólido
+  Total := 0;
+  for b := 0 to High(A.DataBlocks) do
+  begin
+    LastWanted := LastWantedIn(A.DataBlocks[b]);
+    for i := A.DataBlocks[b].FirstFile to LastWanted do
+      if not A.Files[i].IsDir then Inc(Total, A.Files[i].Size);
+  end;
+  if Opt.TestOnly then ProgressBegin('Verificando', Total) else ProgressBegin('Extrayendo', Total);
 
   // Directorios primero (incluye los vacíos, que no tienen datos)
   for i := 0 to High(A.Files) do
@@ -165,9 +189,7 @@ begin
   begin
     Blk := A.DataBlocks[b];
     // ¿Hay algo que hacer en este bloque? Si no, ni lo abrimos
-    LastWanted := -1;
-    for i := Blk.FirstFile to Blk.FirstFile + Blk.FileCount - 1 do
-      if not A.Files[i].IsDir and Wanted(Opt, A.Files[i].Name) then LastWanted := i;
+    LastWanted := LastWantedIn(Blk);
     if LastWanted < 0 then Continue;
 
     Chain := nil;
@@ -186,6 +208,7 @@ begin
             Continue;
           end;
 
+          ProgressFile(F.Name);
           OutF := nil;
           DoWrite := not Opt.TestOnly;
           if DoWrite then
@@ -203,19 +226,30 @@ begin
               OutF := TFileStream.Create(FsPath(OutName), fmCreate);
             end;
           end;
+          Opened := OutF <> nil;
           try
-            ActualCrc := CRC_INIT;
-            Remaining := F.Size;
-            while Remaining > 0 do
-            begin
-              if Remaining > Length(Buf) then n := Length(Buf) else n := Remaining;
-              Chain.ReadExact(@Buf[0], n);
-              ActualCrc := UpdateCRC(ActualCrc, @Buf[0], n);
-              if OutF <> nil then OutF.WriteBuffer(Buf[0], n);
-              Dec(Remaining, n);
+            try
+              ActualCrc := CRC_INIT;
+              Remaining := F.Size;
+              while Remaining > 0 do
+              begin
+                if Remaining > Length(Buf) then n := Length(Buf) else n := Remaining;
+                Chain.ReadExact(@Buf[0], n);
+                ActualCrc := UpdateCRC(ActualCrc, @Buf[0], n);
+                if OutF <> nil then OutF.WriteBuffer(Buf[0], n);
+                ProgressAdd(n);
+                Dec(Remaining, n);
+              end;
+            finally
+              OutF.Free;
             end;
-          finally
-            OutF.Free;
+          except
+            // Cancelado a mitad de un archivo: no dejarlo a medias en el disco
+            on EOperationCancelled do
+            begin
+              if Opened then DeleteFile(FsPath(OutName));
+              raise;
+            end;
           end;
           ActualCrc := ActualCrc xor CRC_INIT;
           if OutF <> nil then RestoreMeta(OutName, F);
@@ -247,6 +281,8 @@ begin
       Chain.Free;
     end;
   end;
+
+  ProgressEnd;
 
   // Las fechas de los directorios se ponen al final (escribir adentro las cambia)
   if not Opt.TestOnly and not Opt.FlatNames then

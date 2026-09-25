@@ -66,7 +66,7 @@ function DictEncode(Buf: PByte; BufSize: SizeInt; var CharCounts: TDictCharCount
 implementation
 
 uses
-  Math, parc_methods;
+  Math, parc_methods, parc_progress;
 
 const
   USE_DICT2 = 1;
@@ -287,11 +287,13 @@ var
   hh: Word;
   n, r, counter: Integer;
   SH: PScanSlot;
+  Tick: LongWord;
 label
   found2, lend, search_max, found_max, search_less, lfound;
 
 begin
   // Máximo de palabras: 1/32 de la entrada; hash del doble
+  Tick := 0;
   MaxWords := RoundUpPow2(Max(BufSize div 32, 32768));
   SetLength(W, MaxWords);
   NWords := 0;
@@ -417,6 +419,9 @@ begin
       Inc(CC^[Buf[p0]]);
       Inc(p0);
     end;
+    // Cancelación: phase1 de un bloque de 128 MB son segundos sin emitir nada
+    Inc(Tick);
+    if Tick and $FFFF = 0 then CheckCancel;
   until not (p < EndBuf);
 
   while p < BufSize do
@@ -770,7 +775,9 @@ var
   Cnt: ^TDictCharCounts;
   HS, HM: LongWord;
   k: SizeInt;
+  Tick: LongWord;
 begin
+  Tick := 0;
   HB := @HashBits[0]; CWs := @CodeWords[0]; Cnt := CC; HS := HashSize; HM := HashMask;
   DataLen := 0;
   B := Buf;
@@ -826,6 +833,8 @@ begin
       O[op] := c; Inc(op);
     end;
     if op >= OutLimit then Exit(1);  // ya no alcanza MinCompression (o no entra en el buffer del C)
+    Inc(Tick);
+    if Tick and $FFFF = 0 then CheckCancel;
   until not (p < BufSize);
   DataLen := op - DictLen;
   Result := 0;
@@ -846,6 +855,7 @@ var
     t2 := GetTickCount64;
     S.Ms[k] := t2 - t;
     t := t2;
+    CheckCancel;
   end;
 
 begin

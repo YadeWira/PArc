@@ -24,7 +24,7 @@ unit parc_lzmaenc;
 interface
 
 uses
-  SysUtils, parc_outstream;
+  SysUtils, parc_outstream, parc_progress;
 
 type
   ELzmaEncParams = class(Exception);
@@ -2357,6 +2357,9 @@ var
   data: PByte;
   curByte: LongWord;
 begin
+  // Cancelación cada ~128 KB de entrada: en :max un Write grande (o un bloque de 4x4, en un
+  // hilo del pool) son segundos sin emitir nada
+  CheckCancel;
   if needInit then
   begin
     MfInit(@mf);

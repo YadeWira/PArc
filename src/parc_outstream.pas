@@ -66,6 +66,9 @@ type
 
 implementation
 
+uses
+  parc_progress;
+
 { TOutStage }
 
 constructor TOutStage.Create(ATarget: TOutStage);
@@ -86,6 +89,9 @@ end;
 
 procedure TOutStage.Emit(Buf: PByte; Count: SizeInt);
 begin
+  // Cancelación también entre etapas: un Write de 1 MB puede disparar segundos de trabajo río
+  // abajo (rep:2040m acumula y lzma:max lo comprime de a trozos)
+  CheckCancel;
   if Count > 0 then FTarget.Write(Buf, Count);
 end;
 
