@@ -164,6 +164,18 @@ begin
   end;
 end;
 
+function NoSolid(const Method: string): Boolean;
+var
+  Stage, Name: string;
+begin
+  for Stage in Method.Split(['+']) do
+  begin
+    Name := Stage.Split([':'])[0];
+    if (Name = 'tta') or (Name = 'mm') then Exit(True);
+  end;
+  Result := False;
+end;
+
 { Orden dentro de un bloque sólido: grupo de arc.groups, extensión, nombre (inserción simple:
   los bloques típicos tienen miles de archivos, no millones). }
 procedure SortGroupFiles(var G: TSolidGroup; const Entries: TWriteEntryArray);
@@ -223,9 +235,12 @@ begin
     begin
       M := MethodForGroup(GM, FileGroup(Entries[i].StoredName));
       if M = '' then M := 'storing';
+      // tta y mm no admiten sólido (doit "nosolid?" en C_TTA.h/C_MM.h): cada WAV/BMP tiene su
+      // propia cabecera y sus parámetros, así que va en su propio bloque
       k := -1;
-      for g := 0 to High(Groups) do
-        if Groups[g].Method = M then k := g;
+      if not NoSolid(M) then
+        for g := 0 to High(Groups) do
+          if Groups[g].Method = M then k := g;
       if k < 0 then
       begin
         k := Length(Groups);

@@ -272,7 +272,8 @@ begin
   FWordSize := hdr[2];
   if (FNumChan = 0) then Corrupt('mm: num_chan = 0');
   FByteSize := (FWordSize + 7) div 8;
-  if (FByteSize < 1) or (FByteSize > 4) then Corrupt('mm: word_size inválido');
+  // byte_size > 4: el switch de mm.cpp no tiene rama y los datos pasan tal cual
+  if FByteSize < 1 then Corrupt('mm: word_size inválido');
   FN := FNumChan * FByteSize;
   Source.ReadExact(@b4[0], 4);
   offset := LongInt(LongWord(b4[0]) or (LongWord(b4[1]) shl 8) or
@@ -326,7 +327,7 @@ begin
     3: Undiff3(@FBuf[0], n, FNumChan, @FBase[0]);
     4: Undiff4(@FBuf[0], n, FNumChan, @FBase[0]);
   else
-    Corrupt('mm: byte_size inválido');
+    ;   // byte_size > 4: sin undiff, como el switch sin rama de mm.cpp
   end;
   Result := True;
 end;

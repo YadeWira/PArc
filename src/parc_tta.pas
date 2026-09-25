@@ -129,9 +129,15 @@ type
     px, pl: Integer;
   end;
 
-function Swap16(x: LongWord): LongWord; inline;
+{ SWAP16 de ttaenc.h:57 INVIERTE el orden de los 16 bits (bit 0 <-> bit 15), no intercambia
+  bytes: con el intercambio de bytes los WAV float de 32 bits se decodificaban mal. }
+function Swap16(x: LongWord): LongWord;
+var
+  i: Integer;
 begin
-  Result := ((x and $00FF) shl 8) or ((x and $FF00) shr 8);
+  Result := 0;
+  for i := 0 to 15 do
+    if (x and (LongWord(1) shl i)) <> 0 then Result := Result or (LongWord(1) shl (15 - i));
 end;
 
 function Predictor1(x: LongInt; k: Integer): LongInt; inline;
@@ -247,6 +253,7 @@ begin
                  FLT_SET[2][FLevel - 1][FByteSize - 1][2]);
   last := 0;
   p := Data;
+  if Len = 0 then Exit;   // Len es LongWord: Len - 1 daría la vuelta
   for i := 0 to Len - 1 do
   begin
     if f3.order <> 0 then FilterDecompress(@f3, p);
@@ -384,6 +391,7 @@ begin
   k0 := 10; k1 := 10;
   sum0 := SHIFT16[k0]; sum1 := SHIFT16[k1];
   p := Ch;
+  if Len = 0 then Exit;   // Len es LongWord: Len - 1 daría la vuelta
   for i := 0 to Len - 1 do
   begin
     unary := GetUnary;
@@ -446,6 +454,13 @@ begin
   FNumChan := b4[2];
   FWordSize := b4[3];
   FByteSize := (FWordSize + 7) div 8;
+  // tta.cpp:430: con nivel 0 el resto de la cabecera no importa (los datos que no son audio
+  // y tta:m0 se guardan con cabecera 00 00 00 00): copiar tal cual
+  if FLevel = 0 then
+  begin
+    FStored := True;
+    Exit;
+  end;
   if (FLevel > 3) or (FRawData > 1) or (FNumChan = 0) or
      ((FIsFloat <> 0) and (FByteSize <> 4)) or
      ((FIsFloat = 0) and (FByteSize >= 4)) then
