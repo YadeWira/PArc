@@ -379,8 +379,8 @@ begin
     '-':        Result := '';
     '--':       Result := Old;
     '', '+':    if Old <> '' then Result := Old else Result := Recommended;
-    '0.1%':     Result := '0*4096';
-    '0.01%':    Result := '0*65536';
+    '0.1%':     Result := '0*4kb';     // lo que guarda arc.exe 0.67.1 (el fuente dice 0*4096)
+    '0.01%':    Result := '0*64kb';    // ídem (el fuente dice 0*65536)
   else
     Result := Opt;
   end;

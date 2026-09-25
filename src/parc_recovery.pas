@@ -222,54 +222,94 @@ begin
   B[High(B) - 1] := Byte(V shr 16); B[High(B)] := Byte(V shr 24);
 end;
 
-{ Parsea el texto de -rr. Devuelve en Wanted el tamaño pedido y en FixedSize el
-  sector_size explícito (0 si no se pidió). }
-function ParseRrSpec(const Spec: string; ArcSize: Int64; out Wanted: Int64;
-                     out FixedSize: Integer): Boolean;
+{ parseNumber de FreeArc (Utils.hs): dígitos y un especificador; k/m/g/t (y b) dan bytes,
+  '^' es 2^N, cualquier otro carácter se devuelve tal cual. Sin especificador, Default. }
+function ParseNumber(const S: string; Default: Char; out Num: Int64; out Spec: Char): Boolean;
 var
-  s: string;
-  p: Integer;
-  n: Int64;
-  mult: Int64;
-  dig: string;
+  i: Integer;
+  t: string;
 begin
-  Result := False; Wanted := 0; FixedSize := 0;
+  t := LowerCase(S) + Default;
+  i := 1;
+  while (i <= Length(t)) and (t[i] in ['0'..'9']) do Inc(i);
+  Num := StrToInt64Def(Copy(t, 1, i - 1), -1);
+  if i = 1 then Num := 0;   // readI "" = 0
+  Spec := t[i];
+  Result := Num >= 0;
+  case Spec of
+    'b': ;
+    'k': Num := Num shl 10;
+    'm': Num := Num shl 20;
+    'g': Num := Num shl 30;
+    't': Num := Num shl 40;
+    '^': Num := Int64(1) shl Num;
+  else
+    Exit;
+  end;
+  Spec := 'b';
+end;
+
+{ parseSize: como ParseNumber con bytes por defecto; otro especificador es error. }
+function ParseSize(const S: string; out Num: Int64): Boolean;
+var
+  c: Char;
+begin
+  Result := ParseNumber(S, 'b', Num, c) and (c = 'b');
+end;
+
+{ El texto de -rr como ArcRecover.hs (writeRecoveryBlocks):
+    "r;ss"   cantidad r (como abajo) con sector de ss bytes;
+    "n*ss"   n*ss bytes de recuperación exactos, sector de ss (los dos con parseSize);
+    "r"      parseNumber con 's' por defecto: N o Ns = N*512, Nb/Nk/Nm = bytes, N% o Np =
+             N * ceil(arcsize/100).
+  Devuelve lo pedido (Wanted), el sector explícito (FixedSize, 0 si no hay) y, en la forma
+  n*ss, el tamaño exacto (ExplicitRec, -1 si no hay). }
+function ParseRrSpec(const Spec: string; ArcSize: Int64; out Wanted: Int64;
+                     out FixedSize: Integer; out ExplicitRec: Int64): Boolean;
+var
+  s, amount: string;
+  p: Integer;
+  n, ss: Int64;
+  c: Char;
+begin
+  Result := False; Wanted := 0; FixedSize := 0; ExplicitRec := -1;
   s := Trim(Spec);
   if s = '' then Exit;
-  // forma "n*size": sector_size explícito
-  p := Pos('*', s);
+  amount := s;
+  p := Pos(';', s);
   if p > 0 then
   begin
-    dig := Copy(s, 1, p - 1);
-    n := StrToInt64Def(dig, -1);
-    if n < 0 then Exit;
-    dig := Copy(s, p + 1, MaxInt);
-    mult := 1;
-    if (dig <> '') and (dig[Length(dig)] = 'b') then Delete(dig, Length(dig), 1);
-    if (dig <> '') and (dig[Length(dig)] = 's') then
-    begin mult := 512; Delete(dig, Length(dig), 1); end;
-    FixedSize := StrToInt64Def(dig, -1);
-    if FixedSize < 1 then Exit;
-    Wanted := n * FixedSize;
-    Result := True;
-    Exit;
-  end;
-  // sufijo
-  mult := 1;
-  if (s <> '') and (s[Length(s)] = 'b') then Delete(s, Length(s), 1);
-  if (s <> '') and (s[Length(s)] = 's') then begin mult := 512; Delete(s, Length(s), 1); end;
-  if (s <> '') and ((s[Length(s)] = '%') or (s[Length(s)] = 'p')) then
+    amount := Copy(s, 1, p - 1);
+    if not ParseSize(Copy(s, p + 1, MaxInt), ss) then Exit;
+    FixedSize := ss;
+  end
+  else
   begin
-    Delete(s, Length(s), 1);
-    n := StrToInt64Def(s, -1);
-    if n < 0 then Exit;
-    Wanted := (ArcSize div 100) * n;
-    Result := True;
-    Exit;
+    p := Pos('*', s);
+    if p > 0 then
+    begin
+      if not ParseSize(Copy(s, 1, p - 1), n) or not ParseSize(Copy(s, p + 1, MaxInt), ss) then Exit;
+      FixedSize := ss;
+      ExplicitRec := n * ss;
+      amount := '';
+    end;
   end;
-  n := StrToInt64Def(s, -1);
-  if n < 0 then Exit;
-  Wanted := n * mult;
+  // Sectores de menos de 512 bytes: FreeArc se queda sin memoria (-rr4096*8 da "-12,918
+  // recovery sectors"); acá, un error claro
+  if (FixedSize <> 0) and (FixedSize < 512) then Exit;
+  if ExplicitRec >= 0 then
+    Wanted := 0   // (no se usa: rec_size = ExplicitRec)
+  else
+  begin
+    if not ParseNumber(amount, 's', n, c) then Exit;
+    case c of
+      'b': Wanted := n;
+      's': Wanted := n * 512;
+      '%', 'p': Wanted := n * ((ArcSize + 99) div 100);   // arcsize `divRoundUp` 100
+    else
+      Exit;
+    end;
+  end;
   Result := True;
 end;
 
@@ -278,7 +318,7 @@ function RecoveryPlan(ArcSize: Int64; const Spec: string;
                       out SectorSize, RecSectors: Integer;
                       out SectorsSize, CrcsSize: Int64): Boolean;
 var
-  wanted: Int64;
+  wanted, explicit_rec: Int64;
   fixed_size: Integer;
   arc_sectors, crcs_size0, rec_size: Int64;
   t: Integer;
@@ -286,7 +326,7 @@ var
 begin
   Result := False;
   SectorSize := 0; RecSectors := 0; SectorsSize := 0; CrcsSize := 0;
-  if not ParseRrSpec(Spec, ArcSize, wanted, fixed_size) then Exit;
+  if not ParseRrSpec(Spec, ArcSize, wanted, fixed_size, explicit_rec) then Exit;
   if wanted < 0 then Exit;
   if fixed_size > 0 then
     SectorSize := fixed_size
@@ -302,12 +342,19 @@ begin
   end;
   arc_sectors := (ArcSize + SectorSize - 1) div SectorSize;
   crcs_size0 := arc_sectors * 4;
-  rec_size := wanted;
-  if crcs_size0 > rec_size then rec_size := crcs_size0;
-  RecSectors := (rec_size - crcs_size0 + SectorSize - 1) div SectorSize;
-  if RecSectors < 0 then RecSectors := 0;
-  SectorsSize := RecSectors * SectorSize;
-  CrcsSize := crcs_size0 + RecSectors * 4;
+  if explicit_rec >= 0 then rec_size := explicit_rec
+  else
+  begin
+    rec_size := wanted;
+    if crcs_size0 > rec_size then rec_size := crcs_size0;
+  end;
+  // (FreeArc puede dar negativo con n*ss chico y archivo grande; acá queda en 0: solo CRCs)
+  if rec_size > crcs_size0 then
+    RecSectors := (rec_size - crcs_size0 + SectorSize - 1) div SectorSize
+  else
+    RecSectors := 0;
+  SectorsSize := Int64(RecSectors) * SectorSize;
+  CrcsSize := crcs_size0 + Int64(RecSectors) * 4;
   Result := True;
 end;
 
@@ -315,42 +362,20 @@ function RecoveryBuild(Arc: TStream; ArcSize, ProtectedFrom, CrcsBlockPos: Int64
                        const Spec: string; out Sectors, Crcs: TBytes;
                        out Info: TRecoveryInfo): Boolean;
 var
-  wanted, rec_size, arc_sectors, rec_sectors, i64, k: Int64;
-  sector_size, fixed_size: Integer;
-  crcs_size0, crcs_size, rec_sectors_size: Int64;
+  arc_sectors, rec_sectors, i64, k: Int64;
+  sector_size: Integer;
+  crcs_size, rec_sectors_size: Int64;
   l: LongWord;
   buf: TBytes;
   n, got, idx: SizeInt;
-  i, t: Integer;
+  i, rs: Integer;
 begin
   Result := False;
   SetLength(Sectors, 0); SetLength(Crcs, 0);
-  if not ParseRrSpec(Spec, ArcSize, wanted, fixed_size) then Exit;
-  if wanted < 0 then Exit;
-  // sector_size: explícito, o 2^floor(log2(40*arcsize div wanted)), mínimo 512
-  if fixed_size > 0 then
-    sector_size := fixed_size
-  else if wanted = 0 then
-    sector_size := 4096
-  else
-  begin
-    t := 0;
-    if wanted > 0 then
-    begin
-      i64 := (40 * ArcSize) div wanted;
-      while (QWord(1) shl (t + 1)) <= QWord(i64) do Inc(t);
-    end;
-    sector_size := 1 shl t;
-    if sector_size < 512 then sector_size := 512;
-  end;
+  // Los tamaños salen de RecoveryPlan: una sola implementación de la gramática de -rr
+  if not RecoveryPlan(ArcSize, Spec, sector_size, rs, rec_sectors_size, crcs_size) then Exit;
+  rec_sectors := rs;
   arc_sectors := (ArcSize + sector_size - 1) div sector_size;
-  crcs_size0 := arc_sectors * 4;
-  rec_size := wanted;
-  if crcs_size0 > rec_size then rec_size := crcs_size0;
-  rec_sectors := (rec_size - crcs_size0 + sector_size - 1) div sector_size;
-  if rec_sectors < 0 then rec_sectors := 0;
-  rec_sectors_size := rec_sectors * sector_size;
-  crcs_size := crcs_size0 + rec_sectors * 4;
 
   Info.Version := '0.36';
   if rec_sectors = 0 then Info.Version := '0.39';

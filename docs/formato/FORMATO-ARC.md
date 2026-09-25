@@ -392,12 +392,29 @@ consecutivos, ambos con método `aNO_COMPRESSION`:
 Se escriben en `rrPos` (el final de los datos) y `lt` los reporta como
 "N recovery sectors (X bytes) present".
 
+**Footer provisional** (`ArcvProcessRead.hs:85-93`). Antes de los RECOVERY_BLOCK se
+escribe un FOOTER_BLOCK completo con la lista `header + directorio` y recovery `""`;
+`rrPos` queda *después* de él, así que el registro también lo protege. Después de los
+dos RECOVERY_BLOCK se escribe el footer definitivo (lista `header + directorio +
+recovery`, sin el provisional, y el texto de `-rr`). Sin el provisional el archivo es
+válido pero no idéntico al de FreeArc: `arcsize` y la paridad de la cola cambian.
+
+**Gramática de `-rr`** (`ArcRecover.hs:104-112`, `parseNumber` de `Utils.hs`):
+`N;SS` = cantidad N con sector SS; `N*SS` = exactamente N·SS bytes con sector SS
+(los dos con `parseSize`: bytes, o `k`/`m`/`g`); si no, `parseNumber N 's'`: sin
+sufijo o `s` = N·512, `b`/`k`/`m` = bytes, `%`/`p` = N·⌈arcsize/100⌉ (`divRoundUp`).
+`-rr0.1%` y `-rr0.01%` se guardan como `0*4kb` y `0*64kb` (así lo hace arc.exe 0.67.1;
+el fuente dice `0*4096`/`0*65536`). `-rr4096*8` (sector de 8 bytes) hace que FreeArc se
+quede sin memoria; PArc lo rechaza. Verificado: con `-m0`, archivos idénticos byte a
+byte a los de arc.exe para `1%`, `0.1%`, `0.01%`, `8*4096`, `10`, `4%`, `3%;4096`, `2`,
+`1m` y `20000b`.
+
 **Derivación de parámetros** (`ArcRecover.hs:104-135`). Con `arcsize` = bytes a
 proteger y `wanted_rec_size` = lo pedido en `-rr`:
 
 | cantidad | fórmula |
 |---|---|
-| `wanted_rec_size` | sufijo `b` = bytes, `s` = n·512, `%`/`p` = arcsize·n/100 |
+| `wanted_rec_size` | sufijo `b` = bytes, `s` (o ninguno) = n·512, `%`/`p` = n·⌈arcsize/100⌉ |
 | `sector_size` | `2^floor(log2(40·arcsize div wanted_rec_size))`, mínimo 512; con `-rr0%` es 4096 |
 | `arc_sectors` | `ceil(arcsize / sector_size)` |
 | `crcs_size0` | `arc_sectors · 4` (un CRC de 4 bytes por sector) |

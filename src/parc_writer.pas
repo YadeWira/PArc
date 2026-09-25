@@ -607,7 +607,15 @@ begin
       SetLength(Control, 2);
       Control[1] := WriteControlBlock(S, Opt.Parc, DIR_BLOCK, Opt.DirMethod, DirData, Opt.Encryption, Opt.HeadersPassword);
 
-      if Opt.Recovery <> '' then WriteRecovery(S, Opt.Parc, Opt.Recovery, Control);
+      if Opt.Recovery <> '' then
+      begin
+        // Como ArcvProcessRead.hs: primero un footer provisional (encabezado y directorio, sin
+        // recovery), que el registro también protege; al final se repite con la lista entera.
+        // Sin él, los bloques de recuperación caen en otro lugar y la paridad de la cola cambia
+        WriteControlBlock(S, Opt.Parc, FOOTER_BLOCK, Opt.DirMethod, BuildFooter(Control, S.Position, Opt.Comment, ''),
+          Opt.Encryption, Opt.HeadersPassword);
+        WriteRecovery(S, Opt.Parc, Opt.Recovery, Control);
+      end;
       // Footer (las posiciones de los bloques de control, relativas a la del footer)
       WriteControlBlock(S, Opt.Parc, FOOTER_BLOCK, Opt.DirMethod, BuildFooter(Control, S.Position, Opt.Comment, Opt.Recovery),
         Opt.Encryption, Opt.HeadersPassword);
