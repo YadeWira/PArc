@@ -129,8 +129,11 @@ function FsPath(const P: string): string;
 var
   F: string;
 begin
-  if (Length(P) < 240) or (Copy(P, 1, 4) = '\\?\') then Exit(P);
+  if Copy(P, 1, 4) = '\\?\' then Exit(P);
+  // El límite de MAX_PATH es sobre la ruta ABSOLUTA: una relativa corta dentro de un
+  // directorio actual largo también se pasa (x -dpdestino con nombres largos fallaba)
   F := StringReplace(ExpandFileName(P), '/', '\', [rfReplaceAll]);
+  if Length(F) < 240 then Exit(P);
   if Copy(F, 1, 4) = '\\?\' then Result := F
   else if Copy(F, 1, 2) = '\\' then Result := '\\?\UNC\' + Copy(F, 3, MaxInt)   // \\servidor\recurso
   else Result := '\\?\' + F;
