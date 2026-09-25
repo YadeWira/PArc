@@ -290,18 +290,30 @@ end;
   Los solapamientos (dist < len) son legales: se copia byte a byte. }
 procedure TLzmaDecoder.CopyMatch(Limit: SizeInt);
 var
-  Src: SizeInt;
+  Src, n, k, Dist: SizeInt;
+  D, S: PByte;
 begin
   Src := DicPos - SizeInt(Rep0) - 1;
   if Src < 0 then Inc(Src, DictSize);
+  Dist := SizeInt(Rep0) + 1;
+  // Por tramos: hasta Limit, hasta el fin del diccionario (la fuente da la vuelta) y lo que
+  // falte del match; los contadores se actualizan una vez por tramo
   while (RemainLen > 0) and (DicPos < Limit) do
   begin
-    Dict[DicPos] := Dict[Src];
-    Inc(DicPos);
-    Inc(Src);
+    n := Limit - DicPos;
+    if n > SizeInt(RemainLen) then n := RemainLen;
+    if n > DictSize - Src then n := DictSize - Src;
+    D := Dict + DicPos;
+    S := Dict + Src;
+    if Dist >= n then
+      Move(S^, D^, n)                  // sin solapamiento
+    else
+      for k := 0 to n - 1 do D[k] := S[k];   // solapado (dist < len): byte a byte, hacia adelante
+    Inc(DicPos, n);
+    Inc(Src, n);
     if Src = DictSize then Src := 0;
-    Dec(RemainLen);
-    Inc(TotalPos);
+    Dec(RemainLen, n);
+    Inc(TotalPos, n);
   end;
 end;
 

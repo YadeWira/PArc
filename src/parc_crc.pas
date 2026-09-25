@@ -1,6 +1,7 @@
 { CRC-32 IEEE (poli 0xEDB88320), igual al UpdateCRC de FreeArc y a zlib.crc32.
-  "Slicing-by-8": 8 tablas procesan 8 bytes por iteración en vez de 1 (el mismo resultado,
-  varias veces más rápido; es lo que usa FreeArc en CompressionLibrary.cpp). }
+  "Slicing-by-16": 16 tablas procesan 16 bytes por iteración en vez de 1 (el mismo resultado,
+  varias veces más rápido), con lecturas de 32 bits: las plataformas de PArc (x86, x64) son
+  little-endian y leen sin alinear sin costo. En big-endian se usa el camino de a un byte. }
 unit parc_crc;
 
 {$mode objfpc}{$H+}
@@ -17,7 +18,7 @@ function CalcCRC(Data: PByte; Len: SizeUInt): LongWord;
 implementation
 
 var
-  T: array[0..7, Byte] of LongWord;
+  T: array[0..15, Byte] of LongWord;
 
 procedure InitTables;
 var
@@ -34,28 +35,35 @@ begin
   end;
   // T[k][i] = CRC de i seguido de k bytes en cero
   for i := 0 to 255 do
-    for k := 1 to 7 do
+    for k := 1 to 15 do
       T[k][i] := (T[k - 1][i] shr 8) xor T[0][T[k - 1][i] and $FF];
 end;
 
 function UpdateCRC(Crc: LongWord; Data: PByte; Len: SizeUInt): LongWord;
+{$IFDEF ENDIAN_LITTLE}
 var
-  a, b: LongWord;
+  a, b, c, d: LongWord;
 begin
-  // Hasta alinear no hace falta: los bytes se leen de a uno y se arman en little-endian
-  while Len >= 8 do
+  while Len >= 16 do
   begin
-    a := Crc xor (LongWord(Data[0]) or (LongWord(Data[1]) shl 8) or
-                  (LongWord(Data[2]) shl 16) or (LongWord(Data[3]) shl 24));
-    b := LongWord(Data[4]) or (LongWord(Data[5]) shl 8) or
-         (LongWord(Data[6]) shl 16) or (LongWord(Data[7]) shl 24);
-    Crc := T[7][a and $FF] xor T[6][(a shr 8) and $FF] xor
-           T[5][(a shr 16) and $FF] xor T[4][a shr 24] xor
-           T[3][b and $FF] xor T[2][(b shr 8) and $FF] xor
-           T[1][(b shr 16) and $FF] xor T[0][b shr 24];
-    Inc(Data, 8);
-    Dec(Len, 8);
+    a := Crc xor PLongWord(Data)^;
+    b := PLongWord(Data + 4)^;
+    c := PLongWord(Data + 8)^;
+    d := PLongWord(Data + 12)^;
+    Crc := T[15][a and $FF] xor T[14][(a shr 8) and $FF] xor
+           T[13][(a shr 16) and $FF] xor T[12][a shr 24] xor
+           T[11][b and $FF] xor T[10][(b shr 8) and $FF] xor
+           T[9][(b shr 16) and $FF] xor T[8][b shr 24] xor
+           T[7][c and $FF] xor T[6][(c shr 8) and $FF] xor
+           T[5][(c shr 16) and $FF] xor T[4][c shr 24] xor
+           T[3][d and $FF] xor T[2][(d shr 8) and $FF] xor
+           T[1][(d shr 16) and $FF] xor T[0][d shr 24];
+    Inc(Data, 16);
+    Dec(Len, 16);
   end;
+{$ELSE}
+begin
+{$ENDIF}
   while Len > 0 do
   begin
     Crc := T[0][Byte(Crc) xor Data^] xor (Crc shr 8);
