@@ -22,6 +22,12 @@ uses
   SysUtils, parc_stream;
 
 type
+  TDictParams = record
+    BlockSize: SizeInt;
+    MinCompression: Integer;
+    MinWeakChars, MinLargeCnt, MinMediumCnt, MinSmallCnt, MinRatio: Integer;
+  end;
+
   TDictStage = class(TInStage)
   private
     FBlockSize: SizeInt;
@@ -36,6 +42,13 @@ type
 
 { Tamaño de bloque como parse_DICT (b<mem>, o una memoria sin nombre; el resto es del compresor). }
 function ParseDictBlockSize(const Params: TStringArray): SizeInt;
+
+{ Parámetros completos de dict, como parse_DICT (C_Dict.cpp). Defaults de
+  DICT_METHOD: 64mb, MinCompression 100%, MinWeakChars 20, 2048/100/50/4.
+  Parámetros: b<mem> BlockSize, c<n> MinWeakChars, l/m/s<n> MinLargeCnt/ Medium/
+  Small, r<n> MinRatio, p y f son presets, "N%" MinCompression, y un parámetro
+  desnudo es un entero = MinWeakChars o una memoria = BlockSize. }
+function ParseDictParams(const Params: TStringArray): TDictParams;
 
 { DictDecode: devuelve los bytes producidos o -1 si los datos son inválidos. }
 function DictDecode(Src: PByte; SrcLen: SizeInt; Dst: PByte; DstCap: SizeInt): SizeInt;
@@ -53,6 +66,59 @@ type
     Len: SizeInt;
     Ptr: SizeInt;   // offset en el buffer de palabras
   end;
+
+
+function ParseDictParams(const Params: TStringArray): TDictParams;
+var
+  k, n: Integer;
+  p: string;
+  m: QWord;
+begin
+  Result.BlockSize := 64 shl 20;
+  Result.MinCompression := 100;
+  Result.MinWeakChars := 20;
+  Result.MinLargeCnt := 2048;
+  Result.MinMediumCnt := 100;
+  Result.MinSmallCnt := 50;
+  Result.MinRatio := 4;
+  for k := 1 to High(Params) do
+  begin
+    p := Params[k];
+    if p = '' then Continue;
+    if Length(p) = 1 then
+    begin
+      case p[1] of
+        'p': begin
+               Result.MinLargeCnt := 8192; Result.MinMediumCnt := 400;
+               Result.MinSmallCnt := 100; Result.MinRatio := 4; Continue;
+             end;
+        'f': begin
+               Result.MinLargeCnt := 2048; Result.MinMediumCnt := 100;
+               Result.MinSmallCnt := 50; Result.MinRatio := 0; Continue;
+             end;
+      end;
+    end
+    else
+      case p[1] of
+        'b': begin if ParseMem(Copy(p, 2, MaxInt), m) then Result.BlockSize := m; Continue; end;
+        'c': begin Result.MinWeakChars := StrToIntDef(Copy(p, 2, MaxInt), Result.MinWeakChars); Continue; end;
+        'l': begin Result.MinLargeCnt := StrToIntDef(Copy(p, 2, MaxInt), Result.MinLargeCnt); Continue; end;
+        'm': begin Result.MinMediumCnt := StrToIntDef(Copy(p, 2, MaxInt), Result.MinMediumCnt); Continue; end;
+        's': begin Result.MinSmallCnt := StrToIntDef(Copy(p, 2, MaxInt), Result.MinSmallCnt); Continue; end;
+        'r': begin Result.MinRatio := StrToIntDef(Copy(p, 2, MaxInt), Result.MinRatio); Continue; end;
+      end;
+    { "N%": MinCompression. En el C se prueba ANTES que el parámetro desnudo. }
+    if p[Length(p)] = '%' then
+    begin
+      n := StrToIntDef(Copy(p, 1, Length(p) - 1), -1);
+      if n >= 0 then begin Result.MinCompression := n; Continue; end;
+    end;
+    { Desnudo: un entero es MinWeakChars y una memoria es BlockSize. }
+    n := StrToIntDef(p, -1);
+    if n >= 0 then Result.MinWeakChars := n
+    else if ParseMem(p, m) then Result.BlockSize := m;
+  end;
+end;
 
 function ParseDictBlockSize(const Params: TStringArray): SizeInt;
 var
