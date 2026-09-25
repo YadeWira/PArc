@@ -68,7 +68,7 @@ implementation
 
 uses
   parc_filters, parc_ppmd, parc_methods, parc_lzp, parc_parallel, parc_lzmaenc,
-  parc_repenc, parc_deltaenc, parc_dictenc, parc_ttaenc, parc_mmenc, parc_torenc;
+  parc_repenc, parc_deltaenc, parc_dictenc, parc_ttaenc, parc_mmenc, parc_torenc, parc_grzipenc;
 
 function StageName(const Stage: string): string; forward;
 
@@ -321,7 +321,7 @@ begin
           if not EncoderAvailable(Inner) then Exit(False);
         end;
       'tor': if not TorEncAvailable(Stage) then Exit(False);
-      'storing', 'exe', 'ppmd', 'lzp', 'lzma', 'rep', 'delta', 'dict', 'tta', 'mm': ;
+      'storing', 'exe', 'ppmd', 'lzp', 'lzma', 'rep', 'delta', 'dict', 'tta', 'mm', 'grzip': ;
     else
       Exit(False);
     end;
@@ -348,6 +348,7 @@ begin
     'delta':   Result := TDeltaEncStage.Create(Target, Parts);
     'dict':    Result := TDictEncStage.Create(Target, Parts);
     'tor':     Result := TTorEncStage.Create(Target, Parts);
+    'grzip':   Result := TGrzipEncStage.Create(Target, Parts);
     'tta':     Result := TTtaEncStage.Create(Target, Parts);
     'mm':      Result := TMmEncStage.Create(Target, Parts);
     'lzma':

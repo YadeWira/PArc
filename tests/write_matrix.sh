@@ -57,7 +57,7 @@ mx:x
 sha_tree() { (cd "$1" && find . -type f -print0 | sort -z | xargs -0 sha256sum); }
 REF=$(sha_tree "$CORPUS/..") ; REF_SUM=$(echo "$REF" | grep ' ./corpus/' | sha256sum | cut -c1-16)
 
-ok=0; fail=0; nocod=0
+ok=0; fail=0; nocod=0; refc=0
 printf '%-13s %-9s %-9s %-9s %-10s %-10s %s\n' método 'parc a' 'unarc t' 'arc.exe t' 'arc.exe x' '.parc x' 'tiempo/tamaño'
 printf -- '-%.0s' $(seq 1 90); echo
 while IFS=: read -r key m; do
@@ -88,10 +88,16 @@ while IFS=: read -r key m; do
   px="$OUT/px_$key"; rm -rf -- "$px"; mkdir -p "$px"
   "$PARC" x "$parc" -dp"$px" >/dev/null 2>&1
   ps=$(sha_tree "$px" | grep ' ./corpus/' | sha256sum | cut -c1-16); [ "$ps" = "$REF_SUM" ] && pr=IDÉNTICO || pr=DIFIERE
-  if [ $u = OK ] && [ $a = OK ] && [ $xr = IDÉNTICO ] && [ $pr = IDÉNTICO ]; then ok=$((ok+1)); else fail=$((fail+1)); fi
-  printf '%-13s %-9s %-9s %-9s %-10s %-10s %s\n' "$key" OK "$u" "$a" "$xr" "$pr" "$t"
+  note=""
+  if [ $u = OK ] && [ $a = OK ] && [ $xr = IDÉNTICO ] && [ $pr = IDÉNTICO ]; then ok=$((ok+1))
+  elif [ $u = FALLA ] && [ $a = OK ] && [ $xr = IDÉNTICO ] && [ $pr = IDÉNTICO ]; then
+    # arc.exe (la autoridad) lo acepta y lo extrae idéntico: se cayó la referencia C (el
+    # decodificador GRZip de unarc corrompe el heap; le pasa también con .arc de arc.exe)
+    refc=$((refc+1)); u="REF-CAE"; note="  (unarc cae; arc.exe OK)"
+  else fail=$((fail+1)); fi
+  printf '%-13s %-9s %-9s %-9s %-10s %-10s %s%s\n' "$key" OK "$u" "$a" "$xr" "$pr" "$t" "$note"
   [ $KEEP = 1 ] || rm -rf -- "$x" "$px"
 done <<< "$METHODS"
 echo
-echo "===== RESUMEN escritura: $ok OK · $nocod sin codificador · $fail fallas ====="
+echo "===== RESUMEN escritura: $ok OK · $refc OK-con-unarc-caído · $nocod sin codificador · $fail fallas ====="
 [ $fail -eq 0 ]
