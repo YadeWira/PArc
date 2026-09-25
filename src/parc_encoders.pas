@@ -46,6 +46,8 @@ type
     procedure DoWrite(Buf: PByte; Count: SizeInt); override;
     procedure DoFinish; override;
   public
+    { 4x4:r<N>: con entropía order-0 >= N% un bloque ni se intenta comprimir (default 99) }
+    MinOrder0Ratio: Double;
     constructor Create(ATarget: TOutStage; const AInner: string; ABlockSize: SizeInt);
     destructor Destroy; override;
   end;
@@ -77,9 +79,9 @@ function WithoutCipher(const Method: string): string;
 implementation
 
 uses
-  parc_filters, parc_ppmd, parc_methods, parc_lzp, parc_parallel, parc_lzmaenc,
+  Math, parc_filters, parc_ppmd, parc_methods, parc_lzp, parc_parallel, parc_lzmaenc,
   parc_repenc, parc_deltaenc, parc_dictenc, parc_ttaenc, parc_mmenc, parc_torenc, parc_grzipenc,
-  parc_crypt;
+  parc_crypt, parc_canon;
 
 { ¿La etapa es de cifrado? El nombre va antes de '-' (bits) o '/' (modo): "aes-256/ctr". }
 function IsCipherStage(const Stage: string): Boolean;
@@ -102,13 +104,34 @@ type
     InBuf: TBytes;
     OrigSize: SizeInt;
     Stored: Boolean;
+    MinOrder0Ratio: Double;
     procedure Process; override;
   end;
 
+{ order0_compression_ratio (C_4x4.cpp:115): entropía order-0 del bloque / su tamaño. }
+function Order0Ratio(Buf: PByte; Size: SizeInt): Double;
+var
+  Count: array[0..255] of SizeInt;
+  i: SizeInt;
+  c: Integer;
+begin
+  FillChar(Count, SizeOf(Count), 0);
+  for i := 0 to Size - 1 do Inc(Count[Buf[i]]);   // (el C cuenta de a 4; la suma es la misma)
+  Result := 0;
+  for c := 0 to 255 do
+    if Count[c] <> 0 then
+      Result := Result + Count[c] * Log2(Size / Count[c]) / 8;
+  Result := Result / Size;
+end;
+
 procedure T4x4EncJob.Process;
 begin
-  // Como _4x4MTCompressor::Process: si no comprime, el bloque va guardado tal cual
-  if StageName(Inner) = 'tor' then
+  // Como _4x4MTCompressor::Process: un bloque de >= 32 KB casi aleatorio (order-0 >= r%) ni
+  // se intenta; y si no comprime, va guardado tal cual
+  if (MinOrder0Ratio <> 0) and (Length(InBuf) >= 32 * 1024) and
+     (Order0Ratio(PByte(InBuf), Length(InBuf)) >= MinOrder0Ratio) then
+    Stored := True
+  else if StageName(Inner) = 'tor' then
     // TORNADO_METHOD::DeCompressMem con compress_all_at_once=1; OutputSize = InSize
     Stored := not TorEncodeMem(Inner.Split([':']), PByte(InBuf), Length(InBuf), Length(InBuf), OutBuf)
   else
@@ -133,6 +156,7 @@ begin
   inherited Create(ATarget);
   FInner := AInner;
   FBlockSize := ABlockSize;
+  MinOrder0Ratio := 0.99;
   Threads := ThreadCount(16);
   SetLength(FQueue, Threads + 1);
   FPool := TJobPool.Create(Threads, Threads + 1);
@@ -176,6 +200,7 @@ begin
   Job.Inner := FInner;
   Job.InBuf := Copy(FCur, 0, FLen);
   Job.OrigSize := FLen;
+  Job.MinOrder0Ratio := MinOrder0Ratio;
   FQueue[(FHead + FCount) mod Length(FQueue)] := Job;
   Inc(FCount);
   TJobPool(FPool).Submit(Job);
@@ -308,27 +333,10 @@ begin
 end;
 
 function LimitMethodToSize(const Method: string; DataSize: Int64): string;
-var
-  Stages, Params: TStringArray;
-  k, j: Integer;
-  m, Need: QWord;
 begin
-  Need := 64 shl 10;
-  while (Need < QWord(DataSize)) and (Need < (QWord(1) shl 40)) do Need := Need shl 1;
-  Stages := Method.Split(['+']);
-  for k := 0 to High(Stages) do
-  begin
-    Params := Stages[k].Split([':']);
-    if Params[0] <> 'lzma' then Continue;
-    for j := 1 to High(Params) do
-      if (Params[j] <> '') and (StrToIntDef(Params[j], -1) < 0) and
-         ((Params[j][1] in ['0'..'9']) and ParseMem(Params[j], m) or
-          (Params[j][1] = 'd') and ParseMem(Copy(Params[j], 2, MaxInt), m)) then
-        if m > Need then
-          Params[j] := IntToStr(Need shr 10) + 'kb';
-    Stages[k] := string.Join(':', Params);
-  end;
-  Result := string.Join('+', Stages);
+  // limitDictionary + el texto canónico de cada compresor (parc_canon, PA-Lab): el mismo
+  // método que guarda FreeArc para un bloque de ese tamaño
+  Result := LimitAndCanonize(Method, DataSize);
 end;
 
 function EncoderAvailable(const Method: string): Boolean;
@@ -367,6 +375,13 @@ begin
       begin
         Parse4x4(Stage, Inner, Bs);
         Result := T4x4EncStage.Create(Target, Inner, Bs);
+        // r<percent> (antes del método interno)
+        for k := 1 to High(Parts) do
+        begin
+          if Pos(Parts[k], Inner) = 1 then Break;
+          if (Length(Parts[k]) > 1) and (Parts[k][1] = 'r') then
+            T4x4EncStage(Result).MinOrder0Ratio := StrToFloatDef(Copy(Parts[k], 2, MaxInt), 99, DefaultFormatSettings) / 100;
+        end;
       end;
     'storing': Result := TStoringStage.Create(Target);
     'rep':     Result := TRepEncStage.Create(Target, Parts);

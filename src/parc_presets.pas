@@ -34,6 +34,10 @@ function MethodForGroup(const GM: TGroupMethods; const Group: string): string;
 { Posición del grupo en arc.groups (para ordenar los archivos de un bloque sólido). }
 function GroupOrder(const Group: string): Integer;
 
+{ Las líneas de arc.groups tal cual (encabezados "$grupo" y máscaras, sin comentarios), en
+  orden: FreeArc numera los grupos por línea (find_group, Cmdline.hs). }
+function ArcGroupLines: TStringArray;
+
 implementation
 
 {$I parc_presets_data.inc}
@@ -358,6 +362,14 @@ function GroupOrder(const Group: string): Integer;
 begin
   Result := GroupNames.IndexOf(Group);
   if Result < 0 then Result := GroupNames.IndexOf('$default');
+end;
+
+function ArcGroupLines: TStringArray;
+var
+  i: Integer;
+begin
+  SetLength(Result, Length(ARC_GROUPS));
+  for i := 0 to High(ARC_GROUPS) do Result[i] := ARC_GROUPS[i];
 end;
 
 initialization

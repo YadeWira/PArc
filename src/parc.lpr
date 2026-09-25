@@ -6,7 +6,7 @@ program parc;
 
 uses
   {$IFDEF UNIX}cthreads,{$ENDIF}
-  Classes, SysUtils, DateUtils, parc_os, parc_bytes, parc_methods, parc_archive, parc_extract, parc_writer, parc_encoders, parc_presets, parc_recovery, parc_progress;
+  Classes, SysUtils, DateUtils, parc_os, parc_bytes, parc_methods, parc_archive, parc_extract, parc_writer, parc_encoders, parc_presets, parc_recovery, parc_progress, parc_filelist;
 
 const
   PARC_VERSION = '0.0.3';
@@ -246,6 +246,28 @@ begin
   if St.Errors > 0 then Result := 2 else Result := 0;
 end;
 
+{ Orden en que Windows (NTFS, y wine) devuelve un directorio: sin distinguir mayúsculas,
+  comparando en MAYÚSCULAS ('_' va después de las letras); si empatan, por bytes. }
+function CompareEntryNames(List: TStringList; A, B: Integer): Integer;
+var
+  i, n: Integer;
+  ca, cb: Byte;
+  SA, SB: string;
+begin
+  SA := List[A]; SB := List[B];
+  n := Length(SA);
+  if Length(SB) < n then n := Length(SB);
+  for i := 1 to n do
+  begin
+    ca := Ord(SA[i]); cb := Ord(SB[i]);
+    if ca in [Ord('a')..Ord('z')] then Dec(ca, 32);
+    if cb in [Ord('a')..Ord('z')] then Dec(cb, 32);
+    if ca <> cb then Exit(Integer(ca) - Integer(cb));
+  end;
+  Result := Length(SA) - Length(SB);
+  if Result = 0 then Result := CompareStr(SA, SB);
+end;
+
 { Junta las entradas a agregar: cada argumento es un archivo o un directorio (recursivo).
   Los nombres guardados son los del argumento, saneados (sin raíz ni ".."). }
 procedure CollectEntries(const Paths: TStringList; const Exclude: string; Excludes: TStrings; var Entries: TWriteEntryArray);
@@ -263,11 +285,16 @@ procedure CollectEntries(const Paths: TStringList; const Exclude: string; Exclud
     Entries[n].Meta := Meta;
   end;
 
+  { Como findFiles_FileInfo de FreeArc: primero todas las entradas del directorio (en el orden
+    de Windows: sin distinguir mayúsculas), después cada subdirectorio, en ese mismo orden. }
   procedure Walk(const Disk, Stored: string);
   var
     SR: TSearchRec;
     Meta: TFileMeta;
+    Names: TStringList;
+    Recurse: array of Boolean;
     ChildDisk, ChildStored: string;
+    i: Integer;
   begin
     // FsPath: sin el prefijo \\?\ de Windows, un directorio de ruta larga "no existe" y todo lo
     // que tiene adentro se perdía en silencio
@@ -276,23 +303,41 @@ procedure CollectEntries(const Paths: TStringList; const Exclude: string; Exclud
       ErrLn('Aviso: no se puede leer el directorio ' + Disk);
       Exit;
     end;
+    Names := TStringList.Create;
     try
-      repeat
-        if (SR.Name = '.') or (SR.Name = '..') then Continue;
-        ChildDisk := IncludeTrailingPathDelimiter(Disk) + SR.Name;
-        if Stored <> '' then ChildStored := Stored + '/' + SR.Name else ChildStored := SR.Name;
+      try
+        repeat
+          if (SR.Name = '.') or (SR.Name = '..') then Continue;
+          // No seguir enlaces simbólicos a directorios: evita ciclos
+          Names.AddObject(SR.Name, TObject(PtrInt({$IFDEF UNIX}(SR.Attr and faSymLink) = 0{$ELSE}True{$ENDIF})));
+        until FindNext(SR) <> 0;
+      finally
+        FindClose(SR);
+      end;
+      Names.CustomSort(@CompareEntryNames);
+      SetLength(Recurse, Names.Count);
+      for i := 0 to Names.Count - 1 do
+      begin
+        Recurse[i] := False;
+        ChildDisk := IncludeTrailingPathDelimiter(Disk) + Names[i];
+        if Stored <> '' then ChildStored := Stored + '/' + Names[i] else ChildStored := Names[i];
         if not GetFileMeta(ChildDisk, Meta) then
         begin
           ErrLn('Aviso: no se puede leer ' + ChildDisk);
           Continue;
         end;
         AddEntry(ChildDisk, ChildStored, Meta);
-        // No seguir enlaces simbólicos a directorios: evita ciclos
-        if Meta.IsDir {$IFDEF UNIX}and ((SR.Attr and faSymLink) = 0){$ENDIF} then
+        Recurse[i] := Meta.IsDir and (PtrInt(Names.Objects[i]) <> 0);
+      end;
+      for i := 0 to Names.Count - 1 do
+        if Recurse[i] then
+        begin
+          ChildDisk := IncludeTrailingPathDelimiter(Disk) + Names[i];
+          if Stored <> '' then ChildStored := Stored + '/' + Names[i] else ChildStored := Names[i];
           Walk(ChildDisk, ChildStored);
-      until FindNext(SR) <> 0;
+        end;
     finally
-      FindClose(SR);
+      Names.Free;
     end;
   end;
 
@@ -308,49 +353,6 @@ begin
     Stored := SanitizePath(Paths[i]);
     if Stored <> '' then AddEntry(Paths[i], Stored, Meta);   // "." o "/" no se guardan a sí mismos
     if Meta.IsDir then Walk(ExcludeTrailingPathDelimiter(Paths[i]), Stored);
-  end;
-end;
-
-function NoSolid(const Method: string): Boolean;
-var
-  Stage, Name: string;
-begin
-  for Stage in Method.Split(['+']) do
-  begin
-    Name := Stage.Split([':'])[0];
-    if (Name = 'tta') or (Name = 'mm') then Exit(True);
-  end;
-  Result := False;
-end;
-
-{ Orden de los archivos nuevos: grupo de arc.groups, extensión, nombre (archivos parecidos
-  juntos en el bloque sólido). }
-procedure SortIndices(const Idx: array of Integer; const Entries: TWriteEntryArray);
-
-  function Key(i: Integer): string;
-  var
-    Name: string;
-  begin
-    Name := Entries[i].StoredName;
-    Result := Format('%.4d', [GroupOrder(FileGroup(Name))]) + #1 +
-              LowerCase(ExtractFileExt(Name)) + #1 + Name;
-  end;
-
-var
-  Keys: TStringList;
-  i: Integer;
-  P: PInteger;
-begin
-  if Length(Idx) = 0 then Exit;
-  Keys := TStringList.Create;
-  try
-    Keys.CaseSensitive := True;
-    for i := 0 to High(Idx) do Keys.AddObject(Key(Idx[i]), TObject(PtrInt(Idx[i])));
-    Keys.Sort;
-    P := @Idx[0];   // (Idx es const para aceptar arreglos abiertos; se reordena en su lugar)
-    for i := 0 to Keys.Count - 1 do P[i] := PtrInt(Keys.Objects[i]);
-  finally
-    Keys.Free;
   end;
 end;
 
@@ -386,58 +388,53 @@ begin
   end;
 end;
 
-{ Agrupa entradas nuevas en bloques sólidos: método de su grupo de arc.groups (-m5 -> $text:
-  dict+lzp+ppmd, etc.), un bloque por método, cortado por -s. }
+{ Agrupa entradas nuevas en bloques sólidos exactamente como FreeArc 0.67 (parc_filelist):
+  orden gerpn, tipo por arc.groups y por contenido, un grupo por método y los cortes de -s,
+  de dict/grzip/lzp y de tta/mm. }
 procedure GroupNewEntries(const Entries: TWriteEntryArray; const Idx: array of Integer;
   const MO: TModifyOptions; var Groups: TSolidGroupArray);
 var
   GM: TGroupMethods;
-  i, n, g, k, j: Integer;
-  M: string;
-  Open: array of Integer;       // bloque abierto por método (índice en Groups), -1 si no
-  OpenBytes: array of Int64;
-  Methods: TStringList;
+  Files: array of TFaFile;
+  Crits: TFaCrits;
+  Blocks: TFaBlocks;
+  i, g, k: Integer;
 begin
+  if Length(Idx) = 0 then Exit;
   GM := DecodeMethod(MO.Method, CpuCount);
-  Methods := TStringList.Create;
-  try
-    // Ordenar primero (grupo de arc.groups, extensión, nombre) y después cortar por -s
-    SortIndices(Idx, Entries);
-    for j := 0 to High(Idx) do
+  SetLength(Files, Length(Idx));
+  for i := 0 to High(Idx) do
+  begin
+    Files[i].Name := Entries[Idx[i]].StoredName;
+    Files[i].DiskPath := Entries[Idx[i]].DiskPath;
+    Files[i].Size := Entries[Idx[i]].Meta.Size;
+  end;
+  // -s como parseSolidOption: -s- cada archivo solo; -s<mem> y -s<N>f cortan; sin -s, todo junto
+  Crits := nil;
+  if MO.NonSolid then
+  begin
+    SetLength(Crits, 1); Crits[0] := FaCrit(fcNone);
+  end
+  else
+  begin
+    if MO.SolidBytes > 0 then
     begin
-      i := Idx[j];
-      M := MethodForGroup(GM, FileGroup(Entries[i].StoredName));
-      if M = '' then M := 'storing';
-      k := Methods.IndexOf(M);
-      if k < 0 then
-      begin
-        k := Methods.Add(M);
-        SetLength(Open, k + 1);
-        SetLength(OpenBytes, k + 1);
-        Open[k] := -1;
-      end;
-      g := Open[k];
-      // tta/mm no admiten sólido (nosolid? de C_TTA.h/C_MM.h); -s- y los topes de -s cortan
-      if (g >= 0) and (MO.NonSolid or NoSolid(M) or
-         ((MO.SolidBytes > 0) and (OpenBytes[k] + Entries[i].Meta.Size > MO.SolidBytes)) or
-         ((MO.SolidFiles > 0) and (Length(Groups[g].Files) >= MO.SolidFiles))) then
-        g := -1;
-      if g < 0 then
-      begin
-        g := Length(Groups);
-        SetLength(Groups, g + 1);
-        Groups[g] := Default(TSolidGroup);
-        Groups[g].Method := M;
-        Open[k] := g;
-        OpenBytes[k] := 0;
-      end;
-      n := Length(Groups[g].Files);
-      SetLength(Groups[g].Files, n + 1);
-      Groups[g].Files[n] := i;
-      Inc(OpenBytes[k], Entries[i].Meta.Size);
+      SetLength(Crits, Length(Crits) + 1); Crits[High(Crits)] := FaCrit(fcSize, MO.SolidBytes);
     end;
-  finally
-    Methods.Free;
+    if MO.SolidFiles > 0 then
+    begin
+      SetLength(Crits, Length(Crits) + 1); Crits[High(Crits)] := FaCrit(fcNumber, MO.SolidFiles);
+    end;
+  end;
+  Blocks := FaSolidBlocks(Files, GM, Crits, FaDetectLevel(MO.Method));
+  for i := 0 to High(Blocks) do
+  begin
+    g := Length(Groups);
+    SetLength(Groups, g + 1);
+    Groups[g] := Default(TSolidGroup);
+    Groups[g].Method := Blocks[i].Method;
+    SetLength(Groups[g].Files, Length(Blocks[i].Files));
+    for k := 0 to High(Blocks[i].Files) do Groups[g].Files[k] := Idx[Blocks[i].Files[k]];
   end;
 end;
 
