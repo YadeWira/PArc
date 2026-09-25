@@ -68,7 +68,7 @@ implementation
 
 uses
   parc_filters, parc_ppmd, parc_methods, parc_lzp, parc_parallel, parc_lzmaenc,
-  parc_repenc, parc_deltaenc;
+  parc_repenc, parc_deltaenc, parc_dictenc;
 
 type
   T4x4EncJob = class(TParallelJob)
@@ -310,7 +310,7 @@ begin
           Parse4x4(Stage, Inner, Bs);
           if not EncoderAvailable(Inner) then Exit(False);
         end;
-      'storing', 'exe', 'ppmd', 'lzp', 'lzma', 'rep', 'delta': ;
+      'storing', 'exe', 'ppmd', 'lzp', 'lzma', 'rep', 'delta', 'dict': ;
     else
       Exit(False);
     end;
@@ -335,6 +335,7 @@ begin
     'storing': Result := TStoringStage.Create(Target);
     'rep':     Result := TRepEncStage.Create(Target, Parts);
     'delta':   Result := TDeltaEncStage.Create(Target, Parts);
+    'dict':    Result := TDictEncStage.Create(Target, Parts);
     'lzma':
       // Con marca de fin: en los bloques de datos el decodificador de FreeArc la exige
       Result := TLzmaEncStage.Create(Target, ParseLzmaEncParams(Parts), True);
