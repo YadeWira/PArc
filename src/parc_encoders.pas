@@ -68,7 +68,9 @@ implementation
 
 uses
   parc_filters, parc_ppmd, parc_methods, parc_lzp, parc_parallel, parc_lzmaenc,
-  parc_repenc, parc_deltaenc, parc_dictenc, parc_ttaenc, parc_mmenc;
+  parc_repenc, parc_deltaenc, parc_dictenc, parc_ttaenc, parc_mmenc, parc_torenc;
+
+function StageName(const Stage: string): string; forward;
 
 type
   T4x4EncJob = class(TParallelJob)
@@ -82,9 +84,15 @@ type
 
 procedure T4x4EncJob.Process;
 begin
-  OutBuf := CompressMem(Inner, PByte(InBuf), Length(InBuf));
   // Como _4x4MTCompressor::Process: si no comprime, el bloque va guardado tal cual
-  Stored := Length(OutBuf) >= Length(InBuf);
+  if StageName(Inner) = 'tor' then
+    // TORNADO_METHOD::DeCompressMem con compress_all_at_once=1; OutputSize = InSize
+    Stored := not TorEncodeMem(Inner.Split([':']), PByte(InBuf), Length(InBuf), Length(InBuf), OutBuf)
+  else
+  begin
+    OutBuf := CompressMem(Inner, PByte(InBuf), Length(InBuf));
+    Stored := Length(OutBuf) >= Length(InBuf);
+  end;
   if Stored then OutBuf := InBuf;
   OutSize := Length(OutBuf);
   InBuf := nil;
@@ -260,6 +268,8 @@ begin
       Inner := string.Join(':', Params, k, Length(Params) - k);
       Break;
     end;
+  if (BlockSize = 0) and (StageName(Inner) = 'tor') then
+    BlockSize := TorDictionary(Inner.Split([':']));    // cmethod->GetDictionary()
   if BlockSize = 0 then
   begin
     Params := Inner.Split([':']);
@@ -310,6 +320,7 @@ begin
           Parse4x4(Stage, Inner, Bs);
           if not EncoderAvailable(Inner) then Exit(False);
         end;
+      'tor': if not TorEncAvailable(Stage) then Exit(False);
       'storing', 'exe', 'ppmd', 'lzp', 'lzma', 'rep', 'delta', 'dict', 'tta', 'mm': ;
     else
       Exit(False);
@@ -336,6 +347,7 @@ begin
     'rep':     Result := TRepEncStage.Create(Target, Parts);
     'delta':   Result := TDeltaEncStage.Create(Target, Parts);
     'dict':    Result := TDictEncStage.Create(Target, Parts);
+    'tor':     Result := TTorEncStage.Create(Target, Parts);
     'tta':     Result := TTtaEncStage.Create(Target, Parts);
     'mm':      Result := TMmEncStage.Create(Target, Parts);
     'lzma':
