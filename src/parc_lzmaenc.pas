@@ -572,6 +572,28 @@ begin
 end;
 
 { GetMatchesSpec1 (árbol binario) }
+{ Largo de la coincidencia entre pb y cur a partir de len (sin pasar de lenLimit). Compara de
+  a 8 bytes y ubica el primero distinto con bsf: el mismo resultado que el bucle de a byte del
+  SDK, más rápido en coincidencias largas. Solo en little-endian (x86/x64). }
+function MatchLen(pb, cur: PByte; len, lenLimit: LongWord): LongWord; inline;
+{$IFDEF ENDIAN_LITTLE}
+var
+  x: QWord;
+begin
+  while len + 8 <= lenLimit do
+  begin
+    x := PQWord(pb + len)^ xor PQWord(cur + len)^;
+    if x <> 0 then Exit(len + (BsfQWord(x) shr 3));
+    Inc(len, 8);
+  end;
+{$ELSE}
+begin
+{$ENDIF}
+  // (con <, no <>: igual cuando len <= lenLimit, y seguro si llega uno mayor)
+  while (len < lenLimit) and (pb[len] = cur[len]) do Inc(len);
+  Result := len;
+end;
+
 function BtGetMatchesSpec(lenLimit, curMatch, pos: LongWord; cur: PByte; son: PLongWord;
   cyclicBufferPos, cyclicBufferSize, cutValue: LongWord; d: PLongWord; maxLen: LongWord): PLongWord;
 var
@@ -597,7 +619,7 @@ begin
         if (len <> lenLimit) and (pb[len] = cur[len]) then
         begin
           Inc(len);
-          while (len <> lenLimit) and (pb[len] = cur[len]) do Inc(len);
+          len := MatchLen(pb, cur, len, lenLimit);
         end;
         if maxLen < len then
         begin
@@ -656,7 +678,7 @@ begin
       if pb[len] = cur[len] then
       begin
         Inc(len);
-        while (len <> lenLimit) and (pb[len] = cur[len]) do Inc(len);
+        len := MatchLen(pb, cur, len, lenLimit);
         if len = lenLimit then
         begin
           ptr1^ := pair[0];
@@ -686,15 +708,8 @@ end;
 
 { UPDATE_maxLen }
 function UpdateMaxLen(cur: PByte; d2, maxLen, lenLimit: LongWord): LongWord; inline;
-var
-  c, lim: PByte;
-  diff: PtrInt;
 begin
-  diff := -PtrInt(d2);
-  c := cur + maxLen;
-  lim := cur + lenLimit;
-  while (c <> lim) and (c[diff] = c^) do Inc(c);
-  Result := LongWord(c - cur);
+  Result := MatchLen(cur - d2, cur, maxLen, lenLimit);
 end;
 
 { Bt2_MatchFinder_GetMatches }
@@ -1482,7 +1497,7 @@ begin
       Continue;
     end;
     len := 2;
-    while (len < numAvail) and (data[len] = data2[len]) do Inc(len);
+    len := MatchLen(data2, data, len, numAvail);
     repLens[i] := len;
     if len > repLens[repMaxIndex] then repMaxIndex := i;
     if len = LZMA_MATCH_LEN_MAX then Break;
@@ -1776,7 +1791,7 @@ begin
         limit := numFastBytes + 1;
         if limit > numAvailFull then limit := numAvailFull;
         len := 3;
-        while (len < limit) and (data[len] = data2[len]) do Inc(len);
+        len := MatchLen(data2, data, len, limit);
         state2 := kLiteralNextStates[state];
         posState2 := (position + 1) and pbMask;
         pr := litPr + PriceRep0(state2, posState2);
@@ -1803,7 +1818,7 @@ begin
       data2 := data - reps[repIndex];
       if (data[0] <> data2[0]) or (data[1] <> data2[1]) then Continue;
       len := 2;
-      while (len < numAvail) and (data[len] = data2[len]) do Inc(len);
+      len := MatchLen(data2, data, len, numAvail);
       offset := cur + len;
       if last < offset then last := offset;
       len2 := len;
@@ -1838,7 +1853,7 @@ begin
         state2 := kState_LitAfterRep;
         posState2 := (posState2 + 1) and pbMask;
         Inc(pr, PriceRep0(state2, posState2));
-        while (len2 < limit) and (data[len2] = data2[len2]) do Inc(len2);
+        len2 := MatchLen(data2, data, len2, limit);
         Dec(len2, len);
         offset := cur + len + len2;
         if last < offset then last := offset;
@@ -1904,7 +1919,7 @@ begin
           Inc(len2, 2);
           if (len2 <= limit) and (data[len2 - 2] = data2[len2 - 2]) and (data[len2 - 1] = data2[len2 - 1]) then
           begin
-            while (len2 < limit) and (data[len2] = data2[len2]) do Inc(len2);
+            len2 := MatchLen(data2, data, len2, limit);
             Dec(len2, len);
             state2 := kMatchNextStates[state];
             posState2 := (position + len) and pbMask;
@@ -1974,7 +1989,7 @@ begin
     data2 := data - FReps[i];
     if (data[0] <> data2[0]) or (data[1] <> data2[1]) then Continue;
     len := 2;
-    while (len < numAvail) and (data[len] = data2[len]) do Inc(len);
+    len := MatchLen(data2, data, len, numAvail);
     if len >= numFastBytes then
     begin
       FBackRes := i;
