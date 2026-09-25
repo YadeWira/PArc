@@ -58,7 +58,14 @@ function RecoveryScan(const ArcName: string; out Res: TRecoveryResult): Boolean;
   "1*512"...). }
 { Los tamaños que van a salir, para poder reservar lugar ANTES de construir: el
   offset del addinfo es la posición del bloque de CRCs, así que el escritor necesita
-  saber cuánto ocupan los dos bloques antes de saber dónde caen. }
+  saber cuánto ocupan los dos bloques antes de saber dónde caen.
+
+  OJO con CrcsSize: es el tamaño de los CRCs SOLAMENTE, sin el addinfo que va delante
+  en el mismo bloque. El bloque de CRCs real mide CrcsSize + el addinfo, y el addinfo
+  no tiene tamaño fijo porque se serializa con VInt (versión + arcsize + offset + la
+  lista de pares): en un .arc de 104.535 bytes protegidos con 4% son 18 bytes, pero
+  cambia con el tamaño del archivo y con los parámetros. Si necesitás el total exacto,
+  se obtiene después de RecoveryBuild como Length(Crcs), que ya incluye el addinfo. }
 function RecoveryPlan(ArcSize: Int64; const Spec: string;
                       out SectorSize, RecSectors: Integer;
                       out SectorsSize, CrcsSize: Int64): Boolean;
