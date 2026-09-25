@@ -37,7 +37,11 @@ begin
   OutLn('  -s-  sin sólido   -s<mem> tope de bytes por bloque sólido   -s<N>f tope de archivos');
   OutLn('  -x<máscara>  excluir (puede repetirse)');
   OutLn('  -rr[N%|N*S|-]  registro de recuperación (-rr sin valor: 4%/2%/1% según tamaño; -rr- quita)');
-  OutLn('  -p<contraseña>  contraseña de un archivo cifrado (si falta, se pide por consola)');
+  OutLn('  -p<contraseña>  al leer: contraseña de un archivo cifrado (si falta, se pide);');
+  OutLn('                  al comprimir: cifra los datos (-p solo: la pide por consola)');
+  OutLn('  -hp[contraseña] cifra también el directorio (sin ella no se ve ni la lista)');
+  OutLn('  -ae=<alg>  --encryption=<alg>  aes (default: aes-256/ctr), blowfish, serpent,');
+  OutLn('             twofish; con tamaño/modo: serpent-256/cfb, blowfish-448/ctr, ...');
   OutLn('  --no-progress  sin línea de progreso (tampoco se muestra si stderr no es una consola)');
   OutLn('Ctrl-C cancela limpiamente (no queda ni el temporal ni un archivo a medio extraer);');
   OutLn('un segundo Ctrl-C corta en el acto. Código de salida al cancelar: 130.');
@@ -358,6 +362,8 @@ type
     NonSolid: Boolean;       // -s-: cada archivo en su propio bloque
     Excludes: TStringList;   // -x<máscara>
     Recovery: string;        // -rr...: '--' si no se dio la opción
+    Encryption: string;      // -ae= / --encryption=
+    DataPassword, HeadersPassword: RawByteString;   // '' = sin cifrar
   end;
 
 { Como ArcRecover.hs: sin -rr se conserva lo que tenía el archivo; -rr/-rr+ usa eso o el
@@ -605,7 +611,7 @@ begin
     // Avisar de una vez qué métodos todavía no se pueden comprimir
     Missing := '';
     for i := 0 to High(Groups) do
-      if (Groups[i].CopyFrom = nil) and not EncoderAvailable(Groups[i].Method) then
+      if (Groups[i].CopyFrom = nil) and not EncoderAvailable(WithoutCipher(Groups[i].Method)) then
         Missing := Missing + LineEnding + '  ' + Groups[i].Method;
     if Missing <> '' then
     begin
@@ -626,6 +632,9 @@ begin
     RRSize := 0;
     for i := 0 to High(Entries) do Inc(RRSize, Entries[i].Meta.Size);
     Opt.Recovery := ResolveRecovery(MO.Recovery, OldRR, RRSize);
+    Opt.Encryption := MO.Encryption;
+    Opt.DataPassword := MO.DataPassword;
+    Opt.HeadersPassword := MO.HeadersPassword;
     St := WriteArchive(ArcName, Entries, Groups, Opt, @LogLine);
   finally
     A.Free;
@@ -640,14 +649,15 @@ begin
 end;
 
 var
-  Cmd, ArcName, S: string;
+  Cmd, ArcName, Pwd2, S: string;
   A: TArchive;
   Opt: TExtractOptions;
   MO: TModifyOptions;
   Filter, Excludes: TStringList;
   SolidMem: QWord;
   i, Code, Tries: Integer;
-  Retry, ShowProgress: Boolean;
+  Retry, ShowProgress, Writing: Boolean;
+  DPwd, HPwd: string;
 begin
   if ArgCount < 2 then
   begin
@@ -664,6 +674,8 @@ begin
   Excludes := TStringList.Create;
   MO.Excludes := Excludes;
   MO.Recovery := '--';
+  MO.Encryption := 'aes';
+  DPwd := '--'; HPwd := '--';   // '--' = no se dio la opción (como Cmdline.hs)
   Code := 0;
   ShowProgress := True;
   try
@@ -687,7 +699,10 @@ begin
           MO.SolidFiles := StrToIntDef(Copy(S, 3, Length(S) - 3), 0)
         else if (Copy(S, 1, 2) = '-s') and ParseMem(Copy(S, 3, MaxInt), SolidMem) then
           MO.SolidBytes := SolidMem
-        else if Copy(S, 1, 2) = '-p' then SetArchivePassword(Copy(S, 3, MaxInt))
+        else if Copy(S, 1, 3) = '-hp' then HPwd := Copy(S, 4, MaxInt)
+        else if Copy(S, 1, 2) = '-p' then DPwd := Copy(S, 3, MaxInt)
+        else if Copy(S, 1, 4) = '-ae=' then MO.Encryption := Copy(S, 5, MaxInt)
+        else if Copy(S, 1, 13) = '--encryption=' then MO.Encryption := Copy(S, 14, MaxInt)
         else
         begin
           ErrLn('Opción desconocida: ' + S);
@@ -703,6 +718,37 @@ begin
       Halt(1);
     end;
     Opt.Filter := Filter;
+    Writing := (Cmd = 'a') or (Cmd = 'u') or (Cmd = 'f') or (Cmd = 'd');
+    // Contraseñas como Cmdline.hs: -p solo cifra datos; -hp (con o sin -p) cifra también
+    // los encabezados; -p y -hp con valores distintos, uno para cada cosa
+    if HPwd <> '--' then
+    begin
+      if HPwd = '' then HPwd := DPwd;
+      if DPwd = '--' then DPwd := HPwd
+      else if DPwd = '' then DPwd := HPwd;
+    end;
+    if Writing and ((DPwd = '') or (HPwd = '')) then
+    begin
+      // -p / -hp sin valor al comprimir: pedirla dos veces (un error de tipeo no tiene arreglo)
+      if not ReadPassword('Contraseña para cifrar: ', S) or (S = '') then
+      begin
+        ErrLn('ERROR: hace falta una contraseña (no hay consola para pedirla)');
+        Halt(1);
+      end;
+      if not ReadPassword('Repetila: ', Pwd2) or (Pwd2 <> S) then
+      begin
+        ErrLn('ERROR: las contraseñas no coinciden');
+        Halt(1);
+      end;
+      if DPwd = '' then DPwd := S;
+      if HPwd = '' then HPwd := S;
+    end;
+    if (DPwd <> '--') and (DPwd <> '') then MO.DataPassword := DPwd;
+    if (HPwd <> '--') and (HPwd <> '') then MO.HeadersPassword := HPwd;
+    // Para leer (x/t/l y el archivo viejo en a/u/f/d): una sola contraseña; si hay de
+    // encabezados, esa, que sin ella no se abre
+    if MO.HeadersPassword <> '' then SetArchivePassword(MO.HeadersPassword)
+    else if MO.DataPassword <> '' then SetArchivePassword(MO.DataPassword);
     if ShowProgress and ErrIsConsole then ProgressHandler := @DrawProgress;
     InstallCancelHandler(@OnCtrlC);
     if Cmd = 'r' then
@@ -717,9 +763,29 @@ begin
     end;
     if (Cmd = 'a') or (Cmd = 'u') or (Cmd = 'f') or (Cmd = 'd') then
     begin
+      Tries := 0;
+      repeat
+      Retry := False;
       try
         Code := CmdModify(Cmd, ArcName, Filter, MO);
       except
+        // El archivo viejo está cifrado y no se dio -p: pedirla, como en x/t
+        on E: EPasswordRequired do
+          if (Tries < 3) and ReadPassword('Contraseña: ', S) then
+          begin
+            SetArchivePassword(S);
+            Inc(Tries);
+            Retry := True;
+          end
+          else begin ClearProgress; ErrLn('ERROR: ' + E.Message); Code := 5; end;
+        on E: EBadPassword do
+          if (Tries < 3) and ReadPassword('Contraseña incorrecta. Contraseña: ', S) then
+          begin
+            SetArchivePassword(S);
+            Inc(Tries);
+            Retry := True;
+          end
+          else begin ClearProgress; ErrLn('ERROR: ' + E.Message); Code := 5; end;
         on E: EOperationCancelled do begin
           ClearProgress;
           if FileExists(FsPath(ArcName)) then ErrLn('Cancelado: ' + ArcName + ' quedó como estaba.')
@@ -729,6 +795,7 @@ begin
         on E: EUnsupportedEncoder do begin ClearProgress; ErrLn('ERROR: ' + E.Message); Code := 3; end;
         on E: Exception do begin ClearProgress; ErrLn('ERROR: ' + E.Message); Code := 4; end;
       end;
+      until not Retry;
       Halt(Code);
     end;
     Tries := 0;

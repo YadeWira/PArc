@@ -64,11 +64,34 @@ function LimitMethodToSize(const Method: string; DataSize: Int64): string;
 { True si CreateEncoderChain sabe comprimir con Method (sin crear nada). }
 function EncoderAvailable(const Method: string): Boolean;
 
+{ Etapa de cifrado para escribir un bloque, como generateEncryption de FreeArc: Algorithm es
+  el de --encryption ("aes", "blowfish-448/cfb", ...), Password en UTF-8. Devuelve la etapa
+  para el codificador (con :k) y en Stored la que se guarda en el archivo (sal, check-code e
+  IV, sin la clave). Sal e IV son nuevos en cada llamado: uno por bloque, como FreeArc. }
+function MakeCipherStage(const Algorithm: string; const Password: RawByteString; out Stored: string): string;
+
+{ Method sin sus etapas de cifrado (la de un bloque viejo que se reempaqueta: la que quedó en
+  el archivo no trae la clave y no sirve para comprimir). }
+function WithoutCipher(const Method: string): string;
+
 implementation
 
 uses
   parc_filters, parc_ppmd, parc_methods, parc_lzp, parc_parallel, parc_lzmaenc,
-  parc_repenc, parc_deltaenc, parc_dictenc, parc_ttaenc, parc_mmenc, parc_torenc, parc_grzipenc;
+  parc_repenc, parc_deltaenc, parc_dictenc, parc_ttaenc, parc_mmenc, parc_torenc, parc_grzipenc,
+  parc_crypt;
+
+{ ¿La etapa es de cifrado? El nombre va antes de '-' (bits) o '/' (modo): "aes-256/ctr". }
+function IsCipherStage(const Stage: string): Boolean;
+var
+  Name: string;
+  p: Integer;
+begin
+  Name := Stage.Split([':'])[0];
+  p := Pos('-', Name); if p > 0 then Name := Copy(Name, 1, p - 1);
+  p := Pos('/', Name); if p > 0 then Name := Copy(Name, 1, p - 1);
+  Result := IsCipherName(Name);
+end;
 
 function StageName(const Stage: string): string; forward;
 
@@ -314,7 +337,8 @@ var
   Bs: SizeInt;
 begin
   for Stage in Method.Split(['+']) do
-    case StageName(Stage) of
+    if IsCipherStage(Stage) then Continue
+    else case StageName(Stage) of
       '4x4':
         begin
           Parse4x4(Stage, Inner, Bs);
@@ -337,6 +361,7 @@ var
   mc, k: Integer;
 begin
   Parts := Stage.Split([':']);
+  if IsCipherStage(Stage) then Exit(TEncryptStage.Create(Target, ParseCryptParams(Parts)));
   case StageName(Stage) of
     '4x4':
       begin
@@ -411,6 +436,35 @@ begin
   finally
     Chain.Free;   // libera también Sink
   end;
+end;
+
+{ Bytes de la contraseña como los ve FreeArc 0.67 sin :f (como PasswordBytes de
+  parc_methods): el byte bajo de cada carácter Unicode. }
+function MakeCipherStage(const Algorithm: string; const Password: RawByteString; out Stored: string): string;
+var
+  W: UnicodeString;
+  Pwd: RawByteString;
+  i: Integer;
+begin
+  W := UTF8Decode(Password);
+  SetLength(Pwd, Length(W));
+  for i := 1 to Length(W) do Pwd[i] := Chr(Ord(W[i]) and $FF);
+  if not IsCipherStage(Algorithm) or not MakeEncryption(Algorithm, Pwd, Stored, Result) then
+    raise EUnsupportedEncoder.CreateFmt('algoritmo de cifrado inválido: "%s"', [Algorithm]);
+end;
+
+function WithoutCipher(const Method: string): string;
+var
+  Stage: string;
+begin
+  Result := '';
+  for Stage in Method.Split(['+']) do
+    if not IsCipherStage(Stage) then
+    begin
+      if Result <> '' then Result := Result + '+';
+      Result := Result + Stage;
+    end;
+  if Result = '' then Result := 'storing';
 end;
 
 end.

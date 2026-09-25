@@ -38,7 +38,11 @@ type
     Comment: RawByteString;
     Recovery: string;     // especificación del registro de recuperación ('' = sin), ya resuelta
     KeepTemp: Boolean;    // no renombrar: el llamador llama a FinishArchive (p. ej. después de
-  end;                    // cerrar el archivo viejo, que en Windows no se puede reemplazar abierto)
+                          // cerrar el archivo viejo, que en Windows no se puede reemplazar abierto)
+    Encryption: string;   // algoritmo (--encryption; "aes" = aes-256/ctr, como FreeArc)
+    DataPassword: RawByteString;     // -p: cifra los bloques de datos ('' = sin cifrar)
+    HeadersPassword: RawByteString;  // -hp: cifra también directorio y footer
+  end;
 
   TWriteStats = record
     Files, Dirs: Integer;
@@ -113,7 +117,7 @@ begin
 end;
 
 function WriteControlBlock(S: TStream; Parc: Boolean; BlockType: Integer; const Method: string;
-  const Data: TBytes): TBlockInfo; forward;
+  const Data: TBytes; const Alg: string = ''; const Pwd: RawByteString = ''): TBlockInfo; forward;
 
 { Largo del descriptor de un bloque storing de Size bytes (no depende del CRC: siempre 4 bytes). }
 function StoringDescriptorLen(Parc: Boolean; BlockType: Integer; Size: Int64): Integer;
@@ -166,16 +170,24 @@ end;
 
 { Escribe un bloque de control (datos comprimidos + descriptor) y devuelve su información. }
 function WriteControlBlock(S: TStream; Parc: Boolean; BlockType: Integer; const Method: string;
-  const Data: TBytes): TBlockInfo;
+  const Data: TBytes; const Alg: string; const Pwd: RawByteString): TBlockInfo;
 var
   Comp: TBytes;
+  EncMethod, Stored: string;
 begin
   Result.BlockType := BlockType;
   Result.Method := Method;
+  EncMethod := Method;
+  if Pwd <> '' then
+  begin
+    // -hp: como el de datos, pero en el directorio y el footer (ArcvProcessCompress.hs)
+    EncMethod := Method + '+' + MakeCipherStage(Alg, Pwd, Stored);
+    Result.Method := Method + '+' + Stored;
+  end;
   Result.Pos := S.Position;
   Result.OrigSize := Length(Data);
   Result.Crc := CalcCRC(PByte(Data), Length(Data));
-  Comp := CompressMem(Method, PByte(Data), Length(Data));
+  Comp := CompressMem(EncMethod, PByte(Data), Length(Data));
   Result.CompSize := Length(Comp);
   if Length(Comp) > 0 then S.WriteBuffer(Comp[0], Length(Comp));
   WriteDescriptor(S, Parc, Result);
@@ -383,7 +395,7 @@ begin
 end;
 
 function WriteDataBlock(S: TStream; const Entries: array of TWriteEntry; const G: TSolidGroup;
-  Log: TLogProc; var Stats: TWriteStats): TDataBlock;
+  const Opt: TWriteOptions; Log: TLogProc; var Stats: TWriteStats): TDataBlock;
 var
   Chain: TOutStage;
   Buf: TBytes;
@@ -398,6 +410,8 @@ var
   CurBlock, CurNext, k: Integer;
   CurChain: TInStage;
   Remaining: Int64;
+  EncMethod, Stored: string;
+  Pwd: RawByteString;
 
   procedure SkipIn(Count: Int64);
   var
@@ -419,11 +433,25 @@ begin
   Size := 0;
   for i := 0 to High(G.Files) do
     if not Entries[G.Files[i]].Meta.IsDir then Inc(Size, Entries[G.Files[i]].Meta.Size);
-  Result.Method := LimitMethodToSize(G.Method, Size);
+  // Un bloque viejo que se reempaqueta trae su cifrado guardado (sin clave): se saca, y si hay
+  // -p se vuelve a cifrar con sal e IV nuevos
+  Result.Method := LimitMethodToSize(WithoutCipher(G.Method), Size);
+  EncMethod := Result.Method;
+  // -p: cifrado al final de la cadena, con sal e IV propios del bloque (como FreeArc). En el
+  // archivo queda la etapa sin la clave; el codificador usa la que la trae
+  // Un bloque que ya estaba cifrado se vuelve a cifrar aunque no se haya dado -p (con la
+  // contraseña con que se leyó): borrar un archivo no tiene que dejar el resto en claro
+  Pwd := Opt.DataPassword;
+  if (Pwd = '') and (WithoutCipher(G.Method) <> G.Method) then Pwd := ArchivePassword;
+  if (Pwd <> '') and (Size > 0) then
+  begin
+    EncMethod := Result.Method + '+' + MakeCipherStage(Opt.Encryption, Pwd, Stored);
+    Result.Method := Result.Method + '+' + Stored;
+  end;
   Result.Pos := S.Position;
   SetLength(Result.Files, Length(G.Files));
   SetLength(Buf, COPY_BUF);
-  Chain := CreateEncoderChain(Result.Method, TStreamSink.Create(S));
+  Chain := CreateEncoderChain(EncMethod, TStreamSink.Create(S));
   try
     for i := 0 to High(G.Files) do
     begin
@@ -522,7 +550,7 @@ begin
   if not EncoderAvailable(Opt.DirMethod) then
     raise EUnsupportedEncoder.CreateFmt('todavía no se puede comprimir con "%s"', [Opt.DirMethod]);
   for i := 0 to High(Groups) do
-    if (Groups[i].CopyFrom = nil) and not EncoderAvailable(Groups[i].Method) then
+    if (Groups[i].CopyFrom = nil) and not EncoderAvailable(WithoutCipher(Groups[i].Method)) then
       raise EUnsupportedEncoder.CreateFmt('todavía no se puede comprimir con "%s"', [Groups[i].Method]);
 
   // Total para el progreso: bytes a comprimir, más los comprimidos de los bloques que se copian
@@ -561,14 +589,14 @@ begin
       if Length(DirGroup.Files) > 0 then
       begin
         SetLength(Blocks, 1);
-        Blocks[0] := WriteDataBlock(S, Entries, DirGroup, Log, Result);
+        Blocks[0] := WriteDataBlock(S, Entries, DirGroup, Opt, Log, Result);
       end;
       for i := 0 to High(Groups) do
         if Length(Groups[i].Files) > 0 then
         begin
           n := Length(Blocks);
           SetLength(Blocks, n + 1);
-          Blocks[n] := WriteDataBlock(S, Entries, Groups[i], Log, Result);
+          Blocks[n] := WriteDataBlock(S, Entries, Groups[i], Opt, Log, Result);
         end;
 
       ProgressEnd;
@@ -577,11 +605,12 @@ begin
       // Directorio (los offsets de los bloques son relativos a su posición)
       DirData := BuildDirectory(Entries, Blocks, S.Position, Opt.Parc);
       SetLength(Control, 2);
-      Control[1] := WriteControlBlock(S, Opt.Parc, DIR_BLOCK, Opt.DirMethod, DirData);
+      Control[1] := WriteControlBlock(S, Opt.Parc, DIR_BLOCK, Opt.DirMethod, DirData, Opt.Encryption, Opt.HeadersPassword);
 
       if Opt.Recovery <> '' then WriteRecovery(S, Opt.Parc, Opt.Recovery, Control);
       // Footer (las posiciones de los bloques de control, relativas a la del footer)
-      WriteControlBlock(S, Opt.Parc, FOOTER_BLOCK, Opt.DirMethod, BuildFooter(Control, S.Position, Opt.Comment, Opt.Recovery));
+      WriteControlBlock(S, Opt.Parc, FOOTER_BLOCK, Opt.DirMethod, BuildFooter(Control, S.Position, Opt.Comment, Opt.Recovery),
+        Opt.Encryption, Opt.HeadersPassword);
       Result.ArcSize := S.Size;
       Ok := True;
     finally

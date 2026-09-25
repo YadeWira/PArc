@@ -24,7 +24,7 @@ unit parc_crypt;
 interface
 
 uses
-  SysUtils, parc_stream;
+  SysUtils, parc_stream, parc_outstream;
 
 type
   TCryptParams = record
@@ -77,6 +77,58 @@ procedure Pbkdf2HmacSha512(const Pwd: PByte; PwdLen: SizeInt;
   contraseña es incorrecta. }
 function DeriveKeyAndCheck(const Par: TCryptParams; const Pwd: PByte; PwdLen: SizeInt;
                            Key: PByte): Boolean;
+
+
+{ --- escritura del cifrado (espejo de generateEncryption de Encryption.hs) --- }
+
+{ Bytes al azar del RNG criptográfico del sistema. Linux: /dev/urandom (getrandom
+  necesita syscall o libc nueva, así que urandom es lo portable). Windows:
+  RtlGenRandom (SystemFunction036), que existe desde XP y anda en Win7. }
+function OsRandom(Buf: PByte; Len: SizeInt): Boolean;
+
+{ Genera el cifrado para ESCRIBIR, como generateEncryption: salt de KeySize bytes e
+  IV del tamaño de bloque, del RNG; PBKDF2-HMAC-SHA512 con NumIterations partiendo en
+  clave + check-code de 2 bytes; y los dos strings, el del ARCHIVO (con :s y :c, SIN
+  :k) y el del encoder (CON :k).
+  OJO, que es lo que hace que los archivos se puedan abrir: el hex se escribe NORMAL
+  (int2char), pero FreeArc lo DECODIFICA con buggy_decode16. La clave que realmente
+  usa el cifrado es buggy_decode16(encode16(clave_de_PBKDF2)), no la de PBKDF2. Si el
+  encoder cifrara con la de PBKDF2, arc.exe descifraría con la efectiva y saldría
+  basura; el check-code igual coincidiría, así que el síntoma sería CRC/descompresión
+  fallida y NO "contraseña incorrecta". Por eso el stage recibe el string CON :k y
+  saca la clave efectiva decodificándolo con la misma función buggy del decoder. }
+function MakeEncryption(const Cipher: string; const Password: RawByteString;
+                        out ArchiveMethod, EncoderMethod: string): Boolean;
+
+  { Etapa de CIFRADO (espejo de TDecryptStage), para escribir archivos cifrados.
+    Recibe el string del método CON :k, como el decoder, y saca la clave EFECTIVA
+    decodificando ese :k con el mismo conversor buggy: PBKDF2 no se vuelve a hacer acá
+    (va una sola vez, en MakeEncryption). El estado del modo persiste entre Write, así
+    que un Write de 1 byte y uno de 1 MB dan exactamente lo mismo. En CTR es simétrico;
+    en CFB la realimentación es el TEXTO CIFRADO, o sea que sale de la salida, no de la
+    entrada como en el decoder. }
+type
+  TEncryptStage = class(TOutStage)
+  private
+    FPar: TCryptParams;
+    FKey: array of Byte;
+    FCounter, FPad, FIV, FEmit: array[0..15] of Byte;
+    FPadLen, FBlockSize: Integer;
+    FRk: array[0..63] of LongWord;
+    FOut: array of Byte;      // el cifrado va acá: el buffer del llamador no se toca
+    function  BlockEncrypt(const Src: array of Byte; var Dst: array of Byte): Boolean;
+    procedure ModeStart;
+    procedure ModeEncrypt(Src, Dst: PByte; Len: SizeInt);
+  protected
+    procedure DoWrite(Buf: PByte; Count: SizeInt); override;
+  public
+    constructor Create(ATarget: TOutStage; const APar: TCryptParams);
+  end;
+
+{ Cifra un buffer suelto con el esquema ya derivado. Es para -hp: el directorio y el
+  footer, que van cifrados aparte de los datos. }
+function EncryptBuffer(const Par: TCryptParams; const Pwd: PByte; PwdLen: SizeInt;
+                       Src: PByte; Len: SizeInt; Dest: PByte): Boolean;
 
 { DEBUG temporal: un bloque de cada cifrado, para verificar contra las fuentes. }
 function AesEcb(const KeyHex, BlockHex: string): string;
@@ -1611,5 +1663,230 @@ begin
   if n > 0 then ModeDecrypt(Buf, n);
   Result := n;
 end;
+
+function OsRandom(Buf: PByte; Len: SizeInt): Boolean;
+{$IFDEF WINDOWS}
+type
+  TRtlGenRandom = function(RandomBuffer: Pointer; BufferLength: LongWord): ByteBool; stdcall;
+var
+  h: THandle;
+  f: TRtlGenRandom;
+  done: ByteBool;
+begin
+  Result := False;
+  if Len <= 0 then Exit(True);
+  h := LoadLibrary('advapi32.dll');
+  if h = 0 then Exit;
+  try
+    f := TRtlGenRandom(GetProcAddress(h, 'SystemFunction036'));
+    if not Assigned(f) then Exit;
+    done := f(Buf, LongWord(Len));
+    Result := done <> False;
+  finally
+    FreeLibrary(h);
+  end;
+end;
+{$ELSE}
+var
+  f: THandle;
+  got: SizeInt;
+begin
+  Result := False;
+  if Len <= 0 then Exit(True);
+  f := FileOpen('/dev/urandom', fmOpenRead or fmShareDenyNone);
+  if f = THandle(-1) then Exit;
+  try
+    got := FileRead(f, Buf^, Len);
+    Result := got = Len;
+  finally
+    FileClose(f);
+  end;
+end;
+{$ENDIF}
+
+function MakeEncryption(const Cipher: string; const Password: RawByteString;
+                        out ArchiveMethod, EncoderMethod: string): Boolean;
+var
+  par: TCryptParams;
+  salt, iv, dk, key, check: array of Byte;
+  ksz: Integer;
+  base: string;
+begin
+  Result := False;
+  ArchiveMethod := ''; EncoderMethod := '';
+  par := ParseCryptParams(Cipher.Split([':']));
+  if (par.KeySize < 1) or (par.IVSize < 1) then Exit;
+  ksz := par.KeySize;
+  SetLength(salt, ksz);
+  SetLength(iv, par.IVSize);
+  if not OsRandom(PByte(@salt[0]), ksz) then Exit;
+  if not OsRandom(PByte(@iv[0]), par.IVSize) then Exit;
+  SetLength(dk, ksz + 2);
+  if Length(Password) > 0 then
+    Pbkdf2HmacSha512(PByte(@Password[1]), Length(Password), PByte(@salt[0]), ksz,
+                     par.NumIterations, PByte(@dk[0]), ksz + 2)
+  else
+    Pbkdf2HmacSha512(nil, 0, PByte(@salt[0]), ksz,
+                     par.NumIterations, PByte(@dk[0]), ksz + 2);
+  key := Copy(dk, 0, ksz);
+  check := Copy(dk, ksz, 2);
+  base := par.Cipher + '-' + IntToStr(ksz * 8) + '/' + par.Mode +
+          ':n' + IntToStr(par.NumIterations) + ':r' + IntToStr(par.Rounds);
+  ArchiveMethod := base + ':s' + EncodeHex(salt, ksz) + ':c' + EncodeHex(check, 2) +
+                   ':i' + EncodeHex(iv, par.IVSize);
+  EncoderMethod := base + ':k' + EncodeHex(key, ksz) + ':i' + EncodeHex(iv, par.IVSize);
+  Result := True;
+end;
+
+
+{ --- TEncryptStage ------------------------------------------------------- }
+
+constructor TEncryptStage.Create(ATarget: TOutStage; const APar: TCryptParams);
+var
+  i: Integer;
+  h: string;
+begin
+  if (APar.KeySize < 1) or (APar.IVSize < 1) then
+    Corrupt('parámetros de cifrado inválidos');
+  if APar.KeyHex = '' then Corrupt('el cifrado del encoder necesita :k');
+  FPar := APar;
+  SetLength(FKey, APar.KeySize);
+  { El :k viene en hex NORMAL (lo escribe MakeEncryption) y se decodifica con el
+    conversor BUGGY, igual que en el decoder: de ahí sale la clave EFECTIVA. }
+  h := APar.KeyHex;
+  if Length(h) div 2 < APar.KeySize then Corrupt('clave :k demasiado corta');
+  for i := 0 to APar.KeySize - 1 do
+    FKey[i] := Byte(BuggyHexVal(h[i * 2 + 1]) * 16 + BuggyHexVal(h[i * 2 + 2]));
+  FBlockSize := CipherBlockSize(APar.Cipher);
+  if FBlockSize > 16 then FBlockSize := 16;
+  if APar.Cipher = 'aes' then
+  begin
+    AesInit;
+    AesSetKeyEnc(@FRk[0], @FKey[0], APar.KeySize);
+  end
+  else if APar.Cipher = 'blowfish' then BlowfishSetup(@FKey[0], APar.KeySize)
+  else if APar.Cipher = 'serpent'  then SerpentSetup(@FKey[0], APar.KeySize)
+  else if APar.Cipher = 'twofish'  then TwofishSetup(@FKey[0], APar.KeySize)
+  else
+    Corrupt('cifrado no soportado: ' + APar.Cipher);
+  if Length(APar.IVHex) < APar.IVSize * 2 then Corrupt('falta el :i');
+  for i := 0 to APar.IVSize - 1 do
+    FIV[i] := Byte(BuggyHexVal(APar.IVHex[i * 2 + 1]) * 16 + BuggyHexVal(APar.IVHex[i * 2 + 2]));
+  for i := 0 to 15 do FCounter[i] := FIV[i];
+  inherited Create(ATarget);
+  ModeStart;
+end;
+
+function TEncryptStage.BlockEncrypt(const Src: array of Byte; var Dst: array of Byte): Boolean;
+var
+  s, d: array[0..3] of LongWord;
+  i: Integer;
+begin
+  if FPar.Cipher = 'blowfish' then begin BlowfishEnc(@Src[0], @Dst[0]); Exit(True); end;
+  if FPar.Cipher = 'serpent'  then begin SerpentEnc(@Src[0], @Dst[0]);  Exit(True); end;
+  if FPar.Cipher = 'twofish'  then begin TwofishEnc(@Src[0], @Dst[0]);  Exit(True); end;
+  for i := 0 to 3 do
+    s[i] := LongWord(Src[i * 4]) or (LongWord(Src[i * 4 + 1]) shl 8) or
+            (LongWord(Src[i * 4 + 2]) shl 16) or (LongWord(Src[i * 4 + 3]) shl 24);
+  AesEncode(@FRk[0], @d[0], @s[0]);
+  for i := 0 to 3 do
+  begin
+    Dst[i * 4]     := Byte(d[i] and $FF);
+    Dst[i * 4 + 1] := Byte((d[i] shr 8) and $FF);
+    Dst[i * 4 + 2] := Byte((d[i] shr 16) and $FF);
+    Dst[i * 4 + 3] := Byte((d[i] shr 24) and $FF);
+  end;
+  Result := True;
+end;
+
+procedure TEncryptStage.ModeStart;
+begin
+  BlockEncrypt(FCounter, FPad);       { CTR: keystream del bloque 0 = E(IV) }
+  if FPar.Mode = 'cfb' then
+    BlockEncrypt(FIV, FPad);          { CFB: keystream del 1er bloque = E(IV) }
+  FPadLen := 0;
+end;
+
+procedure TEncryptStage.ModeEncrypt(Src, Dst: PByte; Len: SizeInt);
+var
+  i, j: Integer;
+  c: Byte;
+begin
+  for i := 0 to Len - 1 do
+  begin
+    if FPadLen = FBlockSize then
+    begin
+      if FPar.Mode = 'ctr' then
+      begin
+        j := 0;
+        while j < FBlockSize do
+        begin
+          FCounter[j] := Byte(FCounter[j] + 1);
+          if FCounter[j] <> 0 then Break;
+          Inc(j);
+        end;
+        BlockEncrypt(FCounter, FPad);
+      end
+      else
+        BlockEncrypt(FEmit, FPad);   { CFB: realimenta el TEXTO CIFRADO }
+      FPadLen := 0;
+    end;
+    c := Src[i] xor FPad[FPadLen];
+    Dst[i] := c;
+    if FPar.Mode = 'cfb' then FEmit[FPadLen] := c;
+    Inc(FPadLen);
+  end;
+end;
+
+procedure TEncryptStage.DoWrite(Buf: PByte; Count: SizeInt);
+var
+  n: SizeInt;
+begin
+  // Cifrar en un buffer propio: una etapa no modifica lo que le pasan (el llamador puede
+  // reusar el buffer, p. ej. el writer ya calculó el CRC sobre él)
+  if Length(FOut) = 0 then SetLength(FOut, 1 shl 16);
+  while Count > 0 do
+  begin
+    n := Count;
+    if n > Length(FOut) then n := Length(FOut);
+    ModeEncrypt(Buf, @FOut[0], n);
+    Emit(@FOut[0], n);
+    Inc(Buf, n);
+    Dec(Count, n);
+  end;
+end;
+
+function EncryptBuffer(const Par: TCryptParams; const Pwd: PByte; PwdLen: SizeInt;
+                       Src: PByte; Len: SizeInt; Dest: PByte): Boolean;
+var
+  p: TCryptParams;
+  key: array of Byte;
+  sink: TMemSink;
+  st: TEncryptStage;
+  d: TBytes;
+begin
+  Result := False;
+  if Len = 0 then Exit(True);
+  p := Par;
+  if p.KeyHex = '' then
+  begin
+    SetLength(key, p.KeySize);
+    if not DeriveKeyAndCheck(p, Pwd, PwdLen, @key[0]) then Exit;
+    p.KeyHex := EncodeHex(key, p.KeySize);
+  end;
+  sink := TMemSink.Create;
+  st := TEncryptStage.Create(sink, p);
+  try
+    st.Write(Src, Len);
+    st.Finish;
+    d := sink.Bytes;
+  finally
+    st.Free;      { libera también el sink }
+  end;
+  if Length(d) <> Len then Exit;
+  Move(d[0], Dest^, Len);
+  Result := True;
+end;
+
 
 end.

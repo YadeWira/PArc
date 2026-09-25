@@ -24,6 +24,8 @@ function ParsePpmdParams(const Params: TStringArray): TPpmdParams;
 
 { Contraseña para los archivos cifrados (bytes tal como los escribió el usuario, UTF-8). }
 procedure SetArchivePassword(const Pwd: RawByteString);
+{ La contraseña dada con SetArchivePassword ('' si no hay). }
+function ArchivePassword: RawByteString;
 
 { Arma la cadena de decodificadores sobre Source (la cadena pasa a ser dueña de Source). }
 function CreateDecoderChain(const Method: string; Source: TInStage): TInStage;
@@ -49,6 +51,11 @@ procedure SetArchivePassword(const Pwd: RawByteString);
 begin
   GPassword := Pwd;
   GHavePassword := True;
+end;
+
+function ArchivePassword: RawByteString;
+begin
+  if GHavePassword then Result := GPassword else Result := '';
 end;
 
 { ¿La etapa es de cifrado? El nombre va antes de '-' (bits) o '/' (modo): "aes-256/ctr". }
