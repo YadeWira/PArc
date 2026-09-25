@@ -375,6 +375,96 @@ y cada uno se descifra con la clave derivada de *su* salt (misma contraseña).
 4. Descifrar el bloque de datos con `cifrado` + `modo` + clave + IV, teniendo en
    cuenta el detalle de AES-CTR/7-Zip y el manejo del sobrante.
 
+#### 7.4 RECOVERY_BLOCK (`-rr`)
+
+Fuentes: `ArcRecover.hs` (escritura, verificación y reparación). En el C++ sólo
+aparece la constante `RECOVERY_BLOCK` (`Unarc/FarPlugin.cpp:166`); la lógica real
+está toda en el Haskell.
+
+**Qué es.** Un registro de paridad que permite *reparar* el archivo, no sólo
+detectar que está roto. Se escriben **dos** bloques de control `RECOVERY_BLOCK`
+consecutivos, ambos con método `aNO_COMPRESSION`:
+
+1. el bloque de **sectores de recuperación** (`rec_sectors_size` bytes), y
+2. el bloque de **CRCs + info** (`crcs_size` bytes), que empieza con la info de
+   control y sigue con los CRCs.
+
+Se escriben en `rrPos` (el final de los datos) y `lt` los reporta como
+"N recovery sectors (X bytes) present".
+
+**Derivación de parámetros** (`ArcRecover.hs:104-135`). Con `arcsize` = bytes a
+proteger y `wanted_rec_size` = lo pedido en `-rr`:
+
+| cantidad | fórmula |
+|---|---|
+| `wanted_rec_size` | sufijo `b` = bytes, `s` = n·512, `%`/`p` = arcsize·n/100 |
+| `sector_size` | `2^floor(log2(40·arcsize div wanted_rec_size))`, mínimo 512; con `-rr0%` es 4096 |
+| `arc_sectors` | `ceil(arcsize / sector_size)` |
+| `crcs_size0` | `arc_sectors · 4` (un CRC de 4 bytes por sector) |
+| `rec_size` | `max(wanted_rec_size, crcs_size0)` |
+| `rec_sectors` | `ceil((rec_size − crcs_size0) / sector_size)` |
+| `rec_sectors_size` | `rec_sectors · sector_size` |
+| `crcs_size` | `crcs_size0 + rec_sectors · 4` |
+
+(ojo con `40·arcsize div wanted_rec_size`: es división entera *antes* del logaritmo)
+
+Validado contra archivos reales de `arc.exe` 0.67.1: con datos de 272.000 bytes y
+`-rr4%` las fórmulas dan `sector_size = 512`, `rec_sectors = 7` y
+`rec_sectors_size = 3584`, y `arc.exe lt` reporta exactamente "7 recovery sectors
+(3584 bytes)"; con `-rr1%` dan `sector_size = 2048`, `rec_sectors = 1`, y reporta
+"1 recovery sectors (2 kbytes)". La relación es inversa a lo que uno esperaría: más
+porcentaje ⇒ sectores más chicos (4% → 512, 2% → 1024, 1% → 2048).
+
+**Algoritmo de paridad.** Es un **XOR rotativo**, no Reed-Solomon:
+
+- El archivo se recorre desde `init_pos` en trozos de a `sector_size` (el último
+  puede ser más corto).
+- Cada trozo se **XOR-ea** dentro de un sector de recuperación que rota:
+  `i := (i+1) mod rec_sectors`, empezando en `i0 = (-arc_sectors) mod rec_sectors`.
+  Ese `i0` es lo que hace que el reparto sea independiente de dónde arranque la
+  protección, y **hay que respetarlo igual al verificar**.
+- De cada trozo se calcula además su **CRC de 4 bytes**, y se guarda en orden.
+- Al final se calcula el CRC de **cada sector de recuperación** y se agregan
+  también, después de los CRCs de los datos.
+
+**Verificación** (`scanArchive`). Se leen los dos bloques, se recorre el archivo
+igual que al escribir (mismo XOR rotativo y mismos CRCs) y todo sector cuyo CRC no
+coincida es un sector dañado. Además de los sectores malos, el XOR acumulado de los
+sectores *buenos* de cada grupo es lo que después permite reconstruir.
+
+**Reparación.** Para cada sector dañado: si en su grupo de rotación (`i` fijo) hay
+un **único** sector dañado, se reconstruye como el XOR del sector de recuperación
+con todos los sectores buenos de ese grupo. O sea que **cada grupo tolera un sector
+dañado**, y el total tolera hasta `rec_sectors` daños siempre que no caigan dos en el
+mismo grupo. El resultado se escribe en `fixed.<nombre>` (nunca se toca el original).
+
+**Info de control.** El bloque de CRCs arranca con la info:
+
+- una **versión como string terminada en NUL**: `"0.36"` cuando hay sectores de
+  recuperación y `"0.39"` cuando `rec_sectors = 0` (o sea, sólo CRCs, `-rr0%`);
+  la lectura acepta ambas;
+- `arcsize` del área protegida;
+- el offset que permite recalcular `init_pos = pos_del_bloque − offset`;
+- la lista de pares `(sector_size, rec_sectors)`.
+
+**Serialización, confirmada contra un `.arc` real.** Los tipos son los de §2
+(`String` = `CStr`, `Integer` = `VInt`, tupla = campos concatenados, lista = `VInt n`
++ elementos), así que el bloque arranca exactamente con:
+
+    CStr "0.36" · VInt arcsize · VInt offset · VInt 1 · VInt sector_size · VInt rec_sectors
+
+y detrás vienen los CRCs. **Ojo con una diferencia que es fácil pasar por alto**: los
+CRC (tanto los de cada sector de datos como los de cada sector de recuperación) son
+`U32` de 4 bytes **LE**, no `VInt`; en el Haskell son `Storable` (líneas 159 y 166),
+no se serializan como los `Integer` del addinfo.
+
+Decodificado de un `.arc` real de `arc.exe` con `-rr4%` (datos de prueba de 272.000
+bytes): `"0.36"`, `arcsize = 104535`, `offset = 108144`, lista de 1 par, y el par
+`(sector_size = 512, rec_sectors = 7)`. Esos dos valores son exactamente lo que
+predicen las fórmulas de arriba para 4%, así que la derivación de parámetros y el
+layout quedan confirmados juntos: el `offset` da `init_pos = pos_del_bloque − offset =
+0`, o sea la protección arranca en el comienzo del archivo.
+
 ## 8. `.parc` — decisiones abiertas
 
 La extensión nativa de PArc es `.parc`.

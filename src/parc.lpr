@@ -6,7 +6,7 @@ program parc;
 
 uses
   {$IFDEF UNIX}cthreads,{$ENDIF}
-  Classes, SysUtils, DateUtils, parc_os, parc_bytes, parc_methods, parc_archive, parc_extract, parc_writer, parc_encoders, parc_presets;
+  Classes, SysUtils, DateUtils, parc_os, parc_bytes, parc_methods, parc_archive, parc_extract, parc_writer, parc_encoders, parc_presets, parc_recovery;
 
 const
   PARC_VERSION = '0.0.3';
@@ -28,6 +28,7 @@ begin
   OutLn('  u   agrega y reemplaza solo si el del disco es más nuevo');
   OutLn('  f   actualiza solo los que ya están en el archivo, si el del disco es más nuevo');
   OutLn('  d   borra del archivo los nombres/máscaras indicados');
+  OutLn('  r   repara con el registro de recuperación (-rr de FreeArc): escribe fixed.<nombre>');
   OutLn('Opciones:');
   OutLn('  -dp<dir>  directorio de destino');
   OutLn('  -o+       sobrescribe archivos existentes    -o-  los saltea (default)');
@@ -87,6 +88,42 @@ begin
     PrintBlock(A.DataBlocks[i]);
     OutLn(Format('             %d archivo(s) desde #%d', [A.DataBlocks[i].FileCount, A.DataBlocks[i].FirstFile]));
   end;
+end;
+
+{ r: como "arc r": busca sectores dañados con el registro de recuperación y, si todos se
+  pueden reconstruir, escribe fixed.<nombre> (el original nunca se toca). }
+function CmdRepair(const ArcName: string): Integer;
+var
+  Res: TRecoveryResult;
+  Dest: string;
+  i: Integer;
+  L: string;
+begin
+  if not RecoveryRepair(ArcName, Res, Dest) then
+  begin
+    ErrLn('ERROR: ' + ArcName + ' no tiene registro de recuperación (crearlo con FreeArc -rr)');
+    Exit(1);
+  end;
+  OutLn(Format('Registro de recuperación %s: %d sector(es) de %d bytes',
+    [Res.Info.Version, Res.Info.RecSectors, Res.Info.SectorSize]));
+  if Length(Res.BadSectors) = 0 then
+  begin
+    OutLn('No hay sectores dañados.');
+    Exit(0);
+  end;
+  L := '';
+  for i := 0 to High(Res.BadSectors) do L := L + ' ' + IntToStr(Res.BadSectors[i]);
+  OutLn(Format('Sectores dañados (%d):%s', [Length(Res.BadSectors), L]));
+  if Length(Res.Unrecoverable) > 0 then
+  begin
+    L := '';
+    for i := 0 to High(Res.Unrecoverable) do L := L + ' ' + IntToStr(Res.Unrecoverable[i]);
+    ErrLn(Format('ERROR: %d sector(es) irrecuperable(s) (dos o más dañados en el mismo grupo):%s',
+      [Length(Res.Unrecoverable), L]));
+    Exit(2);
+  end;
+  OutLn(Format('Reparados %d sector(es) -> %s', [Length(Res.Repaired), Dest]));
+  Result := 0;
 end;
 
 procedure LogLine(const Msg: string);
@@ -540,6 +577,16 @@ begin
       Halt(1);
     end;
     Opt.Filter := Filter;
+    if Cmd = 'r' then
+    begin
+      // Antes de abrir el archivo: dañado puede no abrir normalmente
+      try
+        Code := CmdRepair(ArcName);
+      except
+        on E: Exception do begin ErrLn('ERROR: ' + E.Message); Code := 4; end;
+      end;
+      Halt(Code);
+    end;
     if (Cmd = 'a') or (Cmd = 'u') or (Cmd = 'f') or (Cmd = 'd') then
     begin
       try
