@@ -10,8 +10,8 @@ uses
 
 const
   PARC_VERSION = '0.0.3';
-  // Hasta tener todos los codificadores de los presets, el default es LZMA (exe para binarios)
-  DEFAULT_METHOD = 'exe+lzma:16mb:normal/$text=lzma:16mb:normal/$compressed=storing';
+  // Método por defecto: el mismo que FreeArc (-m4)
+  DEFAULT_METHOD = '4';
   // Directorio y footer: lo mismo que usa FreeArc
   DIR_METHOD = 'lzma:1mb:normal:bt4:32';
 
@@ -28,7 +28,7 @@ begin
   OutLn('Opciones:');
   OutLn('  -dp<dir>  directorio de destino');
   OutLn('  -o+       sobrescribe archivos existentes    -o-  los saltea (default)');
-  OutLn('  -m<método> método de compresión (a), p. ej. -m0 (storing), -mexe');
+  OutLn('  -m<método> preset -m0..-m9, -mx (default -m4, como FreeArc) o método, p. ej. -mlzma');
   OutLn('  -fmt=parc|arc  formato de salida (a)');
   OutLn('  -p<contraseña>  contraseña de un archivo cifrado (si falta, se pide por consola)');
 end;
