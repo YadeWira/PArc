@@ -29,6 +29,12 @@ type
 
 function ExtractArchive(A: TArchive; const Opt: TExtractOptions; Log: TLogProc): TExtractStats;
 
+{ Comodines estilo FreeArc ('*', '?'); en Windows sin distinguir mayúsculas. }
+function MatchWild(const Name, Mask: string): Boolean;
+
+{ ¿Name coincide con alguna máscara (nombre completo, nombre base o prefijo de directorio)? }
+function MatchesAny(const Name: string; Masks: TStrings): Boolean;
+
 implementation
 
 uses
@@ -65,6 +71,18 @@ begin
   end;
   while (m <= Length(b)) and (b[m] = '*') do Inc(m);
   Result := m > Length(b);
+end;
+
+function MatchesAny(const Name: string; Masks: TStrings): Boolean;
+var
+  i: Integer;
+begin
+  if Masks <> nil then
+    for i := 0 to Masks.Count - 1 do
+      if MatchWild(Name, Masks[i]) or MatchWild(Copy(Name, LastDelimiter('/', Name) + 1, MaxInt), Masks[i])
+         or (Name = Masks[i]) or (Copy(Name, 1, Length(Masks[i]) + 1) = Masks[i] + '/') then
+        Exit(True);
+  Result := False;
 end;
 
 function Wanted(const Opt: TExtractOptions; const Name: string): Boolean;

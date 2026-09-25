@@ -24,12 +24,17 @@ begin
   OutLn('  t   verifica (descomprime y compara CRC, sin escribir)');
   OutLn('  x   extrae con rutas');
   OutLn('  e   extrae sin rutas');
-  OutLn('  a   crea un archivo (.parc; .arc compatible con FreeArc si la extensión es .arc)');
+  OutLn('  a   agrega y reemplaza (crea el archivo si no existe; .arc compatible si la extensión es .arc)');
+  OutLn('  u   agrega y reemplaza solo si el del disco es más nuevo');
+  OutLn('  f   actualiza solo los que ya están en el archivo, si el del disco es más nuevo');
+  OutLn('  d   borra del archivo los nombres/máscaras indicados');
   OutLn('Opciones:');
   OutLn('  -dp<dir>  directorio de destino');
   OutLn('  -o+       sobrescribe archivos existentes    -o-  los saltea (default)');
   OutLn('  -m<método> preset -m0..-m9, -mx (default -m4, como FreeArc) o método, p. ej. -mlzma');
-  OutLn('  -fmt=parc|arc  formato de salida (a)');
+  OutLn('  -fmt=parc|arc  formato de salida (a/u/f/d)');
+  OutLn('  -s-  sin sólido   -s<mem> tope de bytes por bloque sólido   -s<N>f tope de archivos');
+  OutLn('  -x<máscara>  excluir (puede repetirse)');
   OutLn('  -p<contraseña>  contraseña de un archivo cifrado (si falta, se pide por consola)');
 end;
 
@@ -108,13 +113,14 @@ end;
 
 { Junta las entradas a agregar: cada argumento es un archivo o un directorio (recursivo).
   Los nombres guardados son los del argumento, saneados (sin raíz ni ".."). }
-procedure CollectEntries(const Paths: TStringList; const Exclude: string; var Entries: TWriteEntryArray);
+procedure CollectEntries(const Paths: TStringList; const Exclude: string; Excludes: TStrings; var Entries: TWriteEntryArray);
 
   procedure AddEntry(const Disk, Stored: string; const Meta: TFileMeta);
   var
     n: Integer;
   begin
     if ExpandFileName(Disk) = Exclude then Exit;   // no meter el archivo que se está escribiendo
+    if MatchesAny(Stored, Excludes) then Exit;     // -x<máscara>
     n := Length(Entries);
     SetLength(Entries, n + 1);
     Entries[n].DiskPath := Disk;
@@ -182,9 +188,9 @@ begin
   Result := False;
 end;
 
-{ Orden dentro de un bloque sólido: grupo de arc.groups, extensión, nombre (inserción simple:
-  los bloques típicos tienen miles de archivos, no millones). }
-procedure SortGroupFiles(var G: TSolidGroup; const Entries: TWriteEntryArray);
+{ Orden de los archivos nuevos: grupo de arc.groups, extensión, nombre (archivos parecidos
+  juntos en el bloque sólido). }
+procedure SortIndices(const Idx: array of Integer; const Entries: TWriteEntryArray);
 
   function Key(i: Integer): string;
   var
@@ -198,91 +204,289 @@ procedure SortGroupFiles(var G: TSolidGroup; const Entries: TWriteEntryArray);
 var
   Keys: TStringList;
   i: Integer;
+  P: PInteger;
 begin
+  if Length(Idx) = 0 then Exit;
   Keys := TStringList.Create;
   try
     Keys.CaseSensitive := True;
-    for i := 0 to High(G.Files) do Keys.AddObject(Key(G.Files[i]), TObject(PtrInt(G.Files[i])));
+    for i := 0 to High(Idx) do Keys.AddObject(Key(Idx[i]), TObject(PtrInt(Idx[i])));
     Keys.Sort;
-    for i := 0 to Keys.Count - 1 do G.Files[i] := PtrInt(Keys.Objects[i]);
+    P := @Idx[0];   // (Idx es const para aceptar arreglos abiertos; se reordena en su lugar)
+    for i := 0 to Keys.Count - 1 do P[i] := PtrInt(Keys.Objects[i]);
   finally
     Keys.Free;
   end;
 end;
 
-function CmdAdd(const ArcName: string; const Paths: TStringList; const Method, Fmt: string): Integer;
+type
+  TModifyOptions = record
+    Method, Fmt: string;
+    SolidBytes: Int64;       // -s<mem>: tope de bytes por bloque sólido (0 = sin tope)
+    SolidFiles: Integer;     // -s<N>f: tope de archivos por bloque (0 = sin tope)
+    NonSolid: Boolean;       // -s-: cada archivo en su propio bloque
+    Excludes: TStringList;   // -x<máscara>
+  end;
+
+{ Agrupa entradas nuevas en bloques sólidos: método de su grupo de arc.groups (-m5 -> $text:
+  dict+lzp+ppmd, etc.), un bloque por método, cortado por -s. }
+procedure GroupNewEntries(const Entries: TWriteEntryArray; const Idx: array of Integer;
+  const MO: TModifyOptions; var Groups: TSolidGroupArray);
 var
-  Entries: TWriteEntryArray;
   GM: TGroupMethods;
-  Groups: array of TSolidGroup;
-  Opt: TWriteOptions;
-  St: TWriteStats;
-  i, n, g, k: Integer;
-  M, Missing: string;
+  i, n, g, k, j: Integer;
+  M: string;
+  Open: array of Integer;       // bloque abierto por método (índice en Groups), -1 si no
+  OpenBytes: array of Int64;
+  Methods: TStringList;
 begin
-  if Paths.Count = 0 then
-  begin
-    ErrLn('ERROR: no se indicaron archivos para agregar');
-    Exit(1);
-  end;
-  if FileExists(FsPath(ArcName)) then
-  begin
-    ErrLn('ERROR: ' + ArcName + ' ya existe (actualizar un archivo existente todavía no está soportado)');
-    Exit(1);
-  end;
-  Entries := nil;
-  CollectEntries(Paths, ExpandFileName(ArcName), Entries);
-  // Cada archivo va al método de su grupo de arc.groups (-m5 -> $text: dict+lzp+ppmd, etc.);
-  // los que comparten método van al mismo bloque sólido
-  GM := DecodeMethod(Method, CpuCount);
-  Groups := nil;
-  for i := 0 to High(Entries) do
-    if not Entries[i].Meta.IsDir then
+  GM := DecodeMethod(MO.Method, CpuCount);
+  Methods := TStringList.Create;
+  try
+    // Ordenar primero (grupo de arc.groups, extensión, nombre) y después cortar por -s
+    SortIndices(Idx, Entries);
+    for j := 0 to High(Idx) do
     begin
+      i := Idx[j];
       M := MethodForGroup(GM, FileGroup(Entries[i].StoredName));
       if M = '' then M := 'storing';
-      // tta y mm no admiten sólido (doit "nosolid?" en C_TTA.h/C_MM.h): cada WAV/BMP tiene su
-      // propia cabecera y sus parámetros, así que va en su propio bloque
-      k := -1;
-      if not NoSolid(M) then
-        for g := 0 to High(Groups) do
-          if Groups[g].Method = M then k := g;
+      k := Methods.IndexOf(M);
       if k < 0 then
       begin
-        k := Length(Groups);
-        SetLength(Groups, k + 1);
-        Groups[k].Method := M;
-        Groups[k].Files := nil;
+        k := Methods.Add(M);
+        SetLength(Open, k + 1);
+        SetLength(OpenBytes, k + 1);
+        Open[k] := -1;
       end;
-      n := Length(Groups[k].Files);
-      SetLength(Groups[k].Files, n + 1);
-      Groups[k].Files[n] := i;
+      g := Open[k];
+      // tta/mm no admiten sólido (nosolid? de C_TTA.h/C_MM.h); -s- y los topes de -s cortan
+      if (g >= 0) and (MO.NonSolid or NoSolid(M) or
+         ((MO.SolidBytes > 0) and (OpenBytes[k] + Entries[i].Meta.Size > MO.SolidBytes)) or
+         ((MO.SolidFiles > 0) and (Length(Groups[g].Files) >= MO.SolidFiles))) then
+        g := -1;
+      if g < 0 then
+      begin
+        g := Length(Groups);
+        SetLength(Groups, g + 1);
+        Groups[g] := Default(TSolidGroup);
+        Groups[g].Method := M;
+        Open[k] := g;
+        OpenBytes[k] := 0;
+      end;
+      n := Length(Groups[g].Files);
+      SetLength(Groups[g].Files, n + 1);
+      Groups[g].Files[n] := i;
+      Inc(OpenBytes[k], Entries[i].Meta.Size);
     end;
-  // Dentro de cada bloque: por grupo de arc.groups, extensión y nombre (archivos parecidos juntos)
-  for g := 0 to High(Groups) do SortGroupFiles(Groups[g], Entries);
-  // Avisar de una vez qué métodos todavía no se pueden comprimir
-  Missing := '';
-  for g := 0 to High(Groups) do
-    if not EncoderAvailable(Groups[g].Method) then Missing := Missing + LineEnding + '  ' + Groups[g].Method;
-  if Missing <> '' then
-  begin
-    ErrLn('ERROR: todavía no hay codificador para:' + Missing);
-    Exit(3);
+  finally
+    Methods.Free;
   end;
-  Opt.DirMethod := DIR_METHOD;
-  if Fmt <> '' then Opt.Parc := Fmt = 'parc'
-  else Opt.Parc := LowerCase(ExtractFileExt(ArcName)) <> '.arc';
-  St := WriteArchive(ArcName, Entries, Groups, Opt, @LogLine);
-  OutLn(Format('Creado %s (%s): %d archivo(s) y %d directorio(s), %d bytes -> %d bytes',
-    [ArcName, BoolToStr(Opt.Parc, 'parc', 'arc'), St.Files, St.Dirs, St.Bytes, St.ArcSize]));
+end;
+
+{ Clave para comparar nombres del archivo con los del disco (en Windows sin mayúsculas). }
+function NameKey(const Name: string): string;
+begin
+  {$IFDEF WINDOWS}Result := LowerCase(Name);{$ELSE}Result := Name;{$ENDIF}
+end;
+
+{ a (agregar/reemplazar), u (solo si es más nuevo), f (solo actualizar lo que ya está),
+  d (borrar). Sobre un archivo existente, los bloques que se conservan enteros se copian tal
+  cual y los que pierden archivos se reempaquetan; se escribe un temporal que reemplaza al
+  original al final. }
+function CmdModify(const Cmd, ArcName: string; const Paths: TStringList; const MO: TModifyOptions): Integer;
+var
+  A: TArchive;
+  Disk, Entries: TWriteEntryArray;
+  NewIdx: array of Integer;
+  Groups: TSolidGroupArray;
+  Keep: array of Boolean;
+  ByName: TStringList;
+  Opt: TWriteOptions;
+  St: TWriteStats;
+  i, j, n, b, KeptInBlock, Removed, Replaced, Added: Integer;
+  Missing, Verb: string;
+  Exists, Newer: Boolean;
+  Old: array of Integer;         // índice en Entries de cada archivo viejo conservado (-1 si no)
+
+  function AddEntry(const E: TWriteEntry): Integer;
+  begin
+    Result := Length(Entries);
+    SetLength(Entries, Result + 1);
+    Entries[Result] := E;
+  end;
+
+begin
+  if (Cmd <> 'd') and (Paths.Count = 0) then
+  begin
+    ErrLn('ERROR: no se indicaron archivos');
+    Exit(1);
+  end;
+  Exists := FileExists(FsPath(ArcName));
+  if not Exists and ((Cmd = 'd') or (Cmd = 'f')) then
+  begin
+    ErrLn('ERROR: no existe ' + ArcName);
+    Exit(1);
+  end;
+  A := nil;
+  if Exists then A := TArchive.Open(ArcName);
+  try
+    if (A <> nil) and A.Locked then
+    begin
+      ErrLn('ERROR: ' + ArcName + ' está bloqueado contra cambios (-k de FreeArc)');
+      Exit(1);
+    end;
+    Disk := nil;
+    if Cmd <> 'd' then CollectEntries(Paths, ExpandFileName(ArcName), MO.Excludes, Disk);
+
+    Entries := nil;
+    NewIdx := nil;
+    Removed := 0; Replaced := 0; Added := 0;
+    // Archivos viejos: cuáles se conservan
+    if A <> nil then
+    begin
+      ByName := TStringList.Create;
+      try
+        ByName.Sorted := True;
+        ByName.Duplicates := dupIgnore;
+        for i := 0 to High(Disk) do ByName.AddObject(NameKey(Disk[i].StoredName), TObject(PtrInt(i)));
+        SetLength(Keep, Length(A.Files));
+        SetLength(Old, Length(A.Files));
+        for j := 0 to High(A.Files) do
+        begin
+          Keep[j] := True;
+          Old[j] := -1;
+          if Cmd = 'd' then
+            Keep[j] := not MatchesAny(A.Files[j].Name, Paths)
+          else
+          begin
+            i := ByName.IndexOf(NameKey(A.Files[j].Name));
+            if i >= 0 then
+            begin
+              i := PtrInt(ByName.Objects[i]);
+              if A.Files[j].IsDir and Disk[i].Meta.IsDir then
+                Disk[i].Meta.Size := -1   // el directorio ya está: no duplicarlo
+              else
+              begin
+                // u y f solo reemplazan si el del disco es más nuevo (comparado en segundos,
+                // la precisión de .arc)
+                Newer := (Disk[i].Meta.MTimeNs div 1000000000) > (MetaFromArchive(A.Files[j]).MTimeNs div 1000000000);
+                if (Cmd = 'a') or Newer then
+                begin
+                  Keep[j] := False;
+                  Inc(Replaced);
+                end
+                else
+                  Disk[i].Meta.Size := -1;  // se queda el del archivo
+              end;
+            end;
+          end;
+          if not Keep[j] and (Cmd = 'd') then Inc(Removed);
+        end;
+      finally
+        ByName.Free;
+      end;
+      // Entradas conservadas (en el orden del archivo)
+      for j := 0 to High(A.Files) do
+        if Keep[j] then
+        begin
+          Old[j] := AddEntry(Default(TWriteEntry));
+          Entries[Old[j]].StoredName := A.Files[j].Name;
+          Entries[Old[j]].Meta := MetaFromArchive(A.Files[j]);
+          Entries[Old[j]].SrcArc := A;
+          Entries[Old[j]].SrcIndex := j;
+        end;
+      // Bloques viejos: enteros -> copia; con bajas -> reempaquetar; vacíos -> nada
+      Groups := nil;
+      for b := 0 to High(A.DataBlocks) do
+      begin
+        KeptInBlock := 0;
+        n := 0;
+        for j := A.DataBlocks[b].FirstFile to A.DataBlocks[b].FirstFile + A.DataBlocks[b].FileCount - 1 do
+          if not A.Files[j].IsDir then
+          begin
+            Inc(n);
+            if Keep[j] then Inc(KeptInBlock);
+          end;
+        if KeptInBlock = 0 then Continue;
+        i := Length(Groups);
+        SetLength(Groups, i + 1);
+        Groups[i] := Default(TSolidGroup);
+        Groups[i].Method := A.DataBlocks[b].Method;
+        if KeptInBlock = n then
+        begin
+          Groups[i].CopyFrom := A;
+          Groups[i].CopyBlock := b;
+        end;
+        for j := A.DataBlocks[b].FirstFile to A.DataBlocks[b].FirstFile + A.DataBlocks[b].FileCount - 1 do
+          if Keep[j] and not A.Files[j].IsDir then
+          begin
+            SetLength(Groups[i].Files, Length(Groups[i].Files) + 1);
+            Groups[i].Files[High(Groups[i].Files)] := Old[j];
+          end;
+      end;
+    end;
+    // Archivos nuevos del disco (f solo actualiza: no agrega los que no estaban)
+    for i := 0 to High(Disk) do
+    begin
+      if Disk[i].Meta.Size < 0 then Continue;
+      // f solo actualiza lo que ya está: ni archivos ni directorios nuevos
+      if Cmd = 'f' then
+      begin
+        n := 0;
+        if A <> nil then
+          for j := 0 to High(A.Files) do
+            if NameKey(A.Files[j].Name) = NameKey(Disk[i].StoredName) then n := 1;
+        if n = 0 then Continue;
+      end;
+      j := AddEntry(Disk[i]);
+      if not Disk[i].Meta.IsDir then
+      begin
+        SetLength(NewIdx, Length(NewIdx) + 1);
+        NewIdx[High(NewIdx)] := j;
+        Inc(Added);
+      end;
+    end;
+    Dec(Added, Replaced);
+    GroupNewEntries(Entries, NewIdx, MO, Groups);
+
+    // Avisar de una vez qué métodos todavía no se pueden comprimir
+    Missing := '';
+    for i := 0 to High(Groups) do
+      if (Groups[i].CopyFrom = nil) and not EncoderAvailable(Groups[i].Method) then
+        Missing := Missing + LineEnding + '  ' + Groups[i].Method;
+    if Missing <> '' then
+    begin
+      ErrLn('ERROR: todavía no hay codificador para:' + Missing);
+      Exit(3);
+    end;
+
+    Opt := Default(TWriteOptions);   // KeepTemp/Comment: los registros locales no se inicializan solos
+    Opt.DirMethod := DIR_METHOD;
+    Opt.KeepTemp := True;            // el original se cierra antes de reemplazarlo (Windows)
+    if MO.Fmt <> '' then Opt.Parc := MO.Fmt = 'parc'
+    else if A <> nil then Opt.Parc := A.IsParc
+    else Opt.Parc := LowerCase(ExtractFileExt(ArcName)) <> '.arc';
+    if A <> nil then Opt.Comment := A.Comment;
+    St := WriteArchive(ArcName, Entries, Groups, Opt, @LogLine);
+  finally
+    A.Free;
+  end;
+  FinishArchive(ArcName);
+  if not Exists then Verb := 'Creado' else Verb := 'Actualizado';
+  OutLn(Format('%s %s (%s): %d archivo(s) y %d directorio(s), %d bytes -> %d bytes',
+    [Verb, ArcName, BoolToStr(Opt.Parc, 'parc', 'arc'), St.Files, St.Dirs, St.Bytes, St.ArcSize]));
+  if Exists then
+    OutLn(Format('  agregados %d, reemplazados %d, borrados %d', [Added, Replaced, Removed]));
   Result := 0;
 end;
 
 var
-  Cmd, ArcName, S, Method, Fmt: string;
+  Cmd, ArcName, S: string;
   A: TArchive;
   Opt: TExtractOptions;
-  Filter: TStringList;
+  MO: TModifyOptions;
+  Filter, Excludes: TStringList;
+  SolidMem: QWord;
   i, Code, Tries: Integer;
   Retry: Boolean;
 begin
@@ -295,9 +499,11 @@ begin
   Opt := Default(TExtractOptions);
   Opt.Overwrite := owSkip;
   ArcName := '';
-  Method := DEFAULT_METHOD;
-  Fmt := '';
+  MO := Default(TModifyOptions);
+  MO.Method := DEFAULT_METHOD;
   Filter := TStringList.Create;
+  Excludes := TStringList.Create;
+  MO.Excludes := Excludes;
   Code := 0;
   try
     for i := 2 to ArgCount do
@@ -309,10 +515,15 @@ begin
         else if S = '-o+' then Opt.Overwrite := owAll
         else if S = '-o-' then Opt.Overwrite := owSkip
         else if Copy(S, 1, 2) = '-m' then
-        begin
-          Method := Copy(S, 3, MaxInt);   // preset (0..9, x, ...) o método explícito
-        end
-        else if Copy(S, 1, 5) = '-fmt=' then Fmt := LowerCase(Copy(S, 6, MaxInt))
+          MO.Method := Copy(S, 3, MaxInt)   // preset (0..9, x, ...) o método explícito
+        else if Copy(S, 1, 5) = '-fmt=' then MO.Fmt := LowerCase(Copy(S, 6, MaxInt))
+        else if Copy(S, 1, 2) = '-x' then Excludes.Add(Copy(S, 3, MaxInt))
+        // -s- no sólido; -s<mem> tope de bytes por bloque; -s<N>f tope de archivos
+        else if S = '-s-' then MO.NonSolid := True
+        else if (Copy(S, 1, 2) = '-s') and (Length(S) > 2) and (S[Length(S)] = 'f') then
+          MO.SolidFiles := StrToIntDef(Copy(S, 3, Length(S) - 3), 0)
+        else if (Copy(S, 1, 2) = '-s') and ParseMem(Copy(S, 3, MaxInt), SolidMem) then
+          MO.SolidBytes := SolidMem
         else if Copy(S, 1, 2) = '-p' then SetArchivePassword(Copy(S, 3, MaxInt))
         else
         begin
@@ -329,10 +540,10 @@ begin
       Halt(1);
     end;
     Opt.Filter := Filter;
-    if Cmd = 'a' then
+    if (Cmd = 'a') or (Cmd = 'u') or (Cmd = 'f') or (Cmd = 'd') then
     begin
       try
-        Code := CmdAdd(ArcName, Filter, Method, Fmt);
+        Code := CmdModify(Cmd, ArcName, Filter, MO);
       except
         on E: EUnsupportedEncoder do begin ErrLn('ERROR: ' + E.Message); Code := 3; end;
         on E: Exception do begin ErrLn('ERROR: ' + E.Message); Code := 4; end;
@@ -381,6 +592,7 @@ begin
     until not Retry;
   finally
     Filter.Free;
+    Excludes.Free;
   end;
   Halt(Code);
 end.

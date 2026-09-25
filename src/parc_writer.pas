@@ -9,13 +9,15 @@ unit parc_writer;
 interface
 
 uses
-  Classes, SysUtils, parc_os;
+  Classes, SysUtils, parc_os, parc_archive;
 
 type
   TWriteEntry = record
-    DiskPath: string;     // de dónde leerlo
+    DiskPath: string;     // de dónde leerlo (si SrcArc = nil)
     StoredName: string;   // cómo se guarda: UTF-8, '/', relativo, sin '..'
     Meta: TFileMeta;
+    SrcArc: TArchive;     // <> nil: viene de un archivo existente (actualizar/borrar)
+    SrcIndex: Integer;    //   su índice en SrcArc.Files
   end;
 
   TWriteEntryArray = array of TWriteEntry;
@@ -24,12 +26,18 @@ type
   TSolidGroup = record
     Method: string;
     Files: array of Integer;
+    CopyFrom: TArchive;   // <> nil: copiar tal cual el bloque CopyBlock de ese archivo (sin
+    CopyBlock: Integer;   //   recomprimir); Files son sus archivos, en su orden
   end;
+
+  TSolidGroupArray = array of TSolidGroup;
 
   TWriteOptions = record
     Parc: Boolean;        // .parc (si no, .arc compatible con FreeArc 0.67)
     DirMethod: string;    // compresión del directorio y del footer
-  end;
+    Comment: RawByteString;
+    KeepTemp: Boolean;    // no renombrar: el llamador llama a FinishArchive (p. ej. después de
+  end;                    // cerrar el archivo viejo, que en Windows no se puede reemplazar abierto)
 
   TWriteStats = record
     Files, Dirs: Integer;
@@ -43,10 +51,16 @@ type
 function WriteArchive(const FileName: string; const Entries: array of TWriteEntry;
   const Groups: array of TSolidGroup; const Opt: TWriteOptions; Log: TLogProc): TWriteStats;
 
+{ Reemplaza FileName por el temporal que dejó WriteArchive con KeepTemp. }
+procedure FinishArchive(const FileName: string);
+
+{ Meta de una entrada que viene de un archivo existente. }
+function MetaFromArchive(const F: TArcFileEntry): TFileMeta;
+
 implementation
 
 uses
-  parc_bytes, parc_crc, parc_outstream, parc_encoders, parc_archive;
+  parc_bytes, parc_crc, parc_stream, parc_outstream, parc_encoders, parc_methods;
 
 const
   VERSION_ARC: array[0..3] of Byte = (0, 0, 6, 7);                // FreeArc 0.67
@@ -235,7 +249,7 @@ end;
 
 { FOOTER_BLOCK (FORMATO-ARC.md §5.1): bloques de control, locked, comentario viejo (0),
   recovery ('') y comentario (0 bytes). }
-function BuildFooter(const Control: array of TBlockInfo; FooterPos: Int64): TBytes;
+function BuildFooter(const Control: array of TBlockInfo; FooterPos: Int64; const Comment: RawByteString): TBytes;
 var
   w: TByteWriter;
   i: Integer;
@@ -254,11 +268,61 @@ begin
   w.U8(0);        // locked
   w.VInt(0);      // comentario viejo (UCS-4)
   w.CStr('');     // recovery
-  w.VInt(0);      // comentario
+  w.VInt(Length(Comment));   // comentario (UTF-8, puede tener NUL)
+  w.Raw(PChar(Comment), Length(Comment));
   Result := w.Bytes;
 end;
 
 { Comprime los archivos de un grupo como un bloque sólido. }
+function MetaFromArchive(const F: TArcFileEntry): TFileMeta;
+begin
+  Result := Default(TFileMeta);
+  Result.Size := F.Size;
+  Result.IsDir := F.IsDir;
+  if F.HasMTimeNs then Result.MTimeNs := F.MTimeNs else Result.MTimeNs := F.Time * 1000000000;
+  Result.HasWinAttr := F.HasWinAttr;
+  Result.WinAttr := F.WinAttr;
+  Result.HasUnixMode := F.HasUnixMode;
+  Result.UnixMode := F.UnixMode;
+end;
+
+{ Copia tal cual un bloque de un archivo existente (sus bytes comprimidos, sin tocarlos: vale
+  también para bloques cifrados). }
+function CopyDataBlock(S: TStream; const Entries: array of TWriteEntry; const G: TSolidGroup;
+  var Stats: TWriteStats): TDataBlock;
+var
+  Blk: TArcBlock;
+  Src: TInStage;
+  Buf: TBytes;
+  n: SizeInt;
+  i: Integer;
+begin
+  Blk := G.CopyFrom.DataBlocks[G.CopyBlock];
+  Result.Method := Blk.Method;
+  Result.Pos := S.Position;
+  SetLength(Buf, COPY_BUF);
+  Src := G.CopyFrom.OpenBlockData(Blk);
+  try
+    repeat
+      n := Src.Read(@Buf[0], Length(Buf));
+      if n > 0 then S.WriteBuffer(Buf[0], n);
+    until n <= 0;
+  finally
+    Src.Free;
+  end;
+  Result.CompSize := S.Position - Result.Pos;
+  SetLength(Result.Files, Length(G.Files));
+  for i := 0 to High(G.Files) do
+    with Entries[G.Files[i]] do
+    begin
+      Result.Files[i].Entry := G.Files[i];
+      Result.Files[i].Size := SrcArc.Files[SrcIndex].Size;
+      Result.Files[i].Crc := SrcArc.Files[SrcIndex].Crc;
+      if Meta.IsDir then Inc(Stats.Dirs)
+      else begin Inc(Stats.Files); Inc(Stats.Bytes, Meta.Size); end;
+    end;
+end;
+
 function WriteDataBlock(S: TStream; const Entries: array of TWriteEntry; const G: TSolidGroup;
   Log: TLogProc; var Stats: TWriteStats): TDataBlock;
 var
@@ -269,7 +333,28 @@ var
   Got: SizeInt;
   Crc: LongWord;
   Size: Int64;
+  // Entradas que vienen de un archivo existente: el bloque viejo se descomprime en orden,
+  // salteando los archivos que no se conservan
+  CurArc: TArchive;
+  CurBlock, CurNext, k: Integer;
+  CurChain: TInStage;
+  Remaining: Int64;
+
+  procedure SkipIn(Count: Int64);
+  var
+    m: SizeInt;
+  begin
+    while Count > 0 do
+    begin
+      if Count > Length(Buf) then m := Length(Buf) else m := Count;
+      CurChain.ReadExact(@Buf[0], m);
+      Dec(Count, m);
+    end;
+  end;
+
 begin
+  if G.CopyFrom <> nil then Exit(CopyDataBlock(S, Entries, G, Stats));
+  CurArc := nil; CurBlock := -1; CurNext := 0; CurChain := nil;
   // Diccionario ajustado al tamaño del bloque (el método ajustado es el que queda en el archivo)
   Size := 0;
   for i := 0 to High(G.Files) do
@@ -285,7 +370,42 @@ begin
       n := G.Files[i];
       Crc := CRC_INIT;
       Size := 0;
-      if not Entries[n].Meta.IsDir then
+      if not Entries[n].Meta.IsDir and (Entries[n].SrcArc <> nil) then
+      begin
+        with Entries[n] do
+        begin
+          k := SrcArc.Files[SrcIndex].DataBlock;
+          if (CurArc <> SrcArc) or (CurBlock <> k) or (SrcIndex < CurNext) then
+          begin
+            FreeAndNil(CurChain);
+            CurArc := SrcArc;
+            CurBlock := k;
+            CurNext := SrcArc.DataBlocks[k].FirstFile;
+            CurChain := CreateDecoderChain(SrcArc.DataBlocks[k].Method, SrcArc.OpenBlockData(SrcArc.DataBlocks[k]));
+          end;
+          while CurNext < SrcIndex do
+          begin
+            SkipIn(SrcArc.Files[CurNext].Size);
+            Inc(CurNext);
+          end;
+          Remaining := SrcArc.Files[SrcIndex].Size;
+          while Remaining > 0 do
+          begin
+            if Remaining > Length(Buf) then Got := Length(Buf) else Got := Remaining;
+            CurChain.ReadExact(@Buf[0], Got);
+            Crc := UpdateCRC(Crc, @Buf[0], Got);
+            Chain.Write(@Buf[0], Got);
+            Inc(Size, Got);
+            Dec(Remaining, Got);
+          end;
+          CurNext := SrcIndex + 1;
+          if (Crc xor CRC_INIT) <> SrcArc.Files[SrcIndex].Crc then
+            raise EArcCorrupt.CreateFmt('CRC incorrecto en %s del archivo original: no se reempaqueta un archivo dañado', [StoredName]);
+        end;
+        Inc(Stats.Files);
+        Inc(Stats.Bytes, Size);
+      end
+      else if not Entries[n].Meta.IsDir then
       begin
         F := TFileStream.Create(FsPath(Entries[n].DiskPath), fmOpenRead or fmShareDenyWrite);
         try
@@ -316,6 +436,7 @@ begin
     Chain.Finish;
   finally
     Chain.Free;
+    CurChain.Free;
   end;
   Result.CompSize := S.Position - Result.Pos;
 end;
@@ -337,7 +458,7 @@ begin
   if not EncoderAvailable(Opt.DirMethod) then
     raise EUnsupportedEncoder.CreateFmt('todavía no se puede comprimir con "%s"', [Opt.DirMethod]);
   for i := 0 to High(Groups) do
-    if not EncoderAvailable(Groups[i].Method) then
+    if (Groups[i].CopyFrom = nil) and not EncoderAvailable(Groups[i].Method) then
       raise EUnsupportedEncoder.CreateFmt('todavía no se puede comprimir con "%s"', [Groups[i].Method]);
 
   Tmp := FileName + '.tmp';
@@ -353,8 +474,8 @@ begin
       Control[0] := WriteControlBlock(S, Opt.Parc, HEADER_BLOCK, 'storing', Hdr.Bytes);
 
       // Directorios primero, en un bloque sin datos (como splitToSolidBlocks de FreeArc)
+      DirGroup := Default(TSolidGroup);   // CopyFrom = nil: los registros locales no se inicializan solos
       DirGroup.Method := 'storing';
-      DirGroup.Files := nil;
       for i := 0 to High(Entries) do
         if Entries[i].Meta.IsDir then
         begin
@@ -382,7 +503,7 @@ begin
       Control[1] := WriteControlBlock(S, Opt.Parc, DIR_BLOCK, Opt.DirMethod, DirData);
 
       // Footer (las posiciones de los bloques de control, relativas a la del footer)
-      WriteControlBlock(S, Opt.Parc, FOOTER_BLOCK, Opt.DirMethod, BuildFooter(Control, S.Position));
+      WriteControlBlock(S, Opt.Parc, FOOTER_BLOCK, Opt.DirMethod, BuildFooter(Control, S.Position, Opt.Comment));
       Result.ArcSize := S.Size;
       Ok := True;
     finally
@@ -391,7 +512,16 @@ begin
   finally
     if not Ok then DeleteFile(FsPath(Tmp));
   end;
-  if FileExists(FsPath(FileName)) then DeleteFile(FsPath(FileName));
+  if not Opt.KeepTemp then FinishArchive(FileName);
+end;
+
+procedure FinishArchive(const FileName: string);
+var
+  Tmp: string;
+begin
+  Tmp := FileName + '.tmp';
+  if FileExists(FsPath(FileName)) and not DeleteFile(FsPath(FileName)) then
+    raise EFCreateError.CreateFmt('no se pudo reemplazar %s (¿está abierto?); el nuevo quedó en %s', [FileName, Tmp]);
   if not RenameFile(FsPath(Tmp), FsPath(FileName)) then
     raise EFCreateError.CreateFmt('no se pudo renombrar %s a %s', [Tmp, FileName]);
 end;
