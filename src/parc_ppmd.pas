@@ -205,16 +205,16 @@ type
     procedure ClearMask;
     procedure AriInitDecoder;
     procedure AriDecNormalize;
-    function  AriGetCurrentCount: LongWord;
-    function  AriGetCurrentShiftCount(SHIFT: Integer): LongWord;
-    procedure AriRemoveSubrange;
+    function  AriGetCurrentCount: LongWord; inline;
+    function  AriGetCurrentShiftCount(SHIFT: Integer): LongWord; inline;
+    procedure AriRemoveSubrange; inline;
     procedure See2Init(p: PSee2; InitVal: LongWord);
-    function  See2GetMean(p: PSee2): LongWord;
-    procedure See2Update(p: PSee2);
-    function  GetMean(Summ: LongWord; Shift, Rnd: Integer): LongWord;
+    function  See2GetMean(p: PSee2): LongWord; inline;
+    procedure See2Update(p: PSee2); inline;
+    function  GetMean(Summ: LongWord; Shift, Rnd: Integer): LongWord; inline;
     function  MakeEscFreq2(ctx: LongWord): PSee2;
-    procedure SwapState(const a, b: PState);
-    procedure StateCpy(const a, b: PState);
+    procedure SwapState(const a, b: PState); inline;
+    procedure StateCpy(const a, b: PState); inline;
     procedure Update1(ctx: LongWord; p: LongWord);
     procedure Update2(ctx: LongWord; p: LongWord);
     procedure RefreshCtx(ctx: LongWord; OldNU: LongWord; Scale: Boolean);
@@ -848,8 +848,10 @@ end;
 procedure TPpmdEngine.Rescale(ctx: LongWord);
 var
   i, EscFreq, Adder, OldNU: LongInt;
-  p, p1: LongWord;
+  p: LongWord;
   tmp: TState;
+  ps, q: PState;
+  C: PContext;
 begin
   i := CtxOf(ctx)^.NumStats;
   p := FFoundState;
@@ -864,23 +866,27 @@ begin
   if (FOrderFall <> 0) or (FMRMethod > MRM_FREEZE) then Adder := 1 else Adder := 0;
   StOf(p)^.Freq := (StOf(p)^.Freq + LongWord(Adder)) shr 1;
   CtxOf(ctx)^.SummFreq := StOf(p)^.Freq;
+  // Con punteros locales: el heap no se mueve y StOf relee FHeap en cada acceso
+  C := PContext(FHeap + ctx);
+  ps := PState(FHeap + p);
   repeat
-    Inc(p, STATE_SIZE);
-    Dec(EscFreq, StOf(p)^.Freq);
-    StOf(p)^.Freq := (StOf(p)^.Freq + LongWord(Adder)) shr 1;
-    Inc(CtxOf(ctx)^.SummFreq, StOf(p)^.Freq);
-    if StOf(p)^.Freq > StOf(p - STATE_SIZE)^.Freq then
+    Inc(ps);
+    Dec(EscFreq, ps^.Freq);
+    ps^.Freq := (ps^.Freq + LongWord(Adder)) shr 1;
+    Inc(C^.SummFreq, ps^.Freq);
+    if ps^.Freq > (ps - 1)^.Freq then
     begin
-      StateCpy(@tmp, StOf(p));
-      p1 := p;
+      tmp := ps^;
+      q := ps;
       repeat
-        StateCpy(StOf(p1), StOf(p1 - STATE_SIZE));
-        Dec(p1, STATE_SIZE);
-      until not (tmp.Freq > StOf(p1 - STATE_SIZE)^.Freq);
-      StateCpy(StOf(p1), @tmp);
+        q^ := (q - 1)^;
+        Dec(q);
+      until not (tmp.Freq > (q - 1)^.Freq);
+      q^ := tmp;
     end;
     Dec(i);
   until i = 0;
+  p := LongWord(PByte(ps) - FHeap);
   if StOf(p)^.Freq = 0 then
   begin
     repeat
@@ -1554,27 +1560,31 @@ procedure TPpmdEngine.DecodeSymbol2(ctx: LongWord);
 var
   psee2c: PSee2;
   i, count, HiCnt, n: LongWord;
-  ps: array[0..255] of LongWord;   { en C es STATE* ps[256] }
+  ps: array[0..255] of PState;     { en C es STATE* ps[256] }
   pb: PState;
-  Sym: Byte;
+  H: PByte;                        { FHeap, FCharMask y FEscCount en locales: FPC relee los }
+  Mask: PByte;                     { campos en cada vuelta y este es el bucle más caliente }
+  Esc: Byte;
 begin
   psee2c := MakeEscFreq2(ctx);
-  i := CtxOf(ctx)^.NumStats - FNumMasked;
+  H := FHeap;
+  Mask := @FCharMask[0];
+  Esc := FEscCount;
+  i := PContext(H + ctx)^.NumStats - FNumMasked;
   n := 0; HiCnt := 0;
-  pb := PState(FHeap + CtxOf(ctx)^.Stats - STATE_SIZE);  { p := Stats-1 }
+  pb := PState(H + PContext(H + ctx)^.Stats - STATE_SIZE);  { p := Stats-1 }
   repeat
     repeat
       Inc(pb);                     { ++p }
-      Sym := pb^.Symbol;           { p[1] antes del ++, equivalente }
-    until FCharMask[Sym] <> FEscCount;
+    until Mask[pb^.Symbol] <> Esc;
     Inc(HiCnt, pb^.Freq);
-    ps[n] := LongWord(PByte(pb) - FHeap);
+    ps[n] := pb;
     Inc(n);
   until n = i;
   Inc(FSubScale, HiCnt);
   count := AriGetCurrentCount;
   n := 0;
-  pb := StOf(ps[0]);
+  pb := ps[0];
   if count < HiCnt then
   begin
     HiCnt := 0;
@@ -1582,22 +1592,22 @@ begin
       Inc(HiCnt, pb^.Freq);
       if HiCnt > count then Break;
       Inc(n);
-      pb := StOf(ps[n]);
+      pb := ps[n];
     until False;
     FSubHigh := HiCnt;
     FSubLow := HiCnt - pb^.Freq;
     See2Update(psee2c);
-    Update2(ctx, LongWord(PByte(pb) - FHeap));
+    Update2(ctx, LongWord(PByte(pb) - H));
   end
   else
   begin
     FSubLow := HiCnt;
     FSubHigh := FSubScale;
-    i := CtxOf(ctx)^.NumStats - FNumMasked;
-    FNumMasked := CtxOf(ctx)^.NumStats;
+    i := PContext(H + ctx)^.NumStats - FNumMasked;
+    FNumMasked := PContext(H + ctx)^.NumStats;
     n := 0;
     repeat
-      FCharMask[StOf(ps[n])^.Symbol] := FEscCount;
+      Mask[ps[n]^.Symbol] := Esc;
       Inc(n);
       Dec(i);
     until i = 0;
