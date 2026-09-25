@@ -36,6 +36,7 @@ type
     Parc: Boolean;        // .parc (si no, .arc compatible con FreeArc 0.67)
     DirMethod: string;    // compresión del directorio y del footer
     Comment: RawByteString;
+    Recovery: string;     // especificación del registro de recuperación ('' = sin), ya resuelta
     KeepTemp: Boolean;    // no renombrar: el llamador llama a FinishArchive (p. ej. después de
   end;                    // cerrar el archivo viejo, que en Windows no se puede reemplazar abierto)
 
@@ -60,7 +61,7 @@ function MetaFromArchive(const F: TArcFileEntry): TFileMeta;
 implementation
 
 uses
-  parc_bytes, parc_crc, parc_stream, parc_outstream, parc_encoders, parc_methods;
+  parc_bytes, parc_crc, parc_stream, parc_outstream, parc_encoders, parc_methods, parc_recovery;
 
 const
   VERSION_ARC: array[0..3] of Byte = (0, 0, 6, 7);                // FreeArc 0.67
@@ -74,6 +75,7 @@ type
     Pos, OrigSize, CompSize: Int64;
     Crc: LongWord;
   end;
+  TBlockInfoArray = array of TBlockInfo;
 
   { Estado de un archivo ya escrito, en el orden del directorio. }
   TDirFile = record
@@ -108,6 +110,58 @@ begin
   w.U32(B.Crc);
   w.U32(CalcCRC(PByte(w.Data), w.Len));
   S.WriteBuffer(w.Data[0], w.Len);
+end;
+
+function WriteControlBlock(S: TStream; Parc: Boolean; BlockType: Integer; const Method: string;
+  const Data: TBytes): TBlockInfo; forward;
+
+{ Largo del descriptor de un bloque storing de Size bytes (no depende del CRC: siempre 4 bytes). }
+function StoringDescriptorLen(Parc: Boolean; BlockType: Integer; Size: Int64): Integer;
+var
+  w: TByteWriter;
+begin
+  w.Clear;
+  w.U32(Signature(Parc));
+  w.VInt(BlockType);
+  w.CStr('storing');
+  w.VInt(Size);
+  w.VInt(Size);
+  w.U32(0);
+  w.U32(0);
+  Result := w.Len;
+end;
+
+{ Registro de recuperación (ArcRecover.hs; FORMATO-ARC.md §7.4): dos RECOVERY_BLOCK storing,
+  el de sectores y el de CRCs+info, protegiendo todo lo escrito hasta acá. El info guarda la
+  posición del bloque de CRCs, así que hay que saber de antemano cuánto ocupa el de sectores. }
+procedure WriteRecovery(S: TFileStream; Parc: Boolean; const Spec: string; var Control: TBlockInfoArray);
+var
+  ArcSize, SectorsSize, CrcsSize, PosSectors, PosCrcs: Int64;
+  SectorSize, RecSectors, n: Integer;
+  Sectors, Crcs: TBytes;
+  Info: TRecoveryInfo;
+  B: TBlockInfo;
+begin
+  ArcSize := S.Position;
+  if not RecoveryPlan(ArcSize, Spec, SectorSize, RecSectors, SectorsSize, CrcsSize) then
+    raise Exception.CreateFmt('especificación de -rr inválida: "%s"', [Spec]);
+  PosSectors := S.Position;
+  PosCrcs := PosSectors + SectorsSize + StoringDescriptorLen(Parc, RECOVERY_BLOCK, SectorsSize);
+  if not RecoveryBuild(S, ArcSize, 0, PosCrcs, Spec, Sectors, Crcs, Info) then
+    raise Exception.Create('no se pudo construir el registro de recuperación');
+  S.Position := PosSectors;   // RecoveryBuild lee lo ya escrito
+  // Solo el tamaño de los sectores decide dónde cae el bloque de CRCs; ese bloque lleva además
+  // el addinfo (versión, tamaños) delante de los CRCs, así que mide más que CrcsSize
+  if Length(Sectors) <> SectorsSize then
+    raise Exception.CreateFmt('registro de recuperación: %d bytes de sectores en vez de %d',
+      [Length(Sectors), SectorsSize]);
+  n := Length(Control);
+  SetLength(Control, n + 2);
+  B := WriteControlBlock(S, Parc, RECOVERY_BLOCK, 'storing', Sectors);
+  Control[n] := B;
+  B := WriteControlBlock(S, Parc, RECOVERY_BLOCK, 'storing', Crcs);
+  if B.Pos <> PosCrcs then raise Exception.Create('registro de recuperación: posición del bloque de CRCs');
+  Control[n + 1] := B;
 end;
 
 { Escribe un bloque de control (datos comprimidos + descriptor) y devuelve su información. }
@@ -249,7 +303,8 @@ end;
 
 { FOOTER_BLOCK (FORMATO-ARC.md §5.1): bloques de control, locked, comentario viejo (0),
   recovery ('') y comentario (0 bytes). }
-function BuildFooter(const Control: array of TBlockInfo; FooterPos: Int64; const Comment: RawByteString): TBytes;
+function BuildFooter(const Control: array of TBlockInfo; FooterPos: Int64; const Comment: RawByteString;
+  const Recovery: string): TBytes;
 var
   w: TByteWriter;
   i: Integer;
@@ -267,7 +322,7 @@ begin
   end;
   w.U8(0);        // locked
   w.VInt(0);      // comentario viejo (UCS-4)
-  w.CStr('');     // recovery
+  w.CStr(Recovery);   // configuración de -rr (para conservarla al actualizar)
   w.VInt(Length(Comment));   // comentario (UTF-8, puede tener NUL)
   w.Raw(PChar(Comment), Length(Comment));
   Result := w.Bytes;
@@ -447,7 +502,7 @@ var
   Tmp: string;
   S: TFileStream;
   Hdr: TByteWriter;
-  Control: array of TBlockInfo;
+  Control: TBlockInfoArray;
   Blocks: array of TDataBlock;
   DirGroup: TSolidGroup;
   i, n: Integer;
@@ -502,8 +557,9 @@ begin
       SetLength(Control, 2);
       Control[1] := WriteControlBlock(S, Opt.Parc, DIR_BLOCK, Opt.DirMethod, DirData);
 
+      if Opt.Recovery <> '' then WriteRecovery(S, Opt.Parc, Opt.Recovery, Control);
       // Footer (las posiciones de los bloques de control, relativas a la del footer)
-      WriteControlBlock(S, Opt.Parc, FOOTER_BLOCK, Opt.DirMethod, BuildFooter(Control, S.Position, Opt.Comment));
+      WriteControlBlock(S, Opt.Parc, FOOTER_BLOCK, Opt.DirMethod, BuildFooter(Control, S.Position, Opt.Comment, Opt.Recovery));
       Result.ArcSize := S.Size;
       Ok := True;
     finally

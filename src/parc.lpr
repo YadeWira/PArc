@@ -36,6 +36,7 @@ begin
   OutLn('  -fmt=parc|arc  formato de salida (a/u/f/d)');
   OutLn('  -s-  sin sólido   -s<mem> tope de bytes por bloque sólido   -s<N>f tope de archivos');
   OutLn('  -x<máscara>  excluir (puede repetirse)');
+  OutLn('  -rr[N%|N*S|-]  registro de recuperación (-rr sin valor: 4%/2%/1% según tamaño; -rr- quita)');
   OutLn('  -p<contraseña>  contraseña de un archivo cifrado (si falta, se pide por consola)');
 end;
 
@@ -263,7 +264,28 @@ type
     SolidFiles: Integer;     // -s<N>f: tope de archivos por bloque (0 = sin tope)
     NonSolid: Boolean;       // -s-: cada archivo en su propio bloque
     Excludes: TStringList;   // -x<máscara>
+    Recovery: string;        // -rr...: '--' si no se dio la opción
   end;
+
+{ Como ArcRecover.hs: sin -rr se conserva lo que tenía el archivo; -rr/-rr+ usa eso o el
+  recomendado por tamaño (4%/2%/1%); -rr- ninguno; -rr0.1% y -rr0.01% solo CRCs. }
+function ResolveRecovery(const Opt, Old: string; ArcSize: Int64): string;
+var
+  Recommended: string;
+begin
+  if ArcSize < 300000 then Recommended := '4%'
+  else if ArcSize < 2000000 then Recommended := '2%'
+  else Recommended := '1%';
+  case Opt of
+    '-':        Result := '';
+    '--':       Result := Old;
+    '', '+':    if Old <> '' then Result := Old else Result := Recommended;
+    '0.1%':     Result := '0*4096';
+    '0.01%':    Result := '0*65536';
+  else
+    Result := Opt;
+  end;
+end;
 
 { Agrupa entradas nuevas en bloques sólidos: método de su grupo de arc.groups (-m5 -> $text:
   dict+lzp+ppmd, etc.), un bloque por método, cortado por -s. }
@@ -341,7 +363,8 @@ var
   Opt: TWriteOptions;
   St: TWriteStats;
   i, j, n, b, KeptInBlock, Removed, Replaced, Added: Integer;
-  Missing, Verb: string;
+  Missing, Verb, OldRR: string;
+  RRSize: Int64;
   Exists, Newer: Boolean;
   Old: array of Integer;         // índice en Entries de cada archivo viejo conservado (-1 si no)
 
@@ -504,6 +527,12 @@ begin
     else if A <> nil then Opt.Parc := A.IsParc
     else Opt.Parc := LowerCase(ExtractFileExt(ArcName)) <> '.arc';
     if A <> nil then Opt.Comment := A.Comment;
+    // El tamaño para el % recomendado es el de los datos (aproximado: lo de entrada)
+    OldRR := '';
+    if A <> nil then OldRR := A.Recovery;
+    RRSize := 0;
+    for i := 0 to High(Entries) do Inc(RRSize, Entries[i].Meta.Size);
+    Opt.Recovery := ResolveRecovery(MO.Recovery, OldRR, RRSize);
     St := WriteArchive(ArcName, Entries, Groups, Opt, @LogLine);
   finally
     A.Free;
@@ -541,6 +570,7 @@ begin
   Filter := TStringList.Create;
   Excludes := TStringList.Create;
   MO.Excludes := Excludes;
+  MO.Recovery := '--';
   Code := 0;
   try
     for i := 2 to ArgCount do
@@ -556,6 +586,7 @@ begin
         else if Copy(S, 1, 5) = '-fmt=' then MO.Fmt := LowerCase(Copy(S, 6, MaxInt))
         else if Copy(S, 1, 2) = '-x' then Excludes.Add(Copy(S, 3, MaxInt))
         // -s- no sólido; -s<mem> tope de bytes por bloque; -s<N>f tope de archivos
+        else if Copy(S, 1, 3) = '-rr' then MO.Recovery := Copy(S, 4, MaxInt)
         else if S = '-s-' then MO.NonSolid := True
         else if (Copy(S, 1, 2) = '-s') and (Length(S) > 2) and (S[Length(S)] = 'f') then
           MO.SolidFiles := StrToIntDef(Copy(S, 3, Length(S) - 3), 0)

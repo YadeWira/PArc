@@ -47,6 +47,26 @@ function RecoveryInfoOf(const ArcName: string; out Info: TRecoveryInfo): Boolean
 { Recorre el archivo y devuelve qué sectores están dañados, sin escribir nada. }
 function RecoveryScan(const ArcName: string; out Res: TRecoveryResult): Boolean;
 
+{ Construye los DOS cuerpos de RECOVERY_BLOCK para un archivo ya escrito (espejo
+  del escritor de ArcRecover.hs). El llamador los mete en bloques de control
+  RECOVERY_BLOCK, el de sectores primero y el de info+CRCs después.
+
+  ArcSize es el tamaño protegido; ProtectedFrom es dónde arranca la protección (para
+  el escritor de PArc es 0, o sea todo el archivo hasta antes de la recuperación);
+  CrcsBlockPos es la posición ABSOLUTA donde va a quedar el bloque de info+CRCs, que
+  es lo que se guarda como offset en el addinfo. Spec es el texto de -rr ("4%", "10s",
+  "1*512"...). }
+{ Los tamaños que van a salir, para poder reservar lugar ANTES de construir: el
+  offset del addinfo es la posición del bloque de CRCs, así que el escritor necesita
+  saber cuánto ocupan los dos bloques antes de saber dónde caen. }
+function RecoveryPlan(ArcSize: Int64; const Spec: string;
+                      out SectorSize, RecSectors: Integer;
+                      out SectorsSize, CrcsSize: Int64): Boolean;
+
+function RecoveryBuild(Arc: TStream; ArcSize, ProtectedFrom, CrcsBlockPos: Int64;
+                       const Spec: string; out Sectors, Crcs: TBytes;
+                       out Info: TRecoveryInfo): Boolean;
+
 { Igual que Scan y además escribe DestName con los sectores dañados reparados.
   DestName queda vacío si no hay nada que reparar. El original nunca se toca. }
 function RecoveryRepair(const ArcName: string; out Res: TRecoveryResult;
@@ -141,13 +161,243 @@ begin
       r.VInt; r.VInt;   // pares extra de otras versiones: se ignoran
     end;
     D.CrcsOfs := Length(D.Crcs) - r.Remaining;
-    if (D.Info.SectorSize <= 0) or (D.Info.RecSectors <= 0) then Exit;
+    { Con -rr0% no hay sectores de recuperación (versión 0.39): se puede VERIFICAR,
+      no reparar. RecSectors = 0 es válido acá. }
+    if D.Info.SectorSize <= 0 then Exit;
+    if D.Info.RecSectors < 0 then Exit;
     D.Info.InitPos := blocks[1].Pos - D.Info.Offset;
     if (D.Info.InitPos < 0) or (D.Info.ArcSize <= 0) then Exit;
     Result := True;
   finally
     arc.Free;
   end;
+end;
+
+
+{ --- escritura del recovery record (espejo de ArcRecover.hs:104-181) --------- }
+
+{ VInt: la forma más corta. La cantidad de bits 1 bajos del primer byte indica
+  cuántos bytes extra siguen, y el valor va desplazado t bits en una palabra LE. }
+procedure VIntPut(var B: TBytes; V: QWord);
+var
+  t, i: Integer;
+  w: QWord;
+  mark: QWord;
+begin
+  t := 1;
+  while (t < 9) and (V >= (QWord(1) shl (7 * t))) do Inc(t);
+  mark := (QWord(1) shl (t - 1)) - 1;      // t=1 -> 0, t=2 -> 01b, t=3 -> 011b...
+  w := (V shl t) or mark;
+  for i := 0 to t - 1 do
+  begin
+    SetLength(B, Length(B) + 1);
+    B[High(B)] := Byte(w and $FF);
+    w := w shr 8;
+  end;
+end;
+
+procedure CStrPut(var B: TBytes; const S: string);
+var i: Integer;
+begin
+  for i := 1 to Length(S) do
+  begin
+    SetLength(B, Length(B) + 1);
+    B[High(B)] := Byte(S[i]);
+  end;
+  SetLength(B, Length(B) + 1);
+  B[High(B)] := 0;
+end;
+
+procedure U32Put(var B: TBytes; V: LongWord);
+begin
+  SetLength(B, Length(B) + 4);
+  B[High(B) - 3] := Byte(V); B[High(B) - 2] := Byte(V shr 8);
+  B[High(B) - 1] := Byte(V shr 16); B[High(B)] := Byte(V shr 24);
+end;
+
+{ Parsea el texto de -rr. Devuelve en Wanted el tamaño pedido y en FixedSize el
+  sector_size explícito (0 si no se pidió). }
+function ParseRrSpec(const Spec: string; ArcSize: Int64; out Wanted: Int64;
+                     out FixedSize: Integer): Boolean;
+var
+  s: string;
+  p: Integer;
+  n: Int64;
+  mult: Int64;
+  dig: string;
+begin
+  Result := False; Wanted := 0; FixedSize := 0;
+  s := Trim(Spec);
+  if s = '' then Exit;
+  // forma "n*size": sector_size explícito
+  p := Pos('*', s);
+  if p > 0 then
+  begin
+    dig := Copy(s, 1, p - 1);
+    n := StrToInt64Def(dig, -1);
+    if n < 0 then Exit;
+    dig := Copy(s, p + 1, MaxInt);
+    mult := 1;
+    if (dig <> '') and (dig[Length(dig)] = 'b') then Delete(dig, Length(dig), 1);
+    if (dig <> '') and (dig[Length(dig)] = 's') then
+    begin mult := 512; Delete(dig, Length(dig), 1); end;
+    FixedSize := StrToInt64Def(dig, -1);
+    if FixedSize < 1 then Exit;
+    Wanted := n * FixedSize;
+    Result := True;
+    Exit;
+  end;
+  // sufijo
+  mult := 1;
+  if (s <> '') and (s[Length(s)] = 'b') then Delete(s, Length(s), 1);
+  if (s <> '') and (s[Length(s)] = 's') then begin mult := 512; Delete(s, Length(s), 1); end;
+  if (s <> '') and ((s[Length(s)] = '%') or (s[Length(s)] = 'p')) then
+  begin
+    Delete(s, Length(s), 1);
+    n := StrToInt64Def(s, -1);
+    if n < 0 then Exit;
+    Wanted := (ArcSize div 100) * n;
+    Result := True;
+    Exit;
+  end;
+  n := StrToInt64Def(s, -1);
+  if n < 0 then Exit;
+  Wanted := n * mult;
+  Result := True;
+end;
+
+
+function RecoveryPlan(ArcSize: Int64; const Spec: string;
+                      out SectorSize, RecSectors: Integer;
+                      out SectorsSize, CrcsSize: Int64): Boolean;
+var
+  wanted: Int64;
+  fixed_size: Integer;
+  arc_sectors, crcs_size0, rec_size: Int64;
+  t: Integer;
+  i64: Int64;
+begin
+  Result := False;
+  SectorSize := 0; RecSectors := 0; SectorsSize := 0; CrcsSize := 0;
+  if not ParseRrSpec(Spec, ArcSize, wanted, fixed_size) then Exit;
+  if wanted < 0 then Exit;
+  if fixed_size > 0 then
+    SectorSize := fixed_size
+  else if wanted = 0 then
+    SectorSize := 4096
+  else
+  begin
+    t := 0;
+    i64 := (40 * ArcSize) div wanted;
+    while (QWord(1) shl (t + 1)) <= QWord(i64) do Inc(t);
+    SectorSize := 1 shl t;
+    if SectorSize < 512 then SectorSize := 512;
+  end;
+  arc_sectors := (ArcSize + SectorSize - 1) div SectorSize;
+  crcs_size0 := arc_sectors * 4;
+  rec_size := wanted;
+  if crcs_size0 > rec_size then rec_size := crcs_size0;
+  RecSectors := (rec_size - crcs_size0 + SectorSize - 1) div SectorSize;
+  if RecSectors < 0 then RecSectors := 0;
+  SectorsSize := RecSectors * SectorSize;
+  CrcsSize := crcs_size0 + RecSectors * 4;
+  Result := True;
+end;
+
+function RecoveryBuild(Arc: TStream; ArcSize, ProtectedFrom, CrcsBlockPos: Int64;
+                       const Spec: string; out Sectors, Crcs: TBytes;
+                       out Info: TRecoveryInfo): Boolean;
+var
+  wanted, rec_size, arc_sectors, rec_sectors, i64, k: Int64;
+  sector_size, fixed_size: Integer;
+  crcs_size0, crcs_size, rec_sectors_size: Int64;
+  l: LongWord;
+  buf: TBytes;
+  n, got, idx: SizeInt;
+  i, t: Integer;
+begin
+  Result := False;
+  SetLength(Sectors, 0); SetLength(Crcs, 0);
+  if not ParseRrSpec(Spec, ArcSize, wanted, fixed_size) then Exit;
+  if wanted < 0 then Exit;
+  // sector_size: explícito, o 2^floor(log2(40*arcsize div wanted)), mínimo 512
+  if fixed_size > 0 then
+    sector_size := fixed_size
+  else if wanted = 0 then
+    sector_size := 4096
+  else
+  begin
+    t := 0;
+    if wanted > 0 then
+    begin
+      i64 := (40 * ArcSize) div wanted;
+      while (QWord(1) shl (t + 1)) <= QWord(i64) do Inc(t);
+    end;
+    sector_size := 1 shl t;
+    if sector_size < 512 then sector_size := 512;
+  end;
+  arc_sectors := (ArcSize + sector_size - 1) div sector_size;
+  crcs_size0 := arc_sectors * 4;
+  rec_size := wanted;
+  if crcs_size0 > rec_size then rec_size := crcs_size0;
+  rec_sectors := (rec_size - crcs_size0 + sector_size - 1) div sector_size;
+  if rec_sectors < 0 then rec_sectors := 0;
+  rec_sectors_size := rec_sectors * sector_size;
+  crcs_size := crcs_size0 + rec_sectors * 4;
+
+  Info.Version := '0.36';
+  if rec_sectors = 0 then Info.Version := '0.39';
+  Info.ArcSize := ArcSize;
+  Info.InitPos := ProtectedFrom;
+  Info.Offset := CrcsBlockPos - ProtectedFrom;
+  Info.SectorSize := sector_size;
+  Info.RecSectors := rec_sectors;
+
+  SetLength(Sectors, rec_sectors_size);
+  if rec_sectors_size > 0 then FillChar(Sectors[0], rec_sectors_size, 0);
+  SetLength(buf, sector_size);
+  // CRCs de los datos, y XOR rotativo. i0 = (-arc_sectors) mod rec_sectors
+  if rec_sectors > 0 then
+    i64 := (((-arc_sectors) mod rec_sectors) + rec_sectors) mod rec_sectors
+  else
+    i64 := 0;
+  Arc.Position := ProtectedFrom;
+  // while y no for: el contador es Int64, y FPC no acepta for de 64 bits en i386 (win32)
+  k := 0;
+  while k < arc_sectors do
+  begin
+    n := sector_size;
+    if (k + 1) * sector_size > ArcSize then n := ArcSize - k * sector_size;
+    got := Arc.Read(buf[0], n);
+    if got <> n then Exit;
+    U32Put(Crcs, CalcCRC(PByte(@buf[0]), n));
+    if rec_sectors > 0 then
+    begin
+      for idx := 0 to n - 1 do
+        Sectors[i64 * sector_size + idx] := Sectors[i64 * sector_size + idx] xor buf[idx];
+      i64 := (i64 + 1) mod rec_sectors;
+    end;
+    Inc(k);
+  end;
+  // CRCs de los sectores de recuperación
+  for i := 0 to rec_sectors - 1 do
+  begin
+    l := CalcCRC(PByte(@Sectors[i * sector_size]), sector_size);
+    U32Put(Crcs, l);
+  end;
+  // el addinfo va DELANTE de los CRCs en el bloque
+  SetLength(buf, 0);
+  CStrPut(buf, Info.Version);
+  VIntPut(buf, QWord(ArcSize));
+  VIntPut(buf, QWord(Info.Offset));
+  VIntPut(buf, 1);
+  VIntPut(buf, QWord(sector_size));
+  VIntPut(buf, QWord(rec_sectors));
+  // concat: addinfo + crcs
+  SetLength(buf, Length(buf) + Length(Crcs));
+  Move(Crcs[0], buf[Length(buf) - Length(Crcs)], Length(Crcs));
+  Crcs := buf;
+  Result := True;
 end;
 
 function RecoveryInfoOf(const ArcName: string; out Info: TRecoveryInfo): Boolean;
@@ -176,10 +426,14 @@ begin
   SetLength(Res.Unrecoverable, 0);
   SetLength(Res.Repaired, 0);
   arc_sectors := (D.Info.ArcSize + D.Info.SectorSize - 1) div D.Info.SectorSize;
-  // El mismo arranque de la rotación que el escritor: i0 = (-arc_sectors) mod rec_sectors
-  i := ((-arc_sectors) mod D.Info.RecSectors + D.Info.RecSectors) mod D.Info.RecSectors;
+  // El mismo arranque de la rotación que el escritor: i0 = (-arc_sectors) mod rec_sectors.
+  // Con -rr0% no hay rotación (RecSectors = 0): sólo se verifican los CRCs.
+  if D.Info.RecSectors > 0 then
+    i := ((-arc_sectors) mod D.Info.RecSectors + D.Info.RecSectors) mod D.Info.RecSectors
+  else
+    i := 0;
   SetLength(XorAcc, Int64(D.Info.RecSectors) * D.Info.SectorSize);
-  FillChar(XorAcc[0], Length(XorAcc), 0);
+  if Length(XorAcc) > 0 then FillChar(XorAcc[0], Length(XorAcc), 0);
   r.Init(@D.Crcs[D.CrcsOfs], Length(D.Crcs) - D.CrcsOfs);
   fs := TFileStream.Create(ArcName, fmOpenRead or fmShareDenyNone);
   try
@@ -193,10 +447,11 @@ begin
         n := D.Info.ArcSize - Int64(k) * D.Info.SectorSize;
       got := fs.Read(buf[0], n);
       if got <> n then Corrupt('no se pudo leer la zona protegida');
-      // XOR en el sector de recuperación que toca
-      for idx := 0 to n - 1 do
-        XorAcc[Int64(i) * D.Info.SectorSize + idx] :=
-          XorAcc[Int64(i) * D.Info.SectorSize + idx] xor buf[idx];
+      // XOR en el sector de recuperación que toca (con -rr0% no hay ninguno)
+      if D.Info.RecSectors > 0 then
+        for idx := 0 to n - 1 do
+          XorAcc[Int64(i) * D.Info.SectorSize + idx] :=
+            XorAcc[Int64(i) * D.Info.SectorSize + idx] xor buf[idx];
       crc := CalcCRC(PByte(@buf[0]), n);
       if crc <> r.U32 then
       begin
@@ -204,12 +459,18 @@ begin
         Res.BadSectors[High(Res.BadSectors)] := k;
       end;
       Inc(k);
-      i := (i + 1) mod D.Info.RecSectors;
+      if D.Info.RecSectors > 0 then i := (i + 1) mod D.Info.RecSectors;
     end;
   finally
     fs.Free;
   end;
   // Cuántos dañados por grupo: si hay más de uno, ese grupo no se puede reparar
+  if D.Info.RecSectors = 0 then
+  begin
+    Res.Unrecoverable := Copy(Res.BadSectors, 0, Length(Res.BadSectors));
+    Result := True;
+    Exit;
+  end;
   SetLength(cntBad, D.Info.RecSectors);
   for n := 0 to High(Res.BadSectors) do
   begin
@@ -261,6 +522,9 @@ begin
   for n := 0 to High(Res.BadSectors) do
     Inc(cntBad[(Res.BadSectors[n] + base) mod D.Info.RecSectors]);
   if Length(Res.BadSectors) = 0 then Exit(True);   // no hay nada que reparar
+  { Con -rr0% (RecSectors = 0) no hay paridad: se puede verificar pero no reparar.
+    Los dañados quedan en Res.Unrecoverable y no se escribe nada. }
+  if D.Info.RecSectors = 0 then Exit(True);
 
   { Copia del archivo, y se sobreescriben los sectores reparables. Si no hay ninguno
     reparable no se escribe nada, que es lo que hace `arc r`: no deja un fixed.*
