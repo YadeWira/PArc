@@ -44,6 +44,12 @@ function FaDetectLevel(const MainMethod: string): Integer;
   cantidad; -se -> por extensión. }
 function FaCrit(Kind: TFaCritKind; Value: Int64 = 0): TFaCrit;
 
+{ parseSolidOption (Cmdline.hs): el texto que sigue a -s. "" = todo junto; "-", "zip", "arj" =
+  sin sólido; "7z", "cab" = todo junto; si no, una secuencia de criterios (el primero que se
+  cumple corta): "e" = por extensión, N sin sufijo o Nf = N archivos (1f = sin sólido),
+  N con b/k/m/g = tamaño. Con ';', lo de la derecha es para los datos. False si no se entiende. }
+function FaParseSolidOption(const Opt: string; out Crits: TFaCrits): Boolean;
+
 { Bloques sólidos para Files con los métodos por grupo GM (DecodeMethod). Sort = False
   desactiva el orden (FreeArc no ordena con -s- ni con -m0). }
 function FaSolidBlocks(const Files: array of TFaFile; const GM: TGroupMethods;
@@ -980,6 +986,73 @@ begin
   else if (Length(M) = 2) and (M[1] = 'x') and (M[2] in ['0'..'9']) then Result := Ord(M[2]) - Ord('0')
   else if (M = 'mx') or (M = 'max') then Result := 9
   else Result := 4;
+end;
+
+function FaParseSolidOption(const Opt: string; out Crits: TFaCrits): Boolean;
+var
+  Parts: TStringArray;
+  Dat, Tok: string;
+  i, j: Integer;
+  Num: Int64;
+  c: Char;
+
+  procedure Add(Kind: TFaCritKind; Value: Int64 = 0);
+  begin
+    SetLength(Crits, Length(Crits) + 1);
+    Crits[High(Crits)] := FaCrit(Kind, Value);
+  end;
+
+  function IsDigitOrE(ch: Char): Boolean;
+  begin
+    Result := (ch in ['0'..'9']) or (ch = 'e');
+  end;
+
+begin
+  Crits := nil;
+  Result := True;
+  if Opt = '' then begin Add(fcAll); Exit; end;
+  Parts := Opt.Split([';']);
+  if Length(Parts) > 2 then Exit(False);
+  Dat := Parts[High(Parts)];
+  if Length(Parts) = 1 then
+    if (Dat = '-') or (Dat = 'zip') or (Dat = 'arj') then begin Add(fcNone); Exit; end
+    else if (Dat = '7z') or (Dat = 'cab') then begin Add(fcAll); Exit; end;
+  if Dat = '' then begin Add(fcAll); Exit; end;
+  // recursive split: "e" suelto, o spanBreak (dígito o 'e'): los dígitos y lo que sigue hasta
+  // el próximo dígito o 'e' ("100f10m" -> "100f", "10m")
+  i := 1;
+  while i <= Length(Dat) do
+  begin
+    if Dat[i] = 'e' then
+    begin
+      Tok := 'e'; Inc(i);
+    end
+    else
+    begin
+      j := i;
+      while (j <= Length(Dat)) and IsDigitOrE(Dat[j]) do Inc(j);
+      while (j <= Length(Dat)) and not IsDigitOrE(Dat[j]) do Inc(j);
+      Tok := Copy(Dat, i, j - i);
+      i := j;
+    end;
+    if Tok = 'e' then begin Add(fcExt); Continue; end;
+    // parseNumber tok 'f'
+    j := 1;
+    while (j <= Length(Tok)) and (Tok[j] in ['0'..'9']) do Inc(j);
+    Num := StrToInt64Def(Copy(Tok, 1, j - 1), 0);
+    if j <= Length(Tok) then c := LowerCase(Tok[j]) else c := 'f';
+    case c of
+      'b': Add(fcSize, Num);
+      'k': Add(fcSize, Num shl 10);
+      'm': Add(fcSize, Num shl 20);
+      'g': Add(fcSize, Num shl 30);
+      't': Add(fcSize, Num shl 40);
+      '^': Add(fcSize, Int64(1) shl Num);
+      'f': if Num = 1 then Add(fcNone) else Add(fcNumber, Num);
+    else
+      Exit(False);
+    end;
+  end;
 end;
 
 function FaCrit(Kind: TFaCritKind; Value: Int64): TFaCrit;

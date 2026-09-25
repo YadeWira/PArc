@@ -34,9 +34,12 @@ begin
   OutLn('  -o+       sobrescribe archivos existentes    -o-  los saltea (default)');
   OutLn('  -m<método> preset -m0..-m9, -mx (default -m4, como FreeArc) o método, p. ej. -mlzma');
   OutLn('  -fmt=parc|arc  formato de salida (a/u/f/d)');
-  OutLn('  -s-  sin sólido   -s<mem> tope de bytes por bloque sólido   -s<N>f tope de archivos');
+  OutLn('  -s  como FreeArc: -s- sin sólido, -se por extensión, -s<N> o -s<N>f N archivos por');
+  OutLn('     bloque, -s<N>m (o k/g/b) bloques de al menos ese tamaño; combinables: -se100f10m');
   OutLn('  -x<máscara>  excluir (puede repetirse)');
-  OutLn('  -rr[N%|N*S|-]  registro de recuperación (-rr sin valor: 4%/2%/1% según tamaño; -rr- quita)');
+  OutLn('  -rr[N%|N|Nm|N;S|N*S|-]  registro de recuperación (sin valor: 4%/2%/1% según tamaño;');
+  OutLn('             N = sectores de 512; -rr- lo quita)');
+  OutLn('Manual completo: docs/USO.md');
   OutLn('  -p<contraseña>  al leer: contraseña de un archivo cifrado (si falta, se pide);');
   OutLn('                  al comprimir: cifra los datos (-p solo: la pide por consola)');
   OutLn('  -hp[contraseña] cifra también el directorio (sin ella no se ve ni la lista)');
@@ -359,9 +362,7 @@ end;
 type
   TModifyOptions = record
     Method, Fmt: string;
-    SolidBytes: Int64;       // -s<mem>: tope de bytes por bloque sólido (0 = sin tope)
-    SolidFiles: Integer;     // -s<N>f: tope de archivos por bloque (0 = sin tope)
-    NonSolid: Boolean;       // -s-: cada archivo en su propio bloque
+    Solid: TFaCrits;         // -s...: criterios de corte de los bloques sólidos (FaParseSolidOption)
     Excludes: TStringList;   // -x<máscara>
     Recovery: string;        // -rr...: '--' si no se dio la opción
     Encryption: string;      // -ae= / --encryption=
@@ -409,23 +410,8 @@ begin
     Files[i].DiskPath := Entries[Idx[i]].DiskPath;
     Files[i].Size := Entries[Idx[i]].Meta.Size;
   end;
-  // -s como parseSolidOption: -s- cada archivo solo; -s<mem> y -s<N>f cortan; sin -s, todo junto
-  Crits := nil;
-  if MO.NonSolid then
-  begin
-    SetLength(Crits, 1); Crits[0] := FaCrit(fcNone);
-  end
-  else
-  begin
-    if MO.SolidBytes > 0 then
-    begin
-      SetLength(Crits, Length(Crits) + 1); Crits[High(Crits)] := FaCrit(fcSize, MO.SolidBytes);
-    end;
-    if MO.SolidFiles > 0 then
-    begin
-      SetLength(Crits, Length(Crits) + 1); Crits[High(Crits)] := FaCrit(fcNumber, MO.SolidFiles);
-    end;
-  end;
+  // -s: los criterios de FreeArc (FaParseSolidOption); sin -s, todo junto
+  Crits := MO.Solid;
   Blocks := FaSolidBlocks(Files, GM, Crits, FaDetectLevel(MO.Method));
   for i := 0 to High(Blocks) do
   begin
@@ -651,7 +637,6 @@ var
   Opt: TExtractOptions;
   MO: TModifyOptions;
   Filter, Excludes: TStringList;
-  SolidMem: QWord;
   i, Code, Tries: Integer;
   Retry, ShowProgress, Writing: Boolean;
   DPwd, HPwd: string;
@@ -691,11 +676,8 @@ begin
         else if Copy(S, 1, 2) = '-x' then Excludes.Add(Copy(S, 3, MaxInt))
         // -s- no sólido; -s<mem> tope de bytes por bloque; -s<N>f tope de archivos
         else if Copy(S, 1, 3) = '-rr' then MO.Recovery := Copy(S, 4, MaxInt)
-        else if S = '-s-' then MO.NonSolid := True
-        else if (Copy(S, 1, 2) = '-s') and (Length(S) > 2) and (S[Length(S)] = 'f') then
-          MO.SolidFiles := StrToIntDef(Copy(S, 3, Length(S) - 3), 0)
-        else if (Copy(S, 1, 2) = '-s') and ParseMem(Copy(S, 3, MaxInt), SolidMem) then
-          MO.SolidBytes := SolidMem
+        else if (Copy(S, 1, 2) = '-s') and FaParseSolidOption(Copy(S, 3, MaxInt), MO.Solid) then
+          // (los criterios quedaron en MO.Solid)
         else if Copy(S, 1, 3) = '-hp' then HPwd := Copy(S, 4, MaxInt)
         else if Copy(S, 1, 2) = '-p' then DPwd := Copy(S, 3, MaxInt)
         else if Copy(S, 1, 4) = '-ae=' then MO.Encryption := Copy(S, 5, MaxInt)
@@ -742,10 +724,11 @@ begin
     end;
     if (DPwd <> '--') and (DPwd <> '') then MO.DataPassword := DPwd;
     if (HPwd <> '--') and (HPwd <> '') then MO.HeadersPassword := HPwd;
-    // Para leer (x/t/l y el archivo viejo en a/u/f/d): una sola contraseña; si hay de
-    // encabezados, esa, que sin ella no se abre
-    if MO.HeadersPassword <> '' then SetArchivePassword(MO.HeadersPassword)
-    else if MO.DataPassword <> '' then SetArchivePassword(MO.DataPassword);
+    // La principal es la de los datos (con esa se vuelve a cifrar lo que se reempaqueta);
+    // la de encabezados, si es otra, se prueba también (-p y -hp distintas)
+    if MO.DataPassword <> '' then SetArchivePassword(MO.DataPassword);
+    if (MO.HeadersPassword <> '') and (MO.HeadersPassword <> MO.DataPassword) then
+      AddArchivePassword(MO.HeadersPassword);
     if ShowProgress and ErrIsConsole then ProgressHandler := @DrawProgress;
     InstallCancelHandler(@OnCtrlC);
     if Cmd = 'r' then
@@ -770,7 +753,7 @@ begin
         on E: EPasswordRequired do
           if (Tries < 3) and ReadPassword('Contraseña: ', S) then
           begin
-            SetArchivePassword(S);
+            AddArchivePassword(S);   // se suma a las ya dadas (-p y -hp pueden ser distintas)
             Inc(Tries);
             Retry := True;
           end
@@ -778,7 +761,7 @@ begin
         on E: EBadPassword do
           if (Tries < 3) and ReadPassword('Contraseña incorrecta. Contraseña: ', S) then
           begin
-            SetArchivePassword(S);
+            AddArchivePassword(S);   // se suma a las ya dadas (-p y -hp pueden ser distintas)
             Inc(Tries);
             Retry := True;
           end
@@ -817,7 +800,7 @@ begin
           // Sin -p: pedirla por consola (hasta 3 intentos), como FreeArc
           if (Tries < 3) and ReadPassword('Contraseña: ', S) then
           begin
-            SetArchivePassword(S);
+            AddArchivePassword(S);   // se suma a las ya dadas (-p y -hp pueden ser distintas)
             Inc(Tries);
             Retry := True;
           end
@@ -825,7 +808,7 @@ begin
         on E: EBadPassword do
           if (Tries > 0) and (Tries < 3) and ReadPassword('Contraseña incorrecta. Contraseña: ', S) then
           begin
-            SetArchivePassword(S);
+            AddArchivePassword(S);   // se suma a las ya dadas (-p y -hp pueden ser distintas)
             Inc(Tries);
             Retry := True;
           end

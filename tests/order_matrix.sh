@@ -77,5 +77,14 @@ for tree in "$OUT"/t/*; do
     python3 "$OUT/cmp.py" "$PARC" "$p" "$f" || fail=$((fail+1))
   done
 done
+# Opciones -s (parseSolidOption de FreeArc) sobre el primer árbol, con -m4
+first=$(ls "$OUT/t" | head -1)
+for sopt in -s- -se -s10 -s1m -s50f -se20f2m -s; do
+  p="$OUT/p_s$sopt.arc"; f="$OUT/f_s$sopt.arc"
+  (cd "$OUT/t" && "$PARC" a "$p" "$first" -m4 $sopt --no-progress >/dev/null 2>&1)
+  (cd "$OUT/t" && wine "$ARC_EXE" a -m4 $sopt "$f" "$first" </dev/null >/dev/null 2>&1)
+  printf '%-8s %-8s ' "$first" "$sopt"
+  python3 "$OUT/cmp.py" "$PARC" "$p" "$f" || fail=$((fail+1))
+done
 echo "== orden/bloques: $fail fallas"
 [ $fail -eq 0 ]

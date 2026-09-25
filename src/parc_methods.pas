@@ -26,6 +26,9 @@ function ParsePpmdParams(const Params: TStringArray): TPpmdParams;
 procedure SetArchivePassword(const Pwd: RawByteString);
 { La contraseña dada con SetArchivePassword ('' si no hay). }
 function ArchivePassword: RawByteString;
+{ Otra contraseña para probar (p. ej. -p y -hp distintas): como FreeArc, cada bloque cifrado
+  se abre con la primera de la lista cuyo check-code coincide. }
+procedure AddArchivePassword(const Pwd: RawByteString);
 
 { Arma la cadena de decodificadores sobre Source (la cadena pasa a ser dueña de Source). }
 function CreateDecoderChain(const Method: string; Source: TInStage): TInStage;
@@ -46,6 +49,7 @@ uses
 var
   GPassword: RawByteString;
   GHavePassword: Boolean;
+  GExtraPasswords: array of RawByteString;
 
 procedure SetArchivePassword(const Pwd: RawByteString);
 begin
@@ -56,6 +60,13 @@ end;
 function ArchivePassword: RawByteString;
 begin
   if GHavePassword then Result := GPassword else Result := '';
+end;
+
+procedure AddArchivePassword(const Pwd: RawByteString);
+begin
+  if not GHavePassword then begin SetArchivePassword(Pwd); Exit; end;
+  SetLength(GExtraPasswords, Length(GExtraPasswords) + 1);
+  GExtraPasswords[High(GExtraPasswords)] := Pwd;
 end;
 
 { ¿La etapa es de cifrado? El nombre va antes de '-' (bits) o '/' (modo): "aes-256/ctr". }
@@ -76,13 +87,13 @@ end;
     (Charsets.myGetArgs usa CommandLineToArgvW) y withCStringLen de GHC 6.x trunca cada
     carácter a su byte bajo (castCharToCChar). Para ASCII da lo mismo; para "日" (U+65E5), E5.
   Nuestra contraseña viene en UTF-8. }
-function PasswordBytes(Fixed: Boolean): RawByteString;
+function PasswordBytes(const Password: RawByteString; Fixed: Boolean): RawByteString;
 var
   W: UnicodeString;
   i: Integer;
 begin
-  if Fixed then Exit(GPassword);
-  W := UTF8Decode(GPassword);
+  if Fixed then Exit(Password);
+  W := UTF8Decode(Password);
   SetLength(Result, Length(W));
   for i := 1 to Length(W) do Result[i] := Chr(Ord(W[i]) and $FF);
 end;
@@ -97,6 +108,8 @@ var
   Par: TCryptParams;
   Key: array of Byte;
   Pwd: RawByteString;
+  p: Integer;
+  Ok: Boolean;
 begin
   Result := Method;
   if Pos('/', Method) = 0 then Exit;   // atajo: toda etapa de cifrado lleva "/modo"
@@ -113,8 +126,16 @@ begin
       raise EPasswordRequired.Create('el archivo está cifrado: indicá la contraseña con -p<contraseña>');
     Par := ParseCryptParams(Params);
     SetLength(Key, Par.KeySize + 2);
-    Pwd := PasswordBytes(Par.Fixed);
-    if not DeriveKeyAndCheck(Par, PByte(Pwd), Length(Pwd), @Key[0]) then
+    Pwd := PasswordBytes(GPassword, Par.Fixed);
+    Ok := DeriveKeyAndCheck(Par, PByte(Pwd), Length(Pwd), @Key[0]);
+    p := 0;
+    while not Ok and (p <= High(GExtraPasswords)) do
+    begin
+      Pwd := PasswordBytes(GExtraPasswords[p], Par.Fixed);
+      Ok := DeriveKeyAndCheck(Par, PByte(Pwd), Length(Pwd), @Key[0]);
+      Inc(p);
+    end;
+    if not Ok then
       raise EBadPassword.Create('contraseña incorrecta');
     Stages[k] := KeyedMethod(Par, @Key[0]);
   end;
