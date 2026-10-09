@@ -32,6 +32,10 @@ begin
   OutLn('Opciones:');
   OutLn('  -dp<dir>  directorio de destino');
   OutLn('  -o+       sobrescribe archivos existentes    -o-  los saltea (default)');
+  OutLn('  -snld     crea también los enlaces que apuntan fuera del destino');
+  OutLn('  -so       x/e: el contenido extraído a stdout (parc x copia.parc datos.txt -so)');
+  OutLn('  -si[nombre]  a: agrega lo que llega por stdin con ese nombre (tar cf - dir | parc a x.parc -sidir.tar)');
+  OutLn('  "-" como archivo: lo lee de stdin (l/t/x/e) o lo escribe en stdout (a)');
   OutLn('  -m<método> preset -m0..-m9, -mx (default -m4, como FreeArc) o método, p. ej. -mlzma');
   OutLn('  -fmt=parc|arc  formato de salida (a/u/f/d)');
   OutLn('  -s  como FreeArc: -s- sin sólido, -se por extensión, -s<N> o -s<N>f N archivos por');
@@ -105,7 +109,7 @@ begin
   begin
     L := '';
     for i := 0 to High(Res.Unrecoverable) do L := L + ' ' + IntToStr(Res.Unrecoverable[i]);
-    ErrLn(Format('ERROR: %d sector(es) irrecuperable(s) (dos o más dañados en el mismo grupo):%s',
+    ErrLn(Format('ERROR: %d sector(es) irrecuperable(s) (más dañados en el mismo grupo de los que el registro puede reparar):%s',
       [Length(Res.Unrecoverable), L]));
     Exit(2);
   end;
@@ -350,6 +354,9 @@ type
     Solid: TFaCrits;         // -s...: criterios de corte de los bloques sólidos (FaParseSolidOption)
     Excludes: TStringList;   // -x<máscara>
     Recursive: Boolean;      // -r: las máscaras buscan también en los subdirectorios
+    StdinName: string;       // -si[nombre]: un archivo más, leído de stdin, con ese nombre
+    StdinFile: string;       //   el temporal donde se volcó
+    ShownName: string;       // el nombre que se muestra ('' = el del archivo; "-": salida estándar)
     Recovery: string;        // -rr...: '--' si no se dio la opción
     Encryption: string;      // -ae= / --encryption=
     VolumeSize: Int64;       // -v<tamaño>: volúmenes (solo .parc); 0 = como estaba
@@ -638,7 +645,7 @@ begin
     ErrLn('ERROR: un autoextraíble no puede ir en volúmenes (-sfx con -v)');
     Exit(1);
   end;
-  if (Cmd <> 'd') and (Paths.Count = 0) then
+  if (Cmd <> 'd') and (Paths.Count = 0) and (MO.StdinFile = '') then
   begin
     ErrLn('ERROR: no se indicaron archivos');
     Exit(1);
@@ -663,6 +670,17 @@ begin
     end;
     Disk := nil;
     if Cmd <> 'd' then CollectEntries(Paths, ExpandFileName(ArcName), MO.Excludes, MO.Recursive, Disk);
+    // -si: lo que llegó por stdin, ya volcado a un temporal, con el nombre pedido
+    if (Cmd <> 'd') and (MO.StdinFile <> '') then
+    begin
+      n := Length(Disk);
+      SetLength(Disk, n + 1);
+      Disk[n] := Default(TWriteEntry);
+      Disk[n].DiskPath := MO.StdinFile;
+      Disk[n].StoredName := SanitizePath(MO.StdinName);
+      GetFileMeta(MO.StdinFile, Disk[n].Meta);
+      Disk[n].Meta.MTimeNs := Int64(DateTimeToUnix(Now, False)) * 1000000000;
+    end;
     // .arc no puede guardar enlaces: el de un archivo se guarda con el contenido del destino
     // (como FreeArc); el de un directorio se saltea con aviso
     if MO.Fmt <> '' then ParcOut := MO.Fmt = 'parc'
@@ -851,6 +869,7 @@ begin
     while FileExists(FsPath(VolumeName(ArcName, NVol + 1))) do Inc(NVol);
     VolInfo := Format(', %d volumen(es) de %d bytes: %s ...', [NVol, Opt.VolumeSize, VolumeName(ArcName, 1)]);
   end;
+  if MO.ShownName <> '' then FinalName := MO.ShownName;
   OutLn(Format('%s %s (%s%s): %d archivo(s) y %d directorio(s), %d bytes -> %d bytes',
     [Verb, FinalName, BoolToStr(Opt.Parc, 'parc', 'arc') + BoolToStr(MO.Sfx or (Length(SfxPrefix) > 0), ', autoextraíble', ''), VolInfo, St.Files, St.Dirs, St.Bytes, St.ArcSize]));
   if Exists then
@@ -872,7 +891,7 @@ var
   MO: TModifyOptions;
   Filter, Excludes: TStringList;
   i, Code, Tries: Integer;
-  Retry, ShowProgress, Writing: Boolean;
+  Retry, ShowProgress, Writing, ToStdout: Boolean;
   DPwd, HPwd: string;
 begin
   if ArgCount < 2 then
@@ -912,6 +931,12 @@ begin
           MO.VolumeSize := VolSize
         else if S = '-o+' then Opt.Overwrite := owAll
         else if S = '-snld' then Opt.UnsafeLinks := True
+        else if S = '-so' then Opt.ToStdout := True
+        else if Copy(S, 1, 3) = '-si' then
+        begin
+          MO.StdinName := Copy(S, 4, MaxInt);
+          if MO.StdinName = '' then MO.StdinName := 'stdin';
+        end
         else if S = '-o-' then Opt.Overwrite := owSkip
         else if Copy(S, 1, 2) = '-m' then
           MO.Method := Copy(S, 3, MaxInt)   // preset (0..9, x, ...) o método explícito
@@ -941,9 +966,60 @@ begin
       Halt(1);
     end;
     Opt.Filter := Filter;
+    Writing := (Cmd = 'a') or (Cmd = 'u') or (Cmd = 'f') or (Cmd = 'd');
+    // stdin y stdout. Un archivo no se puede escribir de corrido (los descriptores apuntan
+    // atrás) ni leer sin saber dónde termina (el footer va al final): se pasa por un temporal.
+    // stdout lleva datos: los mensajes van a stderr.
+    if Opt.ToStdout then OutToStderr := True;
+    if (MO.StdinName <> '') and (Cmd <> 'a') then
+    begin
+      ErrLn('ERROR: -si es solo para el comando a');
+      Halt(1);
+    end;
+    if (MO.StdinName <> '') and (ArcName = '-') then
+    begin
+      ErrLn('ERROR: stdin no puede ser a la vez el archivo y un archivo a agregar (-si con "-")');
+      Halt(1);
+    end;
+    ToStdout := False;
+    if ArcName = '-' then
+    begin
+      if (Cmd = 'l') or (Cmd = 'lb') or (Cmd = 't') or (Cmd = 'x') or (Cmd = 'e') then
+      begin
+        ArcName := IncludeTrailingPathDelimiter(GetTempDir) + Format('parc-stdin-%d.tmp', [GetProcessID]);
+        RegisterTempFile(ArcName);
+        StdinToFile(ArcName);
+      end
+      else if Cmd = 'a' then
+      begin
+        if MO.Sfx or (MO.VolumeSize > 0) then
+        begin
+          ErrLn('ERROR: -sfx y -v no van con un archivo por stdout ("-")');
+          Halt(1);
+        end;
+        OutToStderr := True;
+        ToStdout := True;
+        MO.ShownName := '(salida estándar)';
+        if MO.Fmt = 'arc' then S := '.arc' else S := '.parc';
+        ArcName := IncludeTrailingPathDelimiter(GetTempDir) + Format('parc-stdout-%d', [GetProcessID]) + S;
+        RegisterTempFile(ArcName);
+      end
+      else
+      begin
+        ErrLn('ERROR: "-" (stdin/stdout) sirve con l, lb, t, x, e y a');
+        Halt(1);
+      end;
+    end;
+    if MO.StdinName <> '' then
+    begin
+      // al lado del archivo: el tamaño tiene que conocerse antes de comprimir (el diccionario
+      // se ajusta a él), y en el disco del archivo seguro que hay lugar
+      MO.StdinFile := ExtractFilePath(ExpandFileName(ArcName)) + Format('.parc-stdin-%d.tmp', [GetProcessID]);
+      RegisterTempFile(MO.StdinFile);
+      StdinToFile(MO.StdinFile);
+    end;
     // "x.parc.001" es lo mismo que "x.parc" (el primero de sus volúmenes)
     if IsVolumeSet(ArcName, S) then ArcName := S;
-    Writing := (Cmd = 'a') or (Cmd = 'u') or (Cmd = 'f') or (Cmd = 'd');
     // Contraseñas como Cmdline.hs: -p solo cifra datos; -hp (con o sin -p) cifra también
     // los encabezados; -p y -hp con valores distintos, uno para cada cosa
     if HPwd <> '--' then
@@ -994,6 +1070,7 @@ begin
       Retry := False;
       try
         Code := CmdModify(Cmd, ArcName, Filter, MO);
+        if ToStdout and ((Code = 0) or (Code = EXIT_WARNINGS)) then FileToStdout(ArcName);
       except
         // El archivo viejo está cifrado y no se dio -p: pedirla, como en x/t
         on E: EPasswordRequired do

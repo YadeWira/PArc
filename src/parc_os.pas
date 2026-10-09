@@ -11,6 +11,19 @@ function ArgCount: Integer;
 function Arg(i: Integer): string;          // UTF-8; Arg(0) = ejecutable
 procedure OutLn(const S: string = '');      // S en UTF-8
 procedure ErrLn(const S: string);
+
+var
+  { stdout lleva datos (-so, o el archivo con "-"): los mensajes de OutLn van a stderr. }
+  OutToStderr: Boolean = False;
+
+{ Se borra al terminar el programa (también con Halt o Ctrl-C). }
+procedure RegisterTempFile(const Path: string);
+{ Copia toda la entrada estándar a Path (binario). Devuelve los bytes copiados. }
+function StdinToFile(const Path: string): Int64;
+{ Copia Path a la salida estándar (binario). }
+procedure FileToStdout(const Path: string);
+{ El handle de la salida estándar (para escribir datos binarios en ella). }
+function StdoutHandle: THandle;
 { Escribe en stderr sin salto de línea (la línea de progreso, que se reescribe con #13). }
 procedure ErrWrite(const S: string);
 { ¿stderr es una consola/terminal? (si está redirigida no se muestra el progreso) }
@@ -438,7 +451,77 @@ end;
 
 procedure OutLn(const S: string);
 begin
+  if OutToStderr then begin ErrLn(S); Exit; end;
   {$IFDEF WINDOWS}WriteHandle(STD_OUTPUT_HANDLE, S);{$ELSE}WriteLn(StdOut, S);{$ENDIF}
+end;
+
+var
+  TempFiles: TStringList = nil;
+
+procedure RegisterTempFile(const Path: string);
+begin
+  if TempFiles = nil then TempFiles := TStringList.Create;
+  TempFiles.Add(Path);
+end;
+
+procedure CopyStream(Src, Dst: TStream; var Total: Int64);
+var
+  Buf: array of Byte;
+  n: LongInt;
+begin
+  SetLength(Buf, 1 shl 20);
+  repeat
+    n := Src.Read(Buf[0], Length(Buf));
+    if n > 0 then
+    begin
+      Dst.WriteBuffer(Buf[0], n);
+      Inc(Total, n);
+    end;
+  until n <= 0;
+end;
+
+function StdinToFile(const Path: string): Int64;
+var
+  Src: THandleStream;
+  Dst: TFileStream;
+begin
+  Result := 0;
+  Src := THandleStream.Create({$IFDEF WINDOWS}GetStdHandle(STD_INPUT_HANDLE){$ELSE}StdInputHandle{$ENDIF});
+  try
+    Dst := TFileStream.Create(FsPath(Path), fmCreate);
+    try
+      CopyStream(Src, Dst, Result);
+    finally
+      Dst.Free;
+    end;
+  finally
+    Src.Free;   // (THandleStream no cierra el handle)
+  end;
+end;
+
+function StdoutHandle: THandle;
+begin
+  Result := {$IFDEF WINDOWS}GetStdHandle(STD_OUTPUT_HANDLE){$ELSE}StdOutputHandle{$ENDIF};
+end;
+
+procedure FileToStdout(const Path: string);
+var
+  Src: TFileStream;
+  Dst: THandleStream;
+  Total: Int64;
+begin
+  Total := 0;
+  Src := TFileStream.Create(FsPath(Path), fmOpenRead or fmShareDenyWrite);
+  try
+    Dst := THandleStream.Create({$IFDEF WINDOWS}GetStdHandle(STD_OUTPUT_HANDLE){$ELSE}StdOutputHandle{$ENDIF});
+    try
+      CopyStream(Src, Dst, Total);
+    finally
+      Dst.Free;
+    end;
+  finally
+    Src.Free;
+  end;
 end;
 
 procedure ErrLn(const S: string);
@@ -566,4 +649,14 @@ initialization
   SetMultiByteRTLFileSystemCodePage(CP_UTF8);
   {$ENDIF}
   LoadArgs;
+finalization
+  if TempFiles <> nil then
+  begin
+    while TempFiles.Count > 0 do
+    begin
+      DeleteFile(FsPath(TempFiles[TempFiles.Count - 1]));
+      TempFiles.Delete(TempFiles.Count - 1);
+    end;
+    TempFiles.Free;
+  end;
 end.

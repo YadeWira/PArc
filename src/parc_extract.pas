@@ -23,6 +23,7 @@ type
     AskOverwrite: TAskOverwriteFunc;   // para owAsk; nil = saltear (sin consola a quién preguntar)
     Filter: TStringList;     // nombres/máscaras a incluir (nil = todos)
     UnsafeLinks: Boolean;    // -snld: crear también enlaces absolutos o que salen del destino
+    ToStdout: Boolean;       // -so: el contenido de los archivos a stdout (sin crear nada)
   end;
 
   TExtractStats = record
@@ -190,6 +191,33 @@ var
   F: TArcFileEntry;
   Lm: TFileMeta;
   DoWrite, Opened: Boolean;
+  StdOutS: TStream;        // -so
+  Cur: Integer;            // el archivo que se está procesando en el bloque (-1: ninguno)
+  CurWriting: Boolean;     //   y si ya se estaba escribiendo en el disco
+  BlockDamaged: Boolean;
+
+  { El bloque se cortó (datos dañados o método desconocido): se informa cada archivo pedido
+    que quedó sin extraer, y el que estaba a medio escribir queda con lo que se recuperó. }
+  procedure ReportLost(const Blk: TArcBlock; LastWanted: Integer);
+  var
+    k: Integer;
+  begin
+    BlockDamaged := True;
+    if Cur < 0 then Cur := Blk.FirstFile;
+    for k := Cur to LastWanted do
+      if not A.Files[k].IsDir and not A.Files[k].IsLink and Wanted(Opt, A.Files[k].Name) then
+      begin
+        if (k = Cur) and CurWriting then
+          Log('ERROR: ' + A.Files[k].Name + ' quedó incompleto (se dejó lo que se pudo recuperar)')
+        else if Opt.TestOnly then
+          Log('ERROR: ' + A.Files[k].Name + ' no se pudo verificar')
+        else
+          Log('ERROR: ' + A.Files[k].Name + ' no se pudo extraer');
+        Inc(Result.Errors);
+      end;
+  end;
+
+var
   Total: Int64;
   Mode: TOverwriteMode;
   Ask: TOverwriteAnswer;
@@ -206,6 +234,11 @@ var
 
 begin
   Result := Default(TExtractStats);
+  BlockDamaged := False;
+  StdOutS := nil;
+  if Opt.ToStdout then
+    StdOutS := THandleStream.Create(StdoutHandle);
+  try
   SetLength(Buf, COPY_BUF);
   Mode := Opt.Overwrite;
 
@@ -224,7 +257,7 @@ begin
   for i := 0 to High(A.Files) do
     if A.Files[i].IsDir and Wanted(Opt, A.Files[i].Name) then
     begin
-      if not Opt.TestOnly and not Opt.FlatNames then
+      if not Opt.TestOnly and not Opt.FlatNames and not Opt.ToStdout then
         MakeDirs(DiskName(Opt, A.Files[i].Name));
       Inc(Result.Dirs);
     end;
@@ -237,11 +270,15 @@ begin
     if LastWanted < 0 then Continue;
 
     Chain := nil;
+    Cur := -1;
+    CurWriting := False;
     try
       try
         Chain := CreateDecoderChain(Blk.Method, A.OpenBlockData(Blk));
         for i := Blk.FirstFile to LastWanted do
         begin
+          Cur := i;
+          CurWriting := False;
           // Copia local a propósito, sin `with`: el campo Crc del registro tapaba la variable
           // local y la verificación de CRC comparaba el valor consigo mismo
           F := A.Files[i];
@@ -254,7 +291,7 @@ begin
 
           ProgressFile(F.Name);
           OutF := nil;
-          DoWrite := not Opt.TestOnly;
+          DoWrite := not Opt.TestOnly and not Opt.ToStdout;
           if DoWrite then
           begin
             OutName := DiskName(Opt, F.Name);
@@ -280,6 +317,7 @@ begin
             end;
           end;
           Opened := OutF <> nil;
+          CurWriting := Opened;
           try
             try
               ActualCrc := CRC_INIT;
@@ -289,7 +327,8 @@ begin
                 if Remaining > Length(Buf) then n := Length(Buf) else n := Remaining;
                 Chain.ReadExact(@Buf[0], n);
                 ActualCrc := UpdateCRC(ActualCrc, @Buf[0], n);
-                if OutF <> nil then OutF.WriteBuffer(Buf[0], n);
+                if OutF <> nil then OutF.WriteBuffer(Buf[0], n)
+                else if StdOutS <> nil then StdOutS.WriteBuffer(Buf[0], n);
                 ProgressAdd(n);
                 Dec(Remaining, n);
               end;
@@ -305,13 +344,15 @@ begin
             end;
           end;
           ActualCrc := ActualCrc xor CRC_INIT;
+          CurWriting := False;
+          Cur := i + 1;   // este ya se informa abajo; si el bloque se corta, desde el siguiente
           if OutF <> nil then RestoreMeta(OutName, F);
           if ActualCrc <> F.Crc then
           begin
             Log(Format('ERROR de CRC: %s (esperado %.8x, obtenido %.8x)', [F.Name, F.Crc, ActualCrc]));
             Inc(Result.Errors);
           end
-          else if DoWrite or Opt.TestOnly then
+          else if DoWrite or Opt.TestOnly or Opt.ToStdout then
           begin
             if Opt.TestOnly then Log('OK       ' + F.Name) else Log('Extraído ' + F.Name);
             Inc(Result.Files);
@@ -322,12 +363,12 @@ begin
         on E: EUnsupportedMethod do
         begin
           Log(Format('ERROR: %s (bloque en pos %d, %d archivo(s))', [E.Message, Blk.Pos, Blk.FileCount]));
-          Inc(Result.Errors);
+          ReportLost(Blk, LastWanted);
         end;
         on E: EArcCorrupt do
         begin
           Log(Format('ERROR: %s (bloque en pos %d)', [E.Message, Blk.Pos]));
-          Inc(Result.Errors);
+          ReportLost(Blk, LastWanted);
         end;
       end;
     finally
@@ -336,13 +377,17 @@ begin
   end;
 
   ProgressEnd;
+  // Los demás bloques se extrajeron igual; con registro de recuperación, se puede reparar
+  if BlockDamaged and (A.Recovery <> '') then
+    Log('El archivo tiene registro de recuperación: "parc r ' + ExtractFileName(A.FileName) +
+      '" intenta repararlo (escribe fixed.' + ExtractFileName(A.FileName) + ').');
 
   // Enlaces simbólicos, al final: si se crearan antes, un archivo de este mismo archivo
   // comprimido podría escribirse a través de uno de ellos
   for i := 0 to High(A.Files) do
   begin
     F := A.Files[i];
-    if not F.IsLink or not Wanted(Opt, F.Name) then Continue;
+    if not F.IsLink or not Wanted(Opt, F.Name) or Opt.ToStdout then Continue;
     if Opt.TestOnly then
     begin
       Log('OK       ' + F.Name + ' -> ' + F.LinkTarget);
@@ -395,10 +440,13 @@ begin
   end;
 
   // Las fechas de los directorios se ponen al final (escribir adentro las cambia)
-  if not Opt.TestOnly and not Opt.FlatNames then
+  if not Opt.TestOnly and not Opt.FlatNames and not Opt.ToStdout then
     for i := 0 to High(A.Files) do
       if A.Files[i].IsDir and Wanted(Opt, A.Files[i].Name) then
         RestoreMeta(DiskName(Opt, A.Files[i].Name), A.Files[i]);
+  finally
+    StdOutS.Free;   // (THandleStream no cierra el handle)
+  end;
 end;
 
 end.

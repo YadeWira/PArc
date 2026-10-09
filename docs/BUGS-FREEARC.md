@@ -66,8 +66,8 @@ El `.parc` es formato propio: estas cosas se pueden arreglar ahí sin romper la 
 | función | fuente | ¿vale la pena en PArc? |
 |---|---|---|
 | Symlinks, junctions, dueño/grupo, ACL, streams NTFS | docs :961-965, :1154; tracker #290 | symlinks sí (ver P3); ACL y streams, quizá en `.parc` |
-| Leer/escribir archivos por stdin/stdout | código Files.hs:565; tracker #149, #157 | sí, útil para scripts y backups (`tar | parc`) |
-| Extraer salteando un bloque sólido roto; recuperar sectores no consecutivos | docs :970-973, :1075 | sí: hoy un bloque roto corta la extracción de ese bloque |
+| Leer/escribir archivos por stdin/stdout | código Files.hs:565; tracker #149, #157 | ✅ hecho: `-si`, `-so` y `-` (2026-10-08) |
+| Extraer salteando un bloque sólido roto; recuperar sectores no consecutivos | docs :970-973, :1075 | ✅ los demás bloques se extraen y se informa cada archivo perdido; en curso: seguir dentro de un bloque 4x4 (PA-Lab) y Reed-Solomon |
 | `-n`: extraer solo lo nuevo o modificado; renombrar dentro del archivo; backup incremental | docs :487, :514, :376 | baja prioridad |
 | Archivos con millones de entradas (memoria) | docs :977; tracker #287 | ❓ medir |
 | Deduplicar archivos idénticos | tracker #303 | quizá (rep ya lo hace en parte) |

@@ -174,6 +174,33 @@ En `.parc` el cifrado es más fuerte que el de FreeArc (el `.arc` sigue igual, p
 
 Los `.parc` cifrados con versiones anteriores de PArc se siguen leyendo y actualizando.
 
+### Entrada y salida estándar
+
+| opción | efecto |
+|---|---|
+| `-so` | `x`/`e`: el contenido de los archivos pedidos va a stdout, sin crear nada en el disco |
+| `-si[nombre]` | `a`: agrega lo que llega por stdin como un archivo con ese nombre (sin nombre: `stdin`) |
+| `-` como archivo | `l`, `lb`, `t`, `x`, `e`: lo lee de stdin; `a`: lo escribe en stdout |
+
+```sh
+tar cf - proyecto | parc a copia.parc -siproyecto.tar -m5   # comprimir lo que sale de tar
+parc x copia.parc proyecto.tar -so | tar xf -               # y de vuelta
+parc x copia.parc config.ini -so                            # ver un archivo sin extraerlo
+parc a - docs | ssh otra 'cat > docs.parc'                  # el archivo, directo por la red
+```
+
+Con `-so` o con `a -`, los mensajes van a stderr para no mezclarse con los datos. Un archivo no
+se puede escribir ni leer de corrido (los descriptores apuntan hacia atrás y el directorio va al
+final), así que lo que llega por stdin se vuelca primero a un temporal: con `-si`, al lado del
+archivo; con `-`, en el directorio temporal del sistema (`TMPDIR`). Los temporales se borran
+al terminar, también con error o Ctrl-C.
+
+### Bloques dañados
+
+Si un bloque está dañado, la extracción sigue con los demás. De ese bloque se informa cada
+archivo que no se pudo extraer; el que estaba a medio escribir queda con lo que se recuperó.
+Si el archivo tiene registro de recuperación, se sugiere `parc r`.
+
 ### Progreso y cancelación
 
 | opción | efecto |
