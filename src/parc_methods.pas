@@ -354,6 +354,9 @@ type
     constructor Create(ASource: TInStage; const AInner: string);
   end;
 
+var
+  FourBlockWarned: Integer = 0;   // 1 cuando ya se avisó del primer bloque dañado
+
 procedure T4x4Job.Process;
 begin
   if Stored then
@@ -361,7 +364,19 @@ begin
   else
   begin
     SetLength(OutBuf, OutSize);
-    DecompressBlockMem(Inner, PByte(InBuf), Length(InBuf), PByte(OutBuf), OutSize);
+    // Los bloques de 4x4 son independientes: si uno está dañado, se entregan ceros de su
+    // tamaño original (su CRC fallará aparte) y los demás salen bien (como FreeArc, que
+    // descomprime cada bloque con su propio DeCompressMem)
+    try
+      DecompressBlockMem(Inner, PByte(InBuf), Length(InBuf), PByte(OutBuf), OutSize);
+    except
+      on E: EArcCorrupt do
+      begin
+        FillChar(OutBuf[0], OutSize, 0);
+        if InterlockedExchange(FourBlockWarned, 1) = 0 then
+          ErrLn('Aviso: bloque 4x4 dañado (' + E.Message + '); se entregan ceros y se sigue con los demás bloques');
+      end;
+    end;
   end;
   InBuf := nil;
 end;
