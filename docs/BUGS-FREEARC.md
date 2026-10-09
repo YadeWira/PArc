@@ -81,8 +81,15 @@ El `.parc` es formato propio: estas cosas se pueden arreglar ahí sin romper la 
 Compresores externos (precomp, srep, pmm/ppmonstr) y sus fallas (#380, #321, #381, #358, docs :429); archivos 7z/zip/rar vía 7z.dll (#368, docs :550, :573); `tempfile` entre métodos (docs :368-370); unarc.dll y su callback (#353); integración con Explorer y asociaciones (#372, #278, #300).
 Para la GUI, cuando llegue, conviene recordar dos de la GUI vieja: borrar una carpeta seguía los symlinks y borraba el destino (código Files.hs:416, **alta**), y lo editado al abrir un archivo desde la GUI se perdía (FileManager.hs:430).
 
-## 6. Sin verificar ❓
+## 6. Verificado el 2026-10-08 (pruebas de PA-Lab; arreglos de PArc)
 
-- Comportamiento con disco lleno (FreeArc se cierra y deja el temporal, #103) y con destino FAT32.
-- Extracción a una carpeta protegida por UAC: FreeArc decía "All OK" con 0 archivos (#352).
-- Reportes únicos sin patrón en FreeArc (#349 corrupción al cambiar varias veces el modo sólido, #257 `rep` solo, #392 `rep+tor:16`): candidatos para un fuzz de actualización en PArc.
+| caso | resultado |
+|---|---|
+| Archivo de 4,7 GB | se comprime y extrae idéntico (21 s / 10 s con `-m1`) |
+| Disco lleno al comprimir | error claro, código 4, no cuelga ni deja temporal |
+| Disco lleno al extraer | **corregido**: antes quedaba el archivo truncado; ahora se borra y el error dice cuál (`¿disco lleno o sin permiso?`) |
+| Archivo de más de 4 GB a FAT32 | no se cuelga (FreeArc sí, #168). **Corregido**: antes escribía 4 GB y fallaba; ahora se avisa antes, se saltea ese archivo y se extrae el resto (Linux y Windows) |
+| 1 millón de archivos chicos | `a`, `l` y `x` sin errores; pico de memoria ~480 MB al comprimir, ~185 MB al listar y extraer |
+| Carpeta protegida por UAC sin ser administrador | no concluyente: la única cuenta de la VM es administradora |
+
+Pendiente: reportes de FreeArc sin patrón (#349 corrupción al cambiar varias veces el modo sólido, #257 `rep` solo, #392 `rep+tor:16`), candidatos para un fuzz de actualización.

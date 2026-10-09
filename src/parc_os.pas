@@ -24,6 +24,9 @@ function StdinToFile(const Path: string): Int64;
 procedure FileToStdout(const Path: string);
 { El handle de la salida estándar (para escribir datos binarios en ella). }
 function StdoutHandle: THandle;
+{ ¿Path (o el directorio existente más cercano hacia arriba) está en un volumen FAT o FAT32?
+  Ahí un archivo no puede pasar de 4 GB - 1 (exFAT no tiene ese límite). }
+function IsFatVolume(const Path: string): Boolean;
 { Escribe en stderr sin salto de línea (la línea de progreso, que se reescribe con #13). }
 procedure ErrWrite(const S: string);
 { ¿stderr es una consola/terminal? (si está redirigida no se muestra el progreso) }
@@ -84,7 +87,7 @@ function CpuCount: Integer;
 implementation
 
 uses
-  {$IFDEF WINDOWS}Windows,{$ENDIF}{$IFDEF UNIX}BaseUnix, TermIO, Linux,{$ENDIF} Classes, SysUtils;
+  {$IFDEF WINDOWS}Windows,{$ENDIF}{$IFDEF UNIX}BaseUnix, Unix, TermIO, Linux,{$ENDIF} Classes, SysUtils;
 
 var
   Args: array of string;
@@ -497,6 +500,42 @@ begin
   finally
     Src.Free;   // (THandleStream no cierra el handle)
   end;
+end;
+
+{$IFDEF WINDOWS}
+function GetVolumePathNameW(lpszFileName, lpszVolumePathName: PWideChar; cchBufferLength: DWORD): BOOL;
+  stdcall; external 'kernel32.dll';
+{$ENDIF}
+
+function IsFatVolume(const Path: string): Boolean;
+var
+  P: string;
+{$IFDEF WINDOWS}
+  Root, FsName: array[0..MAX_PATH] of WideChar;
+  W: UnicodeString;
+  Serial, MaxLen, Flags: DWORD;
+{$ELSE}
+  Fs: TStatFs;
+{$ENDIF}
+begin
+  Result := False;
+  P := ExpandFileName(Path);
+  // el destino puede no existir todavía: se mira el primer directorio que sí existe
+  while (P <> '') and not DirectoryExists(FsPath(P)) do
+  begin
+    if ExtractFileDir(P) = P then Break;
+    P := ExtractFileDir(P);
+  end;
+{$IFDEF WINDOWS}
+  W := UTF8Decode(IncludeTrailingPathDelimiter(P));
+  if not GetVolumePathNameW(PWideChar(W), @Root[0], Length(Root)) then Exit;
+  if not GetVolumeInformationW(@Root[0], nil, 0, @Serial, MaxLen, Flags, @FsName[0], Length(FsName)) then Exit;
+  W := UpperCase(UnicodeString(PWideChar(@FsName[0])));
+  Result := (W = 'FAT') or (W = 'FAT32');
+{$ELSE}
+  if fpStatFS(PChar(P), @Fs) <> 0 then Exit;
+  Result := Fs.fstype = $4D44;   // MSDOS_SUPER_MAGIC: vfat/msdos
+{$ENDIF}
 end;
 
 function StdoutHandle: THandle;

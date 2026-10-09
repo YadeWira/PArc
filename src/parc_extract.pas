@@ -292,6 +292,17 @@ begin
           ProgressFile(F.Name);
           OutF := nil;
           DoWrite := not Opt.TestOnly and not Opt.ToStdout;
+          // Un archivo de más de 4 GB no entra en FAT/FAT32: avisarlo antes, en vez de escribir
+          // 4 GB y fallar con "Stream write error" (FreeArc además se colgaba, #168)
+          if DoWrite and (F.Size > High(LongWord)) and IsFatVolume(ExtractFileDir(ExpandFileName(DiskName(Opt, F.Name)))) then
+          begin
+            Log(Format('ERROR: %s mide %d bytes y el destino es FAT/FAT32 (máximo 4 GB por archivo): no se extrae',
+              [F.Name, F.Size]));
+            Inc(Result.Errors);
+            SkipBytes(Chain, F.Size, Buf);
+            Cur := i + 1;
+            Continue;
+          end;
           if DoWrite then
           begin
             OutName := DiskName(Opt, F.Name);
@@ -340,6 +351,18 @@ begin
             on EOperationCancelled do
             begin
               if Opened then DeleteFile(FsPath(OutName));
+              raise;
+            end;
+            // No se pudo escribir (disco lleno, sin permiso...): tampoco se deja a medias, y se
+            // corta todo, porque los que siguen fallarían igual
+            on E: EStreamError do
+            begin
+              if Opened then
+              begin
+                DeleteFile(FsPath(OutName));
+                raise EInOutError.CreateFmt('no se pudo escribir %s (%s): ¿disco lleno o sin permiso?',
+                  [OutName, E.Message]);
+              end;
               raise;
             end;
           end;

@@ -53,5 +53,27 @@ check "actualizar conserva los enlaces"    '[ "$("$PARC" l l.parc | grep -c "<LI
 timeout 60 "$PARC" a l.arc s --no-progress >/dev/null 2>&1
 check ".arc: enlace a archivo con contenido, a directorio salteado" '[ "$("$PARC" l l.arc | grep -c "<LINK>")" = 0 ] && "$PARC" l l.arc | grep -q " s/rel$" && ! "$PARC" l l.arc | grep -q " s/dir$"'
 
+# Disco lleno y FAT32 (sección 6 de docs/BUGS-FREEARC.md): hacen falta volúmenes chicos
+# montados, así que solo con sudo sin contraseña
+if sudo -n true 2>/dev/null; then
+  mkdir -p full/in full/mnt && head -c 3000000 /dev/urandom > full/in/grande.bin && echo a > full/in/a.txt
+  "$PARC" a full.parc full/in -m0 --no-progress >/dev/null 2>&1
+  sudo -n mount -t tmpfs -o size=1m,uid="$(id -u)",gid="$(id -g)" tmpfs full/mnt
+  out=$("$PARC" x full.parc -o+ -dpfull/mnt/dest --no-progress 2>&1); code=$?
+  left=$(find full/mnt -name grande.bin | wc -l)
+  sudo -n umount full/mnt
+  check "disco lleno: error con el nombre, sin dejar el parcial" '[ $code = 4 ] && echo "$out" | grep -q "no se pudo escribir .*grande.bin" && [ "$left" = 0 ]'
+  if [ -x /sbin/mkfs.fat ]; then
+    mkdir -p fat/in fat/mnt && truncate -s 4400000000 fat/in/grande.bin && echo a > fat/in/a.txt
+    "$PARC" a fat.parc fat/in -m1 --no-progress >/dev/null 2>&1; rm -f fat/in/grande.bin
+    truncate -s 100M fat.img && /sbin/mkfs.fat -F 32 fat.img >/dev/null
+    sudo -n mount -o loop,uid="$(id -u)",gid="$(id -g)" fat.img fat/mnt
+    out=$("$PARC" x fat.parc -o+ -dpfat/mnt/dest --no-progress 2>&1); code=$?
+    small=$(cat fat/mnt/dest/fat/in/a.txt 2>/dev/null)
+    sudo -n umount fat/mnt; rm -f fat.img
+    check "FAT32: >4 GB avisado antes, el resto se extrae" '[ $code = 2 ] && echo "$out" | grep -q "FAT/FAT32" && [ "$small" = a ]'
+  fi
+fi
+
 echo "== correcciones: $fail fallas"
 [ $fail -eq 0 ]
