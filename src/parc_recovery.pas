@@ -14,7 +14,17 @@
 
   porque X = R xor original xor actual. Todo lo del lado derecho se conoce, así que un
   grupo con un solo sector dañado se reconstruye exacto. Por eso cada grupo tolera un
-  daño y el archivo tolera hasta RecSectors mientras no caigan dos en el mismo grupo. }
+  daño y el archivo tolera hasta RecSectors mientras no caigan dos en el mismo grupo.
+
+  En .parc (versión "parc-rs1") la paridad es Reed-Solomon (parc_rs): los sectores del
+  archivo se intercalan en S franjas (el sector i va a la franja i mod S, posición i div S)
+  y cada franja lleva m sectores de paridad. Una franja se repara mientras tenga a lo sumo
+  m sectores dañados, EN CUALQUIER POSICIÓN (datos o paridad), y un daño contiguo de hasta
+  S*m sectores se reparte entre franjas. Mismos dos bloques que FreeArc: el de sectores
+  y el de info+CRCs, con un segundo par (m, S) en el addinfo. La paridad j de la franja s
+  va en el sector j*S + s: intercalada como los datos, para que un daño contiguo en el
+  propio registro tampoco se lleve todas las paridades de una franja. Los CRCs por sector
+  detectan qué está dañado. }
 unit parc_recovery;
 
 {$mode objfpc}{$H+}
@@ -32,6 +42,8 @@ type
     InitPos: Int64;      // dónde arranca la zona protegida
     SectorSize: Integer;
     RecSectors: Integer;
+    RsParity: Integer;   // "parc-rs1": paridades por franja (m); 0 = XOR de FreeArc
+    RsStripes: Int64;    //   franjas (S); RecSectors = S * m
   end;
 
   TRecoveryResult = record
@@ -68,11 +80,12 @@ function RecoveryScan(const ArcName: string; out Res: TRecoveryResult): Boolean;
   se obtiene después de RecoveryBuild como Length(Crcs), que ya incluye el addinfo. }
 function RecoveryPlan(ArcSize: Int64; const Spec: string;
                       out SectorSize, RecSectors: Integer;
-                      out SectorsSize, CrcsSize: Int64): Boolean;
+                      out SectorsSize, CrcsSize: Int64; RS: Boolean = False): Boolean;
 
+{ RS: Reed-Solomon (solo .parc); si no, el XOR de FreeArc. }
 function RecoveryBuild(Arc: TStream; ArcSize, ProtectedFrom, CrcsBlockPos: Int64;
                        const Spec: string; out Sectors, Crcs: TBytes;
-                       out Info: TRecoveryInfo): Boolean;
+                       out Info: TRecoveryInfo; UseRS: Boolean = False): Boolean;
 
 { Igual que Scan y además escribe DestName con los sectores dañados reparados.
   DestName queda vacío si no hay nada que reparar. El original nunca se toca. }
@@ -82,10 +95,15 @@ function RecoveryRepair(const ArcName: string; out Res: TRecoveryResult;
 implementation
 
 uses
-  parc_crc, parc_methods, parc_volume;
+  parc_crc, parc_methods, parc_volume, parc_rs;
 
 const
   RECOVERY_BLOCK = 5;
+  RS_VERSION = 'parc-rs1';
+
+type
+  TBoolArr = array of Boolean;
+  TIntArr = array of Integer;
 
 type
   TRecoveryData = record
@@ -163,10 +181,18 @@ begin
     if npar < 1 then Exit;
     D.Info.SectorSize := Integer(r.VInt);
     D.Info.RecSectors := Integer(r.VInt);
+    D.Info.RsParity := 0;
+    D.Info.RsStripes := 0;
     for i := 2 to npar do
-    begin
-      r.VInt; r.VInt;   // pares extra de otras versiones: se ignoran
-    end;
+      if (i = 2) and (D.Info.Version = RS_VERSION) then
+      begin
+        D.Info.RsParity := Integer(r.VInt);
+        D.Info.RsStripes := Int64(r.VInt);
+      end
+      else
+      begin
+        r.VInt; r.VInt;   // pares extra de otras versiones: se ignoran
+      end;
     D.CrcsOfs := Length(D.Crcs) - r.Remaining;
     { Con -rr0% no hay sectores de recuperación (versión 0.39): se puede VERIFICAR,
       no reparar. RecSectors = 0 es válido acá. }
@@ -174,6 +200,11 @@ begin
     if D.Info.RecSectors < 0 then Exit;
     D.Info.InitPos := blocks[1].Pos - D.Info.Offset;
     if (D.Info.InitPos < 0) or (D.Info.ArcSize <= 0) then Exit;
+    if D.Info.Version = RS_VERSION then
+      if (D.Info.RsParity < 1) or (D.Info.RsParity > 254) or
+         (D.Info.RsStripes <> RsStripeCount((D.Info.ArcSize + D.Info.SectorSize - 1) div D.Info.SectorSize, D.Info.RsParity)) or
+         (D.Info.RsStripes * D.Info.RsParity <> D.Info.RecSectors) then
+        Corrupt('registro de recuperación Reed-Solomon con parámetros inválidos');
     Result := True;
   finally
     arc.Free;
@@ -314,9 +345,19 @@ begin
 end;
 
 
-function RecoveryPlan(ArcSize: Int64; const Spec: string;
-                      out SectorSize, RecSectors: Integer;
-                      out SectorsSize, CrcsSize: Int64): Boolean;
+{ Reed-Solomon: la menor cantidad de paridades por franja (m) que da al menos los R
+  sectores de recuperación pedidos. Con N sectores hay S = ceil(N / (255 - m)) franjas y
+  S * m sectores de paridad en total. }
+procedure RsChoose(N, R: Int64; out m: Integer; out S: Int64);
+begin
+  m := 1;
+  while (m < 254) and (RsStripeCount(N, m) * m < R) do Inc(m);
+  S := RsStripeCount(N, m);
+end;
+
+function PlanAll(ArcSize: Int64; const Spec: string; RS: Boolean;
+                 out SectorSize, RecSectors: Integer; out SectorsSize, CrcsSize: Int64;
+                 out m: Integer; out S: Int64): Boolean;
 var
   wanted, explicit_rec: Int64;
   fixed_size: Integer;
@@ -326,6 +367,7 @@ var
 begin
   Result := False;
   SectorSize := 0; RecSectors := 0; SectorsSize := 0; CrcsSize := 0;
+  m := 0; S := 0;
   if not ParseRrSpec(Spec, ArcSize, wanted, fixed_size, explicit_rec) then Exit;
   if wanted < 0 then Exit;
   if fixed_size > 0 then
@@ -353,15 +395,32 @@ begin
     RecSectors := (rec_size - crcs_size0 + SectorSize - 1) div SectorSize
   else
     RecSectors := 0;
+  if RS and (RecSectors > 0) then
+  begin
+    RsChoose(arc_sectors, RecSectors, m, S);
+    RecSectors := S * m;
+  end;
   SectorsSize := Int64(RecSectors) * SectorSize;
   CrcsSize := crcs_size0 + Int64(RecSectors) * 4;
   Result := True;
 end;
 
+function RecoveryPlan(ArcSize: Int64; const Spec: string;
+                      out SectorSize, RecSectors: Integer;
+                      out SectorsSize, CrcsSize: Int64; RS: Boolean = False): Boolean;
+var
+  m: Integer;
+  S: Int64;
+begin
+  Result := PlanAll(ArcSize, Spec, RS, SectorSize, RecSectors, SectorsSize, CrcsSize, m, S);
+end;
+
 function RecoveryBuild(Arc: TStream; ArcSize, ProtectedFrom, CrcsBlockPos: Int64;
                        const Spec: string; out Sectors, Crcs: TBytes;
-                       out Info: TRecoveryInfo): Boolean;
+                       out Info: TRecoveryInfo; UseRS: Boolean = False): Boolean;
 var
+  m, j: Integer;
+  Stripes, si, pi: Int64;
   arc_sectors, rec_sectors, i64, k: Int64;
   sector_size: Integer;
   crcs_size, rec_sectors_size: Int64;
@@ -373,12 +432,15 @@ begin
   Result := False;
   SetLength(Sectors, 0); SetLength(Crcs, 0);
   // Los tamaños salen de RecoveryPlan: una sola implementación de la gramática de -rr
-  if not RecoveryPlan(ArcSize, Spec, sector_size, rs, rec_sectors_size, crcs_size) then Exit;
+  if not PlanAll(ArcSize, Spec, UseRS, sector_size, rs, rec_sectors_size, crcs_size, m, Stripes) then Exit;
   rec_sectors := rs;
   arc_sectors := (ArcSize + sector_size - 1) div sector_size;
 
   Info.Version := '0.36';
-  if rec_sectors = 0 then Info.Version := '0.39';
+  if rec_sectors = 0 then Info.Version := '0.39'
+  else if m > 0 then Info.Version := RS_VERSION;
+  Info.RsParity := m;
+  Info.RsStripes := Stripes;
   Info.ArcSize := ArcSize;
   Info.InitPos := ProtectedFrom;
   Info.Offset := CrcsBlockPos - ProtectedFrom;
@@ -403,7 +465,16 @@ begin
     got := Arc.Read(buf[0], n);
     if got <> n then Exit;
     U32Put(Crcs, CalcCRC(PByte(@buf[0]), n));
-    if rec_sectors > 0 then
+    if m > 0 then
+    begin
+      // Reed-Solomon: el sector k es el dato pi de la franja si (el último, con ceros)
+      if n < sector_size then FillChar(buf[n], sector_size - n, 0);
+      si := k mod Stripes;
+      pi := k div Stripes;
+      for j := 0 to m - 1 do
+        RsMulAdd(RsCoef(j, pi), @buf[0], @Sectors[(j * Stripes + si) * sector_size], sector_size);
+    end
+    else if rec_sectors > 0 then
     begin
       for idx := 0 to n - 1 do
         Sectors[i64 * sector_size + idx] := Sectors[i64 * sector_size + idx] xor buf[idx];
@@ -422,9 +493,14 @@ begin
   CStrPut(buf, Info.Version);
   VIntPut(buf, QWord(ArcSize));
   VIntPut(buf, QWord(Info.Offset));
-  VIntPut(buf, 1);
+  if m > 0 then VIntPut(buf, 2) else VIntPut(buf, 1);
   VIntPut(buf, QWord(sector_size));
   VIntPut(buf, QWord(rec_sectors));
+  if m > 0 then
+  begin
+    VIntPut(buf, QWord(m));
+    VIntPut(buf, QWord(Stripes));
+  end;
   // concat: addinfo + crcs
   SetLength(buf, Length(buf) + Length(Crcs));
   Move(Crcs[0], buf[Length(buf) - Length(Crcs)], Length(Crcs));
@@ -523,14 +599,178 @@ begin
   Result := True;
 end;
 
+{ --- Reed-Solomon ("parc-rs1") --- }
+
+{ CRCs de todos los sectores: Bad[k] para los del archivo, BadPar[i] para los de paridad.
+  Una franja con más de m dañados (datos + paridad) no se puede reparar. }
+function ScanRS(const ArcName: string; const D: TRecoveryData; out Res: TRecoveryResult;
+                out Bad, BadPar: TBoolArr; out PerStripe: TIntArr): Boolean;
+var
+  fs: TStream;
+  buf: TBytes;
+  k, arc_sectors, i: Int64;
+  n, got: SizeInt;
+  r: TByteReader;
+  S: Int64;
+  m, j: Integer;
+begin
+  Result := False;
+  Res.Info := D.Info;
+  SetLength(Res.BadSectors, 0);
+  SetLength(Res.Unrecoverable, 0);
+  SetLength(Res.Repaired, 0);
+  arc_sectors := (D.Info.ArcSize + D.Info.SectorSize - 1) div D.Info.SectorSize;
+  S := D.Info.RsStripes;
+  m := D.Info.RsParity;
+  SetLength(Bad, arc_sectors);
+  SetLength(BadPar, D.Info.RecSectors);
+  SetLength(PerStripe, S);
+  r.Init(@D.Crcs[D.CrcsOfs], Length(D.Crcs) - D.CrcsOfs);
+  fs := OpenArchiveStream(ArcName);
+  try
+    fs.Position := D.Info.InitPos;
+    SetLength(buf, D.Info.SectorSize);
+    k := 0;
+    while k < arc_sectors do
+    begin
+      n := D.Info.SectorSize;
+      if k * D.Info.SectorSize + n > D.Info.ArcSize then n := D.Info.ArcSize - k * D.Info.SectorSize;
+      got := fs.Read(buf[0], n);
+      if got <> n then Corrupt('no se pudo leer la zona protegida');
+      Bad[k] := CalcCRC(PByte(@buf[0]), n) <> r.U32;
+      if Bad[k] then
+      begin
+        SetLength(Res.BadSectors, Length(Res.BadSectors) + 1);
+        Res.BadSectors[High(Res.BadSectors)] := k;
+        Inc(PerStripe[k mod S]);
+      end;
+      Inc(k);
+    end;
+  finally
+    fs.Free;
+  end;
+  // la paridad también puede estar dañada (cuenta como un borrado más de su franja)
+  // (contadores Integer: FPC no acepta for con Int64 en i386)
+  for j := 0 to D.Info.RecSectors - 1 do
+  begin
+    BadPar[j] := CalcCRC(PByte(@D.Sectors[Int64(j) * D.Info.SectorSize]), D.Info.SectorSize) <> r.U32;
+    if BadPar[j] then Inc(PerStripe[j mod S]);
+  end;
+  for j := 0 to High(Res.BadSectors) do
+    if PerStripe[Res.BadSectors[j] mod S] > m then
+    begin
+      SetLength(Res.Unrecoverable, Length(Res.Unrecoverable) + 1);
+      Res.Unrecoverable[High(Res.Unrecoverable)] := Res.BadSectors[j];
+    end;
+  Result := True;
+end;
+
+function RepairRS(const ArcName: string; const D: TRecoveryData; out Res: TRecoveryResult;
+                  out DestName: string): Boolean;
+var
+  Bad, BadPar: TBoolArr;
+  PerStripe: TIntArr;
+  fs: TStream;
+  out2: TFileStream;
+  VolBase: string;
+  arc_sectors, S, st, idx: Int64;
+  m, kk, p, j, SS: Integer;
+  n, got: SizeInt;
+  Mem: TBytes;
+  Ptrs: array of PByte;
+  Present: array of Boolean;
+  reparables: Integer;
+begin
+  Result := False;
+  DestName := '';
+  if not ScanRS(ArcName, D, Res, Bad, BadPar, PerStripe) then Exit;
+  if Length(Res.BadSectors) = 0 then Exit(True);
+  if Length(Res.Unrecoverable) = Length(Res.BadSectors) then Exit(True);   // nada reparable
+  reparables := Length(Res.BadSectors) - Length(Res.Unrecoverable);
+  if reparables = 0 then Exit(True);
+  arc_sectors := (D.Info.ArcSize + D.Info.SectorSize - 1) div D.Info.SectorSize;
+  S := D.Info.RsStripes;
+  m := D.Info.RsParity;
+  SS := D.Info.SectorSize;
+  if not IsVolumeSet(ArcName, VolBase) then VolBase := ArcName;
+  DestName := ExtractFilePath(VolBase) + 'fixed.' + ExtractFileName(VolBase);
+  if FileExists(DestName) then DeleteFile(DestName);
+  out2 := TFileStream.Create(DestName, fmCreate);
+  try
+    fs := OpenArchiveStream(ArcName);
+    try
+      out2.CopyFrom(fs, 0);
+      SetLength(Mem, Int64(RS_MAX_SECTORS) * SS);
+      SetLength(Ptrs, RS_MAX_SECTORS);
+      SetLength(Present, RS_MAX_SECTORS);
+      st := -1;
+      while st < S - 1 do   // (while: FPC no acepta for con Int64 en i386)
+      begin
+        Inc(st);
+        if (PerStripe[st] = 0) or (PerStripe[st] > m) then Continue;
+        kk := RsStripeLen(arc_sectors, S, st);
+        // ¿algún dato dañado? (si solo está dañada la paridad, no hay nada que escribir)
+        n := 0;
+        for p := 0 to kk - 1 do
+          if Bad[Int64(p) * S + st] then Inc(n);
+        if n = 0 then Continue;
+        FillChar(Mem[0], Int64(kk + m) * SS, 0);
+        for p := 0 to kk - 1 do
+        begin
+          idx := Int64(p) * S + st;
+          Ptrs[p] := @Mem[Int64(p) * SS];
+          Present[p] := not Bad[idx];
+          n := SS;
+          if (idx + 1) * SS > D.Info.ArcSize then n := D.Info.ArcSize - idx * SS;
+          if Present[p] then
+          begin
+            fs.Position := D.Info.InitPos + idx * SS;
+            got := fs.Read(Ptrs[p]^, n);
+            if got <> n then Corrupt('no se pudo leer un sector de la franja');
+          end;
+        end;
+        for j := 0 to m - 1 do
+        begin
+          Ptrs[kk + j] := @Mem[Int64(kk + j) * SS];
+          Present[kk + j] := not BadPar[j * S + st];
+          Move(D.Sectors[(j * S + st) * SS], Ptrs[kk + j]^, SS);
+        end;
+        if not RsRecover(kk, m, Ptrs[0..kk + m - 1], Present[0..kk + m - 1], SS) then
+          Corrupt('Reed-Solomon: no se pudo reconstruir una franja reparable');
+        for p := 0 to kk - 1 do
+        begin
+          idx := Int64(p) * S + st;
+          if not Bad[idx] then Continue;
+          n := SS;
+          if (idx + 1) * SS > D.Info.ArcSize then n := D.Info.ArcSize - idx * SS;
+          out2.Position := D.Info.InitPos + idx * SS;
+          out2.WriteBuffer(Ptrs[p]^, n);
+          SetLength(Res.Repaired, Length(Res.Repaired) + 1);
+          Res.Repaired[High(Res.Repaired)] := idx;
+        end;
+      end;
+      Result := True;
+    finally
+      fs.Free;
+    end;
+  finally
+    out2.Free;
+  end;
+end;
+
 function RecoveryScan(const ArcName: string; out Res: TRecoveryResult): Boolean;
 var
   D: TRecoveryData;
   XorAcc: TBytes;
+  Bad, BadPar: TBoolArr;
+  PerStripe: TIntArr;
 begin
   Result := False;
   if not LoadRecovery(ArcName, D) then Exit;
-  Result := ScanFile(ArcName, D, Res, XorAcc);
+  if D.Info.RsParity > 0 then
+    Result := ScanRS(ArcName, D, Res, Bad, BadPar, PerStripe)
+  else
+    Result := ScanFile(ArcName, D, Res, XorAcc);
 end;
 
 function RecoveryRepair(const ArcName: string; out Res: TRecoveryResult;
@@ -549,6 +789,7 @@ begin
   Result := False;
   DestName := '';
   if not LoadRecovery(ArcName, D) then Exit;
+  if D.Info.RsParity > 0 then Exit(RepairRS(ArcName, D, Res, DestName));
   if not ScanFile(ArcName, D, Res, XorAcc) then Exit;
   SetLength(cntBad, D.Info.RecSectors);
   arc_sectors := (D.Info.ArcSize + D.Info.SectorSize - 1) div D.Info.SectorSize;

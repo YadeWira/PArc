@@ -49,7 +49,7 @@ Corregidos el 2026-10-08 como se propone abajo; verificados en Linux, Windows 10
 
 ## 3. Heredado por compatibilidad con `.arc` ⚠️ — se puede corregir solo en `.parc`
 
-Cifrado: ✅ corregido en `.parc` el 2026-10-08 (`:f`, `:m`, 200 000 iteraciones; `tests/parc_crypt.sh`). El `.arc` sigue con el esquema de FreeArc. Recuperación: pendiente.
+Cifrado: ✅ corregido en `.parc` el 2026-10-08 (`:f`, `:m`, 200 000 iteraciones; `tests/parc_crypt.sh`). Recuperación: ✅ Reed-Solomon en `.parc` (`parc-rs1`, `tests/rs_recovery.sh`). El `.arc` sigue con los esquemas de FreeArc.
 
 El `.parc` es formato propio: estas cosas se pueden arreglar ahí sin romper la lectura ni la escritura de `.arc`.
 
@@ -67,7 +67,7 @@ El `.parc` es formato propio: estas cosas se pueden arreglar ahí sin romper la 
 |---|---|---|
 | Symlinks, junctions, dueño/grupo, ACL, streams NTFS | docs :961-965, :1154; tracker #290 | symlinks sí (ver P3); ACL y streams, quizá en `.parc` |
 | Leer/escribir archivos por stdin/stdout | código Files.hs:565; tracker #149, #157 | ✅ hecho: `-si`, `-so` y `-` (2026-10-08) |
-| Extraer salteando un bloque sólido roto; recuperar sectores no consecutivos | docs :970-973, :1075 | ✅ los demás bloques se extraen y se informa cada archivo perdido; en curso: seguir dentro de un bloque 4x4 (PA-Lab) y Reed-Solomon |
+| Extraer salteando un bloque sólido roto; recuperar sectores no consecutivos | docs :970-973, :1075 | ✅ los demás bloques se extraen y se informa cada archivo perdido; dentro de un bloque 4x4, los trozos sanos se extraen (PA-Lab); Reed-Solomon en `.parc` |
 | `-n`: extraer solo lo nuevo o modificado; renombrar dentro del archivo; backup incremental | docs :487, :514, :376 | baja prioridad |
 | Archivos con millones de entradas (memoria) | docs :977; tracker #287 | ❓ medir |
 | Deduplicar archivos idénticos | tracker #303 | quizá (rep ya lo hace en parte) |

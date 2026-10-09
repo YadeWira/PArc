@@ -103,6 +103,19 @@ Agrega datos de paridad que permiten reparar sectores dañados con `parc r` (o `
 Sin `-rr`, al actualizar un archivo se conserva lo que tenía. Los sectores de menos de 512
 bytes se rechazan (FreeArc se queda sin memoria con ellos).
 
+En `.parc` el registro es Reed-Solomon. En `.arc` sigue siendo el XOR de FreeArc, para que
+`arc.exe` lo use. Con el mismo tamaño:
+
+- el XOR repara un solo sector dañado por grupo: dos daños sueltos que caen en el mismo grupo
+  ya no tienen arreglo;
+- Reed-Solomon reparte el archivo en franjas de hasta 255 sectores, cada una con `m`
+  sectores de paridad. Repara hasta `m` sectores dañados por franja, en cualquier posición,
+  incluida la propia paridad. Los sectores se intercalan entre franjas, así que un tramo
+  contiguo dañado de hasta franjas × `m` sectores también se repara.
+
+Con `-rr1%` hay unas 2 o 3 paridades por franja, y con `-rr5%` unas 12. Cuanto más daño suelto
+se quiera tolerar, más por ciento. `parc r` dice qué sectores no pudo reparar.
+
 ### Volúmenes: `-v` (solo `.parc`)
 
 Parte el archivo en pedazos de tamaño fijo, al estilo de 7-Zip: `copia.parc.001`,

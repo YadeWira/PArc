@@ -95,7 +95,23 @@ columna `Time` (Int32) y guarda la precisión de NTFS (100 ns) y ext4 (1 ns).
 
 ## 5. Pendiente
 
-- Formato de RECOVERY_BLOCK (el mismo que en `.arc`, falta especificarlo, `FORMATO-ARC.md` §9).
+- Formato de RECOVERY_BLOCK de `.arc`: falta especificarlo (`FORMATO-ARC.md` §9).
+
+## 5b. Registro de recuperación de `.parc`: Reed-Solomon (`parc-rs1`)
+
+Los mismos dos RECOVERY_BLOCK que `.arc` (sectores primero, info+CRCs después), con:
+
+- addinfo: versión `parc-rs1`, `arcsize`, `offset` y **dos** pares: `(sector_size,
+  rec_sectors)` y `(m, S)`, con `rec_sectors = S × m`;
+- los N sectores de la zona protegida (el último, con ceros hasta `sector_size`) se reparten
+  en S = ⌈N / (255 − m)⌉ franjas: el sector i es el dato i div S de la franja i mod S;
+- la paridad j de la franja s (código de borrado RS sobre GF(2^8), polinomio 0x11D, matriz de
+  Cauchy escalada: `src/parc_rs.pas`) es el sector j·S + s del bloque de sectores;
+- los CRCs son, como en `.arc`, uno por sector de datos y uno por sector de paridad, y marcan
+  qué sectores faltan. Una franja se repara con a lo sumo m sectores dañados.
+
+m es la menor cantidad que da al menos los sectores de recuperación que pide `-rr` con el
+cálculo de FreeArc.
 - ¿Hash más fuerte que CRC-32 por archivo (p. ej. un tag `BLAKE2B`)? A decidir.
 - Enlaces duros, ACL, atributos extendidos: tags futuros.
 

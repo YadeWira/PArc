@@ -149,11 +149,11 @@ var
   B: TBlockInfo;
 begin
   ArcSize := S.Position;
-  if not RecoveryPlan(ArcSize, Spec, SectorSize, RecSectors, SectorsSize, CrcsSize) then
+  if not RecoveryPlan(ArcSize, Spec, SectorSize, RecSectors, SectorsSize, CrcsSize, Parc) then   // .parc: Reed-Solomon
     raise Exception.CreateFmt('especificación de -rr inválida: "%s"', [Spec]);
   PosSectors := S.Position;
   PosCrcs := PosSectors + SectorsSize + StoringDescriptorLen(Parc, RECOVERY_BLOCK, SectorsSize);
-  if not RecoveryBuild(S, ArcSize, 0, PosCrcs, Spec, Sectors, Crcs, Info) then
+  if not RecoveryBuild(S, ArcSize, 0, PosCrcs, Spec, Sectors, Crcs, Info, Parc) then
     raise Exception.Create('no se pudo construir el registro de recuperación');
   S.Position := PosSectors;   // RecoveryBuild lee lo ya escrito
   // Solo el tamaño de los sectores decide dónde cae el bloque de CRCs; ese bloque lleva además
