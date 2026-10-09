@@ -32,6 +32,9 @@ type
     IsDir: Boolean;
     HasWinAttr, HasUnixMode: Boolean;
     WinAttr, UnixMode: LongWord;
+    IsLink: Boolean;         // enlace simbólico (o junction de Windows) guardado como enlace
+    LinkToDir: Boolean;      //   apunta a un directorio (en Windows hay que crearlo distinto)
+    LinkTarget: string;      //   destino, UTF-8 y con '/' (en Windows se vuelve a '\' al crearlo)
   end;
 
 { Ruta para pasarle al sistema de archivos. En Windows, las rutas de 240 caracteres o más
@@ -43,6 +46,14 @@ function MakeDirs(const Dir: string): Boolean;
 
 { Metadatos de un archivo o directorio (sigue enlaces simbólicos). False si no existe. }
 function GetFileMeta(const Path: string; out Meta: TFileMeta): Boolean;
+
+{ Si Path es un enlace simbólico (o, en Windows, un symlink o una junction; otros puntos de
+  reanálisis como los de OneDrive no cuentan), devuelve True y sus metadatos sin seguirlo:
+  IsLink, LinkTarget, LinkToDir, fecha y tamaño 0. Para todo lo demás, False. }
+function GetLinkMeta(const Path: string; out Meta: TFileMeta): Boolean;
+{ Crea el enlace Path -> Target. En Windows hace falta permiso (administrador o modo
+  desarrollador); si no hay, devuelve False. }
+function MakeSymLink(const Path, Target: string; ToDir: Boolean): Boolean;
 
 { Fija la fecha de modificación (ns desde 1970 UTC) de un archivo o directorio. }
 function SetFileMTimeNs(const Path: string; Ns: Int64): Boolean;
@@ -189,6 +200,77 @@ begin
   Meta.HasWinAttr := True;
   Meta.WinAttr := D.dwFileAttributes;
 end;
+
+const
+  FSCTL_GET_REPARSE_POINT = $000900A8;
+  IO_REPARSE_TAG_MOUNT_POINT = $A0000003;   // junction
+  IO_REPARSE_TAG_SYMLINK = $A000000C;
+  FILE_FLAG_OPEN_REPARSE_POINT = $00200000;
+  SYMBOLIC_LINK_FLAG_DIRECTORY = 1;
+  SYMBOLIC_LINK_FLAG_ALLOW_UNPRIVILEGED_CREATE = 2;   // Windows 10 1703+ con modo desarrollador
+
+function GetLinkMeta(const Path: string; out Meta: TFileMeta): Boolean;
+var
+  W, Target: UnicodeString;
+  H: THandle;
+  Buf: array[0..16383] of Byte;
+  Got: DWORD;
+  Tag: LongWord;
+  P: PByte;
+  SubOff, SubLen, PrnOff, PrnLen: Word;
+begin
+  Result := False;
+  if not GetFileMeta(Path, Meta) then Exit;
+  if (Meta.WinAttr and FILE_ATTRIBUTE_REPARSE_POINT) = 0 then Exit;
+  W := UTF8Decode(FsPath(Path));
+  H := CreateFileW(PWideChar(W), 0, FILE_SHARE_READ or FILE_SHARE_WRITE or FILE_SHARE_DELETE, nil,
+                   OPEN_EXISTING, FILE_FLAG_OPEN_REPARSE_POINT or FILE_FLAG_BACKUP_SEMANTICS, 0);
+  if H = INVALID_HANDLE_VALUE then Exit;
+  try
+    if not DeviceIoControl(H, FSCTL_GET_REPARSE_POINT, nil, 0, @Buf, SizeOf(Buf), Got, nil) or (Got < 16) then Exit;
+  finally
+    CloseHandle(H);
+  end;
+  Tag := PLongWord(@Buf[0])^;
+  // REPARSE_DATA_BUFFER: tag, len, reservado, y los offsets de SubstituteName y PrintName;
+  // el symlink tiene además 4 bytes de flags antes de los nombres
+  SubOff := PWord(@Buf[8])^; SubLen := PWord(@Buf[10])^;
+  PrnOff := PWord(@Buf[12])^; PrnLen := PWord(@Buf[14])^;
+  if Tag = IO_REPARSE_TAG_SYMLINK then P := @Buf[20]
+  else if Tag = IO_REPARSE_TAG_MOUNT_POINT then P := @Buf[16]
+  else Exit;   // OneDrive, deduplicación, etc.: se tratan como archivos normales
+  if (PtrUInt(P - PByte(@Buf[0])) + PrnOff + PrnLen > Got) or
+     (PtrUInt(P - PByte(@Buf[0])) + SubOff + SubLen > Got) then Exit;
+  if PrnLen > 0 then SetString(Target, PWideChar(P + PrnOff), PrnLen div 2)
+  else SetString(Target, PWideChar(P + SubOff), SubLen div 2);
+  if Copy(Target, 1, 4) = '\??\' then Delete(Target, 1, 4);
+  Meta.IsLink := True;
+  Meta.LinkToDir := Meta.IsDir;
+  Meta.LinkTarget := StringReplace(UTF8Encode(Target), '\', '/', [rfReplaceAll]);
+  Meta.IsDir := False;
+  Meta.Size := 0;
+  Result := True;
+end;
+
+function MakeSymLink(const Path, Target: string; ToDir: Boolean): Boolean;
+type
+  TCreateSymbolicLinkW = function(lpSymlinkFileName, lpTargetFileName: PWideChar; dwFlags: DWORD): BOOLEAN; stdcall;
+var
+  F: TCreateSymbolicLinkW;
+  W, T: UnicodeString;
+  Flags: DWORD;
+begin
+  Result := False;
+  Pointer(F) := GetProcAddress(GetModuleHandle('kernel32.dll'), 'CreateSymbolicLinkW');
+  if not Assigned(F) then Exit;   // (XP)
+  W := UTF8Decode(FsPath(Path));
+  T := UTF8Decode(StringReplace(Target, '/', '\', [rfReplaceAll]));
+  if ToDir then Flags := SYMBOLIC_LINK_FLAG_DIRECTORY else Flags := 0;
+  Result := F(PWideChar(W), PWideChar(T), Flags or SYMBOLIC_LINK_FLAG_ALLOW_UNPRIVILEGED_CREATE);
+  // Windows 7 y 8 no conocen la bandera y fallan con ERROR_INVALID_PARAMETER
+  if not Result and (GetLastError = ERROR_INVALID_PARAMETER) then
+    Result := F(PWideChar(W), PWideChar(T), Flags);
+end;
 {$ELSE}
 function FsPath(const P: string): string;
 begin
@@ -212,6 +294,31 @@ begin
   Meta.MTimeNs := Int64(St.st_mtime) * 1000000000 + St.st_mtime_nsec;
   Meta.HasUnixMode := True;
   Meta.UnixMode := St.st_mode;
+end;
+
+function GetLinkMeta(const Path: string; out Meta: TFileMeta): Boolean;
+var
+  St, Tgt: Stat;
+  Buf: array[0..4095] of Char;
+  n: SizeInt;
+begin
+  Meta := Default(TFileMeta);
+  Result := False;
+  if (FpLStat(Path, St) <> 0) or not FpS_ISLNK(St.st_mode) then Exit;
+  n := FpReadLink(PChar(Path), @Buf[0], SizeOf(Buf));
+  if n < 0 then Exit;
+  SetString(Meta.LinkTarget, PChar(@Buf[0]), n);
+  Meta.IsLink := True;
+  Meta.LinkToDir := (FpStat(Path, Tgt) = 0) and FpS_ISDIR(Tgt.st_mode);
+  Meta.MTimeNs := Int64(St.st_mtime) * 1000000000 + St.st_mtime_nsec;
+  Meta.HasUnixMode := True;
+  Meta.UnixMode := St.st_mode;
+  Result := True;
+end;
+
+function MakeSymLink(const Path, Target: string; ToDir: Boolean): Boolean;
+begin
+  Result := FpSymLink(PChar(Target), PChar(Path)) = 0;
 end;
 {$ENDIF}
 

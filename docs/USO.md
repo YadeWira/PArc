@@ -28,6 +28,20 @@ archivo; los demás son los archivos o máscaras sobre los que actúa el comando
 
 Los directorios que se pasan a `a`/`u`/`f` se recorren recursivamente.
 
+### Máscaras y enlaces (a, u, f)
+
+- Un argumento puede ser una máscara con `*` y `?` en el último componente: `*.txt`,
+  `src/*.pas`. La expande el propio PArc (en Windows `cmd.exe` no lo hace). Los directorios
+  que coinciden entran completos. `*.*` incluye los nombres sin punto, como en Windows.
+- `-r`: la máscara busca también en todos los subdirectorios (`parc a x.parc -r '*.txt'`).
+- Si nada coincide y el archivo no existía, no se crea un archivo vacío.
+- Un archivo que no se puede leer (sin permiso, o bloqueado por otro programa) se saltea con
+  aviso: el resto se agrega igual y, si ya estaba en el archivo, queda la versión anterior.
+  PArc termina con el código 6.
+- Enlaces simbólicos (y junctions de Windows): en `.parc` se guardan como enlaces, sin
+  seguirlos. En `.arc`, que no los admite, el enlace a un archivo se guarda con el contenido
+  del destino (como FreeArc) y el enlace a un directorio o roto se saltea con aviso.
+
 ## Opciones
 
 ### Destino y sobrescritura (x, e)
@@ -37,6 +51,12 @@ Los directorios que se pasan a `a`/`u`/`f` se recorren recursivamente.
 | `-dp<dir>` | directorio de destino |
 | `-o+` | sobrescribe los archivos que ya existen |
 | `-o-` | los saltea (es lo que se hace si no se indica nada) |
+| `-snld` | crea también los enlaces que apuntan fuera del destino (absolutos o con `..` que sube más allá) |
+
+Los enlaces se crean al final de la extracción. Por seguridad, sin `-snld` no se crean los que
+apuntan fuera del destino: a través de uno así, otro archivo podría escribirse en cualquier
+lugar del disco. En Windows crear un enlace requiere ser administrador o el modo
+desarrollador; si no se puede, se avisa y se saltea.
 
 ### Compresión (a, u, f, d)
 
@@ -161,6 +181,7 @@ el archivo que estaba a medio escribir. Un segundo Ctrl-C corta en el acto.
 | 3 | un método que PArc todavía no sabe descomprimir o comprimir |
 | 4 | otro error (de E/S, por ejemplo) |
 | 5 | contraseña faltante o incorrecta |
+| 6 | terminó, pero algunos archivos no se pudieron leer y no se agregaron |
 | 130 | cancelado con Ctrl-C |
 
 ## Variables de entorno

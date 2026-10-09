@@ -12,6 +12,7 @@ uses
 
 const
   EXIT_CANCELLED = 130;   // como un proceso cortado por SIGINT (128 + 2)
+  EXIT_WARNINGS = 6;    // terminó, pero algunos archivos no se pudieron leer
 
 procedure ClearProgress;
 procedure DrawProgress(const P: TProgressInfo);
@@ -141,8 +142,11 @@ begin
   for i := 0 to High(A.Files) do
     with A.Files[i] do
     begin
-      if IsDir then Kind := '<DIR>' else Kind := IntToStr(Size);
-      OutLn(Format('%s  %14s  %.8x  %s', [FmtTime(Time), Kind, Crc, Name]));
+      if IsDir then Kind := '<DIR>' else if IsLink then Kind := '<LINK>' else Kind := IntToStr(Size);
+      if IsLink then
+        OutLn(Format('%s  %14s  %.8x  %s -> %s', [FmtTime(Time), Kind, Crc, Name, LinkTarget]))
+      else
+        OutLn(Format('%s  %14s  %.8x  %s', [FmtTime(Time), Kind, Crc, Name]));
       Inc(TotalSize, Size);
     end;
   TotalComp := 0;

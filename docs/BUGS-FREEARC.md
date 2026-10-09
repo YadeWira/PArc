@@ -11,7 +11,9 @@ Severidad: **alta** = pérdida o corrupción de datos, o cuelgue; **media** = fa
 
 Estado en PArc: ✅ ya lo corrige · ⚠️ lo hereda · 🐞 bug propio de PArc · ➖ no aplica (función que PArc no tiene) · ❓ sin verificar.
 
-## 1. Para decidir: bugs propios de PArc encontrados en esta revisión
+## 1. Bugs propios de PArc encontrados en esta revisión — ✅ corregidos
+
+Corregidos el 2026-10-08 como se propone abajo; verificados en Linux, Windows 10 (x64 y x86) y Windows 7 x86. Prueba: `tests/fixes.sh`. Sintaxis en `docs/USO.md` (máscaras, `-r`, `-snld`, código 6).
 
 | # | problema | sev. | evidencia | propuesta |
 |---|---|---|---|---|

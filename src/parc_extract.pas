@@ -22,6 +22,7 @@ type
     Overwrite: TOverwriteMode;
     AskOverwrite: TAskOverwriteFunc;   // para owAsk; nil = saltear (sin consola a quién preguntar)
     Filter: TStringList;     // nombres/máscaras a incluir (nil = todos)
+    UnsafeLinks: Boolean;    // -snld: crear también enlaces absolutos o que salen del destino
   end;
 
   TExtractStats = record
@@ -49,7 +50,7 @@ const
 
 { Comodines estilo FreeArc: '*' = cualquier secuencia, '?' = un carácter.
   En Windows sin distinguir mayúsculas. Backtracking simple sobre el último '*'. }
-function MatchWild(const Name, Mask: string): Boolean;
+function MatchWildRaw(const Name, Mask: string): Boolean;
 var
   n, m, StarM, StarN: Integer;
   a, b: string;
@@ -75,6 +76,16 @@ begin
   end;
   while (m <= Length(b)) and (b[m] = '*') do Inc(m);
   Result := m > Length(b);
+end;
+
+{ Como en DOS/Windows (y el pendiente de FreeArc "*.* и makefile.* должны включать makefile"):
+  una máscara que termina en ".*" también vale para nombres sin punto. }
+function MatchWild(const Name, Mask: string): Boolean;
+begin
+  Result := MatchWildRaw(Name, Mask);
+  if not Result and (Length(Mask) >= 2) and (Copy(Mask, Length(Mask) - 1, 2) = '.*')
+     and (Pos('.', Name) = 0) then
+    Result := MatchWildRaw(Name, Copy(Mask, 1, Length(Mask) - 2));
 end;
 
 function MatchesAny(const Name: string; Masks: TStrings): Boolean;
@@ -126,6 +137,31 @@ begin
   SetFileAttrs(FileName, F.HasUnixMode, F.UnixMode, F.HasWinAttr, F.WinAttr);
 end;
 
+{ ¿El enlace Name -> Target apunta fuera de la carpeta de extracción? Absoluto, o con ".." que
+  sube más allá de la raíz (contando desde el directorio del enlace). Un enlace así permitiría
+  que otro archivo (de este o de otro archivo comprimido) se escriba fuera del destino. }
+function LinkEscapes(const Name, Target: string): Boolean;
+var
+  Depth, i: Integer;
+  Part, T: string;
+  Parts: TStringArray;
+begin
+  T := StringReplace(Target, '\', '/', [rfReplaceAll]);
+  if (T = '') or (T[1] = '/') or ((Length(T) >= 2) and (T[2] = ':')) then Exit(True);
+  Depth := 0;
+  for i := 1 to Length(Name) do
+    if Name[i] = '/' then Inc(Depth);   // directorios por encima del enlace dentro del archivo
+  Parts := T.Split(['/']);
+  for Part in Parts do
+    if Part = '..' then
+    begin
+      Dec(Depth);
+      if Depth < 0 then Exit(True);
+    end
+    else if (Part <> '') and (Part <> '.') then Inc(Depth);
+  Result := False;
+end;
+
 { Lee y descarta Count bytes de la cadena (archivos no pedidos dentro de un bloque sólido). }
 procedure SkipBytes(Chain: TInStage; Count: Int64; var Buf: TBytes);
 var
@@ -152,6 +188,7 @@ var
   n: SizeInt;
   ActualCrc: LongWord;
   F: TArcFileEntry;
+  Lm: TFileMeta;
   DoWrite, Opened: Boolean;
   Total: Int64;
   Mode: TOverwriteMode;
@@ -164,7 +201,7 @@ var
   begin
     Result := -1;
     for k := Blk.FirstFile to Blk.FirstFile + Blk.FileCount - 1 do
-      if not A.Files[k].IsDir and Wanted(Opt, A.Files[k].Name) then Result := k;
+      if not A.Files[k].IsDir and not A.Files[k].IsLink and Wanted(Opt, A.Files[k].Name) then Result := k;
   end;
 
 begin
@@ -208,7 +245,7 @@ begin
           // Copia local a propósito, sin `with`: el campo Crc del registro tapaba la variable
           // local y la verificación de CRC comparaba el valor consigo mismo
           F := A.Files[i];
-          if F.IsDir then Continue;
+          if F.IsDir or F.IsLink then Continue;   // los enlaces se crean al final
           if not Wanted(Opt, F.Name) then
           begin
             SkipBytes(Chain, F.Size, Buf);
@@ -299,6 +336,63 @@ begin
   end;
 
   ProgressEnd;
+
+  // Enlaces simbólicos, al final: si se crearan antes, un archivo de este mismo archivo
+  // comprimido podría escribirse a través de uno de ellos
+  for i := 0 to High(A.Files) do
+  begin
+    F := A.Files[i];
+    if not F.IsLink or not Wanted(Opt, F.Name) then Continue;
+    if Opt.TestOnly then
+    begin
+      Log('OK       ' + F.Name + ' -> ' + F.LinkTarget);
+      Inc(Result.Files);
+      Continue;
+    end;
+    // con `e` (sin rutas) el enlace queda en la raíz del destino: se mide desde ahí
+    if Opt.FlatNames then OutName := Copy(F.Name, LastDelimiter('/', F.Name) + 1, MaxInt) else OutName := F.Name;
+    if LinkEscapes(OutName, F.LinkTarget) and not Opt.UnsafeLinks then
+    begin
+      Log('Aviso: no se crea el enlace ' + F.Name + ' -> ' + F.LinkTarget +
+        ' (apunta fuera del destino; -snld lo permite)');
+      Inc(Result.Skipped);
+      Continue;
+    end;
+    OutName := DiskName(Opt, F.Name);
+    Opened := GetLinkMeta(OutName, Lm) or FileExists(FsPath(OutName)) or DirectoryExists(FsPath(OutName));
+    if Opened then
+    begin
+      if Mode = owAsk then
+        if not Assigned(Opt.AskOverwrite) then Ask := oaNo
+        else
+        begin
+          Ask := Opt.AskOverwrite(OutName);
+          if Ask = oaAll then Mode := owAll else if Ask = oaNone then Mode := owSkip;
+        end
+      else if Mode = owAll then Ask := oaYes
+      else Ask := oaNo;
+      // un directorio de verdad no se reemplaza por un enlace
+      if (Ask in [oaNo, oaNone]) or (not GetLinkMeta(OutName, Lm) and DirectoryExists(FsPath(OutName))) then
+      begin
+        Log('Saltado (ya existe): ' + OutName);
+        Inc(Result.Skipped);
+        Continue;
+      end;
+      if not DeleteFile(FsPath(OutName)) then RemoveDir(FsPath(OutName));   // (un enlace a dir en Windows)
+    end;
+    MakeDirs(ExtractFileDir(ExpandFileName(OutName)));
+    if MakeSymLink(OutName, F.LinkTarget, F.LinkToDir) then
+    begin
+      Log('Extraído ' + F.Name + ' -> ' + F.LinkTarget);
+      Inc(Result.Files);
+    end
+    else
+    begin
+      Log('Aviso: no se pudo crear el enlace ' + OutName + ' -> ' + F.LinkTarget
+        {$IFDEF WINDOWS} + ' (en Windows hace falta modo desarrollador o ser administrador)'{$ENDIF});
+      Inc(Result.Skipped);
+    end;
+  end;
 
   // Las fechas de los directorios se ponen al final (escribir adentro las cambia)
   if not Opt.TestOnly and not Opt.FlatNames then

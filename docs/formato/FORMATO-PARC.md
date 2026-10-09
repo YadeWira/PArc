@@ -51,6 +51,11 @@ Todos los arrays por archivo van en el mismo orden que las columnas del director
 | 3 | `UNIX_MODE` | 0 | N × U32 LE | `st_mode` (permisos y tipo) |
 | 4 | `CTIME_NS` | 0 | N × Int64 LE | reservado (creación) |
 | 5 | `ATIME_NS` | 0 | N × Int64 LE | reservado (acceso) |
+| 6 | `SYMLINK` | 0 | VInt K, y K veces: VInt índice, CStr destino, U8 a_directorio | enlaces simbólicos (y junctions de Windows). La entrada es un archivo de tamaño 0, sin datos, que va en el bloque de directorios. Destino en UTF-8 con `/`, tal como estaba en el enlace (relativo o absoluto) |
+
+Un lector que no conoce `SYMLINK` extrae un archivo vacío en lugar del enlace. Al extraer,
+PArc crea los enlaces al final y no crea los que apuntan fuera del destino (absolutos o con
+`..` que sube más allá de la raíz) salvo con `-snld`.
 
 `MTIME_NS` cubre ±292 años alrededor de 1970, así que resuelve el problema de 2038 de la
 columna `Time` (Int32) y guarda la precisión de NTFS (100 ns) y ext4 (1 ns).
@@ -82,7 +87,7 @@ columna `Time` (Int32) y guarda la precisión de NTFS (100 ns) y ext4 (1 ns).
 
 - Formato de RECOVERY_BLOCK (el mismo que en `.arc`, falta especificarlo, `FORMATO-ARC.md` §9).
 - ¿Hash más fuerte que CRC-32 por archivo (p. ej. un tag `BLAKE2B`)? A decidir.
-- Enlaces simbólicos y duros, ACL, atributos extendidos: tags futuros.
+- Enlaces duros, ACL, atributos extendidos: tags futuros.
 
 ## 6. Modo compatible: escribir `.arc`
 

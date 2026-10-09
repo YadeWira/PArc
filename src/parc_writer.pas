@@ -310,6 +310,24 @@ begin
       for i := 0 to n - 1 do f.U32(Entries[All[i].Entry].Meta.UnixMode);
       OptField(DIRTAG_UNIX_MODE, f);
     end;
+    // Enlaces simbólicos: solo los que hay (cantidad, y por cada uno índice, destino, ¿a dir?)
+    k := 0;
+    for i := 0 to n - 1 do
+      if Entries[All[i].Entry].Meta.IsLink then Inc(k);
+    if k > 0 then
+    begin
+      f.Clear;
+      f.VInt(k);
+      for i := 0 to n - 1 do
+        with Entries[All[i].Entry].Meta do
+          if IsLink then
+          begin
+            f.VInt(i);
+            f.CStr(LinkTarget);
+            f.U8(Ord(LinkToDir));
+          end;
+      OptField(DIRTAG_SYMLINK, f);
+    end;
   end;
   w.VInt(DIRTAG_END);
   Result := w.Bytes;
@@ -353,6 +371,9 @@ begin
   Result.WinAttr := F.WinAttr;
   Result.HasUnixMode := F.HasUnixMode;
   Result.UnixMode := F.UnixMode;
+  Result.IsLink := F.IsLink;
+  Result.LinkToDir := F.LinkToDir;
+  Result.LinkTarget := F.LinkTarget;
 end;
 
 { Copia tal cual un bloque de un archivo existente (sus bytes comprimidos, sin tocarlos: vale
@@ -473,7 +494,7 @@ begin
       Crc := CRC_INIT;
       Size := 0;
       if not Entries[n].Meta.IsDir then ProgressFile(Entries[n].StoredName);
-      if not Entries[n].Meta.IsDir and (Entries[n].SrcArc <> nil) then
+      if not Entries[n].Meta.IsDir and not Entries[n].Meta.IsLink and (Entries[n].SrcArc <> nil) then
       begin
         with Entries[n] do
         begin
@@ -509,9 +530,11 @@ begin
         Inc(Stats.Files);
         Inc(Stats.Bytes, Size);
       end
+      else if Entries[n].Meta.IsLink then
+        Inc(Stats.Files)
       else if not Entries[n].Meta.IsDir then
       begin
-        F := TFileStream.Create(FsPath(Entries[n].DiskPath), fmOpenRead or fmShareDenyWrite);
+        F := TFileStream.Create(FsPath(Entries[n].DiskPath), fmOpenRead or fmShareDenyNone);   // también los que otro programa está escribiendo (logs): se avisa si cambian
         try
           repeat
             Got := F.Read(Buf[0], Length(Buf));
@@ -597,7 +620,7 @@ begin
       DirGroup := Default(TSolidGroup);   // CopyFrom = nil: los registros locales no se inicializan solos
       DirGroup.Method := 'storing';
       for i := 0 to High(Entries) do
-        if Entries[i].Meta.IsDir then
+        if Entries[i].Meta.IsDir or Entries[i].Meta.IsLink then   // los enlaces tampoco tienen datos
         begin
           n := Length(DirGroup.Files);
           SetLength(DirGroup.Files, n + 1);

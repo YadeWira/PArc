@@ -37,6 +37,7 @@ begin
   OutLn('  -s  como FreeArc: -s- sin sólido, -se por extensión, -s<N> o -s<N>f N archivos por');
   OutLn('     bloque, -s<N>m (o k/g/b) bloques de al menos ese tamaño; combinables: -se100f10m');
   OutLn('  -x<máscara>  excluir (puede repetirse)');
+  OutLn('  -r     las máscaras (*.txt, src/*.pas) buscan también en los subdirectorios');
   OutLn('  -rr[N%|N|Nm|N;S|N*S|-]  registro de recuperación (sin valor: 4%/2%/1% según tamaño;');
   OutLn('             N = sectores de 512; -rr- lo quita)');
   OutLn('Manual completo: docs/USO.md');
@@ -175,16 +176,39 @@ begin
   if Result = 0 then Result := CompareStr(SA, SB);
 end;
 
-{ Junta las entradas a agregar: cada argumento es un archivo o un directorio (recursivo).
+{ Junta las entradas a agregar: cada argumento es un archivo, un directorio (recursivo) o una
+  máscara con * y ? en el último componente ("src/*.pas"), como en FreeArc: la expande el propio
+  parc porque cmd.exe no lo hace. Sin -r la máscara mira solo ese directorio (y los directorios
+  que coinciden entran enteros); con -r busca también en todos los subdirectorios.
   Los nombres guardados son los del argumento, saneados (sin raíz ni ".."). }
-procedure CollectEntries(const Paths: TStringList; const Exclude: string; Excludes: TStrings; var Entries: TWriteEntryArray);
+var
+  Unreadable: TStringList = nil;   // archivos que no se pudieron abrir (se saltean con aviso)
+
+procedure CollectEntries(const Paths: TStringList; const Exclude: string; Excludes: TStrings; Recursive: Boolean;
+  var Entries: TWriteEntryArray);
 
   procedure AddEntry(const Disk, Stored: string; const Meta: TFileMeta);
   var
     n: Integer;
+    H: THandle;
   begin
     if IsOwnArchiveFile(ExpandFileName(Disk), Exclude) then Exit;   // ni el archivo que se escribe ni sus volúmenes
     if MatchesAny(Stored, Excludes) then Exit;     // -x<máscara>
+    // Uno ilegible (sin permiso, o bloqueado por otro programa en Windows) no aborta todo el
+    // trabajo: se avisa y se saltea; al actualizar queda la versión que ya estaba en el archivo.
+    // (FreeArc tenía el bug opuesto: el archivo desaparecía del archivo comprimido.)
+    if not Meta.IsDir and not Meta.IsLink then
+    begin
+      H := FileOpen(FsPath(Disk), fmOpenRead or fmShareDenyNone);
+      if H = THandle(-1) then
+      begin
+        ErrLn('Aviso: no se puede leer ' + Disk + ' (se saltea)');
+        if Unreadable = nil then Unreadable := TStringList.Create;
+        Unreadable.Add(Disk);
+        Exit;
+      end;
+      FileClose(H);
+    end;
     n := Length(Entries);
     SetLength(Entries, n + 1);
     Entries[n].DiskPath := Disk;
@@ -215,8 +239,7 @@ procedure CollectEntries(const Paths: TStringList; const Exclude: string; Exclud
       try
         repeat
           if (SR.Name = '.') or (SR.Name = '..') then Continue;
-          // No seguir enlaces simbólicos a directorios: evita ciclos
-          Names.AddObject(SR.Name, TObject(PtrInt({$IFDEF UNIX}(SR.Attr and faSymLink) = 0{$ELSE}True{$ENDIF})));
+          Names.Add(SR.Name);
         until FindNext(SR) <> 0;
       finally
         FindClose(SR);
@@ -228,13 +251,15 @@ procedure CollectEntries(const Paths: TStringList; const Exclude: string; Exclud
         Recurse[i] := False;
         ChildDisk := IncludeTrailingPathDelimiter(Disk) + Names[i];
         if Stored <> '' then ChildStored := Stored + '/' + Names[i] else ChildStored := Names[i];
-        if not GetFileMeta(ChildDisk, Meta) then
+        // Un enlace (symlink, o junction de Windows) se guarda como enlace y no se recorre:
+        // así no hay ciclos ni se archiva dos veces lo mismo
+        if not GetLinkMeta(ChildDisk, Meta) and not GetFileMeta(ChildDisk, Meta) then
         begin
           ErrLn('Aviso: no se puede leer ' + ChildDisk);
           Continue;
         end;
         AddEntry(ChildDisk, ChildStored, Meta);
-        Recurse[i] := Meta.IsDir and (PtrInt(Names.Objects[i]) <> 0);
+        Recurse[i] := Meta.IsDir;
       end;
       for i := 0 to Names.Count - 1 do
         if Recurse[i] then
@@ -248,13 +273,69 @@ procedure CollectEntries(const Paths: TStringList; const Exclude: string; Exclud
     end;
   end;
 
+  function HasWild(const S: string): Boolean;
+  begin
+    Result := (Pos('*', S) > 0) or (Pos('?', S) > 0);
+  end;
+
+  { Las entradas de Dir que coinciden con Mask; con Recursive, también las de sus subdirectorios.
+    Devuelve cuántas coincidieron. }
+  function Expand(const Dir, Mask: string): Integer;
+  var
+    SR: TSearchRec;
+    Meta: TFileMeta;
+    Names: TStringList;
+    Child: string;
+    i: Integer;
+  begin
+    Result := 0;
+    Names := TStringList.Create;
+    try
+      if Dir = '' then Child := '.' else Child := Dir;
+      if FindFirst(IncludeTrailingPathDelimiter(FsPath(Child)) + '*', faAnyFile {$IFDEF UNIX}or faSymLink{$ENDIF}, SR) = 0 then
+        try
+          repeat
+            if (SR.Name <> '.') and (SR.Name <> '..') then Names.Add(SR.Name);
+          until FindNext(SR) <> 0;
+        finally
+          FindClose(SR);
+        end;
+      Names.CustomSort(@CompareEntryNames);
+      for i := 0 to Names.Count - 1 do
+      begin
+        Child := Dir + Names[i];
+        if not GetLinkMeta(Child, Meta) and not GetFileMeta(Child, Meta) then Continue;
+        if MatchWild(Names[i], Mask) then
+        begin
+          Inc(Result);
+          AddEntry(Child, SanitizePath(Child), Meta);
+          if Meta.IsDir then Walk(Child, SanitizePath(Child));
+        end
+        else if Recursive and Meta.IsDir then
+          Inc(Result, Expand(IncludeTrailingPathDelimiter(Child), Mask));
+      end;
+    finally
+      Names.Free;
+    end;
+  end;
+
 var
-  i: Integer;
+  i, Cut: Integer;
   Meta: TFileMeta;
-  Stored: string;
+  Stored, Dir, Mask: string;
 begin
   for i := 0 to Paths.Count - 1 do
   begin
+    if HasWild(Paths[i]) then
+    begin
+      Cut := LastDelimiter('/' {$IFDEF WINDOWS}+ '\:'{$ENDIF}, Paths[i]);
+      Dir := Copy(Paths[i], 1, Cut);
+      Mask := Copy(Paths[i], Cut + 1, MaxInt);
+      if HasWild(Dir) then
+        raise EFOpenError.CreateFmt('los comodines van solo en el último componente: %s', [Paths[i]]);
+      if Expand(Dir, Mask) = 0 then ErrLn('Aviso: ningún archivo coincide con ' + Paths[i]);
+      Continue;
+    end;
     if not GetFileMeta(Paths[i], Meta) then
       raise EFOpenError.CreateFmt('no existe: %s', [Paths[i]]);
     Stored := SanitizePath(Paths[i]);
@@ -268,6 +349,7 @@ type
     Method, Fmt: string;
     Solid: TFaCrits;         // -s...: criterios de corte de los bloques sólidos (FaParseSolidOption)
     Excludes: TStringList;   // -x<máscara>
+    Recursive: Boolean;      // -r: las máscaras buscan también en los subdirectorios
     Recovery: string;        // -rr...: '--' si no se dio la opción
     Encryption: string;      // -ae= / --encryption=
     VolumeSize: Int64;       // -v<tamaño>: volúmenes (solo .parc); 0 = como estaba
@@ -375,10 +457,10 @@ begin
   begin
     n := 0;
     for j := A.DataBlocks[b].FirstFile to A.DataBlocks[b].FirstFile + A.DataBlocks[b].FileCount - 1 do
-      if not A.Files[j].IsDir then Inc(n);
+      if not A.Files[j].IsDir and not A.Files[j].IsLink then Inc(n);
     pos := 0;
     for j := A.DataBlocks[b].FirstFile to A.DataBlocks[b].FirstFile + A.DataBlocks[b].FileCount - 1 do
-      if not A.Files[j].IsDir then
+      if not A.Files[j].IsDir and not A.Files[j].IsLink then
       begin
         BlockOf[j] := b; PosOf[j] := pos; CountOf[j] := n;
         Inc(pos);
@@ -395,7 +477,7 @@ begin
     n := 0;
     for j := 0 to High(A.Files) do
     begin
-      if A.Files[j].IsDir then Continue;
+      if A.Files[j].IsDir or A.Files[j].IsLink then Continue;   // sin datos: van en el bloque de directorios
       if Keep[j] then
       begin
         L1[n] := Default(TFaFile);
@@ -540,7 +622,7 @@ var
   SfxPrefix: TBytes;
   NVol: Integer;
   RRSize: Int64;
-  Exists, Newer: Boolean;
+  Exists, Newer, ParcOut: Boolean;
   Old: array of Integer;         // índice en Entries de cada archivo viejo conservado (-1 si no)
 
   function AddEntry(const E: TWriteEntry): Integer;
@@ -580,7 +662,39 @@ begin
       Exit(1);
     end;
     Disk := nil;
-    if Cmd <> 'd' then CollectEntries(Paths, ExpandFileName(ArcName), MO.Excludes, Disk);
+    if Cmd <> 'd' then CollectEntries(Paths, ExpandFileName(ArcName), MO.Excludes, MO.Recursive, Disk);
+    // .arc no puede guardar enlaces: el de un archivo se guarda con el contenido del destino
+    // (como FreeArc); el de un directorio se saltea con aviso
+    if MO.Fmt <> '' then ParcOut := MO.Fmt = 'parc'
+    else if A <> nil then ParcOut := A.IsParc
+    else ParcOut := LowerCase(ExtractFileExt(ArcName)) <> '.arc';
+    if not ParcOut then
+    begin
+      n := 0;
+      for i := 0 to High(Disk) do
+      begin
+        if Disk[i].Meta.IsLink then
+          if Disk[i].Meta.LinkToDir then
+          begin
+            ErrLn('Aviso: ' + Disk[i].DiskPath + ' es un enlace a un directorio y .arc no guarda enlaces (se saltea)');
+            Continue;
+          end
+          else if not GetFileMeta(Disk[i].DiskPath, Disk[i].Meta) then
+          begin
+            ErrLn('Aviso: ' + Disk[i].DiskPath + ' es un enlace roto (se saltea)');
+            Continue;
+          end;
+        Disk[n] := Disk[i];
+        Inc(n);
+      end;
+      SetLength(Disk, n);
+    end;
+    if (Cmd <> 'd') and (Length(Disk) = 0) and not Exists then
+    begin
+      // como FreeArc ("No files to archive"): no se crea un archivo vacío
+      ErrLn('ERROR: no hay archivos para agregar');
+      Exit(1);
+    end;
 
     Entries := nil;
     NewIdx := nil;
@@ -654,7 +768,7 @@ begin
         if n = 0 then Continue;
       end;
       j := AddEntry(Disk[i]);
-      if not Disk[i].Meta.IsDir then
+      if not Disk[i].Meta.IsDir and not Disk[i].Meta.IsLink then
       begin
         SetLength(NewIdx, Length(NewIdx) + 1);
         NewIdx[High(NewIdx)] := j;
@@ -742,6 +856,12 @@ begin
   if Exists then
     OutLn(Format('  agregados %d, reemplazados %d, borrados %d', [Added, Replaced, Removed]));
   Result := 0;
+  if (Unreadable <> nil) and (Unreadable.Count > 0) then
+  begin
+    ErrLn(Format('Aviso: %d archivo(s) no se pudieron leer y no se agregaron (si ya estaban, quedó la versión anterior)',
+      [Unreadable.Count]));
+    Result := EXIT_WARNINGS;
+  end;
 end;
 
 var
@@ -791,6 +911,7 @@ begin
         else if (Copy(S, 1, 2) = '-v') and ParseVolumeSize(Copy(S, 3, MaxInt), VolSize) then
           MO.VolumeSize := VolSize
         else if S = '-o+' then Opt.Overwrite := owAll
+        else if S = '-snld' then Opt.UnsafeLinks := True
         else if S = '-o-' then Opt.Overwrite := owSkip
         else if Copy(S, 1, 2) = '-m' then
           MO.Method := Copy(S, 3, MaxInt)   // preset (0..9, x, ...) o método explícito
@@ -798,6 +919,7 @@ begin
         else if Copy(S, 1, 2) = '-x' then Excludes.Add(Copy(S, 3, MaxInt))
         // -s- no sólido; -s<mem> tope de bytes por bloque; -s<N>f tope de archivos
         else if Copy(S, 1, 3) = '-rr' then MO.Recovery := Copy(S, 4, MaxInt)
+        else if S = '-r' then MO.Recursive := True
         else if (Copy(S, 1, 2) = '-s') and FaParseSolidOption(Copy(S, 3, MaxInt), MO.Solid) then
           // (los criterios quedaron en MO.Solid)
         else if Copy(S, 1, 3) = '-hp' then HPwd := Copy(S, 4, MaxInt)

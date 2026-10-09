@@ -19,6 +19,7 @@ const
   DIRTAG_MTIME_NS  = 1;
   DIRTAG_WIN_ATTR  = 2;
   DIRTAG_UNIX_MODE = 3;
+  DIRTAG_SYMLINK   = 6;   // enlaces: cantidad, y por cada uno índice, destino (CStr) y si apunta a un directorio
   SCAN_MAX = 4096;             // el descriptor del FOOTER empieza dentro de los últimos 4096 bytes
 
   DESCR_BLOCK    = 0;
@@ -52,6 +53,8 @@ type
     HasMTimeNs, HasWinAttr, HasUnixMode: Boolean;
     MTimeNs: Int64;     // nanosegundos desde 1970 UTC
     WinAttr, UnixMode: LongWord;
+    IsLink, LinkToDir: Boolean;   // enlace simbólico (sin datos: tamaño 0)
+    LinkTarget: string;           //   destino, UTF-8 con '/'
   end;
 
   TArchive = class
@@ -319,6 +322,7 @@ var
   Mandatory: Boolean;
   FieldLen, FieldEnd: SizeInt;
   BlockOfs: Int64;
+  LinkCount, LinkIdx: Int64;
 begin
   Data := ReadControlBlock(DirBlock);
   r.Init(PByte(Data), Length(Data));
@@ -407,6 +411,22 @@ begin
             Files[FirstFile + i].UnixMode := r.U32;
             Files[FirstFile + i].HasUnixMode := True;
           end;
+      DIRTAG_SYMLINK:
+        begin
+          LinkCount := Int64(r.VInt);
+          while (LinkCount > 0) and (r.Pos < FieldEnd) do
+          begin
+            LinkIdx := Int64(r.VInt);
+            if (LinkIdx < 0) or (LinkIdx >= Total) then Corrupt('enlace con índice fuera de rango');
+            with Files[FirstFile + LinkIdx] do
+            begin
+              LinkTarget := r.CStr;
+              LinkToDir := r.U8 <> 0;
+              IsLink := (LinkTarget <> '') and not IsDir and (Size = 0);
+            end;
+            Dec(LinkCount);
+          end;
+        end;
     else
       if Mandatory then
         raise EArcCorrupt.CreateFmt('el directorio usa una extensión obligatoria desconocida (tag %d)', [Tag]);
