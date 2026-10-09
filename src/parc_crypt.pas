@@ -39,6 +39,7 @@ type
     IVHex: string;             // :i
     SaltHex: string;           // :s
     CheckHex: string;          // :c
+    Mac: Boolean;              // :m  (PArc) etiqueta HMAC-SHA512 de 32 bytes al final del bloque
   end;
 
   { Etapa de descifrado: lee del fuente el texto cifrado y entrega el claro.
@@ -54,11 +55,17 @@ type
     FPadLen: Integer;
     FBlockSize: Integer;
     FRk: array[0..63] of LongWord;    { AES }
+    FMac: Pointer;                    { :m: estado del HMAC (nil sin :m) }
+    FHold: array of Byte;             { :m: los últimos bytes leídos, que pueden ser la etiqueta }
+    FHoldLen: SizeInt;
+    FMacDone: Boolean;                { :m: la etiqueta ya se verificó (fin del bloque) }
+    FSrcEof: Boolean;                 { :m: la fuente ya terminó }
     function  BlockEncrypt(const Src: array of Byte; var Dst: array of Byte): Boolean;
     procedure ModeStart;
     procedure ModeDecrypt(Buf: PByte; Len: SizeInt);
   public
     constructor Create(ASource: TInStage; const APar: TCryptParams);
+    destructor Destroy; override;
     function Read(Buf: PByte; Count: SizeInt): SizeInt; override;
   end;
 
@@ -119,13 +126,16 @@ type
     FPadLen, FBlockSize: Integer;
     FRk: array[0..63] of LongWord;
     FOut: array of Byte;      // el cifrado va acá: el buffer del llamador no se toca
+    FMac: Pointer;            // :m: estado del HMAC (nil sin :m)
     function  BlockEncrypt(const Src: array of Byte; var Dst: array of Byte): Boolean;
     procedure ModeStart;
     procedure ModeEncrypt(Src, Dst: PByte; Len: SizeInt);
   protected
     procedure DoWrite(Buf: PByte; Count: SizeInt); override;
+    procedure DoFinish; override;
   public
     constructor Create(ATarget: TOutStage; const APar: TCryptParams);
+    destructor Destroy; override;
   end;
 
 { Cifra un buffer suelto con el esquema ya derivado. Es para -hp: el directorio y el
@@ -304,6 +314,56 @@ begin
   Sha512Update(S, @pad[0], 128);
   Sha512Update(S, @inner[0], 64);
   Sha512Final(S, Mac);
+end;
+
+{ --- :m (solo .parc): autenticación de cada bloque cifrado ---
+  HMAC-SHA512 sobre IV y texto cifrado, truncado a 32 bytes, que va al final del bloque. Su
+  clave sale de la clave de cifrado (HMAC(clave, 'PArc-MAC-v1')): no hace falta otra vuelta
+  de PBKDF2. CTR + CRC es maleable (quien cambie bits del cifrado puede corregir el CRC);
+  con la etiqueta, cualquier cambio se detecta. }
+const
+  MAC_TAG_LEN = 32;
+
+type
+  PMacState = ^TMacState;
+  TMacState = record
+    Inner: TSha512;
+    OuterPad: array[0..127] of Byte;
+  end;
+
+function MacCreate(Key: PByte; KeyLen: SizeInt; IV: PByte; IVLen: SizeInt): PMacState;
+const
+  Ctx: AnsiString = 'PArc-MAC-v1';
+var
+  mk: array[0..63] of Byte;
+  pad: array[0..127] of Byte;
+  i: Integer;
+begin
+  HmacSha512(Key, KeyLen, PByte(PAnsiChar(Ctx)), Length(Ctx), mk);
+  New(Result);
+  FillChar(pad, SizeOf(pad), 0);
+  Move(mk[0], pad[0], 64);
+  for i := 0 to 127 do
+  begin
+    Result^.OuterPad[i] := pad[i] xor $5C;
+    pad[i] := pad[i] xor $36;
+  end;
+  Sha512Init(Result^.Inner);
+  Sha512Update(Result^.Inner, @pad[0], 128);
+  Sha512Update(Result^.Inner, IV, IVLen);
+end;
+
+procedure MacTag(St: PMacState; out Tag: array of Byte);
+var
+  inner, full: array[0..63] of Byte;
+  S: TSha512;
+begin
+  Sha512Final(St^.Inner, inner);
+  Sha512Init(S);
+  Sha512Update(S, @St^.OuterPad[0], 128);
+  Sha512Update(S, @inner[0], 64);
+  Sha512Final(S, full);
+  Move(full[0], Tag[0], MAC_TAG_LEN);
 end;
 
 procedure Pbkdf2HmacSha512(const Pwd: PByte; PwdLen: SizeInt;
@@ -1359,6 +1419,7 @@ begin
   Result.Mode := 'ctr'; Result.Fixed := False; Result.NumIterations := 1000;
   Result.Rounds := 0;
   Result.KeyHex := ''; Result.IVHex := ''; Result.SaltHex := ''; Result.CheckHex := '';
+  Result.Mac := False;
   { Params[0] es "cifrado-<bits>/<modo>"; el resto son los parámetros }
   p := Params[0];
   mode := 'ctr';
@@ -1390,6 +1451,7 @@ begin
     p := Params[k];
     if p = '' then Continue;
     if p = 'f' then begin Result.Fixed := True; Continue; end;
+    if p = 'm' then begin Result.Mac := True; Continue; end;
     case p[1] of
       'k': Result.KeyHex := Copy(p, 2, MaxInt);
       'i': Result.IVHex := Copy(p, 2, MaxInt);
@@ -1510,6 +1572,7 @@ begin
   Move(Key^, kb[0], Par.KeySize);
   Result := Par.Cipher + '-' + IntToStr(Par.KeySize * 8) + '/' + Par.Mode;
   if Par.Fixed then Result := Result + ':f';
+  if Par.Mac then Result := Result + ':m';
   Result := Result + ':n' + IntToStr(Par.NumIterations) + ':r' + IntToStr(Par.Rounds);
   Result := Result + ':k' + EncodeHex(kb, Par.KeySize);
   if Par.IVHex <> '' then Result := Result + ':i' + Par.IVHex;
@@ -1570,6 +1633,12 @@ begin
   Move(iv[0], FCounter[0], APar.IVSize);
   Move(iv[0], FIV[0], APar.IVSize);
   FPadLen := 0;
+  if APar.Mac then
+  begin
+    FMac := MacCreate(@FKey[0], APar.KeySize, @iv[0], APar.IVSize);
+    SetLength(FHold, 1 shl 16);
+    FHoldLen := 0;
+  end;
   if APar.Cipher = 'aes' then
   begin
     AesInit;
@@ -1666,13 +1735,51 @@ begin
   end;
 end;
 
+destructor TDecryptStage.Destroy;
+begin
+  if FMac <> nil then Dispose(PMacState(FMac));
+  inherited Destroy;
+end;
+
 function TDecryptStage.Read(Buf: PByte; Count: SizeInt): SizeInt;
 var
   n: SizeInt;
+  Tag: array[0..MAC_TAG_LEN - 1] of Byte;
 begin
-  n := Source.Read(Buf, Count);
-  if n > 0 then ModeDecrypt(Buf, n);
-  Result := n;
+  if FMac = nil then
+  begin
+    n := Source.Read(Buf, Count);
+    if n > 0 then ModeDecrypt(Buf, n);
+    Exit(n);
+  end;
+  // :m: los últimos MAC_TAG_LEN bytes del bloque son la etiqueta, y no se sabe cuáles son
+  // hasta llegar al final: siempre se retienen los últimos MAC_TAG_LEN leídos
+  if FMacDone then Exit(0);   // algunos decodificadores vuelven a leer después del final
+  repeat
+    if not FSrcEof and (FHoldLen < Length(FHold)) then
+    begin
+      n := Source.Read(@FHold[FHoldLen], Length(FHold) - FHoldLen);
+      if n = 0 then FSrcEof := True else Inc(FHoldLen, n);
+    end;
+    Result := FHoldLen - MAC_TAG_LEN;
+    if (Result <= 0) and FSrcEof then
+    begin
+      // fin del bloque, ya entregado todo: lo retenido tiene que ser exactamente la etiqueta
+      if FHoldLen <> MAC_TAG_LEN then Corrupt('cifrado: bloque sin etiqueta de autenticación');
+      MacTag(PMacState(FMac), Tag);
+      if CompareByte(Tag[0], FHold[0], MAC_TAG_LEN) <> 0 then
+        Corrupt('cifrado: la autenticación falló (datos alterados)');
+      FHoldLen := 0;
+      FMacDone := True;
+      Exit(0);
+    end;
+  until Result > 0;
+  if Result > Count then Result := Count;
+  Sha512Update(PMacState(FMac)^.Inner, @FHold[0], Result);
+  Move(FHold[0], Buf^, Result);
+  ModeDecrypt(Buf, Result);
+  Move(FHold[Result], FHold[0], FHoldLen - Result);
+  Dec(FHoldLen, Result);
 end;
 
 function OsRandom(Buf: PByte; Len: SizeInt): Boolean;
@@ -1715,6 +1822,14 @@ begin
 end;
 {$ENDIF}
 
+var
+  // La última derivación: con muchas iteraciones de PBKDF2, derivar de nuevo en cada bloque
+  // costaría ~0,6 s por bloque al escribir y al leer. Dentro de una misma ejecución, todos los
+  // bloques con el mismo cifrado y contraseña comparten sal y clave; cada uno lleva su IV
+  // al azar, que es lo que CTR y CFB necesitan.
+  GKdfId: RawByteString = '';
+  GKdfSalt, GKdfDk: array of Byte;
+
 function MakeEncryption(const Cipher: string; const Password: RawByteString;
                         out ArchiveMethod, EncoderMethod: string): Boolean;
 var
@@ -1722,27 +1837,43 @@ var
   salt, iv, dk, key, check: array of Byte;
   ksz: Integer;
   base: string;
+  Id: RawByteString;
 begin
   Result := False;
   ArchiveMethod := ''; EncoderMethod := '';
   par := ParseCryptParams(Cipher.Split([':']));
   if (par.KeySize < 1) or (par.IVSize < 1) or not CipherKeySizeValid(par.Cipher, par.KeySize) then Exit;
   ksz := par.KeySize;
-  SetLength(salt, ksz);
   SetLength(iv, par.IVSize);
-  if not OsRandom(PByte(@salt[0]), ksz) then Exit;
   if not OsRandom(PByte(@iv[0]), par.IVSize) then Exit;
-  SetLength(dk, ksz + 2);
-  if Length(Password) > 0 then
-    Pbkdf2HmacSha512(PByte(@Password[1]), Length(Password), PByte(@salt[0]), ksz,
-                     par.NumIterations, PByte(@dk[0]), ksz + 2)
+  Id := par.Cipher + '-' + IntToStr(ksz) + ':' + IntToStr(par.NumIterations) + ':' +
+        BoolToStr(par.Fixed, 'f', '') + #0 + Password;
+  if Id = GKdfId then
+  begin
+    salt := Copy(GKdfSalt);
+    dk := Copy(GKdfDk);
+  end
   else
-    Pbkdf2HmacSha512(nil, 0, PByte(@salt[0]), ksz,
-                     par.NumIterations, PByte(@dk[0]), ksz + 2);
+  begin
+    SetLength(salt, ksz);
+    if not OsRandom(PByte(@salt[0]), ksz) then Exit;
+    SetLength(dk, ksz + 2);
+    if Length(Password) > 0 then
+      Pbkdf2HmacSha512(PByte(@Password[1]), Length(Password), PByte(@salt[0]), ksz,
+                       par.NumIterations, PByte(@dk[0]), ksz + 2)
+    else
+      Pbkdf2HmacSha512(nil, 0, PByte(@salt[0]), ksz,
+                       par.NumIterations, PByte(@dk[0]), ksz + 2);
+    GKdfId := Id;
+    GKdfSalt := Copy(salt);
+    GKdfDk := Copy(dk);
+  end;
   key := Copy(dk, 0, ksz);
   check := Copy(dk, ksz, 2);
-  base := par.Cipher + '-' + IntToStr(ksz * 8) + '/' + par.Mode +
-          ':n' + IntToStr(par.NumIterations) + ':r' + IntToStr(par.Rounds);
+  base := par.Cipher + '-' + IntToStr(ksz * 8) + '/' + par.Mode;
+  if par.Fixed then base := base + ':f';
+  if par.Mac then base := base + ':m';
+  base := base + ':n' + IntToStr(par.NumIterations) + ':r' + IntToStr(par.Rounds);
   ArchiveMethod := base + ':s' + EncodeHex(salt, ksz) + ':c' + EncodeHex(check, 2) +
                    ':i' + EncodeHex(iv, par.IVSize);
   EncoderMethod := base + ':k' + EncodeHex(key, ksz) + ':i' + EncodeHex(iv, par.IVSize);
@@ -1764,10 +1895,16 @@ begin
   SetLength(FKey, APar.KeySize);
   { El :k viene en hex NORMAL (lo escribe MakeEncryption) y se decodifica con el
     conversor BUGGY, igual que en el decoder: de ahí sale la clave EFECTIVA. }
+  { Con :f (.parc) el hex se decodifica bien, como en el decoder. }
   h := APar.KeyHex;
   if Length(h) div 2 < APar.KeySize then Corrupt('clave :k demasiado corta');
-  for i := 0 to APar.KeySize - 1 do
-    FKey[i] := Byte(BuggyHexVal(h[i * 2 + 1]) * 16 + BuggyHexVal(h[i * 2 + 2]));
+  if APar.Fixed then
+  begin
+    if DecodeHex(h, FKey) <> APar.KeySize then Corrupt('clave :k inválida');
+  end
+  else
+    for i := 0 to APar.KeySize - 1 do
+      FKey[i] := Byte(BuggyHexVal(h[i * 2 + 1]) * 16 + BuggyHexVal(h[i * 2 + 2]));
   FBlockSize := CipherBlockSize(APar.Cipher);
   if FBlockSize > 16 then FBlockSize := 16;
   if APar.Cipher = 'aes' then
@@ -1782,10 +1919,32 @@ begin
     Corrupt('cifrado no soportado: ' + APar.Cipher);
   if Length(APar.IVHex) < APar.IVSize * 2 then Corrupt('falta el :i');
   for i := 0 to APar.IVSize - 1 do
-    FIV[i] := Byte(BuggyHexVal(APar.IVHex[i * 2 + 1]) * 16 + BuggyHexVal(APar.IVHex[i * 2 + 2]));
+    if APar.Fixed then
+      FIV[i] := Byte(StrToInt('$' + Copy(APar.IVHex, i * 2 + 1, 2)))
+    else
+      FIV[i] := Byte(BuggyHexVal(APar.IVHex[i * 2 + 1]) * 16 + BuggyHexVal(APar.IVHex[i * 2 + 2]));
   for i := 0 to 15 do FCounter[i] := FIV[i];
+  if APar.Mac then FMac := MacCreate(@FKey[0], APar.KeySize, @FIV[0], APar.IVSize);
   inherited Create(ATarget);
   ModeStart;
+end;
+
+destructor TEncryptStage.Destroy;
+begin
+  if FMac <> nil then Dispose(PMacState(FMac));
+  inherited Destroy;
+end;
+
+procedure TEncryptStage.DoFinish;
+var
+  Tag: array[0..MAC_TAG_LEN - 1] of Byte;
+begin
+  if FMac <> nil then
+  begin
+    MacTag(PMacState(FMac), Tag);
+    Emit(@Tag[0], MAC_TAG_LEN);
+  end;
+  inherited DoFinish;
 end;
 
 function TEncryptStage.BlockEncrypt(const Src: array of Byte; var Dst: array of Byte): Boolean;
@@ -1861,6 +2020,7 @@ begin
     n := Count;
     if n > Length(FOut) then n := Length(FOut);
     ModeEncrypt(Buf, @FOut[0], n);
+    if FMac <> nil then Sha512Update(PMacState(FMac)^.Inner, @FOut[0], n);
     Emit(@FOut[0], n);
     Inc(Buf, n);
     Dec(Count, n);

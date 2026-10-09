@@ -70,7 +70,11 @@ function EncoderAvailable(const Method: string): Boolean;
   el de --encryption ("aes", "blowfish-448/cfb", ...), Password en UTF-8. Devuelve la etapa
   para el codificador (con :k) y en Stored la que se guarda en el archivo (sal, check-code e
   IV, sin la clave). Sal e IV son nuevos en cada llamado: uno por bloque, como FreeArc. }
-function MakeCipherStage(const Algorithm: string; const Password: RawByteString; out Stored: string): string;
+const
+  PARC_KDF_ITERATIONS = 200000;   // ~0,6 s por derivación (una por archivo)
+
+function MakeCipherStage(const Algorithm: string; const Password: RawByteString; out Stored: string;
+  Parc: Boolean): string;
 
 { Method sin sus etapas de cifrado (la de un bloque viejo que se reempaqueta: la que quedó en
   el archivo no trae la clave y no sirve para comprimir). }
@@ -463,16 +467,31 @@ end;
 
 { Bytes de la contraseña como los ve FreeArc 0.67 sin :f (como PasswordBytes de
   parc_methods): el byte bajo de cada carácter Unicode. }
-function MakeCipherStage(const Algorithm: string; const Password: RawByteString; out Stored: string): string;
+function MakeCipherStage(const Algorithm: string; const Password: RawByteString; out Stored: string;
+  Parc: Boolean): string;
 var
   W: UnicodeString;
   Pwd: RawByteString;
+  Alg: string;
   i: Integer;
 begin
-  W := UTF8Decode(Password);
-  SetLength(Pwd, Length(W));
-  for i := 1 to Length(W) do Pwd[i] := Chr(Ord(W[i]) and $FF);
-  if not IsCipherStage(Algorithm) or not MakeEncryption(Algorithm, Pwd, Stored, Result) then
+  Alg := Algorithm;
+  if Parc then
+  begin
+    // .parc: hex de la clave bien decodificado y contraseña en UTF-8 (:f), etiqueta de
+    // autenticación (:m) y 200000 iteraciones de PBKDF2 si no se pidió otra cantidad
+    Alg := Alg + ':f:m';
+    if Pos(':n', Algorithm) = 0 then Alg := Alg + ':n' + IntToStr(PARC_KDF_ITERATIONS);
+    Pwd := Password;
+  end
+  else
+  begin
+    // .arc: como FreeArc sin :f (cada carácter recortado a su byte bajo)
+    W := UTF8Decode(Password);
+    SetLength(Pwd, Length(W));
+    for i := 1 to Length(W) do Pwd[i] := Chr(Ord(W[i]) and $FF);
+  end;
+  if not IsCipherStage(Algorithm) or not MakeEncryption(Alg, Pwd, Stored, Result) then
     raise EUnsupportedEncoder.CreateFmt('algoritmo de cifrado inválido: "%s"', [Algorithm]);
 end;
 

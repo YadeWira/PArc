@@ -49,6 +49,8 @@ Corregidos el 2026-10-08 como se propone abajo; verificados en Linux, Windows 10
 
 ## 3. Heredado por compatibilidad con `.arc` ⚠️ — se puede corregir solo en `.parc`
 
+Cifrado: ✅ corregido en `.parc` el 2026-10-08 (`:f`, `:m`, 200 000 iteraciones; `tests/parc_crypt.sh`). El `.arc` sigue con el esquema de FreeArc. Recuperación: pendiente.
+
 El `.parc` es formato propio: estas cosas se pueden arreglar ahí sin romper la lectura ni la escritura de `.arc`.
 
 | problema | fuente | sev. | propuesta para `.parc` |

@@ -160,6 +160,20 @@ Si falta la contraseña de un archivo cifrado, se pide por consola (hasta tres i
 Al actualizar un archivo cifrado, los bloques que se reempaquetan se vuelven a cifrar aunque
 no se haya dado `-p`: borrar un archivo no deja el resto en claro.
 
+En `.parc` el cifrado es más fuerte que el de FreeArc (el `.arc` sigue igual, para que
+`arc.exe` lo abra):
+
+- la clave se deriva con 200 000 iteraciones de PBKDF2-HMAC-SHA512, contra 1000 de FreeArc.
+  Cuesta ~0,6 s, una sola vez por archivo. `-ae=aes:n<N>` elige otra cantidad;
+- la clave se usa completa. FreeArc decodifica mal el hex de la clave y AES-256 le queda en
+  ~212 bits;
+- cada bloque cifrado lleva una etiqueta de autenticación (HMAC-SHA512 de 32 bytes): un
+  cambio en los datos cifrados se detecta ("la autenticación falló"), cosa que el CRC solo
+  no garantiza con el modo CTR;
+- la contraseña va en UTF-8, así que cualquier carácter cuenta.
+
+Los `.parc` cifrados con versiones anteriores de PArc se siguen leyendo y actualizando.
+
 ### Progreso y cancelación
 
 | opción | efecto |

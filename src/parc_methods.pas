@@ -100,6 +100,10 @@ end;
 
 { Como generateDecryption (Encryption.hs): cada etapa de cifrado sin clave (:k) se reemplaza
   por su versión con la clave derivada de la contraseña, después de comprobar el check-code. }
+var
+  GKeyCacheId: string = '';   // la última clave derivada (ApplyKeys)
+  GKeyCache: array of Byte;
+
 function ApplyKeys(const Method: string): string;
 var
   Stages, Params: TStringArray;
@@ -110,6 +114,7 @@ var
   Pwd: RawByteString;
   p: Integer;
   Ok: Boolean;
+  CacheId: string;
 begin
   Result := Method;
   if Pos('/', Method) = 0 then Exit;   // atajo: toda etapa de cifrado lleva "/modo"
@@ -126,14 +131,28 @@ begin
       raise EPasswordRequired.Create('el archivo está cifrado: indicá la contraseña con -p<contraseña>');
     Par := ParseCryptParams(Params);
     SetLength(Key, Par.KeySize + 2);
-    Pwd := PasswordBytes(GPassword, Par.Fixed);
-    Ok := DeriveKeyAndCheck(Par, PByte(Pwd), Length(Pwd), @Key[0]);
-    p := 0;
-    while not Ok and (p <= High(GExtraPasswords)) do
+    // Los bloques de un .parc comparten sal: la clave derivada se recuerda (con muchas
+    // iteraciones de PBKDF2, derivarla en cada bloque costaría ~0,6 s por bloque)
+    CacheId := Par.Cipher + IntToStr(Par.KeySize) + ':' + IntToStr(Par.NumIterations) + ':' +
+               BoolToStr(Par.Fixed, 'f', '') + ':' + Par.SaltHex + ':' + Par.CheckHex;
+    Ok := (CacheId = GKeyCacheId) and (Length(GKeyCache) >= Par.KeySize);
+    if Ok then Move(GKeyCache[0], Key[0], Par.KeySize)
+    else
     begin
-      Pwd := PasswordBytes(GExtraPasswords[p], Par.Fixed);
+      Pwd := PasswordBytes(GPassword, Par.Fixed);
       Ok := DeriveKeyAndCheck(Par, PByte(Pwd), Length(Pwd), @Key[0]);
-      Inc(p);
+      p := 0;
+      while not Ok and (p <= High(GExtraPasswords)) do
+      begin
+        Pwd := PasswordBytes(GExtraPasswords[p], Par.Fixed);
+        Ok := DeriveKeyAndCheck(Par, PByte(Pwd), Length(Pwd), @Key[0]);
+        Inc(p);
+      end;
+      if Ok then
+      begin
+        GKeyCacheId := CacheId;
+        GKeyCache := Copy(Key, 0, Par.KeySize);
+      end;
     end;
     if not Ok then
       raise EBadPassword.Create('contraseña incorrecta');

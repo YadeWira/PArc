@@ -67,7 +67,17 @@ columna `Time` (Int32) y guarda la precisión de NTFS (100 ns) y ext4 (1 ns).
 - **Métodos**: las mismas cadenas (`lzma:...`, `rep:...+...`, `4x4:...`). Los
   decodificadores de PArc son los mismos para los dos formatos.
 - **Footer**: los mismos campos, incluidos `locked`, `recovery` y `comment`.
-- **Cifrado**: el mismo (`FORMATO-ARC.md` §7.3).
+- **Cifrado**: la misma cadena de método (`FORMATO-ARC.md` §7.3), con dos parámetros más
+  que PArc escribe siempre en `.parc` (un lector los acepta también en archivos viejos sin
+  ellos):
+  - `:f`: el hex de `:s`, `:c`, `:i` y la clave se decodifica bien y la contraseña va en
+    UTF-8 (en FreeArc, `:f` existía pero no se usaba; sin él, el hex se decodifica con
+    `buggy_decode16`);
+  - `:m`: al final de los datos cifrados del bloque van 32 bytes de etiqueta:
+    HMAC-SHA512(K_mac, IV ‖ cifrado) truncado, con K_mac = HMAC-SHA512(clave, "PArc-MAC-v1").
+    `compsize` incluye la etiqueta.
+  Por defecto `:n200000`. Todos los bloques de un archivo escrito de una vez comparten la sal
+  (y la clave); cada uno lleva su IV al azar.
 
 ## 4. Escritura: invariantes que tiene que cumplir PArc
 

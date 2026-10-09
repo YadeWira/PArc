@@ -183,7 +183,7 @@ begin
   if Pwd <> '' then
   begin
     // -hp: como el de datos, pero en el directorio y el footer (ArcvProcessCompress.hs)
-    EncMethod := Method + '+' + MakeCipherStage(Alg, Pwd, Stored);
+    EncMethod := Method + '+' + MakeCipherStage(Alg, Pwd, Stored, Parc);
     Result.Method := Method + '+' + Stored;
   end;
   Result.Pos := S.Position;
@@ -480,7 +480,7 @@ begin
   end;
   if (Pwd <> '') and (Size > 0) then
   begin
-    EncMethod := Result.Method + '+' + MakeCipherStage(Opt.Encryption, Pwd, Stored);
+    EncMethod := Result.Method + '+' + MakeCipherStage(Opt.Encryption, Pwd, Stored, Opt.Parc);
     Result.Method := Result.Method + '+' + Stored;
   end;
   Result.Pos := S.Position;
