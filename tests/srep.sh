@@ -97,5 +97,32 @@ for opt in -m0 -m2 -m3; do
   "$OUT/test_srep" f4.srep f4.out >/dev/null 2>&1 && cmp -s f f4.out && ok "$opt (v4)" || bad "$opt (v4)"
 done
 
+echo "== robustez: streams dañados (sin crash ni cuelgue)"
+gen mix 1
+"$OUT/srep_ref" -m3f f f.srep >/dev/null 2>&1
+rotos=0
+for i in $(seq 1 25); do
+  python3 - "$i" <<'PY'
+import random, sys
+random.seed(int(sys.argv[1]))
+d = bytearray(open('f.srep', 'rb').read())
+modo = random.randrange(3)
+if modo == 0:                       # bytes cambiados
+    for _ in range(random.choice([1, 2, 8, 64])):
+        p = random.randrange(len(d)); d[p] ^= 1 << random.randrange(8)
+elif modo == 1:                     # truncado
+    d = d[:random.randrange(1, len(d))]
+else:                               # cabecera rota
+    for p in random.sample(range(min(64, len(d))), 4):
+        d[p] = random.randrange(256)
+open('f.bad', 'wb').write(d)
+PY
+  timeout 20 "$OUT/test_srep" f.bad f.badout >/dev/null 2>&1; rc=$?
+  if [ $rc -eq 124 ] || [ $rc -ge 128 ] || [ $rc -eq 217 ]; then
+    bad "corrupción $i terminó con rc=$rc"; rotos=$((rotos+1))
+  fi
+done
+[ $rotos -eq 0 ] && ok "25 corrupciones sin crash ni cuelgue"
+
 echo "== srep: $pass ok, $fail fallas"
 [ $fail -eq 0 ]
