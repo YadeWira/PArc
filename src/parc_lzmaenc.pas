@@ -2704,7 +2704,15 @@ begin
       Dec(mainLen);
       mainDist := dist2;
     end;
-    if (mainLen = 2) and (mainDist >= $80) then mainLen := 1;
+    // FreeArc (LzmaEnc.c:1568) poda el match principal según su longitud y distancia:
+    // cuanto más largo, más lejos tiene que estar para que valga la pena.
+    case mainLen of
+      2: if mainDist >= (128) then mainLen := 1;
+      3: if mainDist >= (2048) then mainLen := 1;
+      4: if mainDist >= (64 shl 10) then mainLen := 1;
+      5: if mainDist >= (2 shl 20) then mainLen := 1;
+      6: if mainDist >= (12 shl 20) then mainLen := 1;
+    end;
   end;
   if repLen >= 2 then
     if (repLen + 1 >= mainLen)
@@ -2736,12 +2744,12 @@ begin
     if (data[0] <> data2[0]) or (data[1] <> data2[1]) then Continue;
     limit := mainLen - 1;
     len := 2;
-    while True do
-    begin
-      if len >= limit then Exit(1);
-      if data[len] <> data2[len] then Break;
-      Inc(len);
-    end;
+    while (len < limit) and (data[len] = data2[len]) do Inc(len);
+    // FreeArc: acepta el literal aunque el match con rep esté casi tan largo, si el
+    // match principal está lejos (mismo criterio que más arriba con repLen).
+    if (len >= limit)
+      or ((len + 1 >= limit) and (mainDist >= (1 shl 9)))
+      or ((len + 2 >= limit) and (mainDist >= (1 shl 15))) then Exit(1);
   end;
 
   FBackRes := mainDist + LZMA_NUM_REPS;
