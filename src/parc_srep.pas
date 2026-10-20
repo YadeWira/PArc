@@ -218,8 +218,12 @@ var
   var
     k: Int64;
   begin
-    for k := 0 to Len - 1 do
+    k := 0;
+    while k < Len do
+    begin
       Dst[DestPos + k] := Dst[SrcStart + k];
+      Inc(k);
+    end;
   end;
 
   function StatWord(K: Int64): LongWord; inline;
@@ -571,23 +575,26 @@ var
     BSrc := -1; BLen := 0;
     if Pos + SREP_MIN_MATCH > SrcLen then Exit;
     HB := Int64(HashKey(Src + Pos, HBits)) * CANDIDATES;
-    for C := 0 to CANDIDATES - 1 do
+    C := 0;
+    while C < CANDIDATES do
     begin
       Cand := H[HB + C];
-      if (Cand < 0) or (Cand >= Pos) then Continue;
-      if Pos - Cand > Int64(512) * 1024 * 1024 then Continue;
-      if LoadU32(Src + Cand) <> LoadU32(Src + Pos) then Continue;
-      ML := SrcLen - Pos;
-      if ((Cand div SREP_BLOCK) + 1) * SREP_BLOCK - Cand < ML then
-        ML := ((Cand div SREP_BLOCK) + 1) * SREP_BLOCK - Cand;
-      if ((Pos div SREP_BLOCK) + 1) * SREP_BLOCK - Pos < ML then
-        ML := ((Pos div SREP_BLOCK) + 1) * SREP_BLOCK - Pos;
-      J := 0;
-      while (J < ML) and (Src[Cand + J] = Src[Pos + J]) do Inc(J);
-      if (J >= SREP_MIN_MATCH) and (J > BLen) then
+      if (Cand >= 0) and (Cand < Pos) and (Pos - Cand <= Int64(512) * 1024 * 1024) and
+         (LoadU32(Src + Cand) = LoadU32(Src + Pos)) then
       begin
-        BLen := J; BSrc := Cand;
+        ML := SrcLen - Pos;
+        if ((Cand div SREP_BLOCK) + 1) * SREP_BLOCK - Cand < ML then
+          ML := ((Cand div SREP_BLOCK) + 1) * SREP_BLOCK - Cand;
+        if ((Pos div SREP_BLOCK) + 1) * SREP_BLOCK - Pos < ML then
+          ML := ((Pos div SREP_BLOCK) + 1) * SREP_BLOCK - Pos;
+        J := 0;
+        while (J < ML) and (Src[Cand + J] = Src[Pos + J]) do Inc(J);
+        if (J >= SREP_MIN_MATCH) and (J > BLen) then
+        begin
+          BLen := J; BSrc := Cand;
+        end;
       end;
+      Inc(C);
     end;
   end;
 
@@ -598,7 +605,12 @@ begin
   HBits := SREP_HASH_MIN_BITS;
   while (HBits < SREP_HASH_MAX_BITS) and (Int64(1) shl HBits < SrcLen div 16) do Inc(HBits);
   SetLength(H, (Int64(1) shl HBits) * CANDIDATES);
-  for I := 0 to High(H) do H[I] := -1;
+  I := 0;
+  while I <= High(H) do
+  begin
+    H[I] := -1;
+    Inc(I);
+  end;
   NM := 0;
 
   // 1. matches: greedy con lazy matching
@@ -639,7 +651,12 @@ begin
 
   // 2. índice por Src (los stats van agrupados por el bloque del origen)
   SetLength(IdxSrc, NM);
-  for I := 0 to NM - 1 do IdxSrc[I] := I;
+  I := 0;
+  while I < NM do
+  begin
+    IdxSrc[I] := I;
+    Inc(I);
+  end;
   if NM > 1 then SortBySrc(Matches, IdxSrc, 0, NM - 1);
 
   // 3. bloques
