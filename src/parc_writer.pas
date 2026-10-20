@@ -133,7 +133,7 @@ end;
 { Registro de recuperación (ArcRecover.hs; el formato base de FreeArc §7.4): dos RECOVERY_BLOCK storing,
   el de sectores y el de CRCs+info, protegiendo todo lo escrito hasta acá. El info guarda la
   posición del bloque de CRCs, así que hay que saber de antemano cuánto ocupa el de sectores. }
-procedure WriteRecovery(S: TStream; Parc: Boolean; const Spec: string; var Control: TBlockInfoArray);
+procedure WriteRecovery(S: TStream; const Spec: string; var Control: TBlockInfoArray);
 var
   ArcSize, SectorsSize, CrcsSize, PosSectors, PosCrcs: Int64;
   SectorSize, RecSectors, n: Integer;
@@ -142,11 +142,11 @@ var
   B: TBlockInfo;
 begin
   ArcSize := S.Position;
-  if not RecoveryPlan(ArcSize, Spec, SectorSize, RecSectors, SectorsSize, CrcsSize, Parc) then   // .parc: Reed-Solomon
+  if not RecoveryPlan(ArcSize, Spec, SectorSize, RecSectors, SectorsSize, CrcsSize) then   // .parc: Reed-Solomon
     raise Exception.CreateFmt('especificación de -rr inválida: "%s"', [Spec]);
   PosSectors := S.Position;
-  PosCrcs := PosSectors + SectorsSize + StoringDescriptorLen(Parc, RECOVERY_BLOCK, SectorsSize);
-  if not RecoveryBuild(S, ArcSize, 0, PosCrcs, Spec, Sectors, Crcs, Info, Parc) then
+  PosCrcs := PosSectors + SectorsSize + StoringDescriptorLen(True, RECOVERY_BLOCK, SectorsSize);
+  if not RecoveryBuild(S, ArcSize, 0, PosCrcs, Spec, Sectors, Crcs, Info) then
     raise Exception.Create('no se pudo construir el registro de recuperación');
   S.Position := PosSectors;   // RecoveryBuild lee lo ya escrito
   // Solo el tamaño de los sectores decide dónde cae el bloque de CRCs; ese bloque lleva además
@@ -156,9 +156,9 @@ begin
       [Length(Sectors), SectorsSize]);
   n := Length(Control);
   SetLength(Control, n + 2);
-  B := WriteControlBlock(S, Parc, RECOVERY_BLOCK, 'storing', Sectors);
+  B := WriteControlBlock(S, True, RECOVERY_BLOCK, 'storing', Sectors);
   Control[n] := B;
-  B := WriteControlBlock(S, Parc, RECOVERY_BLOCK, 'storing', Crcs);
+  B := WriteControlBlock(S, True, RECOVERY_BLOCK, 'storing', Crcs);
   if B.Pos <> PosCrcs then raise Exception.Create('registro de recuperación: posición del bloque de CRCs');
   Control[n + 1] := B;
 end;
@@ -645,7 +645,7 @@ begin
         // Sin él, los bloques de recuperación caen en otro lugar y la paridad de la cola cambia
         WriteControlBlock(S, True, FOOTER_BLOCK, Opt.DirMethod, BuildFooter(Control, S.Position, Opt.Comment, ''),
           Opt.Encryption, Opt.HeadersPassword);
-        WriteRecovery(S, True, Opt.Recovery, Control);
+        WriteRecovery(S, Opt.Recovery, Control);
       end;
       // Footer (las posiciones de los bloques de control, relativas a la del footer)
       WriteControlBlock(S, True, FOOTER_BLOCK, Opt.DirMethod, BuildFooter(Control, S.Position, Opt.Comment, Opt.Recovery),
