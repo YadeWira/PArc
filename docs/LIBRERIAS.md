@@ -12,7 +12,7 @@ Este documento releva de dónde sale cada uno, contra qué se verificó y qué q
 
 | Componente | En FreeArc 0.67 | Versión portada | Notas |
 |---|---|---|---|
-| LZMA SDK (`Compression/LZMA2/C`) | 2009-02 | 26.x | El stream LZMA y BCJ x86 no cambian; el encoder nuevo produce bytes válidos, no idénticos |
+| LZMA SDK (`Compression/LZMA2/C`) | 2009-02 | 26.x | El stream LZMA y BCJ x86 no cambian; el encoder nuevo produce bytes válidos, no idénticos. `GetOptimumFast` conserva los agregados de FreeArc (poda por longitud/distancia y rep-matches relajados) |
 | LZ4 (`Compression/LZ4`) | 2011-2012 | 1.10.0 | El formato de bloque es estable; la versión vieja tiene CVE-2014-4611 |
 | LibTomCrypt (`_Encryption`) | 1.17 | 1.18.2 | AES/Blowfish/Serpent/Twofish/SHA dan la misma salida |
 | PPMd (D. Shkarin, modificado por FreeArc) | var. H/I | sin upstream compatible | Se mantiene el port propio (incluido el layout de 32 bits en x64) |
@@ -24,7 +24,7 @@ Este documento releva de dónde sale cada uno, contra qué se verificó y qué q
 | Componente | Portado desde | Verificación |
 |---|---|---|
 | LZMA (descompresión) | especificación de referencia (LzmaSpec) | streams generados con Python y el SDK; `tests/run_lzma_tests.py` |
-| LZMA (compresión) | LZMA SDK 26.03 | byte a byte contra el SDK C; roundtrip en `.parc` |
+| LZMA (compresión) | LZMA SDK 26.03 + agregados de FreeArc en `fast` | streams válidos verificados con liblzma (`tests/run_lzma_tests.py`) y roundtrip en `.parc` |
 | BCJ x86 (`exe`) | LZMA SDK 26.03 | contra `Bra86.c` compilado, con cortes de buffer (`tests/bcj.sh`) |
 | LZ4 (descompresión) | semántica de LZ4 1.10 (`LZ4_decompress_safe`), sin CVE-2014-4611 | streams de referencia |
 | LZ4 (compresión) | LZ4 1.10 (`LZ4_compress_default` y `LZ4_compress_HC` nivel 9) | byte a byte contra LZ4 1.10 en C; roundtrip en `.parc` |

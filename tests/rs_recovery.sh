@@ -26,8 +26,10 @@ def damage(src, name, ranges):
 for ext in ('parc',):
     size = os.path.getsize('a.' + ext)
     damage('a.' + ext, 'burst.' + ext, [(200000, 350000)])
-    offs = random.sample(range(1000, size - 300000, 4096), 60)
-    damage('a.' + ext, 'scatter.' + ext, [(o, o + 100) for o in offs])
+    # offsets al azar byte a byte (no múltiplos de 4096: con S=28 el paso 4096 concentra
+    # los daños en 7 franjas y el caso deja de ser "sueltos")
+    offs = random.sample(range(1000, size - 300000), 60)
+    damage('a.' + ext, 'scatter.' + ext, [(o, o + 1) for o in offs])  # 1 byte = 1 sector (InitPos no está alineado a 512)
     damage('a.' + ext, 'heavy.' + ext, [(100000, 1000000)])
     # el final del archivo: registro de recuperación (paridad) + datos
     damage('a.' + ext, 'tail.' + ext, [(size - 60000, size - 50000), (300000, 310000)])

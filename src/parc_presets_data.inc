@@ -1,5 +1,6 @@
-{ GENERADO por tools/gen_presets.py desde Compression.hs (builtinMethodSubsts) y arc.groups
-  de FreeArc 0.67. No editar a mano. }
+{ Tabla de sustitución de métodos y arc.groups tomada de FreeArc 0.67 (builtinMethodSubsts).
+  PArc la mantiene a mano: los ajustes marcados con // PARC buscan mejor relación que
+  FreeArc en el mismo nivel (ver docs/ESTADO.md). }
 
 const
   BUILTIN_METHOD_SUBSTS: array[0..138] of string = (
@@ -18,7 +19,7 @@ const
     '3t  = dict:p: 64m:85% + lzp: 64m: 24:h20        :92% + grzip:m3:8m:l | ex3t',
     '4t  = dict:p: 64m:80% + lzp: 64m: 65:d1m:s16:h20:90% + ppmd:8:96m    | ex4t',
     '5t  = dict:p: 64m:80% + lzp: 80m:105:d1m:s32:h22:92% + ppmd:12:192m  | ex5t',
-    '#t  = dict:p:128m:80% + lzp:160m:145:d1m:s32:h23:92% + ppmd:16:384m',
+    '#t  = dict:p:128m:75%:l8192:m800:s250 + lzp:160m:145:d1m:s32:h23:90% + ppmd:16:384m',  // PARC: más fuerte que FreeArc
     '',
     ';Binary files compression with slow and/or memory-expensive decompression',
     '#b  = #rep+#bx',
@@ -125,10 +126,10 @@ const
     'ex2b = ex2binary',
     'ex#b = delta + ex#binary',
     '',
-    'ex1binary = xtor:3:8mb',
-    'ex2binary = xtor:5',
+    'ex1binary = xtor:5',  // PARC: ventana 16m, nivel máximo (FreeArc: 8m/nivel 3)
+    'ex2binary = xtor:6',  // PARC: ventana 64m (FreeArc: 16m)
     'ex3binary = xlzma:96mb:fast  :32:mc4',
-    'ex4binary = xlzma:96mb:normal:16:mc8',
+    'ex4binary = xlzma:96mb:normal:32:mc8',  // PARC: fb 32 (FreeArc: 16)
     'ex5binary = xlzma:96mb:normal:32:mc32',
     'ex6binary = 4x4:i0:lzma: 8mb:max',
     'ex7binary = 4x4:i0:lzma:16mb:max',
@@ -139,7 +140,7 @@ const
     'ex2t = grzip:m4',
     'ex3t = grzip:m2',
     'ex4t = grzip:m1',
-    'ex5t = dict:p: 64m:80% + lzp: 64m: 65:d1m:s32:h22:90% + xppmd:8:96m',
+    'ex5t = dict:p: 64m:80% + lzp: 64m: 65:d1m:s32:h22:90% + xppmd:12:192m',  // PARC: 8:96->12:192
     'ex6t = dict:p: 64m:80% + lzp: 80m:105:d1m:s32:h22:92% + xppmd:12:192m',
     'ex#t = dict:p:128m:80% + lzp:160m:145:d1m:s32:h23:92% + xppmd:16:384m'
   );

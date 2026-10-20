@@ -86,6 +86,13 @@ sudo bash tests/fixes.sh
 python3 tests/fuzz.py build/linux64/parc 100 build/linux64/*.parc
 ```
 
+To compare size and speed against FreeArc 0.67.1 (performance oracle only; `.arc` is not
+read or written by PArc):
+
+```sh
+ARC_EXE=/path/to/Arc.exe bash tests/bench_vs_freearc.sh some-directory
+```
+
 ## Repository layout
 
 ```
