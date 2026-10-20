@@ -12,6 +12,9 @@ symlinks, Reed–Solomon recovery, volumes and authenticated encryption.
 > SFX **creation** was dropped (`-sfx` and the `parcsfx` module no longer exist). Existing
 > self-extractors can still be listed, tested and extracted; updating one preserves its stub.
 
+Documentation: [manual](docs/USO.md) · [format](docs/formato/FORMATO-PARC.md) ·
+[status](docs/ESTADO.md) · [**wiki**](https://github.com/YadeWira/PArc/wiki).
+
 ## Highlights
 
 - **Own format**: `.parc` keeps names, sizes, CRCs and solid blocks from the FreeArc layout,
