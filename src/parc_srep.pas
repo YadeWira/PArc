@@ -32,6 +32,10 @@ function SrepDecodedSize(Src: PByte; SrcLen: Integer): Int64;
 { Descomprime un stream srep completo (v1..v3). DstLen tiene que ser el tamaño original. }
 function SrepDecode(Src: PByte; SrcLen: Integer; Dst: PByte; DstLen: Int64): Boolean;
 
+{ Comprime con el formato v3 (Future-LZ) que usa FreeArc: matches de al menos BASE_LEN
+  bytes, agrupados por el bloque de su origen. Devuelve el stream srep. }
+function SrepEncode(Src: PByte; SrcLen: Int64): TBytes;
+
 type
   { Descomprime un bloque srep como stream. }
   TSrepStage = class(TInStage)
@@ -293,7 +297,8 @@ begin
         end;
         LenCode := StatWord(i);
         Inc(i);
-        M.Dest := BlockStart + Lit;
+        // basic_pos del C es la posición de salida actual, no el comienzo del bloque
+        M.Dest := OutPos + Lit;
         M.Src := (M.Dest div L1) * L1 - OffLo * L1;
         M.Len := LenCode * L1 + BaseLen;
         if (M.Dest < OutPos) or (M.Src < 0) or (M.Src >= M.Dest) or (M.Dest + M.Len > BlockEnd) then Exit;
@@ -365,6 +370,235 @@ begin
     Move(FOut[FPos], Buf^, Result);
     Inc(FPos, Result);
   end;
+end;
+
+
+{ ---------------------------------------------------------------------------------------- }
+{ Codificador (formato v3)                                                                  }
+{ ---------------------------------------------------------------------------------------- }
+
+const
+  SREP_BASE_LEN = 512;          // -l512 de srep: largo mínimo de un match representable
+  SREP_BLOCK    = 8 * 1024 * 1024;
+  SREP_HASH_BITS = 22;
+  SREP_HASH_SIZE = 1 shl SREP_HASH_BITS;
+
+type
+  TEncMatch = record
+    Src, Dest, Len: Int64;
+  end;
+
+  TEncOut = record
+    Data: TBytes;
+    Len: Int64;
+  end;
+
+procedure OutRaw(var O: TEncOut; P: PByte; N: Int64);
+begin
+  if N <= 0 then Exit;
+  if O.Len + N > Length(O.Data) then
+  begin
+    while O.Len + N > Length(O.Data) do
+      if Length(O.Data) = 0 then SetLength(O.Data, 1 shl 20) else SetLength(O.Data, Length(O.Data) * 2);
+  end;
+  Move(P^, O.Data[O.Len], N);
+  Inc(O.Len, N);
+end;
+
+procedure OutU32(var O: TEncOut; V: LongWord);
+var
+  B: array[0..3] of Byte;
+begin
+  B[0] := Byte(V and $FF); B[1] := Byte((V shr 8) and $FF);
+  B[2] := Byte((V shr 16) and $FF); B[3] := Byte((V shr 24) and $FF);
+  OutRaw(O, @B[0], 4);
+end;
+
+procedure SortBySrc(var M: array of TEncMatch; var Idx: array of Integer; Lo, Hi: Integer);
+var
+  i, j, Piv, T: Integer;
+begin
+  if Lo >= Hi then Exit;
+  Piv := M[Idx[(Lo + Hi) div 2]].Src;
+  i := Lo; j := Hi;
+  repeat
+    while M[Idx[i]].Src < Piv do Inc(i);
+    while M[Idx[j]].Src > Piv do Dec(j);
+    if i <= j then
+    begin
+      T := Idx[i]; Idx[i] := Idx[j]; Idx[j] := T;
+      Inc(i); Dec(j);
+    end;
+  until i > j;
+  if Lo < j then SortBySrc(M, Idx, Lo, j);
+  if i < Hi then SortBySrc(M, Idx, i, Hi);
+end;
+
+function HashKey(P: PByte): LongWord; inline;
+var
+  V: QWord;
+begin
+  Move(P^, V, 8);
+  V := V * QWord($9E3779B97F4A7C15);
+  Result := LongWord(V shr (64 - SREP_HASH_BITS));
+end;
+
+function SrepEncode(Src: PByte; SrcLen: Int64): TBytes;
+var
+  H1, H2: array of Int64;
+  Matches: array of TEncMatch;
+  IdxSrc: array of Integer;
+  Lit: TBytes;
+  Z: array[0..15] of Byte;
+  NM, I, J, J2, NStats, K: Int64;
+  P, Q, BestSrc, BestLen, MaxLen, KEnd, Cur: Int64;
+  Out_: TEncOut;
+  Stats: array of LongWord;
+  LitLen, PrevSrc, Off, LenCode: Int64;
+
+  procedure AddMatch(ASrc, ADest, ALen: Int64);
+  begin
+    if NM = Length(Matches) then SetLength(Matches, NM * 2 + 1024);
+    Matches[NM].Src := ASrc;
+    Matches[NM].Dest := ADest;
+    Matches[NM].Len := ALen;
+    Inc(NM);
+  end;
+
+  procedure AddLit(Pt: PByte; N: Int64);
+  begin
+    if N <= 0 then Exit;
+    if LitLen + N > Length(Lit) then SetLength(Lit, (LitLen + N) * 2 + 1024);
+    Move(Pt^, Lit[LitLen], N);
+    Inc(LitLen, N);
+  end;
+
+begin
+  Result := nil;
+  if SrcLen <= 0 then Exit;
+  SetLength(H1, SREP_HASH_SIZE); SetLength(H2, SREP_HASH_SIZE);
+  for I := 0 to SREP_HASH_SIZE - 1 do begin H1[I] := -1; H2[I] := -1; end;
+  NM := 0;
+
+  // 1. matches (greedy): comparar contra las dos últimas posiciones de cada hash
+  P := 0;
+  while P + SREP_BASE_LEN <= SrcLen do
+  begin
+    BestSrc := -1; BestLen := 0;
+    if P + 8 <= SrcLen then
+    begin
+      I := HashKey(Src + P);
+      if (H1[I] >= 0) and (P - H1[I] <= Int64(512) * 1024 * 1024) then Q := H1[I]
+      else if (H2[I] >= 0) and (P - H2[I] <= Int64(512) * 1024 * 1024) then Q := H2[I]
+      else Q := -1;
+      if Q >= 0 then
+      begin
+        MaxLen := SrcLen - P;
+        if ((Q div SREP_BLOCK) + 1) * SREP_BLOCK - Q < MaxLen then
+          MaxLen := ((Q div SREP_BLOCK) + 1) * SREP_BLOCK - Q;
+        if ((P div SREP_BLOCK) + 1) * SREP_BLOCK - P < MaxLen then
+          MaxLen := ((P div SREP_BLOCK) + 1) * SREP_BLOCK - P;
+        J := 0;
+        while (J < MaxLen) and (Src[Q + J] = Src[P + J]) do Inc(J);
+        if J >= SREP_BASE_LEN then begin BestLen := J; BestSrc := Q; end;
+      end;
+    end;
+
+    if BestSrc >= 0 then
+    begin
+      AddMatch(BestSrc, P, BestLen);
+      J := P;
+      while (J < P + BestLen) and (J + 8 <= SrcLen) do
+      begin
+        I := HashKey(Src + J);
+        H2[I] := H1[I]; H1[I] := J;
+        Inc(J);
+      end;
+      Inc(P, BestLen);
+    end
+    else
+    begin
+      if P + 8 <= SrcLen then
+      begin
+        I := HashKey(Src + P);
+        H2[I] := H1[I]; H1[I] := P;
+      end;
+      Inc(P);
+    end;
+  end;
+  H1 := nil; H2 := nil;
+
+  // 2. índice por Src (los stats van agrupados por el bloque del origen)
+  SetLength(IdxSrc, NM);
+  for I := 0 to NM - 1 do IdxSrc[I] := I;
+  if NM > 1 then SortBySrc(Matches, IdxSrc, 0, NM - 1);
+
+  // 3. bloques
+  Out_.Data := nil; Out_.Len := 0;
+  OutU32(Out_, SREP_BULAT);
+  OutU32(Out_, SREP_SIGNATURE);
+  OutU32(Out_, 3 + (1 shl 8));      // v3; hash_num=1 (sin checksum), seed 0, hash_size 16
+  OutU32(Out_, SREP_BASE_LEN);
+
+  K := 0;
+  I := 0;
+  J := 0;
+  while K < SrcLen do
+  begin
+    KEnd := K + SREP_BLOCK;
+    if KEnd > SrcLen then KEnd := SrcLen;
+
+    // stats con origen en [K,KEnd)
+    NStats := 0;
+    SetLength(Stats, 0);
+    PrevSrc := K;
+    while (I < NM) and (Matches[IdxSrc[I]].Src < KEnd) do
+    begin
+      if Matches[IdxSrc[I]].Src >= K then
+      begin
+        LitLen := Matches[IdxSrc[I]].Src - PrevSrc;
+        if LitLen < 0 then LitLen := 0;
+        Off := Matches[IdxSrc[I]].Dest - Matches[IdxSrc[I]].Src;
+        LenCode := Matches[IdxSrc[I]].Len - SREP_BASE_LEN;
+        SetLength(Stats, NStats * 4 + 4);
+        Stats[NStats * 4 + 0] := LongWord(LitLen);
+        Stats[NStats * 4 + 1] := LongWord(Off and $FFFFFFFF);
+        Stats[NStats * 4 + 2] := LongWord((Off shr 32) and $FFFFFFFF);
+        Stats[NStats * 4 + 3] := LongWord(LenCode);
+        Inc(NStats);
+        PrevSrc := Matches[IdxSrc[I]].Src;
+      end;
+      Inc(I);
+    end;
+
+    // literales: bytes de [K,KEnd) que ningún match cubre
+    LitLen := 0;
+    SetLength(Lit, 0);
+    while (J < NM) and (Matches[J].Dest + Matches[J].Len <= K) do Inc(J);
+    Cur := K;
+    J2 := J;
+    while (J2 < NM) and (Matches[J2].Dest < KEnd) do
+    begin
+      if Matches[J2].Dest > Cur then AddLit(Src + Cur, Matches[J2].Dest - Cur);
+      if Matches[J2].Dest + Matches[J2].Len > Cur then Cur := Matches[J2].Dest + Matches[J2].Len;
+      Inc(J2);
+    end;
+    if Cur < KEnd then AddLit(Src + Cur, KEnd - Cur);
+    J := J2;
+
+    OutU32(Out_, LongWord(LitLen));
+    OutU32(Out_, LongWord(KEnd - K));
+    OutU32(Out_, LongWord(NStats * 16));
+    FillChar(Z, SizeOf(Z), 0);
+    OutRaw(Out_, @Z[0], 16);           // hash_size = 16 (sin checksum)
+    if NStats > 0 then OutRaw(Out_, @Stats[0], NStats * 16);
+    if LitLen > 0 then OutRaw(Out_, @Lit[0], LitLen);
+
+    K := KEnd;
+  end;
+
+  SetLength(Result, Out_.Len);
+  if Out_.Len > 0 then Move(Out_.Data[0], Result[0], Out_.Len);
 end;
 
 end.

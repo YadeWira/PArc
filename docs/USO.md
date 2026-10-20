@@ -272,8 +272,9 @@ parc r copia.arc                          # repara -> fixed.copia.arc
   el registro de recuperación. Los métodos son `storing`, `lzma`, `ppmd`, `grzip`, `dict`,
   `rep`, `delta`, `tor`, `lzp`, `mm`, `tta`, `4x4`, `exe` (BCJ), `lz4`, `dispack070` (DisPack)
   y `srep` (SREP v1–v3), solos o en cadena (`exe+dispack070+lzma`, `srep+lzma`, …).
-- Comprimir con `srep` todavía no está disponible (sí leerlo): `parc a … -msrep` sale con
-  código 3.
+- `srep` al comprimir usa un LZ77 greedy de matches largos (≥512 bytes): genera streams
+  válidos que lee el `srep` de referencia y FreeArc, aunque comprime menos que el `srep`
+  original (que hace una búsqueda exhaustiva).
 - Lo que escribe PArc en `.arc` lo abren y extraen `arc.exe` 0.67.1 y `unarc`.
 - Con el mismo árbol y el mismo preset, PArc arma los mismos bloques sólidos, con los mismos
   archivos en el mismo orden y el mismo método guardado que `arc.exe`

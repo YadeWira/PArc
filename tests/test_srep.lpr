@@ -25,6 +25,18 @@ var
   Size: Int64;
   F: TFileStream;
 begin
+  if ParamStr(1) = 'e' then
+  begin
+    In_ := ReadAll(ParamStr(2));
+    Out_ := SrepEncode(@In_[0], Length(In_));
+    F := TFileStream.Create(ParamStr(3), fmCreate);
+    try
+      if Length(Out_) > 0 then F.WriteBuffer(Out_[0], Length(Out_));
+    finally
+      F.Free;
+    end;
+    Halt(0);
+  end;
   In_ := ReadAll(ParamStr(1));
   Size := SrepDecodedSize(@In_[0], Length(In_));
   if Size < 0 then begin Writeln(StdErr, 'cabecera inválida'); Halt(1); end;

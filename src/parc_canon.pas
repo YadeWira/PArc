@@ -358,6 +358,9 @@ begin
       Exit;
     end;
 
+    { --- srep: compresor externo; el método guardado es siempre "srep". }
+    if Name = 'srep' then Exit('srep');
+
     { --- dispack (C_DisPack.cpp): BlockSize por defecto 8 MB; :x no cambia el flujo. }
     if (Name = 'dispack') or (Name = 'dispack070') then
     begin

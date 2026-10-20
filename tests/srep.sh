@@ -74,6 +74,22 @@ EOF
 "$OUT/test_srep" f.flag1 f.o1 >/dev/null 2>&1 && cmp -s f f.o1 && ok "flag 1" || bad "flag 1"
 "$OUT/test_srep" f.raw f.o2 >/dev/null 2>&1 && cmp -s f f.o2 && ok "flag 0 (guardado)" || bad "flag 0"
 
+echo "== formato v2 (I/O LZ)"
+for opt in -m0o -m1o; do
+  gen text 200000
+  "$OUT/srep_ref" $opt f f2.srep >/dev/null 2>&1 || { bad "srep $opt falla"; continue; }
+  "$OUT/test_srep" f2.srep f2.out >/dev/null 2>&1 && cmp -s f f2.out && ok "$opt" || bad "$opt"
+done
+
+echo "== codificador de PArc, leído por el srep de referencia"
+for spec in "text 200000" "rep 200" "rand 100000" "mix 1"; do
+  set -- $spec; gen "$1" "$2"; sz=$(stat -c%s f)
+  if ! "$OUT/test_srep" e f f.mine >/dev/null 2>&1; then bad "encode falla ($1 $2)"; continue; fi
+  if ! "$OUT/srep_ref" -d f.mine f.dec >/dev/null 2>&1; then bad "srep -d rechaza lo de PArc ($1 $2)"; continue; fi
+  cmp -s f f.dec && ok "encode $1 $2 ($sz -> $(stat -c%s f.mine))" || bad "encode difiere $1 $2"
+  "$OUT/test_srep" f.mine f.own >/dev/null 2>&1 && cmp -s f f.own && ok "PArc lee lo suyo ($1 $2)" || bad "PArc no lee lo suyo ($1 $2)"
+done
+
 echo "== formato v4 (Index-LZ) todavía no soportado"
 head -c 200000 /dev/urandom > f; "$OUT/srep_ref" -m3 f f4.srep >/dev/null 2>&1
 if "$OUT/test_srep" f4.srep f4.out >/dev/null 2>&1; then bad "v4 se decodificó (¿ya está soportado? actualizar el test)"

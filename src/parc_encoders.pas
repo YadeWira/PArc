@@ -28,6 +28,19 @@ type
     constructor Create(ATarget: TOutStage);
   end;
 
+  { srep (Compression/SREP): se acumula el bloque y se codifica en DoFinish; el bloque de
+    FreeArc antepone un byte (1 = stream srep, 0 = guardado tal cual si no conviene). }
+  TSrepEncStage = class(TOutStage)
+  private
+    FData: TBytes;
+    FLen: SizeInt;
+  protected
+    procedure DoWrite(Buf: PByte; Count: SizeInt); override;
+    procedure DoFinish; override;
+  public
+    constructor Create(ATarget: TOutStage);
+  end;
+
   { dispack (C_DisPack.cpp, DISPACK_METHOD::compress): junta tramos de 16 KB que parecen
     ejecutable, los filtra con DisPackFilter y los escribe con tag; el resto va como datos.
     Acá se acumula el bloque entero y se codifica en DoFinish. }
@@ -100,7 +113,7 @@ implementation
 uses
   Math, parc_filters, parc_ppmd, parc_methods, parc_lzp, parc_parallel, parc_lzmaenc,
   parc_repenc, parc_deltaenc, parc_dictenc, parc_ttaenc, parc_mmenc, parc_torenc, parc_grzipenc,
-  parc_crypt, parc_canon, parc_lz4enc, parc_dispack;
+  parc_crypt, parc_canon, parc_lz4enc, parc_dispack, parc_srep;
 
 { ¿La etapa es de cifrado? El nombre va antes de '-' (bits) o '/' (modo): "aes-256/ctr". }
 function IsCipherStage(const Stage: string): Boolean;
@@ -380,7 +393,7 @@ begin
       'tor': if not TorEncAvailable(Stage) then Exit(False);
       'lz4': if not Lz4EncAvailable(Stage) then Exit(False);
       'storing', 'exe', 'ppmd', 'lzp', 'lzma', 'rep', 'delta', 'dict', 'tta', 'mm', 'grzip',
-      'dispack', 'dispack070': ;
+      'dispack', 'dispack070', 'srep': ;
     else
       Exit(False);
     end;
@@ -425,6 +438,8 @@ begin
     'exe':     Result := TBcjEncStage.Create(Target);
     'dispack', 'dispack070':
       Result := TDisPackEncStage.Create(Target, DispackBlockSize(Parts));
+    'srep':
+      Result := TSrepEncStage.Create(Target);
     'lzp':
       begin
         { MinCompression ("N%"): lo usa solo el compresor; ParseLzpParams lo saltea. }
@@ -443,6 +458,56 @@ begin
   else
     raise EUnsupportedEncoder.CreateFmt('todavía no se puede comprimir con "%s"', [Stage]);
   end;
+end;
+
+{ TSrepEncStage }
+
+constructor TSrepEncStage.Create(ATarget: TOutStage);
+begin
+  inherited Create(ATarget);
+  FData := nil;
+  FLen := 0;
+end;
+
+procedure TSrepEncStage.DoWrite(Buf: PByte; Count: SizeInt);
+var
+  Cap: SizeInt;
+begin
+  if Count <= 0 then Exit;
+  if FLen + Count > Length(FData) then
+  begin
+    Cap := Length(FData);
+    if Cap = 0 then Cap := 64 * 1024;
+    while Cap < FLen + Count do Cap := Cap * 2;
+    SetLength(FData, Cap);
+  end;
+  Move(Buf^, FData[FLen], Count);
+  Inc(FLen, Count);
+end;
+
+procedure TSrepEncStage.DoFinish;
+var
+  Enc: TBytes;
+  Flag: Byte;
+begin
+  if FLen > 0 then
+  begin
+    Enc := SrepEncode(@FData[0], FLen);
+    if (Length(Enc) = 0) or (Length(Enc) >= FLen) then
+    begin
+      // no conviene: se guarda tal cual (0)
+      Flag := 0;
+      Emit(@Flag, 1);
+      Emit(@FData[0], FLen);
+    end
+    else
+    begin
+      Flag := 1;
+      Emit(@Flag, 1);
+      Emit(@Enc[0], Length(Enc));
+    end;
+  end;
+  inherited DoFinish;
 end;
 
 { TDisPackEncStage }
