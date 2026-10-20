@@ -204,10 +204,10 @@ el archivo que estaba a medio escribir. Un segundo Ctrl-C corta en el acto.
 | código | significado |
 |---|---|
 | 0 | todo bien |
-| 1 | error de uso (opción desconocida, faltan argumentos, el archivo no existe o está bloqueado) |
+| 1 | error de uso (opción desconocida, faltan argumentos, archivo bloqueado o inexistente en `f`/`d`) |
 | 2 | datos dañados: CRC incorrecto o estructura rota; en `r`, sectores irrecuperables |
 | 3 | un método que PArc todavía no sabe descomprimir o comprimir |
-| 4 | otro error (de E/S, por ejemplo) |
+| 4 | error de E/S (no se pudo abrir o crear un archivo, por ejemplo) |
 | 5 | contraseña faltante o incorrecta |
 | 6 | terminó, pero algunos archivos no se pudieron leer y no se agregaron |
 | 130 | cancelado con Ctrl-C |

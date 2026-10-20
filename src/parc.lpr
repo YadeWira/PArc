@@ -1,5 +1,5 @@
-{ PArc — reescritura de FreeArc en Pascal.
-  Listado, test y extracción de archivos FreeArc (.arc). }
+{ PArc — archivador .parc en Pascal.
+  Listado, test, extracción, creación y actualización de archivos .parc. }
 program parc;
 
 {$mode objfpc}{$H+}
@@ -15,6 +15,35 @@ const
   // Directorio y footer: lo mismo que usa FreeArc
   DIR_METHOD = 'lzma:1mb:normal:bt4:32';
 
+{ Los errores de TFileStream vienen de FPC en inglés ("Unable to open file \"x\":
+  No such file or directory"). Se traducen los casos habituales y se conserva el nombre. }
+function FileErrorText(const Msg: string; Opening: Boolean): string;
+var
+  p, q: Integer;
+  Name, Reason: string;
+begin
+  Result := Msg;
+  p := Pos('"', Msg);
+  if p = 0 then Exit;
+  q := p + 1;
+  while (q <= Length(Msg)) and (Msg[q] <> '"') do Inc(q);
+  if q > Length(Msg) then Exit;
+  Name := Copy(Msg, p + 1, q - p - 1);
+  Reason := Copy(Msg, q + 1, MaxInt);
+  if Copy(Reason, 1, 2) = ': ' then Delete(Reason, 1, 2);
+  if Pos('No such file', Reason) > 0 then Reason := 'no existe'
+  else if Pos('Permission denied', Reason) > 0 then Reason := 'permiso denegado'
+  else if Pos('Is a directory', Reason) > 0 then Reason := 'es un directorio'
+  else if Pos('File exists', Reason) > 0 then Reason := 'ya existe';
+  if Reason = '' then
+  begin
+    if Opening then Result := 'no se pudo abrir "' + Name + '"'
+    else Result := 'no se pudo crear "' + Name + '"';
+  end
+  else if Opening then Result := 'no se pudo abrir "' + Name + '": ' + Reason
+  else Result := 'no se pudo crear "' + Name + '": ' + Reason;
+end;
+
 procedure Usage;
 begin
   OutLn('PArc ' + PARC_VERSION + ' — archivador .parc');
@@ -24,23 +53,22 @@ begin
   OutLn('  t   verifica (descomprime y compara CRC, sin escribir)');
   OutLn('  x   extrae con rutas');
   OutLn('  e   extrae sin rutas');
-  OutLn('  a   agrega y reemplaza (crea el archivo si no existe; .arc compatible si la extensión es .arc)');
+  OutLn('  a   agrega y reemplaza (crea el archivo si no existe)');
   OutLn('  u   agrega y reemplaza solo si el del disco es más nuevo');
   OutLn('  f   actualiza solo los que ya están en el archivo, si el del disco es más nuevo');
   OutLn('  d   borra del archivo los nombres/máscaras indicados');
-  OutLn('  r   repara con el registro de recuperación (-rr de FreeArc): escribe fixed.<nombre>');
+  OutLn('  r   repara con el registro de recuperación (-rr): escribe fixed.<nombre>');
   OutLn('Opciones:');
-  OutLn('  -dp<dir>  directorio de destino');
+  OutLn('  -dp<dir>  directorio de destino (pegado: -dpdestino)');
   OutLn('  -o+       sobrescribe archivos existentes    -o-  los saltea (default)');
   OutLn('  -snld     crea también los enlaces que apuntan fuera del destino');
   OutLn('  -so       x/e: el contenido extraído a stdout (parc x copia.parc datos.txt -so)');
   OutLn('  -si[nombre]  a: agrega lo que llega por stdin con ese nombre (tar cf - dir | parc a x.parc -sidir.tar)');
   OutLn('  "-" como archivo: lo lee de stdin (l/t/x/e) o lo escribe en stdout (a)');
   OutLn('  -m<método> preset -m0..-m9, -mx (default -m4, como FreeArc) o método, p. ej. -mlzma');
-  OutLn('  -fmt=parc|arc  formato de salida (a/u/f/d)');
   OutLn('  -s  como FreeArc: -s- sin sólido, -se por extensión, -s<N> o -s<N>f N archivos por');
   OutLn('     bloque, -s<N>m (o k/g/b) bloques de al menos ese tamaño; combinables: -se100f10m');
-  OutLn('  -x<máscara>  excluir (puede repetirse)');
+  OutLn('  -x<máscara>  excluir (pegada: -x*.txt; puede repetirse)');
   OutLn('  -r     las máscaras (*.txt, src/*.pas) buscan también en los subdirectorios');
   OutLn('  -rr[N%|N|Nm|N;S|N*S|-]  registro de recuperación (sin valor: 4%/2%/1% según tamaño;');
   OutLn('             N = sectores de 512; -rr- lo quita)');
@@ -90,7 +118,7 @@ var
 begin
   if not RecoveryRepair(ArcName, Res, Dest) then
   begin
-    ErrLn('ERROR: ' + ArcName + ' no tiene registro de recuperación (crearlo con FreeArc -rr)');
+    ErrLn('ERROR: ' + ArcName + ' no tiene registro de recuperación (crearlo con -rr)');
     Exit(1);
   end;
   OutLn(Format('Registro de recuperación %s: %d sector(es) de %d bytes',
@@ -866,7 +894,15 @@ begin
       S := Arg(i);
       if (Length(S) > 1) and (S[1] = '-') then
       begin
-        if Copy(S, 1, 3) = '-dp' then Opt.DestDir := Copy(S, 4, MaxInt)
+        if Copy(S, 1, 3) = '-dp' then
+        begin
+          if Length(S) = 3 then
+          begin
+            ErrLn('ERROR: -dp necesita un directorio pegado (-dp<dir>)');
+            Halt(1);
+          end;
+          Opt.DestDir := Copy(S, 4, MaxInt);
+        end
         else if S = '--no-progress' then ShowProgress := False
         else if Copy(S, 1, 4) = '-sfx' then
         begin
@@ -895,7 +931,15 @@ begin
           ErrLn('ERROR: -fmt ya no existe: PArc solo usa el formato .parc');
           Halt(1);
         end
-        else if Copy(S, 1, 2) = '-x' then Excludes.Add(Copy(S, 3, MaxInt))
+        else if Copy(S, 1, 2) = '-x' then
+        begin
+          if Length(S) = 2 then
+          begin
+            ErrLn('ERROR: -x necesita una máscara pegada (-x<patrón>, p. ej. -x*.txt)');
+            Halt(1);
+          end;
+          Excludes.Add(Copy(S, 3, MaxInt));
+        end
         // -s- no sólido; -s<mem> tope de bytes por bloque; -s<N>f tope de archivos
         else if Copy(S, 1, 3) = '-rr' then MO.Recovery := Copy(S, 4, MaxInt)
         else if S = '-r' then MO.Recursive := True
@@ -1057,6 +1101,10 @@ begin
           Code := EXIT_CANCELLED;
         end;
         on E: EUnsupportedEncoder do begin ClearProgress; ErrLn('ERROR: ' + E.Message); Code := 3; end;
+        on E: EFOpenError do
+        begin ClearProgress; ErrLn('ERROR: ' + FileErrorText(E.Message, True)); Code := 4; end;
+        on E: EFCreateError do
+        begin ClearProgress; ErrLn('ERROR: ' + FileErrorText(E.Message, False)); Code := 4; end;
         on E: Exception do begin ClearProgress; ErrLn('ERROR: ' + E.Message); Code := 4; end;
       end;
       until not Retry;
@@ -1100,6 +1148,10 @@ begin
         on E: EOperationCancelled do begin ClearProgress; ErrLn('Cancelado.'); Code := EXIT_CANCELLED; end;
         on E: EArcCorrupt do begin ClearProgress; ErrLn('ERROR: ' + E.Message); Code := 2; end;
         on E: EUnsupportedMethod do begin ClearProgress; ErrLn('ERROR: ' + E.Message); Code := 3; end;
+        on E: EFOpenError do
+        begin ClearProgress; ErrLn('ERROR: ' + FileErrorText(E.Message, True)); Code := 4; end;
+        on E: EFCreateError do
+        begin ClearProgress; ErrLn('ERROR: ' + FileErrorText(E.Message, False)); Code := 4; end;
         on E: Exception do begin ClearProgress; ErrLn('ERROR: ' + E.Message); Code := 4; end;
       end;
     until not Retry;
