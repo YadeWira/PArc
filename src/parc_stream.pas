@@ -107,7 +107,7 @@ begin
   if Count <= 0 then Exit(0);
   FStream.Position := FPos;
   Result := FStream.Read(Buf^, Count);
-  if Result <= 0 then Corrupt('el archivo termina antes de lo esperado');
+  if Result <= 0 then Corrupt('file ends earlier than expected');
   Inc(FPos, Result);
   Dec(FRemaining, Result);
 end;

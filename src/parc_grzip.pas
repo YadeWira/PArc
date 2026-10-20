@@ -261,14 +261,14 @@ begin
   with M^ do
   while True do
   begin
-    if AP > ALimit then Corrupt('grzip: el codificador aritmético se sale de los datos');   // validación
+    if AP > ALimit then Corrupt('grzip: arithmetic coder runs past the data');   // validación
     VCtx := @Model_L0_1[Ch, 0];
     UCtx := @Model_L0_2[4*CtxL0 + (CtxRLE and 3), 0];
     Tot := Model_L0_0[4] + UCtx[4] + VCtx[4];
     // ARI_GetFreq(Tot)
     Range := Range div Tot;
     Frq := Code div Range;
-    if Frq >= Tot then Corrupt('grzip: código aritmético fuera de rango');   // validación
+    if Frq >= Tot then Corrupt('grzip: arithmetic code out of range');   // validación
     Cum := 0;
     Rank := 0;
     repeat
@@ -398,12 +398,12 @@ begin
     end;
     Inc(RunSize, Log2RLESize[Log2RunSize]);
 
-    if RunSize > LongWord(OutLen - OutPos) then Corrupt('grzip: la salida del MTF/WFC excede el bloque');   // validación
+    if RunSize > LongWord(OutLen - OutPos) then Corrupt('grzip: MTF/WFC output exceeds the block');   // validación
     if RunSize = 1 then Output[OutPos] := Byte(Ch)
     else FillChar(Output[OutPos], RunSize, Byte(Ch));
     Inc(OutPos, RunSize);
   end;
-  if OutPos <> OutLen then Corrupt('grzip: tamaño de salida del MTF/WFC incorrecto');   // validación
+  if OutPos <> OutLen then Corrupt('grzip: wrong MTF/WFC output size');   // validación
 end;
 
 { Reservas y liberación fuera del núcleo: en una función con try/finally FPC no deja variables
@@ -472,7 +472,7 @@ procedure FastBwtDecode(Input: PByte; Size: SizeInt; FBP: LongInt);
 var
   T: PLongWord;
 begin
-  if (FBP < 0) or (FBP >= Size) then Corrupt('grzip: índice primario del BWT inválido');   // validación
+  if (FBP < 0) or (FBP >= Size) then Corrupt('grzip: invalid BWT primary index');   // validación
   GetMem(T, Size * SizeOf(LongWord));
   try
     FastBwtCore(Input, Size, FBP, T);
@@ -525,7 +525,7 @@ procedure StrongBwtDecode(Input: PByte; Size: SizeInt; FBP: LongInt);
 var
   T: PLongWord;
 begin
-  if (FBP < 0) or (FBP > Size) then Corrupt('grzip: índice primario del BWT inválido');   // validación
+  if (FBP < 0) or (FBP > Size) then Corrupt('grzip: invalid BWT primary index');   // validación
   GetMem(T, (Size + 1) * SizeOf(LongWord));
   try
     StrongBwtCore(Input, Size, FBP, T);
@@ -611,7 +611,7 @@ begin
       if (Sm and ST_INDIRECT) <> 0 then
       begin
         j := Sm and IDX_MASK;
-        if j > Size then Corrupt('grzip: ST4 inválido');   // validación
+        if j > Size then Corrupt('grzip: invalid ST4');   // validación
         k := Table[j] and IDX_MASK;
         Inc(Table[j]);
       end
@@ -620,7 +620,7 @@ begin
         Inc(Table[k]);
         k := Sm and IDX_MASK;
       end;
-      if k > LongWord(Size) then Corrupt('grzip: ST4 inválido');   // validación
+      if k > LongWord(Size) then Corrupt('grzip: invalid ST4');   // validación
       Sm := Table[k];
       Input[i] := Byte(Sm shr 24);
     end;
@@ -633,8 +633,8 @@ var
   Table: PLongWord;
 begin
   // validación: los índices de Table son de 23 bits y FBP está en [0, Size]
-  if (Size <= 0) or (Size >= ST_INDIRECT) then Corrupt('grzip: tamaño de bloque ST4 inválido');
-  if (FBP < 0) or (FBP > Size) then Corrupt('grzip: índice primario del ST4 inválido');
+  if (Size <= 0) or (Size >= ST_INDIRECT) then Corrupt('grzip: invalid ST4 block size');
+  if (FBP < 0) or (FBP > Size) then Corrupt('grzip: invalid ST4 primary index');
   Context2 := nil; Flag := nil; Table := nil;
   try
     Context2 := AllocMem(65536 * SizeOf(LongInt));
@@ -683,7 +683,7 @@ begin
         if Len <> 0 then
         begin
           Len := Len + MinLen - 1;
-          if (Len > LongWord(OutCap - op)) then Corrupt('grzip: el LZP excede el bloque');   // validación
+          if (Len > LongWord(OutCap - op)) then Corrupt('grzip: LZP exceeds the block');   // validación
           n := Len;
           if op - ptr >= n then
           begin
@@ -701,7 +701,7 @@ begin
         end;
         b := LZP_MatchFlag;
       end;
-      if op >= OutCap then Corrupt('grzip: el LZP excede el bloque');   // validación
+      if op >= OutCap then Corrupt('grzip: LZP exceeds the block');   // validación
       Output[op] := b; Inc(op);
       Ctx := (Ctx shl 8) or b;
     end;
@@ -712,7 +712,7 @@ function LzpDecode(Input: PByte; Size: SizeInt; Output: PByte; OutCap: SizeInt; 
 var
   Contexts: PLongInt;
 begin
-  if (Size < 4) or (OutCap < 4) then Corrupt('grzip: bloque LZP demasiado chico');   // validación
+  if (Size < 4) or (OutCap < 4) then Corrupt('grzip: LZP block too small');   // validación
   Contexts := AllocMem((SizeInt(HTMask) + 1) * SizeOf(LongInt));
   try
     Result := LzpCore(Input, Size, Output, OutCap, MinLen, HTMask, Contexts);
@@ -728,7 +728,7 @@ var
   s: LongInt;
 begin
   s := ((Mode div 256) mod 256) and 31;
-  if s > MaxHashLog then Corrupt('grzip: tabla hash de LZP inválida');   // validación
+  if s > MaxHashLog then Corrupt('grzip: invalid LZP hash table');   // validación
   Result := LzpDecode(Input, Size, Output, OutCap, LongWord((Mode div 65536) mod 32767), (LongWord(1) shl s) - 1);
 end;
 
@@ -785,7 +785,7 @@ begin
         end;
       end;
   else
-    Corrupt('grzip: filtro de registros desconocido');   // validación (el C no escribe nada)
+    Corrupt('grzip: unknown record filter');   // validación (el C no escribe nada)
   end;
 end;
 
@@ -802,13 +802,13 @@ var
   Remain: SizeInt;
   nParts, k: Integer;
 begin
-  if Size < HDR then Corrupt('grzip: bloque truncado');
-  if GetI32(Input + 24) <> 0 then Corrupt('grzip: firma de bloque inválida');
+  if Size < HDR then Corrupt('grzip: truncated block');
+  if GetI32(Input + 24) <> 0 then Corrupt('grzip: invalid block signature');
   DataSize := GetI32(Input + 16);
-  if (DataSize < 0) or (DataSize > Size - HDR) then Corrupt('grzip: bloque truncado');
-  if GetI32(Input + 20) <> 0 then Corrupt('grzip: firma de bloque inválida');
+  if (DataSize < 0) or (DataSize > Size - HDR) then Corrupt('grzip: truncated block');
+  if GetI32(Input + 20) <> 0 then Corrupt('grzip: invalid block signature');
   OrigSize := GetI32(Input);
-  if (OrigSize < 0) or (OrigSize > OutCap) then Corrupt('grzip: tamaño de bloque inválido');   // validación
+  if (OrigSize < 0) or (OrigSize > OutCap) then Corrupt('grzip: invalid block size');   // validación
   Mode := GetI32(Input + 4);
 
   if Mode = -1 then
@@ -817,21 +817,21 @@ begin
     Mode := GetI32(Input + 8);
     if Mode = 0 then
     begin
-      if DataSize <> OrigSize then Corrupt('grzip: tamaño de bloque guardado incorrecto');   // validación
+      if DataSize <> OrigSize then Corrupt('grzip: wrong stored block size');   // validación
       if DataSize > 0 then Move(Input[HDR], Output^, DataSize);
       Exit(DataSize);
     end;
     Result := LzpDecodeMode(Input + HDR, DataSize, Output, OrigSize, Mode);
-    if Result <> OrigSize then Corrupt('grzip: tamaño de bloque LZP incorrecto');   // validación
+    if Result <> OrigSize then Corrupt('grzip: wrong LZP block size');   // validación
     Exit;
   end;
 
   if Mode = -2 then
   begin
     // Filtro de registros: 2 ó 4 sub-bloques con sus propios encabezados
-    if Depth > 0 then Corrupt('grzip: filtro de registros anidado');   // validación
+    if Depth > 0 then Corrupt('grzip: nested record filter');   // validación
     RecMode := GetI32(Input + 8);
-    if (RecMode < 1) or (RecMode > 4) then Corrupt('grzip: filtro de registros desconocido');
+    if (RecMode < 1) or (RecMode > 4) then Corrupt('grzip: unknown record filter');
     if (RecMode and 1) = 1 then nParts := 2 else nParts := 4;
     GetMem(Buf, OrigSize + 1);
     try
@@ -842,11 +842,11 @@ begin
       begin
         Part := OrigSize div nParts;
         if k = nParts then Part := OrigSize - OutPos;
-        if Remain < HDR then Corrupt('grzip: sub-bloque truncado');
+        if Remain < HDR then Corrupt('grzip: sub-truncated block');
         Pos := GetI32(Tmp + 16);
-        if (Pos < 0) or (Pos > Remain - HDR) then Corrupt('grzip: sub-bloque truncado');
+        if (Pos < 0) or (Pos > Remain - HDR) then Corrupt('grzip: sub-truncated block');
         Got := DecodeBlock(Tmp, Pos + HDR, Buf + OutPos, Part, Depth + 1);
-        if Got <> Part then Corrupt('grzip: sub-bloque de tamaño incorrecto');   // validación
+        if Got <> Part then Corrupt('grzip: wrong sub-block size');   // validación
         Inc(OutPos, Got);
         Inc(Tmp, Pos + HDR);
         Dec(Remain, Pos + HDR);
@@ -860,7 +860,7 @@ begin
 
   // Normal: MTF/WFC + aritmético -> BWT/ST4 inverso -> LZP inverso
   TSize := GetI32(Input + 8);
-  if (TSize <= 0) or (TSize > OrigSize) then Corrupt('grzip: tamaño LZP inválido');   // validación
+  if (TSize <= 0) or (TSize > OrigSize) then Corrupt('grzip: invalid LZP size');   // validación
   Padded := (SizeInt(TSize) + 7) and not SizeInt(7);
   FBP := GetI32(Input + 12);
   GetMem(Buf, Padded + 8);
@@ -871,11 +871,11 @@ begin
     if (Mode div 256) <> 0 then
     begin
       Got := LzpDecodeMode(Buf, TSize, Output, OrigSize, Mode);
-      if Got <> OrigSize then Corrupt('grzip: tamaño de bloque LZP incorrecto');   // validación
+      if Got <> OrigSize then Corrupt('grzip: wrong LZP block size');   // validación
     end
     else
     begin
-      if TSize <> OrigSize then Corrupt('grzip: tamaño de bloque incorrecto');   // validación
+      if TSize <> OrigSize then Corrupt('grzip: wrong block size');   // validación
       Move(Buf^, Output^, TSize);
     end;
   finally
@@ -943,7 +943,7 @@ var
   v, BlockSize: QWord;
   ok: Boolean;
 begin
-  if (Length(Params) = 0) or (Params[0] <> 'grzip') then Corrupt('grzip: método inválido');
+  if (Length(Params) = 0) or (Params[0] <> 'grzip') then Corrupt('grzip: invalid method');
   BlockSize := 8 shl 20;
   for k := 1 to High(Params) do
   begin
@@ -956,19 +956,19 @@ begin
       case p[1] of
         'm', 'l', 'h', 't', 'i':
           begin
-            if not CParseInt(Copy(p, 2, MaxInt), v) then Corrupt('grzip: parámetro inválido "' + p + '"');
+            if not CParseInt(Copy(p, 2, MaxInt), v) then Corrupt('grzip: invalid parameter "' + p + '"');
             Continue;
           end;
         'b':
           begin
-            if not CParseMem(Copy(p, 2, MaxInt), BlockSize) then Corrupt('grzip: parámetro inválido "' + p + '"');
+            if not CParseMem(Copy(p, 2, MaxInt), BlockSize) then Corrupt('grzip: invalid parameter "' + p + '"');
             Continue;
           end;
       end;
     // Sin nombre: entero = MinMatchLen, si no, BlockSize
     if CParseInt(p, v) then Continue;
     ok := CParseMem(p, v);
-    if not ok then Corrupt('grzip: parámetro inválido "' + p + '"');
+    if not ok then Corrupt('grzip: invalid parameter "' + p + '"');
     BlockSize := v;
   end;
   if BlockSize > GRZ_MaxBlockSize then BlockSize := GRZ_MaxBlockSize;
@@ -988,13 +988,13 @@ begin
   while Pos < SrcLen do
   begin
     // GRZipMTDecompressor::ReaderThread
-    if SrcLen - Pos < HDR then Corrupt('grzip: bloque truncado');
-    if GetI32(Src + Pos + 24) <> 0 then Corrupt('grzip: firma de bloque inválida');
+    if SrcLen - Pos < HDR then Corrupt('grzip: truncated block');
+    if GetI32(Src + Pos + 24) <> 0 then Corrupt('grzip: invalid block signature');
     DataSize := GetI32(Src + Pos + 16);
-    if (DataSize < 0) or (DataSize > Limit - HDR) then Corrupt('grzip: tamaño de bloque inválido');   // validación
-    if DataSize > SrcLen - Pos - HDR then Corrupt('grzip: bloque truncado');
+    if (DataSize < 0) or (DataSize > Limit - HDR) then Corrupt('grzip: invalid block size');   // validación
+    if DataSize > SrcLen - Pos - HDR then Corrupt('grzip: truncated block');
     OrigSize := GetI32(Src + Pos);
-    if (OrigSize < 0) or (OrigSize > Limit) then Corrupt('grzip: tamaño de bloque inválido');   // validación
+    if (OrigSize < 0) or (OrigSize > Limit) then Corrupt('grzip: invalid block size');   // validación
     if OrigSize > DstLen - OutPos then Exit(False);
     if OrigSize > 0 then
       DecodeBlock(Src + Pos, HDR + DataSize, Dst + OutPos, OrigSize, 0)
@@ -1040,12 +1040,12 @@ var
 begin
   Result := nil;
   if not Source.ReadExactOrEof(@H[0], HDR) then Exit;
-  if GetI32(@H[24]) <> 0 then Corrupt('grzip: firma de bloque inválida');
+  if GetI32(@H[24]) <> 0 then Corrupt('grzip: invalid block signature');
   DataSize := GetI32(@H[16]);
   OrigSize := GetI32(@H[0]);
   // validación: el C lee en un buffer de BlockSize+LZP_MaxMatchLen (y escribe en otro igual)
-  if (DataSize < 0) or (DataSize > FLimit - HDR) then Corrupt('grzip: tamaño de bloque inválido');
-  if (OrigSize < 0) or (OrigSize > FLimit) then Corrupt('grzip: tamaño de bloque inválido');
+  if (DataSize < 0) or (DataSize > FLimit - HDR) then Corrupt('grzip: invalid block size');
+  if (OrigSize < 0) or (OrigSize > FLimit) then Corrupt('grzip: invalid block size');
   Job := TGrzipJob.Create;
   try
     Job.OutSize := OrigSize;

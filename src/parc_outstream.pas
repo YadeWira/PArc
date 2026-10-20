@@ -110,7 +110,7 @@ end;
 
 procedure TOutStage.Write(Buf: PByte; Count: SizeInt);
 begin
-  if FFinished then raise Exception.Create('escritura después de Finish');
+  if FFinished then raise Exception.Create('write after Finish');
   if Count > 0 then DoWrite(Buf, Count);
 end;
 

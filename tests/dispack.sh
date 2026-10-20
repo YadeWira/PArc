@@ -21,14 +21,14 @@ seq 1 30000 > "$C/a.txt"
 head -c 70000 /dev/urandom > "$C/r.bin"
 touch -d '2020-01-01' "$C"/*
 
-echo "== .parc con dispack070"
+echo "== .parc with dispack070"
 rm -f d.parc
 if "$PARC" a d.parc c -mdispack --no-progress >/dev/null 2>&1; then ok "parc a -mdispack"; else bad "parc a -mdispack"; fi
 "$PARC" t d.parc >/dev/null 2>&1 && ok "parc t" || bad "parc t"
 rm -rf x; mkdir x
 "$PARC" x d.parc -o+ -dpx >/dev/null 2>&1 && diff -r c x/c >/dev/null && ok "parc x idéntico" || bad "parc x"
 
-echo "== filtro vs C original"
+echo "== filter vs original C"
 mkdir -p "$ROOT/build/tests"
 if g++ -O2 -w -DFREEARC_UNIX -DFREEARC_INTEL_BYTE_ORDER -I"$REF" -I"$REF/DisPack" \
      -o dispack_ref "$ROOT/tests/dispack_ref.cpp" "$REF/DisPack/DisPack.cpp" 2>/dev/null; then
@@ -47,7 +47,7 @@ for f in "$C/parc.bin" "$C/a.txt" "$C/r.bin"; do
   cmp -s "$f" parc.u && ok "vuelta: $(basename "$f")" || bad "vuelta: $(basename "$f")"
 done
 
-echo "== bloque dañado"
+echo "== damaged block"
 cp d.parc bad.parc
 python3 - <<'EOF'
 d = bytearray(open('bad.parc', 'rb').read())
@@ -57,5 +57,5 @@ EOF
 "$PARC" t bad.parc >/dev/null 2>&1; code=$?
 [ $code = 2 ] && ok "código 2" || bad "código $code (esperado 2)"
 
-echo "== dispack: $pass ok, $fail fallas"
+echo "== dispack: $pass ok, $fail failures"
 [ $fail -eq 0 ]

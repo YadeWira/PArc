@@ -441,7 +441,7 @@ var
 begin
   // Validar antes de adoptar ASource: si el constructor falla, FPC llama a Destroy, y la
   // cadena que nos creó también liberaría ASource (doble liberación)
-  if not ValidLzmaProps(Alc, Alp, Apb) then Corrupt('propiedades lzma inválidas');
+  if not ValidLzmaProps(Alc, Alp, Apb) then Corrupt('invalid lzma properties');
   if ADictSize > QWord(High(SizeInt) div 2) then Corrupt('diccionario lzma demasiado grande');
   inherited Create(ASource);
   n := ADictSize;
@@ -479,7 +479,7 @@ begin
     st := FDec.DecodeTo(Limit);
     case st of
       lsEndMark: FEnded := True;
-      lsError: Corrupt('datos lzma inválidos');
+      lsError: Corrupt('invalid lzma data');
       lsInputEof: Corrupt('stream lzma truncado');
       lsLimit: ;
     end;

@@ -129,7 +129,7 @@ begin
       if (Params[j] <> '') and (Params[j][1] = 'k') then HasKey := True;
     if HasKey then Continue;
     if not GHavePassword then
-      raise EPasswordRequired.Create('el archivo está cifrado: indicá la contraseña con -p<contraseña>');
+      raise EPasswordRequired.Create('archive is encrypted: provide the password with -p<password>');
     Par := ParseCryptParams(Params);
     SetLength(Key, Par.KeySize + 2);
     // Los bloques de un .parc comparten sal: la clave derivada se recuerda (con muchas
@@ -156,7 +156,7 @@ begin
       end;
     end;
     if not Ok then
-      raise EBadPassword.Create('contraseña incorrecta');
+      raise EBadPassword.Create('wrong password');
     Stages[k] := KeyedMethod(Par, @Key[0]);
   end;
   Result := string.Join('+', Stages);
@@ -309,22 +309,22 @@ begin
     'lzma':
       begin
         lz := ParseLzmaParams(Params);
-        if not ValidLzmaProps(lz.lc, lz.lp, lz.pb) then raise EUnsupportedMethod.Create('propiedades lzma inválidas');
+        if not ValidLzmaProps(lz.lc, lz.lp, lz.pb) then raise EUnsupportedMethod.Create('invalid lzma properties');
         if (LzmaDecodeRaw(Src, SrcLen, Dst, DstLen, lz.lc, lz.lp, lz.pb, Written) = lzDataError) or (Written <> DstLen) then
-          Corrupt('4x4: falló la descompresión lzma');
+          Corrupt('4x4: lzma decompression failed');
       end;
     'lz4':
-      if not Lz4DecodeMem(Src, SrcLen, Dst, DstLen) then Corrupt('4x4: falló la descompresión lz4');
+      if not Lz4DecodeMem(Src, SrcLen, Dst, DstLen) then Corrupt('4x4: lz4 decompression failed');
     'tor':
       // Dentro de 4x4 FreeArc usa compress_all_at_once, que cambia cuándo se deshacen las tablas
       if not TornadoDecodeMem(Src, SrcLen, Dst, DstLen, Written) or (Written <> DstLen) then
-        Corrupt('4x4: falló la descompresión tor');
+        Corrupt('4x4: tornado decompression failed');
   else
     begin
       Chain := CreateDecoderChain(Method, TMemStage.Create(Src, SrcLen));
       try
         if DstLen > 0 then Chain.ReadExact(Dst, DstLen);
-        if Chain.Read(@Extra, 1) <> 0 then Corrupt('4x4: el bloque descomprime a más bytes de lo esperado');
+        if Chain.Read(@Extra, 1) <> 0 then Corrupt('4x4: block decompresses to more bytes than expected');
       finally
         Chain.Free;
       end;
@@ -375,7 +375,7 @@ begin
       begin
         FillChar(OutBuf[0], OutSize, 0);
         if InterlockedExchange(FourBlockWarned, 1) = 0 then
-          ErrLn('Aviso: bloque 4x4 dañado (' + E.Message + '); se entregan ceros y se sigue con los demás bloques');
+          ErrLn('Warning: damaged 4x4 block (' + E.Message + '); zeros are returned and the remaining blocks continue');
       end;
     end;
   end;
@@ -402,12 +402,12 @@ begin
   begin
     FStarted := True;
     if not Source.ReadExactOrEof(@Hdr[0], 4) then Exit;
-    if (Hdr[0] or Hdr[1] or Hdr[2] or Hdr[3]) <> 0 then Corrupt('4x4: versión de formato desconocida');
+    if (Hdr[0] or Hdr[1] or Hdr[2] or Hdr[3]) <> 0 then Corrupt('4x4: unknown format version');
   end;
   if not Source.ReadExactOrEof(@Hdr[0], 4) then Exit;
   OutSize := LongInt(LongWord(Hdr[0]) or (LongWord(Hdr[1]) shl 8) or (LongWord(Hdr[2]) shl 16) or (LongWord(Hdr[3]) shl 24));
   InSize := Source.ReadU32;
-  if (InSize > $7FFFFFFF) or (OutSize < -1) then Corrupt('4x4: tamaño de bloque inválido');
+  if (InSize > $7FFFFFFF) or (OutSize < -1) then Corrupt('4x4: invalid block size');
   Job := T4x4Job.Create;
   try
     Job.Inner := FInner;
@@ -429,7 +429,7 @@ var
   pp: TPpmdParams;
 begin
   Params := Stage.Split([':']);
-  if Length(Params) = 0 then raise EUnsupportedMethod.Create('método vacío');
+  if Length(Params) = 0 then raise EUnsupportedMethod.Create('empty method');
   if IsCipherStage(Stage) then
     Exit(TDecryptStage.Create(Source, ParseCryptParams(Params)));
   case Params[0] of
@@ -473,7 +473,7 @@ begin
     'srep':
       Result := TSrepStage.Create(Source);
   else
-    raise EUnsupportedMethod.CreateFmt('método no soportado todavía: "%s"', [Stage]);
+    raise EUnsupportedMethod.CreateFmt('method not supported yet: "%s"', [Stage]);
   end;
 end;
 
@@ -504,7 +504,7 @@ begin
   SetLength(Result, OrigSize);
   if IsStoring(Method) then
   begin
-    if SrcLen <> OrigSize then Corrupt('tamaño de bloque incorrecto');
+    if SrcLen <> OrigSize then Corrupt('wrong block size');
     if OrigSize > 0 then Move(Src^, Result[0], OrigSize);
     Exit;
   end;
@@ -513,17 +513,17 @@ begin
   begin
     // FreeArc descomprime los bloques de control memoria-a-memoria (sin exigir marca de fin)
     lz := ParseLzmaParams(Params);
-    if not ValidLzmaProps(lz.lc, lz.lp, lz.pb) then raise EUnsupportedMethod.Create('propiedades lzma inválidas');
+    if not ValidLzmaProps(lz.lc, lz.lp, lz.pb) then raise EUnsupportedMethod.Create('invalid lzma properties');
     if LzmaDecodeRaw(Src, SrcLen, PByte(Result), OrigSize, lz.lc, lz.lp, lz.pb, Written) = lzDataError then
-      Corrupt('falló la descompresión lzma');
-    if Written <> OrigSize then Corrupt('falló la descompresión lzma');
+      Corrupt('lzma decompression failed');
+    if Written <> OrigSize then Corrupt('lzma decompression failed');
     Exit;
   end;
   // Cualquier otra cadena: en streaming
   Chain := CreateDecoderChain(Method, TMemStage.Create(Src, SrcLen));
   try
     if OrigSize > 0 then Chain.ReadExact(PByte(Result), OrigSize);
-    if Chain.Read(@Extra, 1) <> 0 then Corrupt('el bloque descomprime a más bytes de lo esperado');
+    if Chain.Read(@Extra, 1) <> 0 then Corrupt('block decompresses to more bytes than expected');
   finally
     Chain.Free;
   end;

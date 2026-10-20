@@ -1,5 +1,5 @@
 #!/bin/bash
-# tests/rs_recovery.sh — registro de recuperación Reed-Solomon de .parc ("parc-rs1"):
+# tests/rs_recovery.sh — recovery record Reed-Solomon de .parc ("parc-rs1"):
 # repara un tramo contiguo y sectores sueltos, también con la paridad dañada, y avisa cuando
 # el daño supera lo reparable.
 set -u
@@ -8,12 +8,12 @@ PARC=${PARC_BIN:-$ROOT/build/linux64/parc}
 W=${RS_WORK:-/mnt/IA_LAB/agentes/PArc/rs_recovery}
 rm -rf -- "${W:?}"; mkdir -p "$W/d" && cd "$W" || exit 2
 fail=0
-check() { if eval "$2"; then printf '  ok    %s\n' "$1"; else printf '  FALLA %s\n' "$1"; fail=$((fail+1)); fi; }
+check() { if eval "$2"; then printf '  ok    %s\n' "$1"; else printf '  FAIL %s\n' "$1"; fail=$((fail+1)); fi; }
 for i in $(seq 1 8); do head -c 400000 /dev/urandom > "d/r$i.bin"; done; seq 1 300000 > d/t.txt
 
 "$PARC" a a.parc d -m1 -rr5% --no-progress >/dev/null 2>&1
 check ".parc: registro parc-rs1"            '"$PARC" r a.parc | grep -q "parc-rs1"'
-check "sin daño: nada que reparar"          '"$PARC" r a.parc | grep -q "No hay sectores dañados"'
+check "sin daño: nada que reparar"          '"$PARC" r a.parc | grep -q "No damaged sectors"'
 
 python3 - <<'EOF'
 import random, shutil, os
@@ -31,12 +31,12 @@ for ext in ('parc',):
     offs = random.sample(range(1000, size - 300000), 60)
     damage('a.' + ext, 'scatter.' + ext, [(o, o + 1) for o in offs])  # 1 byte = 1 sector (InitPos no está alineado a 512)
     damage('a.' + ext, 'heavy.' + ext, [(100000, 1000000)])
-    # el final del archivo: registro de recuperación (paridad) + datos
+    # el final del archivo: recovery record (paridad) + datos
     damage('a.' + ext, 'tail.' + ext, [(size - 60000, size - 50000), (300000, 310000)])
 EOF
 for f in burst scatter tail; do
   rm -f "fixed.$f.parc"; "$PARC" r "$f.parc" >/dev/null 2>&1
-  check ".parc $f: reparado e íntegro"       '[ -f fixed.'"$f"'.parc ] && "$PARC" t fixed.'"$f"'.parc --no-progress | tail -1 | grep -q "Errores: 0"'
+  check ".parc $f: reparado e íntegro"       '[ -f fixed.'"$f"'.parc ] && "$PARC" t fixed.'"$f"'.parc --no-progress | tail -1 | grep -q "Errors: 0"'
 done
 rm -f fixed.heavy.parc
 check ".parc heavy: irrecuperable, código 2"  '{ "$PARC" r heavy.parc >/dev/null 2>&1; [ $? = 2 ]; }'
@@ -54,9 +54,9 @@ for o in random.sample(range(0, 6000000, 512), 25):
     f.seek(o); f.write(bytes(random.randrange(256) for _ in range(64)))
 EOF
 rm -f fixed.g2.parc; "$PARC" r g2.parc >/dev/null 2>&1
-check "3%, varias franjas, 25 daños sueltos"  '"$PARC" t fixed.g2.parc --no-progress | tail -1 | grep -q "Errores: 0"'
+check "3%, varias franjas, 25 daños sueltos"  '"$PARC" t fixed.g2.parc --no-progress | tail -1 | grep -q "Errors: 0"'
 echo nuevo > d/nuevo.txt; "$PARC" a a.parc d/nuevo.txt --no-progress >/dev/null 2>&1
 check "actualizar conserva el registro RS"    '"$PARC" r a.parc | grep -q "parc-rs1"'
 
-echo "== recuperación RS: $fail fallas"
+echo "== RS recovery: $fail failures"
 [ $fail -eq 0 ]

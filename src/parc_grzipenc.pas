@@ -1877,12 +1877,12 @@ var
 
   procedure Bad;
   begin
-    raise EGrzipEncParams.CreateFmt('grzip: parámetro inválido "%s"', [p]);
+    raise EGrzipEncParams.CreateFmt('grzip: invalid parameter "%s"', [p]);
   end;
 
 begin
   if (Length(Params) = 0) or (Params[0] <> 'grzip') then
-    raise EGrzipEncParams.Create('grzip: no es el método grzip');
+    raise EGrzipEncParams.Create('grzip: not the method grzip');
   // GRZIP_METHOD::GRZIP_METHOD
   Method := 1; Bs := 8 shl 20; EnableLZP := 1; MinMatchLen := 32; HashSizeLog := 15;
   Alt := 0; Adaptive := False; Delta := 0;
@@ -1932,7 +1932,7 @@ begin
     3: Mode := GRZ_Compression_ST4;
     4: Mode := GRZ_Compression_ST4 + GRZ_Compression_MTF;
   else
-    raise EGrzipEncParams.CreateFmt('grzip: método m%d inválido', [Method]);
+    raise EGrzipEncParams.CreateFmt('grzip: invalid m%d method', [Method]);
   end;
   if EnableLZP <> 0 then
     Mode := LongInt(LongWord(Mode) + LongWord(HashSizeLog) * 256 + LongWord(MinMatchLen) * 65536);
@@ -1943,10 +1943,10 @@ begin
     // validación: el C con esto no funciona (l>=32768 hace negativo el Mode; h>28 no se puede reservar)
     s := ((Mode div 256) mod 256) and 31;
     if (Mode < 0) or (s > MaxHashLog) then
-      raise EGrzipEncParams.Create('grzip: parámetros de LZP fuera de rango (l<32768, h<=28)');
+      raise EGrzipEncParams.Create('grzip: LZP parameters out of range (l<32768, h<=28)');
   end;
   if Bs > GRZ_MaxBlockSize then Bs := GRZ_MaxBlockSize;
-  if Bs = 0 then raise EGrzipEncParams.Create('grzip: tamaño de bloque 0');   // el C no avanzaría
+  if Bs = 0 then raise EGrzipEncParams.Create('grzip: block size 0');   // el C no avanzaría
   BlockSize := Bs;
 end;
 

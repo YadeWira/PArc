@@ -1,49 +1,49 @@
-# Códecs de FreeArc 0.67 portados a PArc
+# FreeArc 0.67 codecs ported to PArc
 
-PArc no enlaza bibliotecas de terceros: los compresores y cifrados están portados a Pascal.
-Este documento releva de dónde sale cada uno, contra qué se verificó y qué queda pendiente.
+PArc does not link third-party libraries: compressors and ciphers are ported to Pascal. This
+document records where each one comes from, what it was verified against, and what remains.
 
-> Las rutas `Compression/...` son relativas a `reference/freearc-0.67/`. En el repo sólo se
-> conserva `Compression/` (fuente de referencia y oráculo de los tests de códecs). El resto
-> del árbol de FreeArc 0.67 está en el historial de git (commit `82ea8d9`) y en el proyecto
-> [FreeArc-ex](https://github.com/YadeWira/FreeArc-ex).
+> Paths such as `Compression/...` are relative to `reference/freearc-0.67/`. The repository
+> keeps only `Compression/` (reference sources and oracle for codec tests). The rest of the
+> FreeArc 0.67 tree is in git history (commit `82ea8d9`) and in the
+> [FreeArc-ex](https://github.com/YadeWira/FreeArc-ex) project.
 
-## Versiones de las que se portó
+## Versions ported from
 
-| Componente | En FreeArc 0.67 | Versión portada | Notas |
+| Component | In FreeArc 0.67 | Ported version | Notes |
 |---|---|---|---|
-| LZMA SDK (`Compression/LZMA2/C`) | 2009-02 | 26.x | El stream LZMA y BCJ x86 no cambian; el encoder nuevo produce bytes válidos, no idénticos. `GetOptimumFast` conserva los agregados de FreeArc (poda por longitud/distancia y rep-matches relajados) |
-| LZ4 (`Compression/LZ4`) | 2011-2012 | 1.10.0 | El formato de bloque es estable; la versión vieja tiene CVE-2014-4611 |
-| LibTomCrypt (`_Encryption`) | 1.17 | 1.18.2 | AES/Blowfish/Serpent/Twofish/SHA dan la misma salida |
-| PPMd (D. Shkarin, modificado por FreeArc) | var. H/I | sin upstream compatible | Se mantiene el port propio (incluido el layout de 32 bits en x64) |
-| SREP | 3.93 beta (2013) | 3.93a beta (2014-10-11) | freeware de Bulat Ziganshin; formato v1–v4 |
-| Tornado, REP, 4x4, Dict, LZP, Delta, MM/TTA, GRZip, DisPack | 0.67 | sin upstream mantenido | Se portaron desde `Compression/`; el stream lo define ese código |
+| LZMA SDK (`Compression/LZMA2/C`) | 2009-02 | 26.x | The LZMA stream and x86 BCJ do not change; the new encoder produces valid bytes, not identical ones. `GetOptimumFast` keeps FreeArc's additions (length/distance pruning and relaxed rep-matches) |
+| LZ4 (`Compression/LZ4`) | 2011-2012 | 1.10.0 | The block format is stable; the old version has CVE-2014-4611 |
+| LibTomCrypt (`_Encryption`) | 1.17 | 1.18.2 | AES/Blowfish/Serpent/Twofish/SHA produce the same output |
+| PPMd (D. Shkarin, modified by FreeArc) | var. H/I | no compatible upstream | Kept as PArc's own port (including the 32-bit layout on x64) |
+| SREP | 3.93 beta (2013) | 3.93a beta (2014-10-11) | freeware by Bulat Ziganshin; v1–v4 format |
+| Tornado, REP, 4x4, Dict, LZP, Delta, MM/TTA, GRZip, DisPack | 0.67 | no maintained upstream | Ported from `Compression/`; that code defines the stream |
 
-## Estado en PArc
+## Status in PArc
 
-| Componente | Portado desde | Verificación |
+| Component | Ported from | Verification |
 |---|---|---|
-| LZMA (descompresión) | especificación de referencia (LzmaSpec) | streams generados con Python y el SDK; `tests/run_lzma_tests.py` |
-| LZMA (compresión) | LZMA SDK 26.03 + agregados de FreeArc en `fast` | streams válidos verificados con liblzma (`tests/run_lzma_tests.py`) y roundtrip en `.parc` |
-| BCJ x86 (`exe`) | LZMA SDK 26.03 | contra `Bra86.c` compilado, con cortes de buffer (`tests/bcj.sh`) |
-| LZ4 (descompresión) | semántica de LZ4 1.10 (`LZ4_decompress_safe`), sin CVE-2014-4611 | streams de referencia |
-| LZ4 (compresión) | LZ4 1.10 (`LZ4_compress_default` y `LZ4_compress_HC` nivel 9) | byte a byte contra LZ4 1.10 en C; roundtrip en `.parc` |
-| AES, Blowfish, Twofish, SHA-512, PBKDF2 | LibTomCrypt | `tests/crypto_vectors.sh`: 0 diferencias en miles de vectores al azar contra la 1.17 de FreeArc y contra la 1.18.2 oficial |
-| Serpent | el agregado de FreeArc sobre LibTomCrypt 1.17 | ídem, contra la 1.17 |
-| CTR / CFB | LibTomCrypt (contador little-endian) | ídem |
-| PPMd, Tornado, REP, 4x4, Dict, LZP, Delta, MM, TTA, GRZip | FreeArc 0.67 | `tests/run_tornado_tests.sh`, `tests/ppmd`, `tests/mm_tta` y roundtrips en `.parc` |
-| DisPack (`dispack070`) | `Compression/DisPack` (0.70) | `tests/dispack.sh`: filtro byte a byte contra el C y roundtrip en `.parc` |
-| SREP (`srep`), decodificador | `Compression/SREP/srep.cpp` (3.93 beta) + 3.93a | `tests/srep.sh`: streams v1–v4 (texto, repetidos, azar, >8 MB), casos sintéticos de `BASE_LEN=0` y largos con vuelta de 32 bits; interoperabilidad opcional con 3.93a |
-| SREP (`srep`), codificador | `Compression/SREP/srep.cpp` (formato v3) | `tests/srep.sh`: streams decodificados por el srep de referencia; LZ77 greedy (≥512, lazy matching, 4 candidatos por hash), `BASE_LEN=0` como 3.93a |
+| LZMA (decompression) | reference specification (LzmaSpec) | streams generated with Python and the SDK; `tests/run_lzma_tests.py` |
+| LZMA (compression) | LZMA SDK 26.03 + FreeArc's `fast` additions | valid streams verified with liblzma (`tests/run_lzma_tests.py`) and round-trip in `.parc` |
+| x86 BCJ (`exe`) | LZMA SDK 26.03 | against compiled `Bra86.c`, with buffer splits (`tests/bcj.sh`) |
+| LZ4 (decompression) | LZ4 1.10 semantics (`LZ4_decompress_safe`), without CVE-2014-4611 | reference streams |
+| LZ4 (compression) | LZ4 1.10 (`LZ4_compress_default` and `LZ4_compress_HC` level 9) | byte-for-byte against LZ4 1.10 in C; round-trip in `.parc` |
+| AES, Blowfish, Twofish, SHA-512, PBKDF2 | LibTomCrypt | `tests/crypto_vectors.sh`: 0 differences over thousands of random vectors against FreeArc's 1.17 and official 1.18.2 |
+| Serpent | FreeArc's addition to LibTomCrypt 1.17 | same, against 1.17 |
+| CTR / CFB | LibTomCrypt (little-endian counter) | same |
+| PPMd, Tornado, REP, 4x4, Dict, LZP, Delta, MM, TTA, GRZip | FreeArc 0.67 | `tests/run_tornado_tests.sh`, `tests/ppmd`, `tests/mm_tta` and `.parc` round-trips |
+| DisPack (`dispack070`) | `Compression/DisPack` (0.70) | `tests/dispack.sh`: filter byte-for-byte against C and `.parc` round-trip |
+| SREP (`srep`), decoder | `Compression/SREP/srep.cpp` (3.93 beta) + 3.93a | `tests/srep.sh`: v1–v4 streams (text, repeats, random, >8 MB), synthetic `BASE_LEN=0` cases and lengths that wrap 32 bits; optional interoperability with 3.93a |
+| SREP (`srep`), encoder | `Compression/SREP/srep.cpp` (v3 format) | `tests/srep.sh`: streams decoded by reference srep; greedy LZ77 (≥512, lazy matching, 4 hash candidates), `BASE_LEN=0` like 3.93a |
 
-Detalle histórico: LibTomCrypt rechaza claves de Blowfish de menos de 8 bytes (y AES/Twofish
-que no sean de 16/24/32); PArc ahora también las rechaza (`CipherKeySizeValid`).
+Historical note: LibTomCrypt rejects Blowfish keys shorter than 8 bytes (and AES/Twofish keys
+that are not 16/24/32 bytes); PArc now rejects them too (`CipherKeySizeValid`).
 
-## Fuera de PArc
+## Out of scope
 
-Los compresores externos de FreeArc (`precomp`, `ecm`, `jpg`, `ppmonstr`, `durilca`, `ccm`,
-`rzm`, etc.) no están portados: son programas aparte y quedan fuera del alcance de PArc, igual
-que los contenedores `.zip`/`.7z`/`.rar`, que atiende FreeArc-ex.
+FreeArc external compressors (`precomp`, `ecm`, `jpg`, `ppmonstr`, `durilca`, `ccm`, `rzm`,
+etc.) are not ported: they are separate programs and remain out of PArc's scope, as do the
+`.zip`/`.7z`/`.rar` containers handled by FreeArc-ex.
 
-El srep del repo no compila tal cual contra el `Common.h` actual; `tests/srep.sh` arma una
-copia con dos ajustes mínimos para usarlo como referencia.
+The repository's srep does not compile as-is against the current `Common.h`; `tests/srep.sh`
+builds a copy with two minimal adjustments to use it as a reference.

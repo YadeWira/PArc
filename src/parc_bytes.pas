@@ -49,7 +49,7 @@ implementation
 
 procedure Corrupt(const Msg: string);
 begin
-  raise EArcCorrupt.Create('archivo dañado: ' + Msg);
+  raise EArcCorrupt.Create('damaged archive: ' + Msg);
 end;
 
 procedure TByteReader.Init(AData: PByte; ASize: SizeInt);
@@ -71,20 +71,20 @@ end;
 
 procedure TByteReader.Skip(N: SizeInt);
 begin
-  if (N < 0) or (N > Size - Pos) then Corrupt('lectura fuera del bloque');
+  if (N < 0) or (N > Size - Pos) then Corrupt('read outside block');
   Inc(Pos, N);
 end;
 
 function TByteReader.U8: Byte;
 begin
-  if Pos >= Size then Corrupt('lectura fuera del bloque');
+  if Pos >= Size then Corrupt('read outside block');
   Result := Data[Pos];
   Inc(Pos);
 end;
 
 function TByteReader.U32: LongWord;
 begin
-  if Size - Pos < 4 then Corrupt('lectura fuera del bloque');
+  if Size - Pos < 4 then Corrupt('read outside block');
   Result := LongWord(Data[Pos]) or (LongWord(Data[Pos + 1]) shl 8) or
             (LongWord(Data[Pos + 2]) shl 16) or (LongWord(Data[Pos + 3]) shl 24);
   Inc(Pos, 4);
@@ -139,7 +139,7 @@ end;
 
 function TByteReader.Bytes(N: SizeInt): RawByteString;
 begin
-  if (N < 0) or (N > Size - Pos) then Corrupt('lectura fuera del bloque');
+  if (N < 0) or (N > Size - Pos) then Corrupt('read outside block');
   SetLength(Result, N);
   if N > 0 then Move(Data[Pos], Result[1], N);
   Inc(Pos, N);

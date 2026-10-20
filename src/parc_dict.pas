@@ -276,7 +276,7 @@ end;
 
 constructor TDictStage.Create(ASource: TInStage; ABlockSize: SizeInt);
 begin
-  if ABlockSize <= 0 then raise EUnsupportedMethod.Create('dict: tamaño de bloque inválido');
+  if ABlockSize <= 0 then raise EUnsupportedMethod.Create('dict: invalid block size');
   inherited Create(ASource);
   FBlockSize := ABlockSize;
 end;
@@ -289,7 +289,7 @@ var
 begin
   if not Source.ReadExactOrEof(@Hdr[0], 4) then Exit(False);
   InSize := LongInt(LongWord(Hdr[0]) or (LongWord(Hdr[1]) shl 8) or (LongWord(Hdr[2]) shl 16) or (LongWord(Hdr[3]) shl 24));
-  if InSize = Low(LongInt) then Corrupt('dict: tamaño de bloque inválido');
+  if InSize = Low(LongInt) then Corrupt('dict: invalid block size');
   if InSize < 0 then
   begin
     n := -InSize;
@@ -303,7 +303,7 @@ begin
     if InSize > 0 then Source.ReadExact(@FIn[0], InSize);
     if Length(FOut) < FBlockSize then SetLength(FOut, FBlockSize);
     FLen := DictDecode(@FIn[0], InSize, @FOut[0], FBlockSize);
-    if FLen < 0 then Corrupt('dict: datos inválidos');
+    if FLen < 0 then Corrupt('dict: invalid data');
   end;
   FPos := 0;
   Result := True;

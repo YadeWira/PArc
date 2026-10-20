@@ -1361,12 +1361,12 @@ end;
 
 function TBTMF.FindMatchLen(p, bufend: PByte; prevlen: LongWord): LongWord;
 begin
-  raise ETorEncoder.Create('tor: BinaryTreeMatchFinder solo con el parser óptimo');
+  raise ETorEncoder.Create('tor: BinaryTreeMatchFinder only with the optimal parser');
 end;
 
 procedure TBTMF.UpdateHash(p: PByte; len, step: LongWord);
 begin
-  raise ETorEncoder.Create('tor: BinaryTreeMatchFinder solo con el parser óptimo');
+  raise ETorEncoder.Create('tor: BinaryTreeMatchFinder only with the optimal parser');
 end;
 
 { TLazyMF (LazyMatching<MF>) }
@@ -1446,7 +1446,7 @@ end;
 
 procedure TLazyMF.UpdateHash1(p: PByte);
 begin
-  raise ETorEncoder.Create('tor: LazyMatching::update_hash1 no existe');
+  raise ETorEncoder.Create('tor: LazyMatching::update_hash1 does not exist');
 end;
 
 procedure TLazyMF.InvalidateMatch;
@@ -2963,7 +2963,7 @@ begin
   if row < 1 then Exit(What + ': largo de fila < 1');
   r := row;
   if (AHashSize = 2 * LongWord(gb)) and (r = (1 shl lb(r))) then Dec(r);
-  if AHashSize div LongWord(8 * r) < 2 then Exit(What + ': hash demasiado chico para esa fila');
+  if AHashSize div LongWord(8 * r) < 2 then Exit(What + ': hash too small for that row');
 end;
 
 function ValidateMethod(const m0: TTorMethod; out Combo: Integer): string;
@@ -2972,9 +2972,9 @@ var
 begin
   Result := '';
   Combo := SelectCombo(m0);
-  if Combo = 0 then Exit('combinación de parámetros que FreeArc no compila (FREEARC_ERRCODE_INVALID_COMPRESSOR)');
+  if Combo = 0 then Exit('parameter combination FreeArc does not compile (FREEARC_ERRCODE_INVALID_COMPRESSOR)');
   if (m0.EncodingMethod < 1) or (m0.EncodingMethod > 4) then
-    Exit('codificador c' + IntToStr(m0.EncodingMethod) + ' no válido (c0 genera un stream que el C no descomprime)');
+    Exit('codificador c' + IntToStr(m0.EncodingMethod) + ' invalid (c0 produces a stream the C decoder cannot decompress)');
   if m0.Buffer > gb then Exit('buffer > 1gb (el DistanceCoder del C no cubre distancias mayores)');
   m := m0;
   AdjustMethod(m, Combo >= 9);
@@ -3001,7 +3001,7 @@ begin
   if (Combo in [4, 5, 6, 7]) and (m.UpdateStep < 1) then Exit('u0 cuelga al compresor del C');
   // find_all_matches no puede pasarse de MAX_MATCHES pares
   if (Combo >= 9) and (Int64(m.HashRowWidth) + m.AuxHashRowWidth + 16 > MAX_MATCHES) then
-    Exit('l+al demasiado grande para el parser óptimo');
+    Exit('l+al too large for the optimal parser');
 end;
 
 function ParseTorEncParams(const Params: TStringArray; out M: TTorMethod): string;
@@ -3013,7 +3013,7 @@ var
   Combo: Integer;
 begin
   M := StdMethods[DEFAULT_METHOD];
-  if (Length(Params) = 0) or (Params[0] <> 'tor') then Exit('no es el método tor');
+  if (Length(Params) = 0) or (Params[0] <> 'tor') then Exit('not the method tor');
   for k := 1 to High(Params) do
   begin
     p := Params[k];
@@ -3043,7 +3043,7 @@ begin
       end
     else
       ok := False;
-    if not ok then Exit('parámetro inválido "' + p + '"');
+    if not ok then Exit('invalid parameter "' + p + '"');
   end;
   Result := ValidateMethod(M, Combo);
 end;
@@ -3109,7 +3109,7 @@ begin
   E := TTorEngine(FEngine);
   while Count > 0 do
   begin
-    if E.State = esDone then raise ETorEncoder.Create('tor: datos después del final');
+    if E.State = esDone then raise ETorEncoder.Create('tor: data after the end');
     if E.ReadGot = E.ReadWant then begin E.Resume; Continue; end;
     n := E.ReadWant - E.ReadGot;
     if n > Count then n := Count;
@@ -3142,7 +3142,7 @@ begin
   E := CreateEngine(Params, True, SrcLen + SrcLen div 4 + 4096);
   try
     if SrcLen > SizeInt(E.M.Buffer) then
-      raise ETorEncoder.CreateFmt('tor: bloque de %d bytes mayor que el buffer (%d)', [SrcLen, E.M.Buffer]);
+      raise ETorEncoder.CreateFmt('tor: block of %d bytes larger than the buffer (%d)', [SrcLen, E.M.Buffer]);
     if SrcLen > 0 then Move(Src^, E.Buf^, SrcLen);
     E.ReadGot := SrcLen;
     E.Resume;

@@ -19,7 +19,7 @@ type
   EOperationCancelled = class(Exception);
 
   TProgressInfo = record
-    Phase: string;        // 'Comprimiendo', 'Extrayendo', 'Verificando'
+    Phase: string;        // 'Compressing', 'Extrayendo', 'Verificando'
     Done, Total: Int64;   // bytes procesados / a procesar (Total = 0: no se sabe)
     CurrentFile: string;
     ElapsedMs: QWord;

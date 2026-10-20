@@ -313,9 +313,9 @@ end;
 constructor TLzpEncStage.Create(ATarget: TOutStage; const APar: TLzpParams;
                                 AMinCompression: Integer);
 begin
-  if APar.BlockSize <= 0 then raise EUnsupportedMethod.Create('lzp: tamaño de bloque inválido');
+  if APar.BlockSize <= 0 then raise EUnsupportedMethod.Create('lzp: invalid block size');
   if (APar.MinMatchLen < 1) or (APar.SmallestLen < 1) then
-    raise EUnsupportedMethod.Create('lzp: largo mínimo inválido');
+    raise EUnsupportedMethod.Create('lzp: invalid minimum length');
   FPar := APar;
   FMinCompression := AMinCompression;
   SetLength(FIn, FPar.BlockSize);
@@ -383,9 +383,9 @@ end;
 constructor TLzpStage.Create(ASource: TInStage; const APar: TLzpParams);
 begin
   if (APar.HashSizeLog < 1) or (APar.HashSizeLog > 30) then
-    raise EUnsupportedMethod.Create('lzp: tamaño de hash inválido');
-  if APar.BlockSize <= 0 then raise EUnsupportedMethod.Create('lzp: tamaño de bloque inválido');
-  if (APar.MinMatchLen < 1) or (APar.SmallestLen < 1) then raise EUnsupportedMethod.Create('lzp: largo mínimo inválido');
+    raise EUnsupportedMethod.Create('lzp: invalid hash size');
+  if APar.BlockSize <= 0 then raise EUnsupportedMethod.Create('lzp: invalid block size');
+  if (APar.MinMatchLen < 1) or (APar.SmallestLen < 1) then raise EUnsupportedMethod.Create('lzp: invalid minimum length');
   inherited Create(ASource);
   FPar := APar;
 end;
@@ -398,7 +398,7 @@ var
 begin
   if not Source.ReadExactOrEof(@Hdr[0], 4) then Exit(False);
   InSize := LongInt(LongWord(Hdr[0]) or (LongWord(Hdr[1]) shl 8) or (LongWord(Hdr[2]) shl 16) or (LongWord(Hdr[3]) shl 24));
-  if InSize = Low(LongInt) then Corrupt('lzp: tamaño de bloque inválido');
+  if InSize = Low(LongInt) then Corrupt('lzp: invalid block size');
   if InSize < 0 then
   begin
     n := -InSize;
@@ -413,7 +413,7 @@ begin
     if Length(FOut) < FPar.BlockSize then SetLength(FOut, FPar.BlockSize);
     if Length(FHash) = 0 then SetLength(FHash, SizeInt(1) shl FPar.HashSizeLog);
     FLen := LzpDecode(@FIn[0], InSize, @FOut[0], FPar.BlockSize, FPar, FHash);
-    if FLen < 0 then Corrupt('lzp: datos inválidos');
+    if FLen < 0 then Corrupt('lzp: invalid data');
   end;
   FPos := 0;
   Result := True;

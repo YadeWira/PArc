@@ -134,7 +134,7 @@ begin
         Move(buf[0], D.Sectors[got], n);
         Inc(got, n);
       end;
-      if got <> Length(D.Sectors) then Corrupt('bloque de sectores de recuperación incompleto');
+      if got <> Length(D.Sectors) then Corrupt('incomplete recovery sector block');
     finally
       st.Free;
     end;
@@ -151,7 +151,7 @@ begin
         Move(buf[0], D.Crcs[got], n);
         Inc(got, n);
       end;
-      if got <> Length(D.Crcs) then Corrupt('bloque de CRCs de recuperación incompleto');
+      if got <> Length(D.Crcs) then Corrupt('incomplete recovery CRC block');
     finally
       st.Free;
     end;
@@ -187,7 +187,7 @@ begin
       if (D.Info.RsParity < 1) or (D.Info.RsParity > 254) or
          (D.Info.RsStripes <> RsStripeCount((D.Info.ArcSize + D.Info.SectorSize - 1) div D.Info.SectorSize, D.Info.RsParity)) or
          (D.Info.RsStripes * D.Info.RsParity <> D.Info.RecSectors) then
-        Corrupt('registro de recuperación Reed-Solomon con parámetros inválidos');
+        Corrupt('Reed-Solomon recovery record with invalid parameters');
     Result := True;
   finally
     arc.Free;
@@ -514,7 +514,7 @@ begin
       if Int64(k) * D.Info.SectorSize + n > D.Info.ArcSize then
         n := D.Info.ArcSize - Int64(k) * D.Info.SectorSize;
       got := fs.Read(buf[0], n);
-      if got <> n then Corrupt('no se pudo leer la zona protegida');
+      if got <> n then Corrupt('could not read the protected area');
       crc := CalcCRC(PByte(@buf[0]), n);
       if crc <> r.U32 then
       begin
@@ -567,7 +567,7 @@ begin
       n := D.Info.SectorSize;
       if k * D.Info.SectorSize + n > D.Info.ArcSize then n := D.Info.ArcSize - k * D.Info.SectorSize;
       got := fs.Read(buf[0], n);
-      if got <> n then Corrupt('no se pudo leer la zona protegida');
+      if got <> n then Corrupt('could not read the protected area');
       Bad[k] := CalcCRC(PByte(@buf[0]), n) <> r.U32;
       if Bad[k] then
       begin
@@ -657,7 +657,7 @@ begin
           begin
             fs.Position := D.Info.InitPos + idx * SS;
             got := fs.Read(Ptrs[p]^, n);
-            if got <> n then Corrupt('no se pudo leer un sector de la franja');
+            if got <> n then Corrupt('could not read a stripe sector');
           end;
         end;
         for j := 0 to m - 1 do
@@ -667,7 +667,7 @@ begin
           Move(D.Sectors[(j * S + st) * SS], Ptrs[kk + j]^, SS);
         end;
         if not RsRecover(kk, m, Ptrs[0..kk + m - 1], Present[0..kk + m - 1], SS) then
-          Corrupt('Reed-Solomon: no se pudo reconstruir una franja reparable');
+          Corrupt('Reed-Solomon: could not rebuild a repairable stripe');
         for p := 0 to kk - 1 do
         begin
           idx := Int64(p) * S + st;

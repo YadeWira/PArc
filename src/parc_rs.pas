@@ -244,7 +244,7 @@ var
   src: PByte;
 begin
   if not ValidKM(k, m) or (Length(Data) < k) or (Length(Parity) < m) or (SectorSize < 0) then
-    raise ERangeError.CreateFmt('RsEncode: parámetros inválidos (k=%d, m=%d)', [k, m]);
+    raise ERangeError.CreateFmt('RsEncode: invalid parameters (k=%d, m=%d)', [k, m]);
   BuildCoefs(k, m, C);
   chunk := ChunkFor(m, SectorSize);
   off := 0;

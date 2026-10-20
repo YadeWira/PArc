@@ -1728,7 +1728,7 @@ begin
   if not StartSubAllocator(LongWord(AMemSize)) then
   begin
     FAllocFailed := True;
-    raise EOutOfMemory.Create('ppmd: no hay memoria para el modelo');
+    raise EOutOfMemory.Create('ppmd: not enough memory for the model');
   end;
 end;
 
@@ -1748,10 +1748,10 @@ begin
   if (AOrder < MIN_O) or (AOrder > MAX_O) then
     Corrupt('ppmd: orden fuera de rango');
   if AMemSize < MIN_MEM then
-    Corrupt('ppmd: memoria del modelo insuficiente');
+    Corrupt('ppmd: insufficient model memory');
   // El heap emula direcciones de 32 bits: el modelo tiene que caber en un offset UInt32
   if AMemSize > $FFFFFFFF - 4096 then
-    Corrupt('ppmd: memoria del modelo demasiado grande');
+    Corrupt('ppmd: model memory too large');
   { El motor (que puede fallar al reservar la memoria del modelo) se crea ANTES de adoptar la
     fuente, por el mismo motivo: no es dueño de ASource, así que si falla no hay nada que liberar. }
   FEngine := TPpmdEngine.Create(ASource, AOrder, AMemSize, AMRMethod, AChunk);
@@ -2088,9 +2088,9 @@ begin
   if (AOrder < MIN_O) or (AOrder > MAX_O) then
     Corrupt('ppmd: orden fuera de rango');
   if AMemSize < MIN_MEM then
-    Corrupt('ppmd: memoria del modelo insuficiente');
+    Corrupt('ppmd: insufficient model memory');
   if AMemSize > $FFFFFFFF - 4096 then
-    Corrupt('ppmd: memoria del modelo demasiado grande');
+    Corrupt('ppmd: model memory too large');
   FOrder := AOrder; FMemSize := AMemSize; FMRMethod := AMRMethod;
   FEngine := TPpmdEngine.Create(nil, AOrder, AMemSize, AMRMethod, AChunk);
   TPpmdEngine(FEngine).SetEncSink(@StageSink);

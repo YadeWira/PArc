@@ -7,8 +7,8 @@ PARC=${PARC_BIN:-$ROOT/build/linux64/parc}
 W=${FIXES_WORK:-/mnt/IA_LAB/agentes/PArc/fixes}
 rm -rf -- "${W:?}"; mkdir -p "$W" && cd "$W" || exit 2
 fail=0
-check() { if eval "$2"; then printf '  ok    %s\n' "$1"; else printf '  FALLA %s\n' "$1"; fail=$((fail+1)); fi; }
-names() { "$PARC" l "$1" 2>/dev/null | awk 'NR>2 && !/^---/ && !/archivo\(s\)/ {print $5}' | sort | tr '\n' ' '; }
+check() { if eval "$2"; then printf '  ok    %s\n' "$1"; else printf '  FAIL %s\n' "$1"; fail=$((fail+1)); fi; }
+names() { "$PARC" l "$1" 2>/dev/null | awk 'NR>2 && !/^---/ && !/file\(s\)/ {print $5}' | sort | tr '\n' ' '; }
 
 # P1: máscaras
 mkdir -p m/src/sub && echo a > m/src/a.txt && echo c > m/src/sub/c.txt && echo p > m/src/x.pas && touch m/makefile
@@ -40,7 +40,7 @@ mkdir -p s/sub && echo hola > s/real.txt && ln -s real.txt s/rel && ln -s sub s/
   && ln -s /etc/passwd s/abs && ln -s noexiste s/roto
 timeout 60 "$PARC" a l.parc s --no-progress >/dev/null 2>&1
 check ".parc: guarda los enlaces sin recorrerlos" '[ "$("$PARC" l l.parc | grep -c "<LINK>")" = 5 ]'
-check "t con enlaces"                      '"$PARC" t l.parc --no-progress | tail -1 | grep -q "Errores: 0"'
+check "t con enlaces"                      '"$PARC" t l.parc --no-progress | tail -1 | grep -q "Errors: 0"'
 rm -rf o; "$PARC" x l.parc -dpo --no-progress >/dev/null 2>&1
 check "x: recrea los enlaces"              '[ "$(readlink o/s/rel)" = real.txt ] && [ "$(readlink o/s/dir)" = sub ] && [ "$(cat o/s/rel)" = hola ]'
 check "x: no crea el enlace absoluto"      '[ ! -L o/s/abs ]'
@@ -60,7 +60,7 @@ if sudo -n true 2>/dev/null; then
   out=$("$PARC" x full.parc -o+ -dpfull/mnt/dest --no-progress 2>&1); code=$?
   left=$(find full/mnt -name grande.bin | wc -l)
   sudo -n umount full/mnt
-  check "disco lleno: error con el nombre, sin dejar el parcial" '[ $code = 4 ] && echo "$out" | grep -q "no se pudo escribir .*grande.bin" && [ "$left" = 0 ]'
+  check "disco lleno: error con el nombre, sin dejar el parcial" '[ $code = 4 ] && echo "$out" | grep -q "could not write .*grande.bin" && [ "$left" = 0 ]'
   if [ -x /sbin/mkfs.fat ]; then
     mkdir -p fat/in fat/mnt && truncate -s 4400000000 fat/in/grande.bin && echo a > fat/in/a.txt
     "$PARC" a fat.parc fat/in -m1 --no-progress >/dev/null 2>&1; rm -f fat/in/grande.bin
@@ -73,5 +73,5 @@ if sudo -n true 2>/dev/null; then
   fi
 fi
 
-echo "== correcciones: $fail fallas"
+echo "== fixes: $fail failures"
 [ $fail -eq 0 ]

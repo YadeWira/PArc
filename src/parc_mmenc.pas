@@ -86,7 +86,7 @@ var
   isF, ok: Boolean;
 begin
   if (Length(Params) = 0) or (Params[0] <> 'mm') then
-    raise EMmEncParams.Create('mm: no es el método mm');
+    raise EMmEncParams.Create('mm: not the method mm');
   // MM_METHOD::MM_METHOD
   Result.Mode := 9;
   Result.SkipHeader := 0;
@@ -110,7 +110,7 @@ begin
       else
         ok := FaParseInt(Copy(p, 2, MaxInt), Result.Reorder);
       end;
-      if not ok then raise EMmEncParams.CreateFmt('mm: parámetro inválido "%s"', [p]);
+      if not ok then raise EMmEncParams.CreateFmt('mm: invalid parameter "%s"', [p]);
       Continue;
     end;
     // sin nombre: c*w o c*wf
@@ -121,7 +121,7 @@ begin
       Result.WordSize := b;
     end
     else
-      raise EMmEncParams.CreateFmt('mm: parámetro inválido "%s"', [p]);
+      raise EMmEncParams.CreateFmt('mm: invalid parameter "%s"', [p]);
   end;
 end;
 
@@ -148,7 +148,7 @@ begin
   if APar.Reorder <> 0 then
     raise EMmEncParams.Create('mm: reorder no lo decodifica FreeArc');
   if (APar.NumChan < 0) or (APar.WordSize < 0) or (APar.Offset < 0) then
-    raise EMmEncParams.Create('mm: parámetros inválidos');
+    raise EMmEncParams.Create('mm: invalid parameters');
   FPar := APar;
   inherited Create(ATarget);
 end;

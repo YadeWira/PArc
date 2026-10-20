@@ -434,7 +434,7 @@ begin
     p^.blockSize := MfGetBlockSize(p, historySize);
     if p^.blockSize = 0 then raise ELzmaEncParams.Create('lzma: diccionario demasiado grande');
     {$IFDEF CPU32}
-    if p^.blockSize > LongWord(High(SizeInt)) then raise EOutOfMemory.Create('lzma: sin memoria para la ventana');
+    if p^.blockSize > LongWord(High(SizeInt)) then raise EOutOfMemory.Create('lzma: not enough memory for the window');
     {$ENDIF}
     p^.bufBase := GetMem(p^.blockSize);
   end;
@@ -461,7 +461,7 @@ begin
   // no exigir un bloque contiguo enorme en 32 bits.
   newSize := (numSons + $F) and not QWord($F);
   if (hashSizeSum * 4 > QWord(High(SizeInt))) or (newSize * 4 > QWord(High(SizeInt))) then
-    raise EOutOfMemory.Create('lzma: sin memoria para el match finder');
+    raise EOutOfMemory.Create('lzma: not enough memory for the match finder');
   p^.hash := GetMem(SizeInt(hashSizeSum * 4));
   p^.son := GetMem(SizeInt(newSize * 4));
 end;
@@ -1553,10 +1553,10 @@ begin
   mt^.started := True;
   InterLockedIncrement(LzmaMtStarts);
   mt^.hashSync.thread := BeginThread(@MtHashThreadFunc, mt, tid);
-  if mt^.hashSync.thread = TThreadID(0) then raise Exception.Create('lzma: no se pudo crear un hilo');
+  if mt^.hashSync.thread = TThreadID(0) then raise Exception.Create('lzma: could not create a thread');
   mt^.hashSync.created := True;
   mt^.btSync.thread := BeginThread(@MtBtThreadFunc, mt, tid);
-  if mt^.btSync.thread = TThreadID(0) then raise Exception.Create('lzma: no se pudo crear un hilo');
+  if mt^.btSync.thread = TThreadID(0) then raise Exception.Create('lzma: could not create a thread');
   mt^.btSync.created := True;
 end;
 
@@ -3442,7 +3442,7 @@ var
 
 begin
   if (Length(Params) = 0) or (Params[0] <> 'lzma') then
-    raise ELzmaEncParams.Create('no es un método lzma');
+    raise ELzmaEncParams.Create('not an lzma method');
   R := DefaultLzmaEncParams;
   mfSet := False;
   for k := 1 to High(Params) do
@@ -3505,7 +3505,7 @@ begin
     else if p = 'ultra' then Profile(1, mfBT4, 128, 128)
     else ok := Unnamed;
     if not ok and not optional then
-      raise ELzmaEncParams.CreateFmt('parámetro lzma inválido: "%s"', [Params[k]]);
+      raise ELzmaEncParams.CreateFmt('invalid lzma parameter: "%s"', [Params[k]]);
   end;
   if not mfSet then R.MatchFinder := mfHT4;   // match finder por defecto
   Result := R;
@@ -3518,7 +3518,7 @@ begin
   if P.DictSize = 0 then
     raise ELzmaEncParams.Create('lzma: diccionario nulo');
   if (P.Algorithm < 0) or (P.MatchFinderCycles < 0) or (P.NumThreads < 0) then
-    raise ELzmaEncParams.Create('lzma: parámetros negativos');
+    raise ELzmaEncParams.Create('lzma: negative parameters');
   if (Ord(P.MatchFinder) < Ord(Low(TLzmaMatchFinder))) or (Ord(P.MatchFinder) > Ord(High(TLzmaMatchFinder))) then
     raise ELzmaEncParams.Create('lzma: match finder desconocido');
 end;
@@ -3596,7 +3596,7 @@ begin
     Inc(Result, n);
   end;
   if (Result = 0) and not FEof then
-    raise Exception.Create('lzma: el match finder se quedó sin entrada (error interno)');
+    raise Exception.Create('lzma: match finder ran out of input (internal error)');
 end;
 
 procedure TLzmaEncStage.WriteOut(Buf: PByte; Size: SizeInt);
@@ -3758,7 +3758,7 @@ var
   e: TLzmaEnc;
   dummy: Byte;
 begin
-  if SrcLen < 0 then raise ELzmaEncParams.Create('lzma: tamaño negativo');
+  if SrcLen < 0 then raise ELzmaEncParams.Create('lzma: negative size');
   if Src = nil then Src := @dummy;
   o := TMemOut.Create;
   e := nil;
@@ -3766,7 +3766,7 @@ begin
     SetLength(o.Data, SrcLen div 2 + 4096);
     e := TLzmaEnc.Create(P, WriteEndMark, nil, @o.Write, Src, QWord(SrcLen));
     while not e.Finished do e.CodeOneBlock;
-    if e.nowPos64 <> QWord(SrcLen) then raise Exception.Create('lzma: error interno (tamaño)');
+    if e.nowPos64 <> QWord(SrcLen) then raise Exception.Create('lzma: internal error (size)');
     Result := Copy(o.Data, 0, o.Len);
   finally
     e.Free;

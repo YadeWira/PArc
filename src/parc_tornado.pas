@@ -396,7 +396,7 @@ begin
   maxbits := 0;
   for i := p2 downto b + 2 do
   begin
-    if FNodes[i].Bits >= 31 then Corrupt('tor: árbol de huffman demasiado profundo');
+    if FNodes[i].Bits >= 31 then Corrupt('tor: huffman tree too deep');
     FNodes[FNodes[i].Left].Bits := FNodes[i].Bits + 1;
     FNodes[FNodes[i].Left].Code := FNodes[i].Code;
     FNodes[FNodes[i].Right].Bits := FNodes[i].Bits + 1;
@@ -406,7 +406,7 @@ begin
     if FNodes[i].Bits > maxbits then maxbits := FNodes[i].Bits;
   // Un stream válido no pasa de ~23 bits (contadores acotados por HUFBLOCKSIZE y el rescale);
   // el tope limita la tabla index[] a 128MB con datos corruptos
-  if maxbits > 26 then Corrupt('tor: árbol de huffman demasiado profundo');
+  if maxbits > 26 then Corrupt('tor: huffman tree too deep');
   FHufMaxBits := maxbits;
   if maxbits > FHufMaxSoFar then
   begin
@@ -474,7 +474,7 @@ begin
   // El compresor emite EOB cada HUFBLOCKSIZE símbolos; sin este límite un stream corrupto
   // podría desbordar los contadores
   Inc(FHufBlock);
-  if FHufBlock > 2 * HUFBLOCKSIZE then Corrupt('tor: bloque huffman sin EOB');
+  if FHufBlock > 2 * HUFBLOCKSIZE then Corrupt('tor: huffman block without EOB');
   Result := x;
 end;
 
@@ -513,7 +513,7 @@ function TTornadoStage.ArithGetCount(Bits: Integer): LongWord;
 begin
   FRange := FRange shr Bits;
   Result := FCode div FRange;
-  if Result >= (LongWord(1) shl Bits) then Corrupt('tor: error en el decodificador aritmético');
+  if Result >= (LongWord(1) shl Bits) then Corrupt('tor: arithmetic decoder error');
 end;
 
 { TRangeDecoder::Update }
@@ -538,7 +538,7 @@ begin
   // GetCount(RANGE_BITS) y Update escritos a mano (FPC no expande inline dentro de inline)
   FRange := FRange shr RANGE_BITS;
   count := FCode div FRange;
-  if count >= RANGE then Corrupt('tor: error en el decodificador aritmético');
+  if count >= RANGE then Corrupt('tor: arithmetic decoder error');
   s := FAIndex[count div (RANGE div INDEXES)];
   while FACum[s] + FACnt[s] - 1 < count do Inc(s);   // termina: sum(cnt) = RANGE > count
   FCode := FCode - FACum[s] * FRange;
@@ -565,7 +565,7 @@ var
 begin
   if n = 0 then
   begin
-    if FCode >= FRange then Corrupt('tor: error en el decodificador aritmético');
+    if FCode >= FRange then Corrupt('tor: arithmetic decoder error');
     Exit(0);
   end;
   if n <= 24 then
@@ -591,13 +591,13 @@ var
   s, i: Integer;
 begin
   FInit := True;
-  if not Source.ReadExactOrEof(@hdr[0], 2) then Corrupt('tor: stream vacío');
+  if not Source.ReadExactOrEof(@hdr[0], 2) then Corrupt('tor: empty stream');
   bs := Source.ReadU32;
   FMethod := hdr[0];
   FMinLen := hdr[1];
   if (FMethod < 1) or (FMethod > 4) then Corrupt('tor: codificador desconocido');
   // _bufsize es int en el C; negativo no tiene sentido
-  if bs > LongWord(High(LongInt)) then Corrupt('tor: tamaño de buffer inválido');
+  if bs > LongWord(High(LongInt)) then Corrupt('tor: invalid buffer size');
   FHdrBufSize := bs;
   // tornado_decompressor_outbuf_size
   if FAllAtOnce then FBufSize := SizeInt(bs) + SizeInt(bs div 8) + 512
@@ -661,7 +661,7 @@ begin
   end;
   // EOB no llega acá con huffman; con aritmético y los códigos de reserva el C indexaría las
   // tablas de distancias fuera de rango
-  if x >= EOB_CODE then Corrupt('tor: código inválido');
+  if x >= EOB_CODE then Corrupt('tor: invalid code');
   // getlen
   lcode := x mod LEN_CODES;
   if FMethod = 4 then l := lc2_base[lcode] + ArithGetBits(extra_lbits2[lcode])
@@ -1041,7 +1041,7 @@ begin
     // Validaciones del C, más len=0 y dist=0 (el C copiaría basura o daría la vuelta a len)
     if (len = 0) or (dist = 0) or (SizeInt(dist) > FBufSize) or (Int64(len) > 2 * FHdrBufSize) or
        ((QWord(o) + FOffset < dist) and not FOffsetOverflow) then
-      Corrupt('tor: match inválido');
+      Corrupt('tor: invalid match');
     // Match lento: origen antes del inicio del buffer, que da la vuelta, o que cruza write_end
     if o >= SizeInt(dist) then p := o - SizeInt(dist) else p := o - SizeInt(dist) + FBufSize;
     FMatchLeft := len;
@@ -1070,8 +1070,8 @@ begin
   begin
     // Tabla diffeada: len = largo de fila, dist = cantidad de filas
     Dec(len, IMPOSSIBLE_LEN);
-    if (len = 0) or (QWord(dist) * len > QWord(2 * FHdrBufSize)) then Corrupt('tor: tabla inválida');
-    if len > MAX_TABLE_ROW then Corrupt('tor: tabla inválida');
+    if (len = 0) or (QWord(dist) * len > QWord(2 * FHdrBufSize)) then Corrupt('tor: invalid table');
+    if len > MAX_TABLE_ROW then Corrupt('tor: invalid table');
     TabAdd(len, o, dist);
     if (FTabCount = FTabCap) and not FAllAtOnce then
     begin

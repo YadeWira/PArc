@@ -1,7 +1,7 @@
 { DICT (codificador): reemplazo de palabras frecuentes por códigos de 1 o 2 bytes. Port de
   Compression/Dict/dict.cpp (DictEncode, phase1..phase7) y C_Dict.cpp (dict_compress) de
   FreeArc 0.67 (Bulat Ziganshin). El formato y el decodificador están en parc_dict.
-  Stream: bloques [Int32 LE][datos] de a BlockSize; tamaño negativo = bloque guardado
+  Stream: bloques [Int32 LE][datos] de a BlockSize; negative size = bloque guardado
   (DictEncode falló o no llegó a MinCompression).
   Diferencias con el C (a propósito):
    - los qsort del C no son estables y sus comparadores devuelven 0 en empates: acá se ordena
@@ -903,7 +903,7 @@ begin
   FPar := ParseDictParams(Params);
   // El encabezado del bloque es un int32 (dict_compress: int WrSize = -InSize)
   if (FPar.BlockSize <= 0) or (FPar.BlockSize > High(LongInt) - 200000) then
-    raise EUnsupportedMethod.Create('dict: tamaño de bloque inválido');
+    raise EUnsupportedMethod.Create('dict: invalid block size');
   SetLength(FIn, Min(FPar.BlockSize, SizeInt(1) shl 20));
   FInLen := 0;
   FillChar(FCharCounts, SizeOf(FCharCounts), 0);

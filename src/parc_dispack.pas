@@ -980,11 +980,11 @@ begin
   Result := False;
   if not FStarted then
   begin
-    if FLen - FPos < 4 then raise EArcCorrupt.Create('dispack: falta el tamaño de bloque');
+    if FLen - FPos < 4 then raise EArcCorrupt.Create('dispack: missing block size');
     FChunkSize := Load32LE(@FData[FPos]);
     Inc(FPos, 4);
     if (FChunkSize = 0) or (FChunkSize > FBlockSize) then
-      raise EArcCorrupt.Create('dispack: tamaño de bloque inválido');
+      raise EArcCorrupt.Create('dispack: invalid block size');
     FStarted := True;
   end;
   if FPos >= FLen then Exit(False);
@@ -996,7 +996,7 @@ begin
   begin
     if LongWord(Tag) = DISPACK_TAG_DATA then
     begin
-      if FLen - FPos < 4 then raise EArcCorrupt.Create('dispack: falta el largo');
+      if FLen - FPos < 4 then raise EArcCorrupt.Create('dispack: missing length');
       Len := Integer(Load32LE(@FData[FPos]));
       Inc(FPos, 4);
     end
@@ -1028,11 +1028,11 @@ begin
     if (OutSize < 0) or (InSize < 0) or
        (OutSize > Integer(FBlockSize)) or
        (InSize > Integer(FBlockSize + FBlockSize div 4 + 1024)) then
-      raise EArcCorrupt.Create('dispack: tamaño inválido');
+      raise EArcCorrupt.Create('dispack: invalid size');
     if FPos + InSize > FLen then raise EArcCorrupt.Create('dispack: tramo corto');
     SetLength(FOut, OutSize);
     if not DisPackUnFilter(@FData[FPos], InSize, @FOut[0], OutSize, FBase) then
-      raise EArcCorrupt.Create('dispack: no se pudo desfiltrar');
+      raise EArcCorrupt.Create('dispack: could not unfilter');
     Inc(FPos, InSize);
     Inc(FBase, LongWord(OutSize));
   end

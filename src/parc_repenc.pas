@@ -155,7 +155,7 @@ var
 
   procedure Bad;
   begin
-    raise ERepEncParams.CreateFmt('rep: parámetro inválido "%s"', [p]);
+    raise ERepEncParams.CreateFmt('rep: invalid parameter "%s"', [p]);
   end;
 
   function Int(const S: string): LongInt;
@@ -167,13 +167,13 @@ var
   begin
     if not FaParseMem(S, m) then Bad;
     if m > QWord(High(LongInt)) then
-      raise ERepEncParams.CreateFmt('rep: "%s" es demasiado grande (máx. 2 GB - 1)', [p]);
+      raise ERepEncParams.CreateFmt('rep: "%s" is too large (max. 2 GB - 1)', [p]);
     Result := LongInt(m);
   end;
 
 begin
   if (Length(Params) = 0) or (Params[0] <> 'rep') then
-    raise ERepEncParams.Create('rep: no es el método rep');
+    raise ERepEncParams.Create('rep: not the method rep');
   Result := DefaultRepEncParams;
   // parse_REP (C_REP.cpp)
   for k := 1 to High(Params) do
@@ -226,13 +226,13 @@ var
 begin
   L := 0;
   HashSize := 0;
-  if P.BlockSize <= 0 then raise ERepEncParams.Create('rep: tamaño de bloque inválido');
+  if P.BlockSize <= 0 then raise ERepEncParams.Create('rep: invalid block size');
   if (P.MinMatchLen < 1) or (P.SmallestLen < 1) then
-    raise ERepEncParams.Create('rep: largo mínimo de match inválido');
-  if P.ChunkSize < 0 then raise ERepEncParams.Create('rep: ChunkSize inválido');
-  if (P.HashBits < 0) or (P.HashBits > 30) then raise ERepEncParams.Create('rep: HashBits inválido (0..30)');
-  if P.Barrier < 0 then raise ERepEncParams.Create('rep: Barrier inválido');
-  if (P.Threads < 1) or (P.Threads > 4096) then raise ERepEncParams.Create('rep: cantidad de hilos inválida');
+    raise ERepEncParams.Create('rep: invalid minimum match length');
+  if P.ChunkSize < 0 then raise ERepEncParams.Create('rep: invalid ChunkSize');
+  if (P.HashBits < 0) or (P.HashBits > 30) then raise ERepEncParams.Create('rep: invalid HashBits (0..30)');
+  if P.Barrier < 0 then raise ERepEncParams.Create('rep: invalid Barrier');
+  if (P.Threads < 1) or (P.Threads > 4096) then raise ERepEncParams.Create('rep: invalid thread count');
   // rep_compress: SmallestLen se limita a MinMatchLen; CalcHashSize
   Small := P.SmallestLen;
   if Small > P.MinMatchLen then Small := P.MinMatchLen;
@@ -242,9 +242,9 @@ begin
   else L := LongInt(RoundDownPow2(QWord(Len - 1)) div 2);
   // L=0 (l1/l2 sin c) divide por cero en el C; con L > 2^28 desborda 4*L en HTBLOCK
   if (L < 1) or (L > 1 shl 28) then
-    raise ERepEncParams.CreateFmt('rep: tamaño de bloque de hash L=%d inválido (l>=3 o c>=1)', [L]);
+    raise ERepEncParams.CreateFmt('rep: invalid hash block size L=%d (l>=3 or c>=1)', [L]);
   // Con BlockSize <= L el C se cuelga (Get() sin trabajos pendientes)
-  if P.BlockSize <= L then raise ERepEncParams.Create('rep: el bloque tiene que ser mayor que L');
+  if P.BlockSize <= L then raise ERepEncParams.Create('rep: block must be larger than L');
   if P.HashBits > 0 then HashSize := LongInt(1) shl P.HashBits
   else
   begin
@@ -253,7 +253,7 @@ begin
     HashSize := LongInt(q);
   end;
   // Con HashSize=0 el C indexa hasharr[hash & -1]: fuera del arreglo
-  if HashSize < 1 then raise ERepEncParams.Create('rep: el bloque es demasiado chico para el hash');
+  if HashSize < 1 then raise ERepEncParams.Create('rep: block too small for the hash');
 end;
 
 function RepEncMemory(const P: TRepEncParams): Int64;

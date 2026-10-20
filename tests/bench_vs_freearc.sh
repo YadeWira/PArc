@@ -45,7 +45,7 @@ for corpus in "$@"; do
     if [ "$ps" -gt 0 ] && [ "$as" -gt 0 ]; then
       delta=$(awk "BEGIN{printf \"%+.2f%%\", 100*($ps-$as)/$as}")
     else
-      delta="FALLA"
+      delta="FAIL"
     fi
     tp=$(awk "BEGIN{printf \"%.2f\", ($t1-$t0)/1e9}")
     ta=$(awk "BEGIN{printf \"%.2f\", ($t2-$t1)/1e9}")

@@ -1444,7 +1444,7 @@ begin
     raise EUnsupportedMethod.Create('modo de cifrado no soportado: ' + mode);
   if Result.KeySize = 0 then Result.KeySize := CipherMaxKeySize(name);
   if (Result.KeySize > CipherMaxKeySize(name)) or (Result.KeySize < 1) then
-    raise EUnsupportedMethod.Create('tamaño de clave inválido en ' + Params[0]);
+    raise EUnsupportedMethod.Create('invalid key size in ' + Params[0]);
   Result.IVSize := CipherBlockSize(name);
   for k := 1 to High(Params) do
   begin
@@ -1460,7 +1460,7 @@ begin
       'n': Result.NumIterations := StrToIntDef(Copy(p, 2, MaxInt), 1000);
       'r': Result.Rounds := StrToIntDef(Copy(p, 2, MaxInt), 0);
     else
-      raise EUnsupportedMethod.Create('parámetro de cifrado desconocido: ' + p);
+      raise EUnsupportedMethod.Create('unknown encryption parameter: ' + p);
     end;
   end;
 end;
@@ -1607,11 +1607,11 @@ begin
   if not IsCipherName(APar.Cipher) then
     raise EUnsupportedMethod.Create('cifrado no soportado: ' + APar.Cipher);
   if APar.KeyHex = '' then
-    raise EUnsupportedMethod.Create('cifrado sin clave: falta derivarla del password');
+    raise EUnsupportedMethod.Create('encryption without key: it must be derived from the password');
   if (APar.Mode <> 'ctr') and (APar.Mode <> 'cfb') then
     raise EUnsupportedMethod.Create('modo de cifrado no soportado: ' + APar.Mode);
   if not CipherKeySizeValid(APar.Cipher, APar.KeySize) then
-    raise EUnsupportedMethod.Create('tamaño de clave inválido para ' + APar.Cipher);
+    raise EUnsupportedMethod.Create('invalid key size for ' + APar.Cipher);
   inherited Create(ASource);
   FPar := APar;
   FBlockSize := CipherBlockSize(APar.Cipher);
@@ -1621,14 +1621,14 @@ begin
   else
     n := DecodeHexBuggy(APar.KeyHex, FKey);
   if n <> APar.KeySize then
-    Corrupt('cifrado: clave con largo inválido');
+    Corrupt('encryption: invalid key length');
   SetLength(iv, APar.IVSize);
   FillChar(iv[0], APar.IVSize, 0);
   if APar.IVHex <> '' then
   begin
     if APar.Fixed then n := DecodeHex(APar.IVHex, iv)
     else n := DecodeHexBuggy(APar.IVHex, iv);
-    if n <> APar.IVSize then Corrupt('cifrado: IV con largo inválido');
+    if n <> APar.IVSize then Corrupt('encryption: invalid IV length');
   end;
   Move(iv[0], FCounter[0], APar.IVSize);
   Move(iv[0], FIV[0], APar.IVSize);
@@ -1651,7 +1651,7 @@ begin
   else if APar.Cipher = 'twofish' then
     TwofishSetup(@FKey[0], APar.KeySize)
   else
-    raise EUnsupportedMethod.Create('cifrado todavía no implementado: ' + APar.Cipher);
+    raise EUnsupportedMethod.Create('encryption not implemented yet: ' + APar.Cipher);
   ModeStart;
 end;
 
@@ -1765,10 +1765,10 @@ begin
     if (Result <= 0) and FSrcEof then
     begin
       // fin del bloque, ya entregado todo: lo retenido tiene que ser exactamente la etiqueta
-      if FHoldLen <> MAC_TAG_LEN then Corrupt('cifrado: bloque sin etiqueta de autenticación');
+      if FHoldLen <> MAC_TAG_LEN then Corrupt('encryption: block without authentication tag');
       MacTag(PMacState(FMac), Tag);
       if CompareByte(Tag[0], FHold[0], MAC_TAG_LEN) <> 0 then
-        Corrupt('cifrado: la autenticación falló (datos alterados)');
+        Corrupt('encryption: authentication failed (modified data)');
       FHoldLen := 0;
       FMacDone := True;
       Exit(0);
@@ -1889,7 +1889,7 @@ var
   h: string;
 begin
   if (APar.KeySize < 1) or (APar.IVSize < 1) or not CipherKeySizeValid(APar.Cipher, APar.KeySize) then
-    Corrupt('parámetros de cifrado inválidos');
+    Corrupt('invalid encryption parameters');
   if APar.KeyHex = '' then Corrupt('el cifrado del encoder necesita :k');
   FPar := APar;
   SetLength(FKey, APar.KeySize);
@@ -1900,7 +1900,7 @@ begin
   if Length(h) div 2 < APar.KeySize then Corrupt('clave :k demasiado corta');
   if APar.Fixed then
   begin
-    if DecodeHex(h, FKey) <> APar.KeySize then Corrupt('clave :k inválida');
+    if DecodeHex(h, FKey) <> APar.KeySize then Corrupt('invalid :k key');
   end
   else
     for i := 0 to APar.KeySize - 1 do
@@ -1917,7 +1917,7 @@ begin
   else if APar.Cipher = 'twofish'  then TwofishSetup(@FKey[0], APar.KeySize)
   else
     Corrupt('cifrado no soportado: ' + APar.Cipher);
-  if Length(APar.IVHex) < APar.IVSize * 2 then Corrupt('falta el :i');
+  if Length(APar.IVHex) < APar.IVSize * 2 then Corrupt('missing :i');
   for i := 0 to APar.IVSize - 1 do
     if APar.Fixed then
       FIV[i] := Byte(StrToInt('$' + Copy(APar.IVHex, i * 2 + 1, 2)))

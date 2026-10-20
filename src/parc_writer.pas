@@ -143,23 +143,23 @@ var
 begin
   ArcSize := S.Position;
   if not RecoveryPlan(ArcSize, Spec, SectorSize, RecSectors, SectorsSize, CrcsSize) then   // .parc: Reed-Solomon
-    raise Exception.CreateFmt('especificación de -rr inválida: "%s"', [Spec]);
+    raise Exception.CreateFmt('invalid -rr specification: "%s"', [Spec]);
   PosSectors := S.Position;
   PosCrcs := PosSectors + SectorsSize + StoringDescriptorLen(True, RECOVERY_BLOCK, SectorsSize);
   if not RecoveryBuild(S, ArcSize, 0, PosCrcs, Spec, Sectors, Crcs, Info) then
-    raise Exception.Create('no se pudo construir el registro de recuperación');
+    raise Exception.Create('could not build the recovery record');
   S.Position := PosSectors;   // RecoveryBuild lee lo ya escrito
   // Solo el tamaño de los sectores decide dónde cae el bloque de CRCs; ese bloque lleva además
   // el addinfo (versión, tamaños) delante de los CRCs, así que mide más que CrcsSize
   if Length(Sectors) <> SectorsSize then
-    raise Exception.CreateFmt('registro de recuperación: %d bytes de sectores en vez de %d',
+    raise Exception.CreateFmt('recovery record: %d sector bytes instead of %d',
       [Length(Sectors), SectorsSize]);
   n := Length(Control);
   SetLength(Control, n + 2);
   B := WriteControlBlock(S, True, RECOVERY_BLOCK, 'storing', Sectors);
   Control[n] := B;
   B := WriteControlBlock(S, True, RECOVERY_BLOCK, 'storing', Crcs);
-  if B.Pos <> PosCrcs then raise Exception.Create('registro de recuperación: posición del bloque de CRCs');
+  if B.Pos <> PosCrcs then raise Exception.Create('recovery record: CRC block position');
   Control[n + 1] := B;
 end;
 
@@ -535,7 +535,7 @@ begin
           end;
           CurNext := SrcIndex + 1;
           if (Crc xor CRC_INIT) <> SrcArc.Files[SrcIndex].Crc then
-            raise EArcCorrupt.CreateFmt('CRC incorrecto en %s del archivo original: no se reempaqueta un archivo dañado', [StoredName]);
+            raise EArcCorrupt.CreateFmt('wrong CRC in %s of the original archive: a damaged archive is not repacked', [StoredName]);
         end;
         Inc(Stats.Files);
         Inc(Stats.Bytes, Size);
@@ -560,7 +560,7 @@ begin
           F.Free;
         end;
         if Size <> Entries[n].Meta.Size then
-          Log(Format('Aviso: %s cambió de tamaño mientras se leía (%d -> %d bytes)',
+          Log(Format('Warning: %s changed size while being read (%d -> %d bytes)',
             [Entries[n].DiskPath, Entries[n].Meta.Size, Size]));
         Inc(Stats.Files);
         Inc(Stats.Bytes, Size);
@@ -595,10 +595,10 @@ var
 begin
   Result := Default(TWriteStats);
   if not EncoderAvailable(Opt.DirMethod) then
-    raise EUnsupportedEncoder.CreateFmt('todavía no se puede comprimir con "%s"', [Opt.DirMethod]);
+    raise EUnsupportedEncoder.CreateFmt('cannot compress with "%s" yet', [Opt.DirMethod]);
   for i := 0 to High(Groups) do
     if (Groups[i].CopyFrom = nil) and not EncoderAvailable(WithoutCipher(Groups[i].Method)) then
-      raise EUnsupportedEncoder.CreateFmt('todavía no se puede comprimir con "%s"', [Groups[i].Method]);
+      raise EUnsupportedEncoder.CreateFmt('cannot compress with "%s" yet', [Groups[i].Method]);
 
   // Total para el progreso: bytes a comprimir, más los comprimidos de los bloques que se copian
   Total := 0;
@@ -611,7 +611,7 @@ begin
 
   Tmp := FileName + '.tmp';
   Ok := False;
-  ProgressBegin('Comprimiendo', Total);
+  ProgressBegin('Compressing', Total);
   if Opt.VolumeSize > 0 then S := TVolumeStream.CreateWrite(Tmp, Opt.VolumeSize)
   else S := TFileStream.Create(FsPath(Tmp), fmCreate);
   try
@@ -690,24 +690,24 @@ begin
     // FileName.tmp.001... -> FileName.001...; fuera la versión anterior (suelta o en
     // volúmenes), incluidos los volúmenes que sobren si ahora son menos
     if FileExists(FsPath(FileName)) and not DeleteFile(FsPath(FileName)) then
-      raise EFCreateError.CreateFmt('no se pudo reemplazar %s (¿está abierto?)', [FileName]);
+      raise EFCreateError.CreateFmt('could not replace %s (is it open?)', [FileName]);
     i := 1;
     while FileExists(FsPath(VolumeName(Tmp, i))) do
     begin
       if FileExists(FsPath(VolumeName(FileName, i))) and not DeleteFile(FsPath(VolumeName(FileName, i))) then
-        raise EFCreateError.CreateFmt('no se pudo reemplazar %s (¿está abierto?); el nuevo quedó en %s',
+        raise EFCreateError.CreateFmt('could not replace %s (is it open?); the new file was left at %s',
           [VolumeName(FileName, i), VolumeName(Tmp, i)]);
       if not RenameFile(FsPath(VolumeName(Tmp, i)), FsPath(VolumeName(FileName, i))) then
-        raise EFCreateError.CreateFmt('no se pudo renombrar %s a %s', [VolumeName(Tmp, i), VolumeName(FileName, i)]);
+        raise EFCreateError.CreateFmt('could not rename %s to %s', [VolumeName(Tmp, i), VolumeName(FileName, i)]);
       Inc(i);
     end;
     DeleteVolumesFrom(FileName, i);
     Exit;
   end;
   if FileExists(FsPath(FileName)) and not DeleteFile(FsPath(FileName)) then
-    raise EFCreateError.CreateFmt('no se pudo reemplazar %s (¿está abierto?); el nuevo quedó en %s', [FileName, Tmp]);
+    raise EFCreateError.CreateFmt('could not replace %s (is it open?); the new file was left at %s', [FileName, Tmp]);
   if not RenameFile(FsPath(Tmp), FsPath(FileName)) then
-    raise EFCreateError.CreateFmt('no se pudo renombrar %s a %s', [Tmp, FileName]);
+    raise EFCreateError.CreateFmt('could not rename %s to %s', [Tmp, FileName]);
   DeleteVolumesFrom(FileName, 1);   // si antes estaba en volúmenes
 end;
 

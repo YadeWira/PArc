@@ -31,57 +31,57 @@ begin
   Name := Copy(Msg, p + 1, q - p - 1);
   Reason := Copy(Msg, q + 1, MaxInt);
   if Copy(Reason, 1, 2) = ': ' then Delete(Reason, 1, 2);
-  if Pos('No such file', Reason) > 0 then Reason := 'no existe'
-  else if Pos('Permission denied', Reason) > 0 then Reason := 'permiso denegado'
-  else if Pos('Is a directory', Reason) > 0 then Reason := 'es un directorio'
-  else if Pos('File exists', Reason) > 0 then Reason := 'ya existe';
+  if Pos('No such file', Reason) > 0 then Reason := 'does not exist'
+  else if Pos('Permission denied', Reason) > 0 then Reason := 'permission denied'
+  else if Pos('Is a directory', Reason) > 0 then Reason := 'is a directory'
+  else if Pos('File exists', Reason) > 0 then Reason := 'already exists';
   if Reason = '' then
   begin
-    if Opening then Result := 'no se pudo abrir "' + Name + '"'
-    else Result := 'no se pudo crear "' + Name + '"';
+    if Opening then Result := 'could not open "' + Name + '"'
+    else Result := 'could not create "' + Name + '"';
   end
-  else if Opening then Result := 'no se pudo abrir "' + Name + '": ' + Reason
-  else Result := 'no se pudo crear "' + Name + '": ' + Reason;
+  else if Opening then Result := 'could not open "' + Name + '": ' + Reason
+  else Result := 'could not create "' + Name + '": ' + Reason;
 end;
 
 procedure Usage;
 begin
-  OutLn('PArc ' + PARC_VERSION + ' — archivador .parc');
-  OutLn('Uso: parc <comando> <archivo> [archivos/máscaras...] [opciones]');
-  OutLn('  l   lista el contenido');
-  OutLn('  lb  lista los bloques (estructura interna)');
-  OutLn('  t   verifica (descomprime y compara CRC, sin escribir)');
-  OutLn('  x   extrae con rutas');
-  OutLn('  e   extrae sin rutas');
-  OutLn('  a   agrega y reemplaza (crea el archivo si no existe)');
-  OutLn('  u   agrega y reemplaza solo si el del disco es más nuevo');
-  OutLn('  f   actualiza solo los que ya están en el archivo, si el del disco es más nuevo');
-  OutLn('  d   borra del archivo los nombres/máscaras indicados');
-  OutLn('  r   repara con el registro de recuperación (-rr): escribe fixed.<nombre>');
-  OutLn('Opciones:');
-  OutLn('  -dp<dir>  directorio de destino (pegado: -dpdestino)');
-  OutLn('  -o+       sobrescribe archivos existentes    -o-  los saltea (default)');
-  OutLn('  -snld     crea también los enlaces que apuntan fuera del destino');
-  OutLn('  -so       x/e: el contenido extraído a stdout (parc x copia.parc datos.txt -so)');
-  OutLn('  -si[nombre]  a: agrega lo que llega por stdin con ese nombre (tar cf - dir | parc a x.parc -sidir.tar)');
-  OutLn('  "-" como archivo: lo lee de stdin (l/t/x/e) o lo escribe en stdout (a)');
-  OutLn('  -m<método> preset -m0..-m9, -mx (default -m4, como FreeArc) o método, p. ej. -mlzma');
-  OutLn('  -s  como FreeArc: -s- sin sólido, -se por extensión, -s<N> o -s<N>f N archivos por');
-  OutLn('     bloque, -s<N>m (o k/g/b) bloques de al menos ese tamaño; combinables: -se100f10m');
-  OutLn('  -x<máscara>  excluir (pegada: -x*.txt; puede repetirse)');
-  OutLn('  -r     las máscaras (*.txt, src/*.pas) buscan también en los subdirectorios');
-  OutLn('  -rr[N%|N|Nm|N;S|N*S|-]  registro de recuperación (sin valor: 4%/2%/1% según tamaño;');
-  OutLn('             N = sectores de 512; -rr- lo quita)');
-  OutLn('Manual completo: docs/USO.md');
-  OutLn('  -p<contraseña>  al leer: contraseña de un archivo cifrado (si falta, se pide);');
-  OutLn('                  al comprimir: cifra los datos (-p solo: la pide por consola)');
-  OutLn('  -hp[contraseña] cifra también el directorio (sin ella no se ve ni la lista)');
+  OutLn('PArc ' + PARC_VERSION + ' — .parc archiver');
+  OutLn('Usage: parc <command> <archive> [files/patterns...] [options]');
+  OutLn('  l   list contents');
+  OutLn('  lb  list internal blocks');
+  OutLn('  t   test (decompress and compare CRCs, without writing)');
+  OutLn('  x   extract keeping paths');
+  OutLn('  e   extract without paths');
+  OutLn('  a   add and replace (create the archive if missing)');
+  OutLn('  u   add and replace only if the disk copy is newer');
+  OutLn('  f   freshen only files already in the archive if the disk copy is newer');
+  OutLn('  d   delete the given names/patterns from the archive');
+  OutLn('  r   repair with the recovery record (-rr): writes fixed.<name>');
+  OutLn('Options:');
+  OutLn('  -dp<dir>  destination directory (attached: -dpdest)');
+  OutLn('  -o+       overwrite existing files             -o-  skip them (default)');
+  OutLn('  -snld     also create links pointing outside the destination');
+  OutLn('  -so       x/e: write extracted contents to stdout (parc x a.parc data.txt -so)');
+  OutLn('  -si[name]  a: add stdin data under that name (tar cf - dir | parc a x.parc -sidir.tar)');
+  OutLn('  "-" as archive: read from stdin (l/t/x/e) or write to stdout (a)');
+  OutLn('  -m<method> preset -m0..-m9, -mx (default -m4, like FreeArc) or a method, e.g. -mlzma');
+  OutLn('  -s  like FreeArc: -s- non-solid, -se by extension, -s<N> or -s<N>f N files per');
+  OutLn('     block, -s<N>m (or k/g/b) blocks of at least that size; combinable: -se100f10m');
+  OutLn('  -x<pattern>  exclude (attached: -x*.txt; may be repeated)');
+  OutLn('  -r     patterns (*.txt, src/*.pas) also search subdirectories');
+  OutLn('  -rr[N%|N|Nm|N;S|N*S|-]  recovery record (no value: 4%/2%/1% by size;');
+  OutLn('             N = 512-byte sectors; -rr- removes it)');
+  OutLn('Full manual: docs/USO.md');
+  OutLn('  -p<password>  on read: password of an encrypted archive (prompted if missing);');
+  OutLn('                when compressing: encrypt data (bare -p prompts)');
+  OutLn('  -hp[password] also encrypt the directory (without it not even the listing is visible)');
   OutLn('  -ae=<alg>  --encryption=<alg>  aes (default: aes-256/ctr), blowfish, serpent,');
-  OutLn('             twofish; con tamaño/modo: serpent-256/cfb, blowfish-448/ctr, ...');
-  OutLn('  -v<tamaño>  volúmenes de ese tamaño (x.parc.001, .002...; solo .parc): -v100m, -v4g, -v700000k');
-  OutLn('  --no-progress  sin línea de progreso (tampoco se muestra si stderr no es una consola)');
-  OutLn('Ctrl-C cancela limpiamente (no queda ni el temporal ni un archivo a medio extraer);');
-  OutLn('un segundo Ctrl-C corta en el acto. Código de salida al cancelar: 130.');
+  OutLn('             twofish; with size/mode: serpent-256/cfb, blowfish-448/ctr, ...');
+  OutLn('  -v<size>  volumes of that size (x.parc.001, .002...; .parc only): -v100m, -v4g, -v700000k');
+  OutLn('  --no-progress  no progress line (also hidden when stderr is not a console)');
+  OutLn('Ctrl-C cancels cleanly (no temporary or half-written file is left);');
+  OutLn('a second Ctrl-C stops immediately. Exit code on cancel: 130.');
 end;
 
 procedure PrintBlock(const B: TArcBlock);
@@ -94,16 +94,16 @@ procedure CmdBlocks(A: TArchive);
 var
   i: Integer;
 begin
-  OutLn(Format('Archivo: %s (%d bytes), SFX=%d, bloqueado=%s, recovery="%s"',
-    [A.FileName, A.ArcSize, A.SFXSize, BoolToStr(A.Locked, 'sí', 'no'), A.Recovery]));
-  OutLn('Bloques de control:');
+  OutLn(Format('Archive: %s (%d bytes), SFX=%d, locked=%s, recovery="%s"',
+    [A.FileName, A.ArcSize, A.SFXSize, BoolToStr(A.Locked, 'yes', 'no'), A.Recovery]));
+  OutLn('Control blocks:');
   for i := 0 to High(A.ControlBlocks) do PrintBlock(A.ControlBlocks[i]);
   PrintBlock(A.Footer);
-  OutLn('Bloques de datos:');
+  OutLn('Data blocks:');
   for i := 0 to High(A.DataBlocks) do
   begin
     PrintBlock(A.DataBlocks[i]);
-    OutLn(Format('             %d archivo(s) desde #%d', [A.DataBlocks[i].FileCount, A.DataBlocks[i].FirstFile]));
+    OutLn(Format('             %d file(s) from #%d', [A.DataBlocks[i].FileCount, A.DataBlocks[i].FirstFile]));
   end;
 end;
 
@@ -118,28 +118,28 @@ var
 begin
   if not RecoveryRepair(ArcName, Res, Dest) then
   begin
-    ErrLn('ERROR: ' + ArcName + ' no tiene registro de recuperación (crearlo con -rr)');
+    ErrLn('ERROR: ' + ArcName + ' has no recovery record (create one with -rr)');
     Exit(1);
   end;
-  OutLn(Format('Registro de recuperación %s: %d sector(es) de %d bytes',
+  OutLn(Format('Recovery record %s: %d sector(s) of %d bytes',
     [Res.Info.Version, Res.Info.RecSectors, Res.Info.SectorSize]));
   if Length(Res.BadSectors) = 0 then
   begin
-    OutLn('No hay sectores dañados.');
+    OutLn('No damaged sectors.');
     Exit(0);
   end;
   L := '';
   for i := 0 to High(Res.BadSectors) do L := L + ' ' + IntToStr(Res.BadSectors[i]);
-  OutLn(Format('Sectores dañados (%d):%s', [Length(Res.BadSectors), L]));
+  OutLn(Format('Damaged sectors (%d):%s', [Length(Res.BadSectors), L]));
   if Length(Res.Unrecoverable) > 0 then
   begin
     L := '';
     for i := 0 to High(Res.Unrecoverable) do L := L + ' ' + IntToStr(Res.Unrecoverable[i]);
-    ErrLn(Format('ERROR: %d sector(es) irrecuperable(s) (más dañados en el mismo grupo de los que el registro puede reparar):%s',
+    ErrLn(Format('ERROR: %d unrecoverable sector(s) (too many damaged sectors in the same group for the record to repair):%s',
       [Length(Res.Unrecoverable), L]));
     Exit(2);
   end;
-  OutLn(Format('Reparados %d sector(es) -> %s', [Length(Res.Repaired), Dest]));
+  OutLn(Format('Repaired %d sector(s) -> %s', [Length(Res.Repaired), Dest]));
   Result := 0;
 end;
 
@@ -153,9 +153,9 @@ begin
   Opt.FlatNames := Cmd = 'e';
   St := ExtractArchive(A, Opt, @LogLine);
   if Opt.TestOnly then
-    OutLn(Format('Verificados %d archivo(s), %d bytes. Errores: %d', [St.Files, St.Bytes, St.Errors]))
+    OutLn(Format('Verified %d file(s), %d bytes. Errors: %d', [St.Files, St.Bytes, St.Errors]))
   else
-    OutLn(Format('Extraídos %d archivo(s) y %d directorio(s), %d bytes. Saltados: %d. Errores: %d',
+    OutLn(Format('Extracted %d file(s) and %d director(ies), %d bytes. Skipped: %d. Errors: %d',
       [St.Files, St.Dirs, St.Bytes, St.Skipped, St.Errors]));
   if St.Unsupported then Result := 3
   else if St.Errors > 0 then Result := 2
@@ -234,7 +234,7 @@ procedure CollectEntries(const Paths: TStringList; const Exclude: string; Exclud
       H := FileOpen(FsPath(Disk), fmOpenRead or fmShareDenyNone);
       if H = THandle(-1) then
       begin
-        ErrLn('Aviso: no se puede leer ' + Disk + ' (se saltea)');
+        ErrLn('Warning: cannot read ' + Disk + ' (skipped)');
         if Unreadable = nil then Unreadable := TStringList.Create;
         Unreadable.Add(Disk);
         Exit;
@@ -263,7 +263,7 @@ procedure CollectEntries(const Paths: TStringList; const Exclude: string; Exclud
     // que tiene adentro se perdía en silencio
     if FindFirst(IncludeTrailingPathDelimiter(FsPath(Disk)) + '*', faAnyFile {$IFDEF UNIX}or faSymLink{$ENDIF}, SR) <> 0 then
     begin
-      ErrLn('Aviso: no se puede leer el directorio ' + Disk);
+      ErrLn('Warning: cannot read directory ' + Disk);
       Exit;
     end;
     Names := TStringList.Create;
@@ -287,7 +287,7 @@ procedure CollectEntries(const Paths: TStringList; const Exclude: string; Exclud
         // así no hay ciclos ni se archiva dos veces lo mismo
         if not GetLinkMeta(ChildDisk, Meta) and not GetFileMeta(ChildDisk, Meta) then
         begin
-          ErrLn('Aviso: no se puede leer ' + ChildDisk);
+          ErrLn('Warning: cannot read ' + ChildDisk);
           Continue;
         end;
         AddEntry(ChildDisk, ChildStored, Meta);
@@ -364,12 +364,12 @@ begin
       Dir := Copy(Paths[i], 1, Cut);
       Mask := Copy(Paths[i], Cut + 1, MaxInt);
       if HasWild(Dir) then
-        raise EFOpenError.CreateFmt('los comodines van solo en el último componente: %s', [Paths[i]]);
-      if Expand(Dir, Mask) = 0 then ErrLn('Aviso: ningún archivo coincide con ' + Paths[i]);
+        raise EFOpenError.CreateFmt('wildcards are only allowed in the last component: %s', [Paths[i]]);
+      if Expand(Dir, Mask) = 0 then ErrLn('Warning: no files match ' + Paths[i]);
       Continue;
     end;
     if not GetFileMeta(Paths[i], Meta) then
-      raise EFOpenError.CreateFmt('no existe: %s', [Paths[i]]);
+      raise EFOpenError.CreateFmt('does not exist: %s', [Paths[i]]);
     Stored := SanitizePath(Paths[i]);
     if Stored <> '' then AddEntry(Paths[i], Stored, Meta);   // "." o "/" no se guardan a sí mismos
     if Meta.IsDir then Walk(ExcludeTrailingPathDelimiter(Paths[i]), Stored);
@@ -613,7 +613,7 @@ begin
     raise;
   end;
   if not DeleteFile(FsPath(Target)) or not RenameFile(FsPath(Tmp), FsPath(Target)) then
-    raise EFCreateError.CreateFmt('no se pudo escribir %s', [Target]);
+    raise EFCreateError.CreateFmt('could not write %s', [Target]);
 end;
 
 function ReadWholeFile(const Name: string; MaxLen: Int64 = High(Int64)): TBytes;
@@ -665,13 +665,13 @@ var
 begin
   if (Cmd <> 'd') and (Paths.Count = 0) and (MO.StdinFile = '') then
   begin
-    ErrLn('ERROR: no se indicaron archivos');
+    ErrLn('ERROR: no files specified');
     Exit(1);
   end;
   Exists := ArchiveExists(ArcName);
   if not Exists and ((Cmd = 'd') or (Cmd = 'f')) then
   begin
-    ErrLn('ERROR: no existe ' + ArcName);
+    ErrLn('ERROR: does not exist: ' + ArcName);
     Exit(1);
   end;
   A := nil;
@@ -683,7 +683,7 @@ begin
     if (A <> nil) and (A.SFXSize > 0) then SfxPrefix := ReadWholeFile(ArcName, A.SFXSize);
     if (A <> nil) and A.Locked then
     begin
-      ErrLn('ERROR: ' + ArcName + ' está bloqueado contra cambios (-k de FreeArc)');
+      ErrLn('ERROR: ' + ArcName + ' is locked against changes (FreeArc -k)');
       Exit(1);
     end;
     Disk := nil;
@@ -702,7 +702,7 @@ begin
     if (Cmd <> 'd') and (Length(Disk) = 0) and not Exists then
     begin
       // como FreeArc ("No files to archive"): no se crea un archivo vacío
-      ErrLn('ERROR: no hay archivos para agregar');
+      ErrLn('ERROR: no files to add');
       Exit(1);
     end;
 
@@ -802,7 +802,7 @@ begin
         Missing := Missing + LineEnding + '  ' + Groups[i].Method;
     if Missing <> '' then
     begin
-      ErrLn('ERROR: todavía no hay codificador para:' + Missing);
+      ErrLn('ERROR: no encoder yet for:' + Missing);
       Exit(3);
     end;
 
@@ -829,7 +829,7 @@ begin
   end;
   FinishArchive(ArcName, Opt.VolumeSize);
   FinalName := ArcName;
-  if not Exists then Verb := 'Creado' else Verb := 'Actualizado';
+  if not Exists then Verb := 'Created' else Verb := 'Updated';
   // PArc ya no crea autoextraíbles; si el archivo ya traía un módulo delante, se conserva
   if Length(SfxPrefix) > 0 then
   begin
@@ -842,17 +842,17 @@ begin
   begin
     NVol := 0;
     while FileExists(FsPath(VolumeName(ArcName, NVol + 1))) do Inc(NVol);
-    VolInfo := Format(', %d volumen(es) de %d bytes: %s ...', [NVol, Opt.VolumeSize, VolumeName(ArcName, 1)]);
+    VolInfo := Format(', %d volume(s) of %d bytes: %s ...', [NVol, Opt.VolumeSize, VolumeName(ArcName, 1)]);
   end;
   if MO.ShownName <> '' then FinalName := MO.ShownName;
-  OutLn(Format('%s %s (%s%s): %d archivo(s) y %d directorio(s), %d bytes -> %d bytes',
-    [Verb, FinalName, 'parc' + BoolToStr(Length(SfxPrefix) > 0, ', autoextraíble', ''), VolInfo, St.Files, St.Dirs, St.Bytes, St.ArcSize]));
+  OutLn(Format('%s %s (%s%s): %d file(s) and %d director(ies), %d bytes -> %d bytes',
+    [Verb, FinalName, 'parc' + BoolToStr(Length(SfxPrefix) > 0, ', self-extracting', ''), VolInfo, St.Files, St.Dirs, St.Bytes, St.ArcSize]));
   if Exists then
-    OutLn(Format('  agregados %d, reemplazados %d, borrados %d', [Added, Replaced, Removed]));
+    OutLn(Format('  added %d, replaced %d, deleted %d', [Added, Replaced, Removed]));
   Result := 0;
   if (Unreadable <> nil) and (Unreadable.Count > 0) then
   begin
-    ErrLn(Format('Aviso: %d archivo(s) no se pudieron leer y no se agregaron (si ya estaban, quedó la versión anterior)',
+    ErrLn(Format('Warning: %d file(s) could not be read and were not added (if present, the previous version was kept)',
       [Unreadable.Count]));
     Result := EXIT_WARNINGS;
   end;
@@ -898,7 +898,7 @@ begin
         begin
           if Length(S) = 3 then
           begin
-            ErrLn('ERROR: -dp necesita un directorio pegado (-dp<dir>)');
+            ErrLn('ERROR: -dp needs an attached directory (-dp<dir>)');
             Halt(1);
           end;
           Opt.DestDir := Copy(S, 4, MaxInt);
@@ -925,7 +925,7 @@ begin
         begin
           if Length(S) = 2 then
           begin
-            ErrLn('ERROR: -x necesita una máscara pegada (-x<patrón>, p. ej. -x*.txt)');
+            ErrLn('ERROR: -x needs an attached pattern (-x<pattern>, e.g. -x*.txt)');
             Halt(1);
           end;
           Excludes.Add(Copy(S, 3, MaxInt));
@@ -941,7 +941,7 @@ begin
         else if Copy(S, 1, 13) = '--encryption=' then MO.Encryption := Copy(S, 14, MaxInt)
         else
         begin
-          ErrLn('Opción desconocida: ' + S);
+          ErrLn('Unknown option: ' + S);
           Halt(1);
         end;
       end
@@ -955,7 +955,7 @@ begin
     end;
     if (ArcName <> '-') and (LowerCase(ExtractFileExt(ArcName)) = '.arc') then
     begin
-      ErrLn('ERROR: PArc ya no lee ni escribe .arc (ahora solo .parc). Para .arc usá FreeArc-ex.');
+      ErrLn('ERROR: PArc no longer reads or writes .arc (only .parc). For .arc use FreeArc-ex.');
       Halt(1);
     end;
     Opt.Filter := Filter;
@@ -966,12 +966,12 @@ begin
     if Opt.ToStdout then OutToStderr := True;
     if (MO.StdinName <> '') and (Cmd <> 'a') then
     begin
-      ErrLn('ERROR: -si es solo para el comando a');
+      ErrLn('ERROR: -si is only valid with command a');
       Halt(1);
     end;
     if (MO.StdinName <> '') and (ArcName = '-') then
     begin
-      ErrLn('ERROR: stdin no puede ser a la vez el archivo y un archivo a agregar (-si con "-")');
+      ErrLn('ERROR: stdin cannot be both the archive and a file to add (-si with "-")');
       Halt(1);
     end;
     ToStdout := False;
@@ -987,12 +987,12 @@ begin
       begin
         if MO.VolumeSize > 0 then
         begin
-          ErrLn('ERROR: -v no va con un archivo por stdout ("-")');
+          ErrLn('ERROR: -v cannot be used with an archive on stdout ("-")');
           Halt(1);
         end;
         OutToStderr := True;
         ToStdout := True;
-        MO.ShownName := '(salida estándar)';
+        MO.ShownName := '(standard output)';
         S := '.parc';
         ArcName := IncludeTrailingPathDelimiter(GetTempDir) + Format('parc-stdout-%d', [GetProcessID]) + S;
         RegisterTempFile(ArcName);
@@ -1024,14 +1024,14 @@ begin
     if Writing and ((DPwd = '') or (HPwd = '')) then
     begin
       // -p / -hp sin valor al comprimir: pedirla dos veces (un error de tipeo no tiene arreglo)
-      if not ReadPassword('Contraseña para cifrar: ', S) or (S = '') then
+      if not ReadPassword('Password for encryption: ', S) or (S = '') then
       begin
-        ErrLn('ERROR: hace falta una contraseña (no hay consola para pedirla)');
+        ErrLn('ERROR: a password is required (no console to prompt)');
         Halt(1);
       end;
-      if not ReadPassword('Repetila: ', Pwd2) or (Pwd2 <> S) then
+      if not ReadPassword('Repeat it: ', Pwd2) or (Pwd2 <> S) then
       begin
-        ErrLn('ERROR: las contraseñas no coinciden');
+        ErrLn('ERROR: passwords do not match');
         Halt(1);
       end;
       if DPwd = '' then DPwd := S;
@@ -1069,7 +1069,7 @@ begin
       except
         // El archivo viejo está cifrado y no se dio -p: pedirla, como en x/t
         on E: EPasswordRequired do
-          if (Tries < 3) and ReadPassword('Contraseña: ', S) then
+          if (Tries < 3) and ReadPassword('Password: ', S) then
           begin
             AddArchivePassword(S);   // se suma a las ya dadas (-p y -hp pueden ser distintas)
             Inc(Tries);
@@ -1077,7 +1077,7 @@ begin
           end
           else begin ClearProgress; ErrLn('ERROR: ' + E.Message); Code := 5; end;
         on E: EBadPassword do
-          if (Tries < 3) and ReadPassword('Contraseña incorrecta. Contraseña: ', S) then
+          if (Tries < 3) and ReadPassword('Wrong password. Password: ', S) then
           begin
             AddArchivePassword(S);   // se suma a las ya dadas (-p y -hp pueden ser distintas)
             Inc(Tries);
@@ -1086,8 +1086,8 @@ begin
           else begin ClearProgress; ErrLn('ERROR: ' + E.Message); Code := 5; end;
         on E: EOperationCancelled do begin
           ClearProgress;
-          if FileExists(FsPath(ArcName)) then ErrLn('Cancelado: ' + ArcName + ' quedó como estaba.')
-          else ErrLn('Cancelado: no se creó ' + ArcName + '.');
+          if FileExists(FsPath(ArcName)) then ErrLn('Cancelled: ' + ArcName + ' was left unchanged.')
+          else ErrLn('Cancelled: ' + ArcName + ' was not created.');
           Code := EXIT_CANCELLED;
         end;
         on E: EUnsupportedEncoder do begin ClearProgress; ErrLn('ERROR: ' + E.Message); Code := 3; end;
@@ -1120,7 +1120,7 @@ begin
       except
         on E: EPasswordRequired do
           // Sin -p: pedirla por consola (hasta 3 intentos), como FreeArc
-          if (Tries < 3) and ReadPassword('Contraseña: ', S) then
+          if (Tries < 3) and ReadPassword('Password: ', S) then
           begin
             AddArchivePassword(S);   // se suma a las ya dadas (-p y -hp pueden ser distintas)
             Inc(Tries);
@@ -1128,14 +1128,14 @@ begin
           end
           else begin ErrLn('ERROR: ' + E.Message); Code := 5; end;
         on E: EBadPassword do
-          if (Tries > 0) and (Tries < 3) and ReadPassword('Contraseña incorrecta. Contraseña: ', S) then
+          if (Tries > 0) and (Tries < 3) and ReadPassword('Wrong password. Password: ', S) then
           begin
             AddArchivePassword(S);   // se suma a las ya dadas (-p y -hp pueden ser distintas)
             Inc(Tries);
             Retry := True;
           end
           else begin ErrLn('ERROR: ' + E.Message); Code := 5; end;
-        on E: EOperationCancelled do begin ClearProgress; ErrLn('Cancelado.'); Code := EXIT_CANCELLED; end;
+        on E: EOperationCancelled do begin ClearProgress; ErrLn('Cancelled.'); Code := EXIT_CANCELLED; end;
         on E: EArcCorrupt do begin ClearProgress; ErrLn('ERROR: ' + E.Message); Code := 2; end;
         on E: EUnsupportedMethod do begin ClearProgress; ErrLn('ERROR: ' + E.Message); Code := 3; end;
         on E: EFOpenError do

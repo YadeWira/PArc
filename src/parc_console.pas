@@ -135,7 +135,7 @@ var
   TotalSize, TotalComp: Int64;
   Kind: string;
 begin
-  OutLn('Fecha/hora (UTC)            Tamaño       CRC  Nombre');
+  OutLn('Date/time (UTC)               Size       CRC  Name');
   OutLn('-------------------  --------------  --------  ------');
   TotalSize := 0;
   for i := 0 to High(A.Files) do
@@ -151,8 +151,8 @@ begin
   TotalComp := 0;
   for i := 0 to High(A.DataBlocks) do Inc(TotalComp, A.DataBlocks[i].CompSize);
   OutLn('-------------------  --------------  --------  ------');
-  OutLn(Format('%d archivo(s), %d bytes, comprimido %d bytes', [Length(A.Files), TotalSize, TotalComp]));
-  if A.Comment <> '' then OutLn('Comentario: ' + A.Comment);
+  OutLn(Format('%d file(s), %d bytes, compressed %d bytes', [Length(A.Files), TotalSize, TotalComp]));
+  if A.Comment <> '' then OutLn('Comment: ' + A.Comment);
 end;
 
 procedure LogLine(const Msg: string);
@@ -170,16 +170,16 @@ begin
   if not InIsConsole then Exit;
   ClearProgress;
   repeat
-    OutLn('Ya existe ' + Name);
-    ErrWrite('¿Sobrescribir? [s]í, [n]o, [t]odos, n[i]nguno: ');
+    OutLn('Already exists: ' + Name);
+    ErrWrite('Overwrite? [y]es, [n]o, [a]ll, n[o]ne: ');
     L := '';
     if EOF(Input) then Exit;
     ReadLn(L);
     L := LowerCase(Trim(L));
-    if (L = 's') or (L = 'si') or (L = 'sí') or (L = 'y') then Exit(oaYes);
+    if (L = 'y') or (L = 'yes') or (L = 's') or (L = 'si') then Exit(oaYes);
     if (L = 'n') or (L = 'no') then Exit(oaNo);
-    if (L = 't') or (L = 'todos') or (L = 'a') then Exit(oaAll);
-    if (L = 'i') or (L = 'ninguno') then Exit(oaNone);
+    if (L = 'a') or (L = 'all') or (L = 't') then Exit(oaAll);
+    if (L = 'o') or (L = 'none') or (L = 'i') then Exit(oaNone);
   until False;
 end;
 
@@ -191,7 +191,7 @@ var
 begin
   if (GetConsoleProcessList(@Pids[0], 2) = 1) and InIsConsole then
   begin
-    ErrWrite('Pulse Enter para cerrar...');
+    ErrWrite('Press Enter to close...');
     ReadLn(L);
   end;
 end;

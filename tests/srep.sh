@@ -36,7 +36,7 @@ if ! ( cd "$S" && g++ -DFREEARC_UNIX -DFREEARC_INTEL_BYTE_ORDER -D_FILE_OFFSET_B
         ../Common.cpp ref_wrap.cpp -o "$OUT/srep_ref" -lrt -lpthread -lstdc++ \
         -Wno-write-strings -Wno-unused-result ) 2>"$OUT/build.log"; then
   echo "  skip: no se pudo compilar el srep de referencia (ver $OUT/build.log)"
-  echo "== srep: 0 ok, 0 fallas (omitido)"
+  echo "== srep: 0 ok, 0 failures (omitido)"
   exit 0
 fi
 ok "srep_ref"
@@ -74,7 +74,7 @@ EOF
 "$OUT/test_srep" f.flag1 f.o1 >/dev/null 2>&1 && cmp -s f f.o1 && ok "flag 1" || bad "flag 1"
 "$OUT/test_srep" f.raw f.o2 >/dev/null 2>&1 && cmp -s f f.o2 && ok "flag 0 (guardado)" || bad "flag 0"
 
-echo "== formato v2 (I/O LZ)"
+echo "== v2 format (I/O LZ)"
 for opt in -m0o -m1o; do
   gen text 200000
   "$OUT/srep_ref" $opt f f2.srep >/dev/null 2>&1 || { bad "srep $opt falla"; continue; }
@@ -90,7 +90,7 @@ for spec in "text 200000" "rep 200" "rand 100000" "mix 1"; do
   "$OUT/test_srep" f.mine f.own >/dev/null 2>&1 && cmp -s f f.own && ok "PArc lee lo suyo ($1 $2)" || bad "PArc no lee lo suyo ($1 $2)"
 done
 
-echo "== header del codificador (v3 con BASE_LEN=0, como 3.93a)"
+echo "== encoder header (v3 with BASE_LEN=0, like 3.93a)"
 gen mix 1
 "$OUT/test_srep" e f f.b0 >/dev/null 2>&1
 if python3 - <<'PY'
@@ -101,14 +101,14 @@ PY
 then ok "versión 3 y BASE_LEN=0"; else bad "header inesperado (¿versión o BASE_LEN?)"; fi
 "$OUT/srep_ref" -d f.b0 f.b0.out >/dev/null 2>&1 && cmp -s f f.b0.out && ok "3.93 lo decodifica" || bad "3.93 no lo decodifica"
 
-echo "== formato v4 (Index-LZ)"
+echo "== v4 format (Index-LZ)"
 for opt in -m0 -m2 -m3; do
   gen mix 1
   "$OUT/srep_ref" $opt f f4.srep >/dev/null 2>&1 || { bad "srep $opt falla"; continue; }
   "$OUT/test_srep" f4.srep f4.out >/dev/null 2>&1 && cmp -s f f4.out && ok "$opt (v4)" || bad "$opt (v4)"
 done
 
-echo "== formato de SREP 3.93a (BASE_LEN=0 y largos cortos con vuelta de 32 bits)"
+echo "== SREP 3.93a format (BASE_LEN=0 and short lengths with 32-bit wrap)"
 python3 - <<'PY'
 import struct
 SIG, SREP = 0x26351817, 0x50455253
@@ -144,7 +144,7 @@ else
   echo "  (SREP_393A no definido: se omite la interoperabilidad con 3.93a)"
 fi
 
-echo "== robustez: streams dañados (sin crash ni cuelgue)"
+echo "== robustness: damaged streams (no crash or hang)"
 gen mix 1
 "$OUT/srep_ref" -m3f f f.srep >/dev/null 2>&1
 rotos=0
@@ -171,5 +171,5 @@ PY
 done
 [ $rotos -eq 0 ] && ok "25 corrupciones sin crash ni cuelgue"
 
-echo "== srep: $pass ok, $fail fallas"
+echo "== srep: $pass ok, $fail failures"
 [ $fail -eq 0 ]

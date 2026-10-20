@@ -9,7 +9,7 @@ seq 1 300000 > c/texto.txt; head -c 3000000 /dev/urandom > c/azar.bin; cp c/azar
 head -c 1500000 /dev/urandom > c/sub/otro.bin; : > c/vacio
 fail=0
 ok() { printf '  ok    %s\n' "$1"; }
-bad() { printf '  FALLA %s\n' "$1"; fail=$((fail+1)); }
+bad() { printf '  FAIL %s\n' "$1"; fail=$((fail+1)); }
 check() { if eval "$2"; then ok "$1"; else bad "$1"; fi; }
 sha() { (cd "$1" && find . -type f -print0 | sort -z | xargs -0 sha256sum | sha256sum | cut -c1-16); }
 REF=$(sha c)
@@ -20,13 +20,13 @@ xsame() {   # xsame <archivo o primer volumen>: extrae y compara con c/
 "$PARC" a v.parc c -m4 -v1m --no-progress >/dev/null 2>&1
 n=$(ls v.parc.[0-9][0-9][0-9] 2>/dev/null | wc -l)
 check "crea volúmenes ($n de 1 MB, el último más chico)" '[ $n -ge 4 ] && [ ! -e v.parc ] && [ $(stat -c %s v.parc.001) = 1048576 ] && [ $(stat -c %s $(ls v.parc.[0-9]* | tail -1)) -le 1048576 ]'
-check "parc t por la base (v.parc)"        '"$PARC" t v.parc --no-progress 2>&1 | tail -1 | grep -q "Errores: 0"'
-check "parc t por el primero (v.parc.001)" '"$PARC" t v.parc.001 --no-progress 2>&1 | tail -1 | grep -q "Errores: 0"'
+check "parc t por la base (v.parc)"        '"$PARC" t v.parc --no-progress 2>&1 | tail -1 | grep -q "Errors: 0"'
+check "parc t por el primero (v.parc.001)" '"$PARC" t v.parc.001 --no-progress 2>&1 | tail -1 | grep -q "Errors: 0"'
 check "parc x idéntico"                    'xsame v.parc.001'
 check "parc l"                             '"$PARC" l v.parc | grep -q "sub/otro.bin"'
 cat v.parc.[0-9][0-9][0-9] > junto.parc
 check "unidos con cat: un .parc normal"    'xsame junto.parc'
-check "-v con .arc: rechazado (solo .parc)"            '! "$PARC" a v.arc c -v1m --no-progress >/dev/null 2>&1 && [ ! -e v.arc.001 ] && [ ! -e v.arc.tmp.001 ]'
+check "-v con .arc: rechazado (only .parc)"            '! "$PARC" a v.arc c -v1m --no-progress >/dev/null 2>&1 && [ ! -e v.arc.001 ] && [ ! -e v.arc.tmp.001 ]'
 
 # Actualizar: conserva el tamaño de volumen; borrar algo grande deja menos volúmenes y los que
 # sobran se borran
@@ -69,5 +69,5 @@ head -c 60000000 /dev/urandom > grande.bin
 sleep 1.5; kill -INT $pid; wait $pid; rc=$?
 check "Ctrl-C: código 130 y sin temporales" '[ $rc = 130 ] && [ -z "$(ls | grep "g.parc")" ]'
 
-echo "== volúmenes: $fail fallas"
+echo "== volumes: $fail failures"
 [ $fail -eq 0 ]

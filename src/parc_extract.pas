@@ -124,7 +124,7 @@ begin
   if Opt.FlatNames then Rel := Copy(Rel, LastDelimiter('/', Rel) + 1, MaxInt);
   // En Windows, ':' dentro de un nombre abre un stream alternativo (ADS): no lo permitimos
   if (Rel = '') {$IFDEF WINDOWS}or (Pos(':', Rel) > 0){$ENDIF} then
-    raise EArcCorrupt.CreateFmt('nombre inseguro en el archivo: "%s"', [Name]);
+    raise EArcCorrupt.CreateFmt('unsafe name in archive: "%s"', [Name]);
   Rel := StringReplace(Rel, '/', PathDelim, [rfReplaceAll]);
   if Opt.DestDir <> '' then Result := IncludeTrailingPathDelimiter(Opt.DestDir) + Rel
   else Result := Rel;
@@ -197,7 +197,7 @@ var
   CurWriting: Boolean;     //   y si ya se estaba escribiendo en el disco
   BlockDamaged: Boolean;
 
-  { El bloque se cortó (datos dañados o método desconocido): se informa cada archivo pedido
+  { El bloque se cortó (damaged data o método desconocido): se informa cada archivo pedido
     que quedó sin extraer, y el que estaba a medio escribir queda con lo que se recuperó. }
   procedure ReportLost(const Blk: TArcBlock; LastWanted: Integer);
   var
@@ -209,11 +209,11 @@ var
       if not A.Files[k].IsDir and not A.Files[k].IsLink and Wanted(Opt, A.Files[k].Name) then
       begin
         if (k = Cur) and CurWriting then
-          Log('ERROR: ' + A.Files[k].Name + ' quedó incompleto (se dejó lo que se pudo recuperar)')
+          Log('ERROR: ' + A.Files[k].Name + ' is incomplete (whatever could be recovered was kept)')
         else if Opt.TestOnly then
-          Log('ERROR: ' + A.Files[k].Name + ' no se pudo verificar')
+          Log('ERROR: ' + A.Files[k].Name + ' could not be verified')
         else
-          Log('ERROR: ' + A.Files[k].Name + ' no se pudo extraer');
+          Log('ERROR: ' + A.Files[k].Name + ' could not be extracted');
         Inc(Result.Errors);
       end;
   end;
@@ -297,7 +297,7 @@ begin
           // 4 GB y fallar con "Stream write error" (FreeArc además se colgaba, #168)
           if DoWrite and (F.Size > High(LongWord)) and IsFatVolume(ExtractFileDir(ExpandFileName(DiskName(Opt, F.Name)))) then
           begin
-            Log(Format('ERROR: %s mide %d bytes y el destino es FAT/FAT32 (máximo 4 GB por archivo): no se extrae',
+            Log(Format('ERROR: %s is %d bytes and the destination is FAT/FAT32 (4 GB per-file maximum): not extracted',
               [F.Name, F.Size]));
             Inc(Result.Errors);
             SkipBytes(Chain, F.Size, Buf);
@@ -318,7 +318,7 @@ begin
             else Ask := oaNo;
             if FileExists(FsPath(OutName)) and (Ask in [oaNo, oaNone]) then
             begin
-              Log('Saltado (ya existe): ' + OutName);
+              Log('Skipped (already exists): ' + OutName);
               Inc(Result.Skipped);
               DoWrite := False;
             end
@@ -361,7 +361,7 @@ begin
               if Opened then
               begin
                 DeleteFile(FsPath(OutName));
-                raise EInOutError.CreateFmt('no se pudo escribir %s (%s): ¿disco lleno o sin permiso?',
+                raise EInOutError.CreateFmt('could not write %s (%s): disk full or permission denied?',
                   [OutName, E.Message]);
               end;
               raise;
@@ -373,12 +373,12 @@ begin
           if OutF <> nil then RestoreMeta(OutName, F);
           if ActualCrc <> F.Crc then
           begin
-            Log(Format('ERROR de CRC: %s (esperado %.8x, obtenido %.8x)', [F.Name, F.Crc, ActualCrc]));
+            Log(Format('CRC ERROR: %s (expected %.8x, got %.8x)', [F.Name, F.Crc, ActualCrc]));
             Inc(Result.Errors);
           end
           else if DoWrite or Opt.TestOnly or Opt.ToStdout then
           begin
-            if Opt.TestOnly then Log('OK       ' + F.Name) else Log('Extraído ' + F.Name);
+            if Opt.TestOnly then Log('OK       ' + F.Name) else Log('Extracted ' + F.Name);
             Inc(Result.Files);
             Inc(Result.Bytes, F.Size);
           end;
@@ -387,12 +387,12 @@ begin
         on E: EUnsupportedMethod do
         begin
           Result.Unsupported := True;
-          Log(Format('ERROR: %s (bloque en pos %d, %d archivo(s))', [E.Message, Blk.Pos, Blk.FileCount]));
+          Log(Format('ERROR: %s (block at %d, %d file(s))', [E.Message, Blk.Pos, Blk.FileCount]));
           ReportLost(Blk, LastWanted);
         end;
         on E: EArcCorrupt do
         begin
-          Log(Format('ERROR: %s (bloque en pos %d)', [E.Message, Blk.Pos]));
+          Log(Format('ERROR: %s (block at %d)', [E.Message, Blk.Pos]));
           ReportLost(Blk, LastWanted);
         end;
       end;
@@ -404,8 +404,8 @@ begin
   ProgressEnd;
   // Los demás bloques se extrajeron igual; con registro de recuperación, se puede reparar
   if BlockDamaged and (A.Recovery <> '') then
-    Log('El archivo tiene registro de recuperación: "parc r ' + ExtractFileName(A.FileName) +
-      '" intenta repararlo (escribe fixed.' + ExtractFileName(A.FileName) + ').');
+    Log('The archive has a recovery record: "parc r ' + ExtractFileName(A.FileName) +
+      '" will try to repair it (writes fixed.' + ExtractFileName(A.FileName) + ').');
 
   // Enlaces simbólicos, al final: si se crearan antes, un archivo de este mismo archivo
   // comprimido podría escribirse a través de uno de ellos
@@ -423,8 +423,8 @@ begin
     if Opt.FlatNames then OutName := Copy(F.Name, LastDelimiter('/', F.Name) + 1, MaxInt) else OutName := F.Name;
     if LinkEscapes(OutName, F.LinkTarget) and not Opt.UnsafeLinks then
     begin
-      Log('Aviso: no se crea el enlace ' + F.Name + ' -> ' + F.LinkTarget +
-        ' (apunta fuera del destino; -snld lo permite)');
+      Log('Warning: not creating link ' + F.Name + ' -> ' + F.LinkTarget +
+        ' (points outside the destination; -snld allows it)');
       Inc(Result.Skipped);
       Continue;
     end;
@@ -444,7 +444,7 @@ begin
       // un directorio de verdad no se reemplaza por un enlace
       if (Ask in [oaNo, oaNone]) or (not GetLinkMeta(OutName, Lm) and DirectoryExists(FsPath(OutName))) then
       begin
-        Log('Saltado (ya existe): ' + OutName);
+        Log('Skipped (already exists): ' + OutName);
         Inc(Result.Skipped);
         Continue;
       end;
@@ -453,13 +453,13 @@ begin
     MakeDirs(ExtractFileDir(ExpandFileName(OutName)));
     if MakeSymLink(OutName, F.LinkTarget, F.LinkToDir) then
     begin
-      Log('Extraído ' + F.Name + ' -> ' + F.LinkTarget);
+      Log('Extracted ' + F.Name + ' -> ' + F.LinkTarget);
       Inc(Result.Files);
     end
     else
     begin
-      Log('Aviso: no se pudo crear el enlace ' + OutName + ' -> ' + F.LinkTarget
-        {$IFDEF WINDOWS} + ' (en Windows hace falta modo desarrollador o ser administrador)'{$ENDIF});
+      Log('Warning: could not create link ' + OutName + ' -> ' + F.LinkTarget
+        {$IFDEF WINDOWS} + ' (on Windows this requires developer mode or administrator)'{$ENDIF});
       Inc(Result.Skipped);
     end;
   end;

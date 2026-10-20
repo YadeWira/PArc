@@ -106,7 +106,7 @@ ARC_EXE=/path/to/Arc.exe bash tests/bench_vs_freearc.sh some-directory
 
 ```
 src/                     PArc sources (Free Pascal)
-docs/                    manual and format specification (currently in Spanish)
+docs/                    manual and format specification
 tests/                   test suite, codec oracles and fuzzers
 reference/freearc-0.67/  only Compression/: FreeArc 0.67 codec sources used as
                          reference and test oracle for the ported codecs

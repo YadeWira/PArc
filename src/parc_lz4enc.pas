@@ -65,7 +65,7 @@ type
     destructor Destroy; override;
   end;
 
-{ parse_LZ4; parámetros inválidos -> ELz4EncParams }
+{ parse_LZ4; invalid parameters -> ELz4EncParams }
 function ParseLz4EncParams(const Params: TStringArray): TLz4EncParams;
 
 { True si la etapa ("lz4:..") tiene parámetros válidos. }
@@ -205,7 +205,7 @@ begin
   if (N < 0) or (N > LZ4_MAX_INPUT_SIZE) then Exit;
   if N = 0 then
   begin
-    // bloque vacío: un token 0
+    // empty block: un token 0
     if DstCap <= 0 then Exit;
     Dst[0] := 0;
     Exit(1);
@@ -848,7 +848,7 @@ var
   ok: Boolean;
 begin
   if (Length(Params) = 0) or (Params[0] <> 'lz4') then
-    raise ELz4EncParams.Create('lz4: no es el método lz4');
+    raise ELz4EncParams.Create('lz4: not the method lz4');
   // LZ4_METHOD::LZ4_METHOD
   Result.Compressor := 0;
   Result.BlockSize := 1 shl 20;
@@ -872,7 +872,7 @@ begin
       ok := ParseMem(Copy(p, 2, MaxInt), m);
       // BlockSize=0: el C lee 0 bytes, lo toma como fin y descarta todo el stream
       if ok and ((m = 0) or (m > LZ4_MAX_INPUT_SIZE)) then
-        raise ELz4EncParams.CreateFmt('lz4: tamaño de bloque inválido "%s"', [p]);
+        raise ELz4EncParams.CreateFmt('lz4: invalid block size "%s"', [p]);
       if ok then Result.BlockSize := SizeInt(m);
     end
     else if (p <> '') and (p[1] = 'h') then
@@ -882,7 +882,7 @@ begin
       ok := FaParseInt(Copy(p, 1, Length(p) - 1), n);
       if ok then Result.MinCompression := Integer(n);
     end;
-    if not ok then raise ELz4EncParams.CreateFmt('lz4: parámetro inválido "%s"', [p]);
+    if not ok then raise ELz4EncParams.CreateFmt('lz4: invalid parameter "%s"', [p]);
   end;
 end;
 

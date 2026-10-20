@@ -160,16 +160,16 @@ begin
     Inc(FSize, FSizes[i]);
     Inc(i);
   end;
-  if i = 0 then raise EFOpenError.CreateFmt('no existe %s', [PartName(0)]);
+  if i = 0 then raise EFOpenError.CreateFmt('does not exist: %s', [PartName(0)]);
   // Un hueco (falta uno del medio): los que siguen existen pero no se leerían
   if FileExists(FsPath(PartName(i + 1))) then
-    raise EFOpenError.CreateFmt('falta el volumen %s (hay %s y %s)', [PartName(i), PartName(i - 1), PartName(i + 1)]);
+    raise EFOpenError.CreateFmt('missing volume %s (found %s and %s)', [PartName(i), PartName(i - 1), PartName(i + 1)]);
 end;
 
 constructor TVolumeStream.CreateWrite(const Base: string; VolSize: Int64);
 begin
   inherited Create;
-  if VolSize <= 0 then raise EArgumentException.Create('tamaño de volumen inválido');
+  if VolSize <= 0 then raise EArgumentException.Create('invalid volume size');
   FBase := Base;
   FVolSize := VolSize;
   FNames := TStringList.Create;
@@ -251,7 +251,7 @@ var
   Ofs, n: Int64;
   P: PByte;
 begin
-  if FVolSize = 0 then raise EStreamError.Create('volúmenes abiertos solo para lectura');
+  if FVolSize = 0 then raise EStreamError.Create('volumes opened read-only');
   Result := 0;
   P := @Buffer;
   while Count > 0 do

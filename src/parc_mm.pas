@@ -117,7 +117,7 @@ begin
         if isF then Result.IsFloat := 1;
       end
       else
-        raise EUnsupportedMethod.Create('mm: parámetro inválido: ' + p);
+        raise EUnsupportedMethod.Create('mm: invalid parameter: ' + p);
     end;
   end;
 end;
@@ -228,9 +228,9 @@ end;
 constructor TMmStage.Create(ASource: TInStage; const APar: TMmParams);
 begin
   if (APar.Reorder <> 0) then
-    raise EUnsupportedMethod.Create('mm: reorder todavía no soportado');
+    raise EUnsupportedMethod.Create('mm: reorder not supported yet');
   if (APar.NumChan < 0) or (APar.WordSize < 0) then
-    raise EUnsupportedMethod.Create('mm: parámetros inválidos');
+    raise EUnsupportedMethod.Create('mm: invalid parameters');
   inherited Create(ASource);
   FPar := APar;
 end;
@@ -273,12 +273,12 @@ begin
   if (FNumChan = 0) then Corrupt('mm: num_chan = 0');
   FByteSize := (FWordSize + 7) div 8;
   // byte_size > 4: el switch de mm.cpp no tiene rama y los datos pasan tal cual
-  if FByteSize < 1 then Corrupt('mm: word_size inválido');
+  if FByteSize < 1 then Corrupt('mm: invalid word_size');
   FN := FNumChan * FByteSize;
   Source.ReadExact(@b4[0], 4);
   offset := LongInt(LongWord(b4[0]) or (LongWord(b4[1]) shl 8) or
                     (LongWord(b4[2]) shl 16) or (LongWord(b4[3]) shl 24));
-  if offset < 0 then Corrupt('mm: offset inválido');
+  if offset < 0 then Corrupt('mm: invalid offset');
   { el encabezado original se copia tal cual }
   if offset > 0 then
   begin
@@ -295,7 +295,7 @@ begin
   align := RoundUp(3 + 4 + offset, FN) - (3 + 4 + offset);
   if align > 0 then
   begin
-    if align > Length(FBase) then Corrupt('mm: alineación inválida');
+    if align > Length(FBase) then Corrupt('mm: invalid alignment');
     Source.ReadExact(@FBase[0], align);
   end;
   FChunk := RoundDown(BUFFER_SIZE, FN);

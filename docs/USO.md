@@ -1,246 +1,246 @@
-# PArc — manual de la línea de comandos
+# PArc — command-line manual
 
-PArc es un archivador en Free Pascal para Windows 7 o posterior (x86 y x64) y Linux x64. Usa
-un formato propio, `.parc` (derivado del contenedor de FreeArc), que guarda fechas en
-nanosegundos, los atributos de Windows y los permisos de Unix. PArc no lee ni escribe `.arc`:
-para eso está FreeArc-ex (https://github.com/YadeWira/FreeArc-ex).
+PArc is an archiver written in Free Pascal for Windows 7 or later (x86 and x64) and Linux x64.
+It uses its own format, `.parc` (derived from the FreeArc container), which stores nanosecond
+timestamps, Windows attributes and Unix permissions. PArc does not read or write `.arc`: use
+FreeArc-ex for that (https://github.com/YadeWira/FreeArc-ex).
 
 ```
-parc <comando> <archivo> [archivos/máscaras...] [opciones]
+parc <command> <archive> [files/patterns...] [options]
 ```
 
-Las opciones pueden ir en cualquier posición. El primer argumento que no es una opción es el
-archivo; los demás son los archivos o máscaras sobre los que actúa el comando.
+Options may appear in any position. The first non-option argument is the archive; the rest are
+the files or patterns the command operates on.
 
-## Comandos
+## Commands
 
-| comando | qué hace |
+| command | what it does |
 |---|---|
-| `l` | lista el contenido: fecha (UTC), tamaño, CRC y nombre |
-| `lb` | lista los bloques internos: control, datos, método de cada uno y qué archivos tiene |
-| `t` | verifica: descomprime todo y compara los CRC, sin escribir nada |
-| `x` | extrae con rutas |
-| `e` | extrae sin rutas (todo en el directorio de destino) |
-| `a` | agrega archivos y reemplaza los que ya estaban; crea el archivo si no existe |
-| `u` | como `a`, pero reemplaza solo si el del disco es más nuevo |
-| `f` | actualiza solo los que ya están en el archivo, si el del disco es más nuevo |
-| `d` | borra del archivo los nombres o máscaras indicados |
-| `r` | repara con el registro de recuperación: escribe `fixed.<nombre>`; el original no se toca |
+| `l` | list contents: date (UTC), size, CRC and name |
+| `lb` | list internal blocks: control, data, method and contained files |
+| `t` | test: decompress everything and compare CRCs, without writing |
+| `x` | extract keeping paths |
+| `e` | extract without paths (everything into the destination directory) |
+| `a` | add files and replace existing ones; create the archive if missing |
+| `u` | like `a`, but replace only when the disk copy is newer |
+| `f` | freshen: update only files already in the archive when the disk copy is newer |
+| `d` | delete the given names or patterns from the archive |
+| `r` | repair with the recovery record: writes `fixed.<name>`; the original is untouched |
 
-Los directorios que se pasan a `a`/`u`/`f` se recorren recursivamente.
+Directories passed to `a`/`u`/`f` are scanned recursively.
 
-### Máscaras y enlaces (a, u, f)
+### Patterns and links (a, u, f)
 
-- Un argumento puede ser una máscara con `*` y `?` en el último componente: `*.txt`,
-  `src/*.pas`. La expande el propio PArc (en Windows `cmd.exe` no lo hace). Los directorios
-  que coinciden entran completos. `*.*` incluye los nombres sin punto, como en Windows.
-- `-r`: la máscara busca también en todos los subdirectorios (`parc a x.parc -r '*.txt'`).
-- Si nada coincide y el archivo no existía, no se crea un archivo vacío.
-- Un archivo que no se puede leer (sin permiso, o bloqueado por otro programa) se saltea con
-  aviso: el resto se agrega igual y, si ya estaba en el archivo, queda la versión anterior.
-  PArc termina con el código 6.
-- Enlaces simbólicos (y junctions de Windows): se guardan como enlaces, sin seguirlos.
-- El archivo que se está escribiendo, sus volúmenes y sus temporales no se agregan aunque
-  caigan dentro de una máscara (`parc a x.parc .` no mete `x.parc` dentro de sí mismo).
+- An argument may be a pattern with `*` and `?` in its last component: `*.txt`, `src/*.pas`.
+  PArc expands it itself (Windows `cmd.exe` does not). Matching directories are added in full.
+  `*.*` includes names without a dot, as on Windows.
+- `-r`: the pattern also searches every subdirectory (`parc a x.parc -r '*.txt'`).
+- If nothing matches and the archive did not exist, no empty archive is created.
+- A file that cannot be read (no permission, or locked by another program) is skipped with a
+  warning: the rest is still added, and if it was already in the archive the previous version is
+  kept. PArc exits with code 6.
+- Symbolic links (and Windows junctions) are stored as links, without following them.
+- The archive being written, its volumes and its temporary files are not added even if they
+  match a pattern (`parc a x.parc .` does not put `x.parc` inside itself).
 
-## Opciones
+## Options
 
-### Destino y sobrescritura (x, e)
+### Destination and overwriting (x, e)
 
-| opción | efecto |
+| option | effect |
 |---|---|
-| `-dp<dir>` | directorio de destino |
-| `-o+` | sobrescribe los archivos que ya existen |
-| `-o-` | los saltea (es lo que se hace si no se indica nada) |
-| `-snld` | crea también los enlaces que apuntan fuera del destino (absolutos o con `..` que sube más allá) |
+| `-dp<dir>` | destination directory |
+| `-o+` | overwrite existing files |
+| `-o-` | skip them (this is what happens when nothing is specified) |
+| `-snld` | also create links that point outside the destination (absolute, or with `..` escaping it) |
 
-Los enlaces se crean al final de la extracción. Por seguridad, sin `-snld` no se crean los que
-apuntan fuera del destino: a través de uno así, otro archivo podría escribirse en cualquier
-lugar del disco. En Windows crear un enlace requiere ser administrador o el modo
-desarrollador; si no se puede, se avisa y se saltea.
+Links are created at the end of extraction. For safety, without `-snld` PArc does not create
+links that point outside the destination: through such a link another file could be written
+anywhere on disk. On Windows, creating a link requires administrator rights or developer mode;
+if that fails, PArc warns and skips it.
 
-### Compresión (a, u, f, d)
+### Compression (a, u, f, d)
 
-| opción | efecto |
+| option | effect |
 |---|---|
-| `-m<N>` | preset (heredado de FreeArc): `-m0` (sin compresión) a `-m9`, `-mx`. El default es `-m4` |
-| `-m<método>` | un método explícito, por ejemplo `-mlzma:64mb:max` o `-mrep:96m+exe+lzma` |
-| `--recompress` | al actualizar, rehace todos los bloques con el método pedido en vez de copiar los que quedan enteros |
-| `-x<máscara>` | excluye archivos; se puede repetir |
+| `-m<N>` | preset (from FreeArc): `-m0` (store) to `-m9`, `-mx`. Default is `-m4` |
+| `-m<method>` | explicit method, e.g. `-mlzma:64mb:max` or `-mrep:96m+exe+lzma` |
+| `--recompress` | when updating, rebuild every block with the requested method instead of copying intact ones |
+| `-x<pattern>` | exclude files; may be repeated |
 
-Los presets eligen el método según el tipo de cada archivo, como FreeArc: por `arc.groups`
-(extensión) y, si el preset distingue textos o datos ya comprimidos, mirando el contenido. El
-diccionario de cada compresor se achica al tamaño del bloque, así que extraer un archivo chico
-no pide la memoria del preset completo.
+Presets choose a method per file type, like FreeArc: through `arc.groups` (extension) and, when
+the preset distinguishes text or already-compressed data, by inspecting content. Each
+compressor's dictionary is reduced to the block size, so extracting a small file does not
+require the full preset memory.
 
-Al actualizar (`a`, `u`, `f`), los bloques sólidos que quedan enteros se copian sin recomprimir;
-`--recompress` fuerza a rehacerlos. Con `d` y un `-m` explícito se recompila todo el archivo
-con ese método, igual que FreeArc (es un comando que "copia": `is_COPYING_COMMAND` en
-`Cmdline.hs`).
+When updating (`a`, `u`, `f`), solid blocks that remain intact are copied without recompression;
+`--recompress` forces rebuilding them. With `d` and an explicit `-m`, the whole archive is
+recompressed with that method, just like FreeArc (a "copying" command:
+`is_COPYING_COMMAND` in `Cmdline.hs`).
 
-### Bloques sólidos: `-s`
+### Solid blocks: `-s`
 
-Igual que en FreeArc. Sin `-s`, todos los archivos que usan el mismo método van en un solo
-bloque sólido (salvo los cortes propios de cada compresor).
+Same as FreeArc. Without `-s`, all files using the same method go into one solid block (except
+for compressor-specific splits).
 
-| opción | efecto |
+| option | effect |
 |---|---|
-| `-s-` | sin sólido: cada archivo en su propio bloque |
-| `-se` | un bloque por extensión |
-| `-s<N>` o `-s<N>f` | a lo sumo N archivos por bloque (`-s1f` = sin sólido) |
-| `-s<N>m` (o `k`, `g`, `b`) | bloques de *al menos* ese tamaño: el bloque se cierra con el archivo que lo supera |
-| combinados | `-se100f10m`: se corta con el primer criterio que se cumpla |
+| `-s-` | non-solid: each file in its own block |
+| `-se` | one block per extension |
+| `-s<N>` or `-s<N>f` | at most N files per block (`-s1f` = non-solid) |
+| `-s<N>m` (or `k`, `g`, `b`) | blocks of *at least* that size: the block closes with the file that exceeds it |
+| combined | `-se100f10m`: closes on the first criterion met |
 
-### Registro de recuperación: `-rr`
+### Recovery record: `-rr`
 
-Agrega datos de paridad que permiten reparar sectores dañados con `parc r` (o `arc r`).
+Adds parity data that lets `parc r` (or `arc r`) repair damaged sectors.
 
-| opción | efecto |
+| option | effect |
 |---|---|
-| `-rr` | lo recomendado según el tamaño: 4%, 2% o 1% |
-| `-rr<N>%` | N por ciento del archivo |
-| `-rr<N>` o `-rr<N>s` | N sectores de 512 bytes |
-| `-rr<N>b`, `-rr<N>k`, `-rr<N>m` | esa cantidad de bytes |
-| `-rr<cant>;<sector>` | una cantidad de las anteriores, con sectores de ese tamaño |
-| `-rr<N>*<sector>` | exactamente N sectores de ese tamaño |
-| `-rr0.1%` / `-rr0.01%` | solo los CRC de sectores de 4 KB / 64 KB: detecta daño, no repara |
-| `-rr-` | quita el registro al actualizar |
+| `-rr` | recommended by size: 4%, 2% or 1% |
+| `-rr<N>%` | N percent of the archive |
+| `-rr<N>` or `-rr<N>s` | N sectors of 512 bytes |
+| `-rr<N>b`, `-rr<N>k`, `-rr<N>m` | that many bytes |
+| `-rr<amount>;<sector>` | an amount as above, with sectors of that size |
+| `-rr<N>*<sector>` | exactly N sectors of that size |
+| `-rr0.1%` / `-rr0.01%` | only CRCs for 4 KB / 64 KB sectors: detect damage, do not repair |
+| `-rr-` | remove the record when updating |
 
-Sin `-rr`, al actualizar un archivo se conserva lo que tenía. Los sectores de menos de 512
-bytes se rechazan (FreeArc se queda sin memoria con ellos).
+Without `-rr`, updating an archive keeps whatever it had. Sectors smaller than 512 bytes are
+rejected (FreeArc runs out of memory with them).
 
-El registro es Reed-Solomon: reparte el archivo en franjas de hasta 255 sectores, cada una con
-`m` sectores de paridad. Repara hasta `m` sectores dañados por franja, en cualquier posición,
-incluida la propia paridad. Los sectores se intercalan entre franjas, así que un tramo
-contiguo dañado de hasta franjas × `m` sectores también se repara.
+The record is Reed-Solomon: it splits the archive into stripes of up to 255 sectors, each with
+`m` parity sectors. It repairs up to `m` damaged sectors per stripe, at any position, including
+parity itself. Sectors are interleaved across stripes, so a contiguous damaged range of up to
+stripes × `m` sectors is also repaired.
 
-Con `-rr1%` hay unas 2 o 3 paridades por franja, y con `-rr5%` unas 12. Cuanto más daño suelto
-se quiera tolerar, más por ciento. `parc r` dice qué sectores no pudo reparar.
+With `-rr1%` there are about 2 or 3 parities per stripe, and with `-rr5%` about 12. The more
+scattered damage you want to tolerate, the higher the percentage. `parc r` reports which
+sectors it could not repair.
 
-### Volúmenes: `-v` (solo `.parc`)
+### Volumes: `-v` (`.parc` only)
 
-Parte el archivo en pedazos de tamaño fijo, al estilo de 7-Zip: `copia.parc.001`,
-`copia.parc.002`… (el último, más chico).
+Splits the archive into fixed-size pieces, 7-Zip style: `backup.parc.001`, `backup.parc.002`…
+(the last one smaller).
 
-| opción | efecto |
+| option | effect |
 |---|---|
-| `-v<N>` | volúmenes de N bytes; con sufijo `k`, `m`, `g`: `-v100m`, `-v4g`, `-v700000k` |
+| `-v<N>` | volumes of N bytes; with suffix `k`, `m`, `g`: `-v100m`, `-v4g`, `-v700000k` |
 
-- Para leer, extraer, verificar o actualizar se da el primero (`copia.parc.001`) o la base
-  (`copia.parc`); PArc junta los volúmenes al vuelo.
-- Es el mismo archivo cortado en pedazos: `cat copia.parc.0* > copia.parc` (o `copy /b` en
-  Windows) da un `.parc` normal.
-- Al actualizar un archivo en volúmenes se conserva el tamaño de volumen (el del primero) y
-  se borran los que sobren. `-v` sobre un archivo suelto lo pasa a volúmenes.
-- Con `-rr`, el registro protege todo el conjunto; `parc r` escribe `fixed.<nombre>` de una
-  sola pieza.
-- Si falta un volumen del medio se avisa cuál; si falta el último, el error lo sugiere.
+- To list, extract, test or update, pass the first volume (`backup.parc.001`) or the base name
+  (`backup.parc`); PArc joins the volumes on the fly.
+- It is the same archive cut into pieces: `cat backup.parc.0* > backup.parc` (or `copy /b` on
+  Windows) produces a normal `.parc`.
+- Updating a volume set keeps the volume size (that of the first volume) and deletes extra
+  volumes. `-v` on a single-file archive turns it into volumes.
+- With `-rr`, the record protects the whole set; `parc r` writes a single-file `fixed.<name>`.
+- If a middle volume is missing, PArc reports which one; if the last one is missing, the error
+  suggests it.
 
-### Cifrado
+### Encryption
 
-| opción | efecto |
+| option | effect |
 |---|---|
-| `-p<contraseña>` | al leer: la contraseña de un archivo cifrado. Al comprimir: cifra los datos |
-| `-p` | sin valor: la pide por consola (dos veces, si es para cifrar) |
-| `-hp[<contraseña>]` | cifra también el directorio y el footer: sin la contraseña no se ve ni la lista |
-| `-ae=<alg>`, `--encryption=<alg>` | `aes` (default, aes-256/ctr), `blowfish`, `serpent`, `twofish`; con tamaño y modo: `serpent-256/cfb`, `blowfish-448/ctr`... |
+| `-p<password>` | on read: password of an encrypted archive. When compressing: encrypt data |
+| `-p` | no value: prompt on the console (twice when encrypting) |
+| `-hp[<password>]` | also encrypt the directory and footer: without the password not even the listing is visible |
+| `-ae=<alg>`, `--encryption=<alg>` | `aes` (default, aes-256/ctr), `blowfish`, `serpent`, `twofish`; with size and mode: `serpent-256/cfb`, `blowfish-448/ctr`… |
 
-`-p` y `-hp` pueden llevar contraseñas distintas; al leer se prueban las dos.
-Si falta la contraseña de un archivo cifrado, se pide por consola (hasta tres intentos).
-Al actualizar un archivo cifrado, los bloques que se reempaquetan se vuelven a cifrar aunque
-no se haya dado `-p`: borrar un archivo no deja el resto en claro.
+`-p` and `-hp` may carry different passwords; both are tried when reading.
+If the password of an encrypted archive is missing, PArc prompts (up to three attempts).
+When updating an encrypted archive, blocks that are repacked are encrypted again even if `-p`
+was not given: deleting a file does not leave the rest in plaintext.
 
-El cifrado de `.parc` usa:
+`.parc` encryption uses:
 
-- 200 000 iteraciones de PBKDF2-HMAC-SHA512 para derivar la clave. Cuesta ~0,6 s, una sola
-  vez por archivo. `-ae=aes:n<N>` elige otra cantidad;
-- la clave completa (32 bytes para AES-256), sin la decodificación defectuosa de FreeArc;
-- una etiqueta de autenticación (HMAC-SHA512 de 32 bytes) por bloque: un cambio en los datos
-  cifrados se detecta ("la autenticación falló"), cosa que el CRC solo no garantiza con CTR;
-- la contraseña en UTF-8, así que cualquier carácter cuenta.
+- 200,000 PBKDF2-HMAC-SHA512 iterations to derive the key. This costs ~0.6 s, once per archive.
+  `-ae=aes:n<N>` selects another count;
+- the full key (32 bytes for AES-256), without FreeArc's defective decoding;
+- one authentication tag per block (32-byte HMAC-SHA512): a change in the encrypted data is
+  detected ("authentication failed"), which CRC alone does not guarantee with CTR;
+- the password in UTF-8, so any character counts.
 
-Los `.parc` cifrados con versiones anteriores de PArc se siguen leyendo y actualizando.
+`.parc` archives encrypted by older PArc versions can still be read and updated.
 
-### Entrada y salida estándar
+### Standard input and output
 
-| opción | efecto |
+| option | effect |
 |---|---|
-| `-so` | `x`/`e`: el contenido de los archivos pedidos va a stdout, sin crear nada en el disco |
-| `-si[nombre]` | `a`: agrega lo que llega por stdin como un archivo con ese nombre (sin nombre: `stdin`) |
-| `-` como archivo | `l`, `lb`, `t`, `x`, `e`: lo lee de stdin; `a`: lo escribe en stdout |
+| `-so` | `x`/`e`: write the requested files' contents to stdout, without creating anything on disk |
+| `-si[name]` | `a`: add data from stdin as a file with that name (no name: `stdin`) |
+| `-` as archive | `l`, `lb`, `t`, `x`, `e`: read it from stdin; `a`: write it to stdout |
 
 ```sh
-tar cf - proyecto | parc a copia.parc -siproyecto.tar -m5   # comprimir lo que sale de tar
-parc x copia.parc proyecto.tar -so | tar xf -               # y de vuelta
-parc x copia.parc config.ini -so                            # ver un archivo sin extraerlo
-parc a - docs | ssh otra 'cat > docs.parc'                  # el archivo, directo por la red
+tar cf - project | parc a backup.parc -siproject.tar -m5   # compress tar output
+parc x backup.parc project.tar -so | tar xf -               # and back
+parc x backup.parc config.ini -so                           # view a file without extracting it
+parc a - docs | ssh other 'cat > docs.parc'                 # the archive, straight over the network
 ```
 
-Con `-so` o con `a -`, los mensajes van a stderr para no mezclarse con los datos. Un archivo no
-se puede escribir ni leer de corrido (los descriptores apuntan hacia atrás y el directorio va al
-final), así que lo que llega por stdin se vuelca primero a un temporal: con `-si`, al lado del
-archivo; con `-`, en el directorio temporal del sistema (`TMPDIR`). Los temporales se borran
-al terminar, también con error o Ctrl-C.
+With `-so` or with `a -`, messages go to stderr so they do not mix with data. An archive cannot
+be read or written sequentially (descriptors point backwards and the directory is at the end),
+so stdin is first copied to a temporary file: with `-si`, next to the archive; with `-`, in the
+system temporary directory (`TMPDIR`). Temporary files are deleted on completion, including on
+error or Ctrl-C.
 
-### Bloques dañados
+### Damaged blocks
 
-Si un bloque está dañado, la extracción sigue con los demás. De ese bloque se informa cada
-archivo que no se pudo extraer; el que estaba a medio escribir queda con lo que se recuperó.
-Si el archivo tiene registro de recuperación, se sugiere `parc r`.
+If a block is damaged, extraction continues with the others. For that block PArc reports every
+file it could not extract; a file that was being written keeps whatever was recovered. If the
+archive has a recovery record, PArc suggests `parc r`.
 
-### Progreso y cancelación
+### Progress and cancellation
 
-| opción | efecto |
+| option | effect |
 |---|---|
-| `--no-progress` | sin la línea de progreso |
+| `--no-progress` | disable the progress line |
 
-La línea de progreso (fase, porcentaje, MB, velocidad, tiempo restante y archivo actual) se
-muestra en stderr solo si es una consola; redirigida no aparece. Ctrl-C cancela limpiamente:
-al comprimir no queda el temporal y un archivo existente queda intacto; al extraer se borra
-el archivo que estaba a medio escribir. Un segundo Ctrl-C corta en el acto.
+The progress line (phase, percentage, MB, speed, remaining time and current file) is shown on
+stderr only when it is a console; when redirected it does not appear. Ctrl-C cancels cleanly:
+when compressing, the temporary file is removed and an existing archive remains intact; when
+extracting, the half-written file is deleted. A second Ctrl-C stops immediately.
 
-## Códigos de salida
+## Exit codes
 
-| código | significado |
+| code | meaning |
 |---|---|
-| 0 | todo bien |
-| 1 | error de uso (opción desconocida, faltan argumentos, archivo bloqueado o inexistente en `f`/`d`) |
-| 2 | datos dañados: CRC incorrecto o estructura rota; en `r`, sectores irrecuperables |
-| 3 | un método que PArc todavía no sabe descomprimir o comprimir |
-| 4 | error de E/S (no se pudo abrir o crear un archivo, por ejemplo) |
-| 5 | contraseña faltante o incorrecta |
-| 6 | terminó, pero algunos archivos no se pudieron leer y no se agregaron |
-| 130 | cancelado con Ctrl-C |
+| 0 | success |
+| 1 | usage error (unknown option, missing arguments, locked archive, or missing archive in `f`/`d`) |
+| 2 | corrupt data: wrong CRC or broken structure; with `r`, unrecoverable sectors |
+| 3 | a method PArc cannot decompress or compress yet |
+| 4 | I/O error (could not open or create a file, for example) |
+| 5 | missing or wrong password |
+| 6 | finished, but some files could not be read and were not added |
+| 130 | cancelled with Ctrl-C |
 
-## Variables de entorno
+## Environment variables
 
-| variable | efecto |
+| variable | effect |
 |---|---|
-| `PARC_THREADS` | cantidad de hilos para los compresores paralelos (4x4, grzip); por defecto, los núcleos |
+| `PARC_THREADS` | number of threads for parallel compressors (4x4, grzip); defaults to CPU cores |
 
-## Ejemplos
+## Examples
 
 ```sh
-parc a copia.parc proyecto/ -m5 -rr       # con registro de recuperación
-parc a fotos.parc fotos/ -mx -s-          # máxima compresión, sin sólido
-parc a privado.parc docs/ -p -hp          # cifrado; pide la contraseña
-parc u copia.parc proyecto/               # actualiza lo que cambió
-parc d copia.parc 'proyecto/tmp/*'        # borra
-parc t copia.parc                         # verifica
-parc x copia.parc -dpdestino -o+          # extrae sobrescribiendo
-parc r copia.parc                         # repara -> fixed.copia.parc
+parc a backup.parc project/ -m5 -rr       # with a recovery record
+parc a photos.parc photos/ -mx -s-        # maximum compression, non-solid
+parc a private.parc docs/ -p -hp          # encryption; prompts for the password
+parc u backup.parc project/               # update what changed
+parc d backup.parc 'project/tmp/*'        # delete
+parc t backup.parc                        # test
+parc x backup.parc -dpdestination -o+     # extract, overwriting
+parc r backup.parc                        # repair -> fixed.backup.parc
 ```
 
-## Relación con FreeArc
+## Relationship with FreeArc
 
-PArc empezó como una reescritura compatible de FreeArc 0.67, pero ya no lee ni escribe `.arc`.
-El formato `.parc` conserva la estructura de bloques y los métodos, con extensiones propias
-(`docs/formato/FORMATO-PARC.md`). Los compresores son los mismos, portados a Pascal y
-verificados contra las fuentes C de `reference/freearc-0.67/Compression/`.
+PArc started as a compatible rewrite of FreeArc 0.67, but it no longer reads or writes `.arc`.
+The `.parc` format keeps the block structure and methods, with its own extensions
+(`docs/formato/FORMATO-PARC.md`). The compressors are the same, ported to Pascal and verified
+against the C sources in `reference/freearc-0.67/Compression/`.
 
-El soporte de `.arc` (y de los demás contenedores) está en
+Support for `.arc` (and the other containers) lives in
 [FreeArc-ex](https://github.com/YadeWira/FreeArc-ex).
 
-La creación de autoextraíbles (`-sfx` y el módulo `parcsfx`) también quedó fuera. PArc
-sigue abriendo, verificando y extrayendo SFX existentes, y al actualizarlos conserva el
-módulo que llevan delante.
+Self-extractor creation (`-sfx` and the `parcsfx` module) was also dropped. PArc still opens,
+tests and extracts existing SFX archives, and updating one preserves the stub in front of it.

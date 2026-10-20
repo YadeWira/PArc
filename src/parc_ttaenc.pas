@@ -153,7 +153,7 @@ var
   isF, ok: Boolean;
 begin
   if (Length(Params) = 0) or (Params[0] <> 'tta') then
-    raise ETtaEncParams.Create('tta: no es el método tta');
+    raise ETtaEncParams.Create('tta: not the method tta');
   // TTA_METHOD::TTA_METHOD
   Result.Level := 3;
   Result.SkipHeader := 0;
@@ -182,7 +182,7 @@ begin
       ok := False;
     if (p <> '') and (p[1] in ['m', 'c', 'w', 'o', 'r']) then
     begin
-      if not ok then raise ETtaEncParams.CreateFmt('tta: parámetro inválido "%s"', [p]);
+      if not ok then raise ETtaEncParams.CreateFmt('tta: invalid parameter "%s"', [p]);
       Continue;
     end;
     // sin nombre: c*w o c*wf
@@ -193,7 +193,7 @@ begin
       Result.WordSize := b;
     end
     else
-      raise ETtaEncParams.CreateFmt('tta: parámetro inválido "%s"', [p]);
+      raise ETtaEncParams.CreateFmt('tta: invalid parameter "%s"', [p]);
   end;
 end;
 
@@ -337,7 +337,7 @@ constructor TTtaEncStage.Create(ATarget: TOutStage; const APar: TTtaEncParams);
 begin
   // Validar ANTES de inherited Create (si falla, Destroy ve FTarget=nil)
   if (APar.Level < 0) or (APar.NumChan < 0) or (APar.WordSize < 0) or (APar.Offset < 0) then
-    raise ETtaEncParams.Create('tta: parámetros inválidos');
+    raise ETtaEncParams.Create('tta: invalid parameters');
   if (APar.RawData < 0) or (APar.RawData > 1) then
     raise ETtaEncParams.Create('tta: raw_data > 1 no lo decodifica FreeArc');
   FPar := APar;
@@ -517,7 +517,7 @@ begin
     tpDetect:
       if FPrevLen > 0 then Decide;              // entrada vacía: el C no escribe nada
     tpHeader:
-      raise ETtaEncError.Create('tta: la entrada es más corta que el offset');
+      raise ETtaEncError.Create('tta: input shorter than offset');
   end;
   if (FPhase = tpBlocks) and (FBlkLen > 0) then EncodeBlock;
   FBlk := nil;

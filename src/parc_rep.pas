@@ -62,19 +62,19 @@ begin
   if not FStarted then
   begin
     FStarted := True;
-    // Un stream vacío (sin siquiera el tamaño de ventana) es un bloque sin datos
+    // Un empty stream (sin siquiera el tamaño de ventana) es un bloque sin datos
     if not Source.ReadExactOrEof(@ComprSize, 4) then Exit;
     FWinSize := LeToN(ComprSize);
-    if (FWinSize <= 0) or (FWinSize > High(SizeInt) div 2) then Corrupt('rep: tamaño de ventana inválido');
+    if (FWinSize <= 0) or (FWinSize > High(SizeInt) div 2) then Corrupt('rep: invalid window size');
     SetLength(FWin, FWinSize);
   end;
   ComprSize := Source.ReadU32;
   if ComprSize = 0 then Exit;   // marca de fin
-  if ComprSize < 8 then Corrupt('rep: bloque inválido');
+  if ComprSize < 8 then Corrupt('rep: invalid block');
   if ComprSize > Length(FBlock) then SetLength(FBlock, ComprSize);
   Source.ReadExact(@FBlock[0], ComprSize);
   FNum := LongInt(LongWord(FBlock[0]) or (LongWord(FBlock[1]) shl 8) or (LongWord(FBlock[2]) shl 16) or (LongWord(FBlock[3]) shl 24));
-  if (FNum < 0) or (Int64(FNum) * 12 + 8 > ComprSize) then Corrupt('rep: tablas inválidas');
+  if (FNum < 0) or (Int64(FNum) * 12 + 8 > ComprSize) then Corrupt('rep: invalid tables');
   FTabLens := 4;
   FTabOffs := FTabLens + 4 * FNum;
   FTabData := FTabOffs + 4 * FNum;
@@ -83,10 +83,10 @@ begin
   LitTotal := 0;
   for i := 0 to FNum do
   begin
-    if Tab(FTabData, i) < 0 then Corrupt('rep: largo de literal inválido');
+    if Tab(FTabData, i) < 0 then Corrupt('rep: invalid literal length');
     Inc(LitTotal, Tab(FTabData, i));
   end;
-  if LitTotal <> Int64(ComprSize) - FLitPos then Corrupt('rep: los literales no coinciden con el bloque');
+  if LitTotal <> Int64(ComprSize) - FLitPos then Corrupt('rep: literals do not match the block');
   FItem := 0;
   FInMatch := False;
   StartItem;
@@ -99,10 +99,10 @@ begin
   begin
     FRemain := Tab(FTabLens, FItem);
     FMatchDist := Tab(FTabOffs, FItem);
-    if FRemain < 0 then Corrupt('rep: largo de match inválido');
+    if FRemain < 0 then Corrupt('rep: invalid match length');
     // La distancia apunta a datos ya producidos y dentro de la ventana
     if (FMatchDist <= 0) or (FMatchDist > FWinSize) or (QWord(FMatchDist) > FTotal) then
-      if FRemain > 0 then Corrupt('rep: distancia inválida');
+      if FRemain > 0 then Corrupt('rep: invalid distance');
   end
   else
     FRemain := Tab(FTabData, FItem);

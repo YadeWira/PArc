@@ -428,12 +428,12 @@ begin
     Inc(N, K);
   end;
   SetLength(In_, N);
-  if N = 0 then raise EArcCorrupt.Create('srep: bloque vacío');
+  if N = 0 then raise EArcCorrupt.Create('srep: empty block');
   Size := SrepDecodedSize(@In_[0], N);
-  if Size < 0 then raise EArcCorrupt.Create('srep: cabecera inválida');
+  if Size < 0 then raise EArcCorrupt.Create('srep: invalid header');
   SetLength(FOut, Integer(Size));
   if not SrepDecode(@In_[0], N, @FOut[0], Size) then
-    raise EArcCorrupt.Create('srep: datos dañados');
+    raise EArcCorrupt.Create('srep: damaged data');
   FPos := 0;
 end;
 

@@ -140,7 +140,7 @@ begin
     // En volúmenes, lo más probable es que falte el último (el footer va al final)
     on E: EArcCorrupt do
       if FStream is TVolumeStream then
-        Corrupt(E.Message + Format('; se leyeron %d volumen(es), hasta %s: ¿falta el siguiente?',
+        Corrupt(E.Message + Format('; %d volume(s) read, up to %s: is the next one missing?',
           [TVolumeStream(FStream).Names.Count, TVolumeStream(FStream).Names[TVolumeStream(FStream).Names.Count - 1]]))
       else
         raise;
@@ -157,13 +157,13 @@ end;
 function TArchive.OpenBlockData(const Block: TArcBlock): TInStage;
 begin
   if (Block.Pos < 0) or (Block.CompSize < 0) or (Block.Pos + Block.CompSize > ArcSize) then
-    Corrupt('bloque de datos fuera del archivo');
+    Corrupt('data block outside the archive');
   Result := TFileSliceStage.Create(FStream, Block.Pos, Block.CompSize);
 end;
 
 procedure TArchive.ReadAt(Pos: Int64; var Buf; Count: SizeInt);
 begin
-  if (Pos < 0) or (Count < 0) or (Pos + Count > ArcSize) then Corrupt('bloque fuera del archivo');
+  if (Pos < 0) or (Count < 0) or (Pos + Count > ArcSize) then Corrupt('block outside the archive');
   FStream.Position := Pos;
   FStream.ReadBuffer(Buf, Count);
 end;
@@ -211,7 +211,7 @@ var
 begin
   n := SCAN_MAX;
   if ArcSize < n then n := ArcSize;
-  if n < 4 then Corrupt('no es un archivo FreeArc (demasiado chico)');
+  if n < 4 then Corrupt('not a FreeArc archive (too small)');
   Base := ArcSize - n;
   SetLength(Raw, n);
   ReadAt(Base, Raw[0], n);
@@ -221,12 +221,12 @@ begin
       if TryReadDescriptor(Raw, i, n - i, Base + i, Result, Sig) then
       begin
         if Result.BlockType <> FOOTER_BLOCK then
-          Corrupt('el último bloque no es el footer');
+          Corrupt('the last block is not the footer');
         if Sig <> PARC_SIGNATURE then
-          raise EArcCorrupt.Create('es un archivo .arc: PArc ya no lo soporta (para .arc usá FreeArc-ex)');
+          raise EArcCorrupt.Create('this is an .arc archive: PArc no longer supports it (use FreeArc-ex for .arc)');
         Exit;
       end;
-  raise EArcCorrupt.Create('no es un archivo .parc o está dañado (no se encontró el footer)');
+  raise EArcCorrupt.Create('not a .parc archive or it is damaged (footer not found)');
 end;
 
 function TArchive.ReadControlBlock(const Block: TArcBlock): TBytes;
@@ -234,12 +234,12 @@ var
   Comp: TBytes;
 begin
   if (Block.CompSize > High(SizeInt)) or (Block.OrigSize > High(SizeInt)) then
-    Corrupt('bloque de control demasiado grande');
+    Corrupt('control block too large');
   SetLength(Comp, Block.CompSize);
   if Block.CompSize > 0 then ReadAt(Block.Pos, Comp[0], Block.CompSize);
   Result := DecompressMem(Block.Method, PByte(Comp), Length(Comp), Block.OrigSize);
   if CalcCRC(PByte(Result), Length(Result)) <> Block.Crc then
-    Corrupt(Format('CRC incorrecto en bloque %s en pos %d', [BlockTypeName(Block.BlockType), Block.Pos]));
+    Corrupt(Format('wrong CRC in block %s at %d', [BlockTypeName(Block.BlockType), Block.Pos]));
 end;
 
 procedure TArchive.ParseFooter(const Footer: TArcBlock);
@@ -252,7 +252,7 @@ begin
   Data := ReadControlBlock(Footer);
   r.Init(PByte(Data), Length(Data));
   n := r.VIntSize;
-  if n > r.Remaining then Corrupt('cantidad de bloques inválida');
+  if n > r.Remaining then Corrupt('invalid block count');
   SetLength(ControlBlocks, n);
   for i := 0 to n - 1 do
     with ControlBlocks[i] do
@@ -260,7 +260,7 @@ begin
       BlockType := r.VIntSize;
       Method := r.CStr;
       RelPos := r.VInt;
-      if RelPos > QWord(Footer.Pos) then Corrupt('posición de bloque inválida');
+      if RelPos > QWord(Footer.Pos) then Corrupt('invalid block position');
       Pos := Footer.Pos - Int64(RelPos);
       OrigSize := Int64(r.VInt);
       CompSize := Int64(r.VInt);
@@ -268,7 +268,7 @@ begin
     end;
   Locked := r.U8 <> 0;
   n := r.VIntSize;                 // comentario viejo en UCS-4: FreeArc 0.67 escribe 0
-  if n > r.Remaining div 4 then Corrupt('comentario inválido');
+  if n > r.Remaining div 4 then Corrupt('invalid comment');
   r.Skip(n * 4);
   if not r.Eof then Recovery := r.CStr;
   if not r.Eof then
@@ -301,10 +301,10 @@ begin
     begin
       Data := ReadControlBlock(ControlBlocks[i]);
       if (Length(Data) < 8) or (Data[0] <> $50) or (Data[1] <> $41) or (Data[2] <> $72) or (Data[3] <> $01) then
-        Corrupt('encabezado .parc inválido');
+        Corrupt('invalid .parc header');
       Version := LongWord(Data[4]) or (LongWord(Data[5]) shl 8) or (LongWord(Data[6]) shl 16) or (LongWord(Data[7]) shl 24);
       if Version > PARC_FORMAT_VERSION then
-        raise EArcCorrupt.CreateFmt('formato .parc versión %d: esta versión de PArc solo entiende hasta la %d',
+        raise EArcCorrupt.CreateFmt(' .parc format version %d: this PArc version understands up to %d',
           [Version, PARC_FORMAT_VERSION]);
       Exit;
     end;
@@ -331,7 +331,7 @@ begin
   r.Init(PByte(Data), Length(Data));
 
   NBlocks := r.VIntSize;
-  if NBlocks > r.Remaining then Corrupt('cantidad de bloques de datos inválida');
+  if NBlocks > r.Remaining then Corrupt('invalid data block count');
   FirstBlock := Length(DataBlocks);
   FirstFile := Length(Files);
   SetLength(DataBlocks, FirstBlock + NBlocks);
@@ -340,7 +340,7 @@ begin
   for b := 0 to NBlocks - 1 do
   begin
     Counts[b] := r.VIntSize;
-    if Counts[b] > r.Remaining then Corrupt('cantidad de archivos inválida');
+    if Counts[b] > r.Remaining then Corrupt('invalid file count');
     DataBlocks[FirstBlock + b] := Default(TArcBlock);
     DataBlocks[FirstBlock + b].BlockType := DATA_BLOCK;
     DataBlocks[FirstBlock + b].FirstFile := FirstFile + Total;
@@ -352,27 +352,27 @@ begin
   for b := 0 to NBlocks - 1 do
   begin
     Ofs := r.VInt;
-    if Ofs > QWord(DirBlock.Pos) then Corrupt('posición de bloque de datos inválida');
+    if Ofs > QWord(DirBlock.Pos) then Corrupt('invalid data block position');
     DataBlocks[FirstBlock + b].Pos := DirBlock.Pos - Int64(Ofs);
   end;
   for b := 0 to NBlocks - 1 do
     DataBlocks[FirstBlock + b].CompSize := Int64(r.VInt);
 
   NDirs := r.VIntSize;
-  if NDirs > r.Remaining then Corrupt('cantidad de directorios inválida');
+  if NDirs > r.Remaining then Corrupt('invalid directory count');
   SetLength(Dirs, NDirs);
   for i := 0 to NDirs - 1 do
     Dirs[i] := SanitizePath(r.CStr);
 
   // Cada campo por archivo va en su propia columna (el formato base de FreeArc §6)
-  if Total > r.Remaining then Corrupt('cantidad de archivos inválida');
+  if Total > r.Remaining then Corrupt('invalid file count');
   SetLength(Files, FirstFile + Total);
   for i := 0 to Total - 1 do
     Files[FirstFile + i].Name := r.CStr;
   for i := 0 to Total - 1 do
   begin
     DirIdx := r.VIntSize;
-    if DirIdx >= NDirs then Corrupt('índice de directorio inválido');
+    if DirIdx >= NDirs then Corrupt('invalid directory index');
     if Dirs[DirIdx] <> '' then
       Files[FirstFile + i].Name := Dirs[DirIdx] + '/' + SanitizePath(Files[FirstFile + i].Name)
     else
@@ -390,7 +390,7 @@ begin
     if Tag = DIRTAG_END then Break;
     Mandatory := r.U8 <> 0;
     FieldLen := r.VIntSize;
-    if FieldLen > r.Remaining then Corrupt('campo opcional del directorio truncado');
+    if FieldLen > r.Remaining then Corrupt('truncated directory optional field');
     FieldEnd := r.Pos + FieldLen;
     case Tag of
       DIRTAG_MTIME_NS:
@@ -433,7 +433,7 @@ begin
           while (LinkCount > 0) and (r.Pos < FieldEnd) do
           begin
             LinkIdx := Int64(r.VInt);
-            if (LinkIdx < 0) or (LinkIdx >= Total) then Corrupt('enlace con índice fuera de rango');
+            if (LinkIdx < 0) or (LinkIdx >= Total) then Corrupt('link index out of range');
             with Files[FirstFile + LinkIdx] do
             begin
               LinkTarget := r.CStr;
@@ -445,7 +445,7 @@ begin
         end;
     else
       if Mandatory then
-        raise EArcCorrupt.CreateFmt('el directorio usa una extensión obligatoria desconocida (tag %d)', [Tag]);
+        raise EArcCorrupt.CreateFmt('directory uses an unknown mandatory extension (tag %d)', [Tag]);
     end;
     r.Pos := FieldEnd;   // saltear lo que no se usó (tamaño inesperado o tag desconocido)
   end;

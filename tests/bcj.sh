@@ -28,5 +28,5 @@ for f in $CAND; do
   done
 done
 
-echo "== bcj: $pass ok, $fail fallas"
+echo "== bcj: $pass ok, $fail failures"
 [ $fail -eq 0 ]

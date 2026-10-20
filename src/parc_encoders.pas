@@ -187,7 +187,7 @@ var
   Threads: Integer;
 begin
   if not EncoderAvailable(AInner) then
-    raise EUnsupportedEncoder.CreateFmt('todavía no se puede comprimir con "%s"', [AInner]);
+    raise EUnsupportedEncoder.CreateFmt('cannot compress with "%s" yet', [AInner]);
   if ABlockSize < 4096 then ABlockSize := 4096;
   inherited Create(ATarget);
   FInner := AInner;
@@ -456,7 +456,7 @@ begin
         Result := TPpmdEncStage.Create(Target, pp.Order, pp.Mem, pp.MRMethod, pp.Chunk);
       end;
   else
-    raise EUnsupportedEncoder.CreateFmt('todavía no se puede comprimir con "%s"', [Stage]);
+    raise EUnsupportedEncoder.CreateFmt('cannot compress with "%s" yet', [Stage]);
   end;
 end;
 
@@ -558,7 +558,7 @@ begin
   if not EncoderAvailable(Method) then
   begin
     Target.Free;
-    raise EUnsupportedEncoder.CreateFmt('todavía no se puede comprimir con "%s"', [Method]);
+    raise EUnsupportedEncoder.CreateFmt('cannot compress with "%s" yet', [Method]);
   end;
   Result := Target;
   try
@@ -614,7 +614,7 @@ begin
     for i := 1 to Length(W) do Pwd[i] := Chr(Ord(W[i]) and $FF);
   end;
   if not IsCipherStage(Algorithm) or not MakeEncryption(Alg, Pwd, Stored, Result) then
-    raise EUnsupportedEncoder.CreateFmt('algoritmo de cifrado inválido: "%s"', [Algorithm]);
+    raise EUnsupportedEncoder.CreateFmt('invalid encryption algorithm: "%s"', [Algorithm]);
 end;
 
 function WithoutCipher(const Method: string): string;

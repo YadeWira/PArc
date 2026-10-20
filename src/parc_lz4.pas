@@ -127,14 +127,14 @@ begin
   begin
     FStarted := True;
     if not Source.ReadExactOrEof(@Hdr[0], 1) then Exit(False);
-    if Hdr[0] <> LZ4_FORMAT_VERSION then Corrupt('lz4: versión de formato desconocida');
+    if Hdr[0] <> LZ4_FORMAT_VERSION then Corrupt('lz4: unknown format version');
   end;
   if not Source.ReadExactOrEof(@Hdr[0], 4) then Exit(False);
   InSize := LongInt(LongWord(Hdr[0]) or (LongWord(Hdr[1]) shl 8) or (LongWord(Hdr[2]) shl 16) or (LongWord(Hdr[3]) shl 24));
   if InSize < 0 then
   begin
     // Bloque guardado: se copia tal cual
-    if InSize = Low(LongInt) then Corrupt('lz4: tamaño de bloque inválido');
+    if InSize = Low(LongInt) then Corrupt('lz4: invalid block size');
     n := -InSize;
     if n > Length(FOut) then SetLength(FOut, n);
     Source.ReadExact(@FOut[0], n);
@@ -145,7 +145,7 @@ begin
     if SizeInt(InSize) > Length(FIn) then SetLength(FIn, InSize);
     if InSize > 0 then Source.ReadExact(@FIn[0], InSize);
     FLen := Lz4DecodeBlock(@FIn[0], InSize, @FOut[0], Length(FOut));
-    if FLen < 0 then Corrupt('lz4: datos inválidos');
+    if FLen < 0 then Corrupt('lz4: invalid data');
   end;
   FPos := 0;
   Result := True;

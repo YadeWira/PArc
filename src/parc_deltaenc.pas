@@ -50,7 +50,7 @@ type
     constructor Create(ATarget: TOutStage; const APar: TDeltaEncParams);
   end;
 
-{ parse_DELTA; parámetros inválidos -> EDeltaEncParams }
+{ parse_DELTA; invalid parameters -> EDeltaEncParams }
 function ParseDeltaEncParams(const Params: TStringArray): TDeltaEncParams;
 
 implementation
@@ -82,7 +82,7 @@ var
   ok: Boolean;
 begin
   if (Length(Params) = 0) or (Params[0] <> 'delta') then
-    raise EDeltaEncParams.Create('delta: no es el método delta');
+    raise EDeltaEncParams.Create('delta: not the method delta');
   // DELTA_METHOD::DELTA_METHOD
   Result.BlockSize := 8 shl 20;
   Result.ExtendedTables := False;
@@ -92,10 +92,10 @@ begin
     if p = 'x' then begin Result.ExtendedTables := True; Continue; end;
     if (p <> '') and (p[1] = 'b') then ok := FaParseMem(Copy(p, 2, MaxInt), m)
     else ok := FaParseMem(p, m);
-    if not ok then raise EDeltaEncParams.CreateFmt('delta: parámetro inválido "%s"', [p]);
+    if not ok then raise EDeltaEncParams.CreateFmt('delta: invalid parameter "%s"', [p]);
     // Con BlockSize=0 el C lee 0 bytes, lo toma como fin y descarta todo el stream
     if (m = 0) or (m > MAX_BLOCK_SIZE) then
-      raise EDeltaEncParams.CreateFmt('delta: tamaño de bloque inválido "%s"', [p]);
+      raise EDeltaEncParams.CreateFmt('delta: invalid block size "%s"', [p]);
     Result.BlockSize := LongInt(m);
   end;
 end;
@@ -111,7 +111,7 @@ constructor TDeltaEncStage.Create(ATarget: TOutStage; const APar: TDeltaEncParam
 begin
   // Validar ANTES de inherited Create (si falla, Destroy ve FTarget=nil)
   if (APar.BlockSize <= 0) or (APar.BlockSize > MAX_BLOCK_SIZE) then
-    raise EDeltaEncParams.Create('delta: tamaño de bloque inválido');
+    raise EDeltaEncParams.Create('delta: invalid block size');
   FPar := APar;
   inherited Create(ATarget);
 end;

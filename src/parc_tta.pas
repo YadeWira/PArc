@@ -305,7 +305,7 @@ begin
         if isF then Result.IsFloat := 1;
       end
       else
-        raise EUnsupportedMethod.Create('tta: parámetro inválido: ' + p);
+        raise EUnsupportedMethod.Create('tta: invalid parameter: ' + p);
     end;
   end;
 end;
@@ -437,7 +437,7 @@ begin
   if (APar.RawData < 0) or (APar.RawData > 1) then
     raise EUnsupportedMethod.Create('tta: raw_data no soportado');
   if (APar.NumChan < 0) or (APar.WordSize < 0) then
-    raise EUnsupportedMethod.Create('tta: parámetros inválidos');
+    raise EUnsupportedMethod.Create('tta: invalid parameters');
   inherited Create(ASource);
 end;
 
@@ -475,7 +475,7 @@ begin
   Source.ReadExact(@b4[0], 4);
   offset := LongInt(LongWord(b4[0]) or (LongWord(b4[1]) shl 8) or
                     (LongWord(b4[2]) shl 16) or (LongWord(b4[3]) shl 24));
-  if offset < 0 then Corrupt('tta: offset inválido');
+  if offset < 0 then Corrupt('tta: invalid offset');
   if offset > 0 then
   begin
     SetLength(FOut, offset);
@@ -493,7 +493,7 @@ begin
   if not Source.ReadExactOrEof(@b4[0], 4) then Exit(False);
   bytes_read := LongWord(b4[0]) or (LongWord(b4[1]) shl 8) or
                 (LongWord(b4[2]) shl 16) or (LongWord(b4[3]) shl 24);
-  if bytes_read > (LongWord(1) shl 30) then Corrupt('tta: bloque demasiado grande');
+  if bytes_read > (LongWord(1) shl 30) then Corrupt('tta: block too large');
   frame_len := bytes_read div LongWord(FN);
 
   if FRawData = 0 then
@@ -502,7 +502,7 @@ begin
     bit_array_size := LongWord(b4[0]) or (LongWord(b4[1]) shl 8) or
                       (LongWord(b4[2]) shl 16) or (LongWord(b4[3]) shl 24);
     if bit_array_size > (LongWord(1) shl 30) then
-      Corrupt('tta: bloque comprimido demasiado grande');
+      Corrupt('tta: compressed block too large');
     if bit_array_size = 0 then
     begin
       SetLength(FOut, bytes_read);
@@ -582,7 +582,7 @@ begin
           FOut[(i * FNumChan + j) * 4 + 3] := Byte((LongWord(FChan[j][i]) shr 24) and $FF);
         end;
   else
-    Corrupt('tta: byte_size inválido');
+    Corrupt('tta: invalid byte_size');
   end;
 
   rest := bytes_read mod LongWord(FN);

@@ -126,7 +126,7 @@ cut -d'|' -f1,2 "$WORK/results.txt" | sort -t'|' -k2,2V | awk -F'|' '
   { c[$2]++; if ($1=="OK") ok[$2]++; else bad[$2]++; if (!($2 in seen)) { seen[$2]=1; order[n++]=$2 } }
   END { for (i=0;i<n;i++) { k=order[i]; printf "%-12s %6d %6d\n", k, ok[k]+0, bad[k]+0 } }'
 tot=$(wc -l < "$WORK/results.txt"); nf=$(grep -c '^FAIL' "$WORK/results.txt")
-echo "total: $tot casos, $((tot-nf)) ok, $nf fallas"
+echo "total: $tot casos, $((tot-nf)) ok, $nf failures"
 
 # Datos corruptos: decodifican o lanzan EArcCorrupt, nunca otra excepción ni cuelgue
 echo; echo "== fuzz"

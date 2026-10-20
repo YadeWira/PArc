@@ -245,8 +245,8 @@ begin
   if not Source.ReadExactOrEof(@Hdr[0], 4) then Exit(False);
   DataSize := GetUi32(@Hdr[0]);
   TableSize := Source.ReadU32;
-  if (TableSize mod 4) <> 0 then Corrupt('delta: tamaño de tabla inválido');
-  if DataSize > $7FFFFFFF then Corrupt('delta: bloque demasiado grande');
+  if (TableSize mod 4) <> 0 then Corrupt('delta: invalid table size');
+  if DataSize > $7FFFFFFF then Corrupt('delta: block too large');
   SetLength(Tables, 3 * SizeInt(TableSize));
   if TableSize > 0 then Source.ReadExact(@Tables[0], 3 * SizeInt(TableSize));
   SetLength(FData, DataSize);
@@ -263,14 +263,14 @@ begin
     N := 0;
     while TypeW > 1 do
     begin
-      if N >= MAX_ELEMENT_SIZE then Corrupt('delta: tipo de tabla inválido');
+      if N >= MAX_ELEMENT_SIZE then Corrupt('delta: invalid table type');
       Immutable[N] := (TypeW and 1) <> 0;
       TypeW := TypeW shr 1;
       Inc(N);
     end;
     Inc(P, Skip);
     if (N = 0) or (Rows < 0) or (P < 0) or (P + N * Rows > SizeInt(DataSize)) then
-      Corrupt('delta: tabla fuera del bloque');
+      Corrupt('delta: table outside block');
 
     // unreorder_table: las columnas inmutables se guardaron primero, juntas
     Imm := 0;
