@@ -75,6 +75,8 @@ Requires Free Pascal 3.2 or newer.
 ./build.sh all
 ```
 
+Tested on Linux x64, Windows 10 x64 and Windows 7 SP1 x64 (32- and 64-bit binaries).
+
 ## Testing
 
 The suite runs against `.parc` archives and the C reference sources kept in

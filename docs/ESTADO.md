@@ -92,6 +92,19 @@ Cambios que lo hacen posible (todos dentro de `.parc`; los códecs son los mismo
   precisión. Ahorra ~2 KB por cada 1.300 archivos.
 - El registro de recuperación es sólo Reed-Solomon; el XOR de `.arc` ya no existe.
 
+## Plataformas verificadas (0.0.1)
+
+| plataforma | binario | pruebas |
+|---|---|---|
+| Linux x64 | `parc` | suite completa: CLI, stdio, volúmenes, RS, cifrado, DisPack, SREP, BCJ, Tornado, vectores criptográficos, fixes, LZMA y fuzz |
+| Windows 10 x64 | win64 | `a/l/t/x`, `u/f/d`, `-p`, `-rr`, `-v`, nombres UTF-8 y archivo creado en Linux |
+| Windows 10 x64 (WOW64) | win32 | mismas pruebas básicas y archivo cruzado a Linux |
+| Windows 7 SP1 x64 | win32 y win64 | crear/verificar/extraer, cifrado y archivo cruzado Linux ↔ Windows |
+| Linux ↔ Windows | ambos | ida y vuelta de `.parc` con `diff` byte a byte |
+
+SREP con el binario de 32 bits se verificó con Wine y con un archivo cruzado a Linux (el
+resto de las pruebas de Windows se hicieron en las VMs reales).
+
 ## Pruebas
 
 ```sh
