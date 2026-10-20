@@ -268,10 +268,12 @@ parc r copia.arc                          # repara -> fixed.copia.arc
 
 ## Compatibilidad con FreeArc
 
-- Lee todo lo que escribe FreeArc 0.67: todos los métodos menos `srep`, archivos cifrados
-  (`-p`, `-hp`) y el registro de recuperación. Los métodos son `storing`, `lzma`, `ppmd`,
-  `grzip`, `dict`, `rep`, `delta`, `tor`, `lzp`, `mm`, `tta`, `4x4`, `exe` (BCJ), `lz4` y
-  `dispack070` (DisPack), solos o en cadena (`exe+dispack070+lzma`, …).
+- Lee todo lo que escribe FreeArc 0.67: todos los métodos, archivos cifrados (`-p`, `-hp`) y
+  el registro de recuperación. Los métodos son `storing`, `lzma`, `ppmd`, `grzip`, `dict`,
+  `rep`, `delta`, `tor`, `lzp`, `mm`, `tta`, `4x4`, `exe` (BCJ), `lz4`, `dispack070` (DisPack)
+  y `srep` (SREP v1–v3), solos o en cadena (`exe+dispack070+lzma`, `srep+lzma`, …).
+- Comprimir con `srep` todavía no está disponible (sí leerlo): `parc a … -msrep` sale con
+  código 3.
 - Lo que escribe PArc en `.arc` lo abren y extraen `arc.exe` 0.67.1 y `unarc`.
 - Con el mismo árbol y el mismo preset, PArc arma los mismos bloques sólidos, con los mismos
   archivos en el mismo orden y el mismo método guardado que `arc.exe`

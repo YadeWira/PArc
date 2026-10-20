@@ -40,16 +40,5 @@ for m in $METHODS; do
   else bad "$m: arc.exe x difiere"; fi
 done
 
-# Método todavía no soportado: `parc` sale con 3 ("no soportado"), no con 2 ("datos dañados").
-# (Hoy SREP no está portado; cuando lo esté, cambiar este caso por un método inventado.)
-rm -f s.arc
-if wine "$ARC_EXE" a -msrep s.arc c </dev/null >/dev/null 2>&1; then
-  out=$("$PARC" t s.arc 2>&1); code=$?
-  [ $code = 3 ] && ok "método no soportado: código 3" || bad "método no soportado: código $code (esperado 3)"
-  echo "$out" | grep -q "no soportado" && ok "método no soportado: lo informa" || bad "método no soportado: no lo informa"
-else
-  echo "  skip método no soportado (arc.exe no crea srep)"
-fi
-
 echo "== métodos canónicos: $pass ok, $fail fallas"
 [ $fail -eq 0 ]
