@@ -3,11 +3,16 @@
 Basado en el relevamiento de la GUI de FreeArc 0.67 (GUI.hs, FileManager*.hs, UI.hs, CUI.hs,
 DLLUI.hs, ArcShellExt/). Todavía no hay decisiones tomadas: ver §5.
 
+> **Estado (2026-10-20):** la GUI **no se empieza hasta que el humano lo diga**. No es una
+> fase en curso: primero van los bugs y la actualización de codecs. Decisiones ya tomadas:
+> será un **clon 1:1** de la GUI de FreeArc y **no usará GTK2**.
+
 ## 0. Restricciones del entorno
 - **La LCL para Windows todavía no se puede compilar desde Linux.** El cross win64 instalado
   solo tiene `rtl*`, sin `fcl-*` ni `winunits`. La CLI sí compila, porque usa solo la RTL.
   Para win32 no hay cross (PA-Lab está armando `ppcross386`).
-- En Linux solo está compilado el widgetset **gtk2** (Lazarus 4.0). qt5 necesita `libqt5pas`.
+- En Linux el único widgetset instalado es **gtk2** (Lazarus 4.0), pero **está descartado por
+  decisión**; habrá que instalar qt5 (`libqt5pas`) o resolver el widgetset antes de empezar.
 - Los archivos de idioma de FreeArc (`arc.languages/`) no están en el repo.
 
 ## 1. Cómo es la GUI de FreeArc
@@ -94,10 +99,16 @@ DLLUI.hs, ArcShellExt/). Todavía no hay decisiones tomadas: ver §5.
 | F7 | DLL del shell (etapa B) | F4 |
 
 ## 5. Decisiones pendientes (humano)
-1. Visual: ¿clon de FreeArc o diseño nuevo? (recomendado: misma estructura, widgets nativos)
+1. Visual: ~~¿clon de FreeArc o diseño nuevo?~~ **decidido: clon 1:1**.
 2. i18n: ¿formato `arc.<idioma>.txt` compatible o `.po` con `LCLTranslator`?
-3. Widgetset Linux: ¿gtk2 o qt5?
+3. Widgetset Linux: ~~¿gtk2 o qt5?~~ **gtk2 descartado**. Falta elegir (qt5 u otro) y
+   confirmarlo; hoy solo gtk2 está instalado.
 4. Toolchain Windows: ¿cross completo desde Linux o build nativo en Windows?
+   (decidido: priorizar el cross, ver la respuesta del 2026-10-20)
 5. Explorador: ¿alcanza con la etapa A o hace falta la DLL COM?
 6. Alcance del MVP: ¿solo lectura hasta tener el escritor `.parc`?
 7. ¿Se mantiene "Background" o alcanza con Pausa/Cancelar?
+
+## 6. Cuándo se empieza
+Cuando el humano lo indique. Antes de tocar código de GUI: cerrar la fase de bugs y la de
+codecs. No agregar dependencias de LCL al build de la CLI (`build.sh`) mientras tanto.

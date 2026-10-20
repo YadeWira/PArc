@@ -60,7 +60,8 @@ function FaParseSolidOption(const Opt: string; out Crits: TFaCrits): Boolean;
 { Bloques sólidos para Files con los métodos por grupo GM (DecodeMethod). Sort = False
   desactiva el orden (FreeArc no ordena con -s- ni con -m0). }
 function FaSolidBlocks(const Files: array of TFaFile; const GM: TGroupMethods;
-  const Crits: TFaCrits; DetectLevel: Integer; Presorted: Boolean = False): TFaBlocks;
+  const Crits: TFaCrits; DetectLevel: Integer; Presorted: Boolean = False;
+  AllowCopyOld: Boolean = True): TFaBlocks;
 
 { Orden de los archivos como sort_files (gerpn), y la comparación del merge de join_lists
   (key_func "gerpn": grupo, extensión, directorio, nombre; la r es una constante). }
@@ -433,6 +434,7 @@ type
 var
   CurGM: TGroupMethods;
   CurLevel: Integer;
+  CurCopyOld: Boolean;   // False: --recompress (los bloques viejos se rehacen, no se copian)
   CurFiles: array of TFaFile;
   CurType: TIntArray;   // cfType de cada archivo
 
@@ -896,11 +898,63 @@ begin
   end;
 end;
 
+{ splitLenMin (ArhiveFileList.hs): el mínimo aceptable para cada criterio. }
+function CritLenMin(const C: TFaCrit; const L: TIntArray; From: Integer): Integer;
+begin
+  case C.Kind of
+    fcSize: Result := CritLen(FaCrit(fcSize, C.Value div 2), L, From);
+    fcBlockSize: Result := Max(1, PrefixUnder(L, From, SpecialSize(C.Value div 3)));
+    fcNumber: Result := Max(1, C.Value div 2);
+  else
+    Result := CritLen(C, L, From);
+  end;
+end;
+
+{ splitLenMax (ArhiveFileList.hs): el máximo aceptable para cada criterio. }
+function CritLenMax(const C: TFaCrit; const L: TIntArray; From: Integer): Integer;
+begin
+  case C.Kind of
+    fcSize: Result := CritLen(FaCrit(fcSize, C.Value + C.Value div 2), L, From);
+    fcBlockSize: Result := Max(1, PrefixUnder(L, From, SpecialSize(C.Value)));
+    fcNumber: Result := Max(1, C.Value + C.Value div 2);
+  else
+    Result := CritLen(C, L, From);
+  end;
+end;
+
+{ solidBlockLen (ArhiveFileList.hs): si en From empieza un bloque viejo entero, cuántos
+  archivos tiene; si no, 0. }
+function SolidBlockLen(const L: TIntArray; From: Integer): Integer;
+var
+  i: Integer;
+begin
+  Result := 0;
+  if (From < 0) or (From > High(L)) then Exit;
+  with CurFiles[L[From]] do
+  begin
+    if not IsOld or (OldPos <> 0) then Exit;
+    Result := OldBlockFiles;
+  end;
+  if (Result <= 0) or (From + Result > Length(L)) then
+  begin
+    Result := 0;
+    Exit;
+  end;
+  for i := From + 1 to From + Result - 1 do
+    if not CurFiles[L[i]].IsOld or (CurFiles[L[i]].OldBlock <> CurFiles[L[From]].OldBlock) or
+       (CurFiles[L[i]].OldPos <= CurFiles[L[i - 1]].OldPos) then
+    begin
+      Result := 0;
+      Exit;
+    end;
+end;
+
 { isWholeSolidBlock: los Count archivos desde From son, en orden, todo un bloque viejo. }
 function IsWholeOld(const L: TIntArray; From, Count: Integer): Boolean;
 var
   i: Integer;
 begin
+  if not CurCopyOld then Exit(False);
   if (Count <= 0) or (From + Count > Length(L)) then Exit(False);
   with CurFiles[L[From]] do
     if not IsOld or (OldPos <> 0) or (OldBlockFiles <> Count) then Exit(False);
@@ -915,7 +969,8 @@ procedure SplitOneType(const Method: string; const L: TIntArray; const Crits0: T
 var
   Crits: TFaCrits;
   Stages: TStringArray;
-  i, a, Len: Integer;
+  i, a, Len, rem, newLen, minLen, maxLen, k: Integer;
+  IsAll: Boolean;
   bs: Int64;
 
   procedure Emit(From, Count: Integer);
@@ -959,17 +1014,51 @@ begin
     bs := BlockSizeOf(Stages[0]);
     if bs > 0 then Prepend(FaCrit(fcBlockSize, bs));
   end;
-  // splitBy. El fuente, con recompress = False, conserva los bloques viejos enteros que
-  // encabezan la lista (oldLen) y corta los nuevos antes del próximo (oldPos); pero arc.exe
-  // 0.67.1 NO lo hace: con archivos nuevos del mismo grupo detrás de un bloque viejo entero,
-  // reempaqueta todo (probado). Se comporta como con --recompress: siempre el largo nuevo, y
-  // un bloque se copia solo si el corte resulta ser exactamente uno viejo entero (Emit).
+  // splitBy con computeLen (ArhiveFileList.hs): con recompress el corte es el nuevo; si no,
+  // primero se conserva el bloque viejo entero que encabeza la lista (oldLen) y, si no hay,
+  // se corta antes del próximo bloque viejo (oldPos) cuando entra en el corte nuevo; si el
+  // viejo empieza más allá, se corta en minLen. El bloque viejo conservado se copia (Emit).
+  // Excepción medida contra arc.exe 0.67.1: con el criterio "todo junto" (sin -s, o -s / -s7z)
+  // rehace un solo bloque por grupo aunque haya bloques viejos; con criterios explícitos
+  // (-s-, -s1f, -s100k...) los conserva.
+  IsAll := (Length(Crits) = 1) and (Crits[0].Kind = fcAll);
   a := 0;
   while a <= High(L) do
   begin
-    Len := MaxInt;
-    for i := 0 to High(Crits) do Len := Min(Len, CritLen(Crits[i], L, a));
-    Len := Max(1, Min(Len, Length(L) - a));
+    rem := Length(L) - a;
+    newLen := MaxInt; minLen := MaxInt; maxLen := MaxInt;
+    for i := 0 to High(Crits) do
+    begin
+      newLen := Min(newLen, CritLen(Crits[i], L, a));
+      minLen := Min(minLen, CritLenMin(Crits[i], L, a));
+      maxLen := Min(maxLen, CritLenMax(Crits[i], L, a));
+    end;
+    newLen := Max(1, Min(newLen, rem));
+    minLen := Max(1, Min(minLen, rem));
+    maxLen := Max(minLen, Min(maxLen, rem));
+    if not CurCopyOld then
+      Len := newLen                                  // --recompress
+    else if IsAll then
+      Len := rem                                     // todo junto: un bloque por grupo
+    else
+    begin
+      Len := SolidBlockLen(L, a);
+      if Len = 0 then
+      begin
+        k := -1;
+        // el próximo bloque viejo entero que empieza entre minLen y maxLen-1
+        for i := a + minLen to Min(a + maxLen - 1, High(L)) do
+          if SolidBlockLen(L, i) > 0 then
+          begin
+            k := i - a;
+            Break;
+          end;
+        if k < 0 then Len := newLen
+        else if k <= newLen then Len := k
+        else Len := minLen;
+      end;
+    end;
+    Len := Max(1, Min(Len, rem));
     Emit(a, Len);
     Inc(a, Len);
   end;
@@ -1023,7 +1112,8 @@ begin
 end;
 
 function FaSolidBlocks(const Files: array of TFaFile; const GM: TGroupMethods;
-  const Crits: TFaCrits; DetectLevel: Integer; Presorted: Boolean): TFaBlocks;
+  const Crits: TFaCrits; DetectLevel: Integer; Presorted: Boolean;
+  AllowCopyOld: Boolean): TFaBlocks;
 var
   i, j, k, TypesCount: Integer;
   Order: TIntArray;
@@ -1037,6 +1127,7 @@ begin
   if Length(Files) = 0 then Exit;
   CurGM := GM;
   CurLevel := DetectLevel;
+  CurCopyOld := AllowCopyOld;
   SetLength(CurFiles, Length(Files));
   SetLength(CurType, Length(Files));
   TypesCount := 1;

@@ -351,6 +351,8 @@ end;
 type
   TModifyOptions = record
     Method, Fmt: string;
+    MethodGiven: Boolean;    // -m explícito (con d, FreeArc recompila todo: --recompress)
+    Recompress: Boolean;     // --recompress: rehacer todos los bloques viejos
     Solid: TFaCrits;         // -s...: criterios de corte de los bloques sólidos (FaParseSolidOption)
     Excludes: TStringList;   // -x<máscara>
     Recursive: Boolean;      // -r: las máscaras buscan también en los subdirectorios
@@ -436,7 +438,7 @@ end;
   Keep/Old: qué archivos viejos siguen y su entrada; NewIdx: las entradas del disco. }
 procedure PlanUpdate(A: TArchive; const Keep: array of Boolean; const Old: array of Integer;
   const Entries: TWriteEntryArray; const NewIdx: array of Integer; const MO: TModifyOptions;
-  var Groups: TSolidGroupArray);
+  Recompress: Boolean; var Groups: TSolidGroupArray);
 var
   L1, L2, M: array of TFaFile;
   E1, E2, EM: array of Integer;        // entrada de cada elemento de L1, L2, M
@@ -541,7 +543,7 @@ begin
     begin
       M[n] := L2[y]; EM[n] := E2[y]; Inc(y); Inc(n);
     end;
-  Blocks := FaSolidBlocks(M, GM, MO.Solid, FaDetectLevel(MO.Method), True);
+  Blocks := FaSolidBlocks(M, GM, MO.Solid, FaDetectLevel(MO.Method), True, not Recompress);
   for k := 0 to High(Blocks) do
   begin
     g := Length(Groups);
@@ -630,6 +632,7 @@ var
   NVol: Integer;
   RRSize: Int64;
   Exists, Newer, ParcOut: Boolean;
+  Recompress: Boolean;           // d con -m explícito: FreeArc recompila todos los bloques
   Old: array of Integer;         // índice en Entries de cada archivo viejo conservado (-1 si no)
 
   function AddEntry(const E: TWriteEntry): Integer;
@@ -795,10 +798,13 @@ begin
     end;
     Dec(Added, Replaced);
     Groups := nil;
+    // Cmdline.hs: con los comandos que copian (d entre ellos), un -m explícito implica
+    // --recompress: los bloques viejos se rehacen con ese método en vez de copiarse.
+    Recompress := MO.Recompress or ((Cmd = 'd') and MO.MethodGiven);
     if A = nil then
       GroupNewEntries(Entries, NewIdx, MO, Groups)
     else
-      PlanUpdate(A, Keep, Old, Entries, NewIdx, MO, Groups);
+      PlanUpdate(A, Keep, Old, Entries, NewIdx, MO, Recompress, Groups);
 
     // Avisar de una vez qué métodos todavía no se pueden comprimir
     Missing := '';
@@ -938,8 +944,12 @@ begin
           if MO.StdinName = '' then MO.StdinName := 'stdin';
         end
         else if S = '-o-' then Opt.Overwrite := owSkip
+        else if S = '--recompress' then MO.Recompress := True
         else if Copy(S, 1, 2) = '-m' then
-          MO.Method := Copy(S, 3, MaxInt)   // preset (0..9, x, ...) o método explícito
+        begin
+          MO.Method := Copy(S, 3, MaxInt);   // preset (0..9, x, ...) o método explícito
+          MO.MethodGiven := True;
+        end
         else if Copy(S, 1, 5) = '-fmt=' then MO.Fmt := LowerCase(Copy(S, 6, MaxInt))
         else if Copy(S, 1, 2) = '-x' then Excludes.Add(Copy(S, 3, MaxInt))
         // -s- no sólido; -s<mem> tope de bytes por bloque; -s<N>f tope de archivos

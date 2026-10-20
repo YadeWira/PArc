@@ -85,5 +85,31 @@ bf=$("$PARC" lb w_f/base.arc | grep ' data ' | grep -v tta | head -1 | awk '{pri
 echo "           bloque viejo: base $b0, parc $bp, arc.exe $bf"
 { echo "$out" | grep -q "estructura =  métodos ="; } && [ "$b0" = "$bp" ] && [ "$b0" = "$bf" ] || fail=$((fail+1))
 
+# --- d con -m explícito: FreeArc recompila TODOS los bloques (Cmdline.hs is_COPYING_COMMAND) ---
+for who in f p; do
+  rm -rf "w_$who"; cp -a c "w_$who"
+  arcx "w_$who" a -m4 base.arc . -xbase.arc
+done
+arcx w_f d -mlzma -s- base.arc medio.txt
+(cd w_p && "$PARC" d base.arc medio.txt -mlzma -s- --no-progress >/dev/null 2>&1)
+printf '%-10s ' delm
+out=$(python3 "$OUT/cmp.py" "$PARC" w_p/base.arc w_f/base.arc); echo "$out"
+t=$(wine "$ARC_EXE" t w_p/base.arc </dev/null 2>&1 | tr '\r' '\n' | grep -a -c 'All OK')
+{ echo "$out" | grep -q "estructura =  métodos ="; } && [ "$t" = 1 ] || fail=$((fail+1))
+
+# --- sin recompresión, con -s- se conserva el bloque viejo entero y el archivo nuevo va aparte ---
+for who in f p; do
+  rm -rf "w_$who"; cp -a c "w_$who"
+  arcx "w_$who" a -m1 -s base.arc . -xbase.arc
+  cp nuevos/aaa1.bin "w_$who/"
+  touch -d '2021-01-01' "w_$who/aaa1.bin"
+done
+arcx w_f a -m1 -s- base.arc aaa1.bin -xbase.arc
+(cd w_p && "$PARC" a base.arc aaa1.bin -m1 -s- -xbase.arc --no-progress >/dev/null 2>&1)
+printf '%-10s ' solidkeep
+out=$(python3 "$OUT/cmp.py" "$PARC" w_p/base.arc w_f/base.arc); echo "$out"
+t=$(wine "$ARC_EXE" t w_p/base.arc </dev/null 2>&1 | tr '\r' '\n' | grep -a -c 'All OK')
+{ echo "$out" | grep -q "estructura =  métodos ="; } && [ "$t" = 1 ] || fail=$((fail+1))
+
 echo "== actualización: $fail fallas"
 [ $fail -eq 0 ]

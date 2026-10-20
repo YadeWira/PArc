@@ -41,6 +41,9 @@ Los directorios que se pasan a `a`/`u`/`f` se recorren recursivamente.
 - Enlaces simbólicos (y junctions de Windows): en `.parc` se guardan como enlaces, sin
   seguirlos. En `.arc`, que no los admite, el enlace a un archivo se guarda con el contenido
   del destino (como FreeArc) y el enlace a un directorio o roto se saltea con aviso.
+- El archivo que se está escribiendo, sus volúmenes y sus temporales no se agregan aunque
+  caigan dentro de una máscara (`parc a x.arc .` no mete `x.arc` dentro de sí mismo).
+  FreeArc 0.67.1 sí lo incluye; en PArc se excluye a propósito.
 
 ## Opciones
 
@@ -65,12 +68,18 @@ desarrollador; si no se puede, se avisa y se saltea.
 | `-m<N>` | preset de FreeArc: `-m0` (sin compresión) a `-m9`, `-mx`. El default es `-m4`, como en FreeArc |
 | `-m<método>` | un método explícito, por ejemplo `-mlzma:64mb:max` o `-mrep:96m+exe+lzma` |
 | `-fmt=arc` / `-fmt=parc` | formato de salida. Sin la opción: el del archivo que se actualiza, o por la extensión (`.arc` = FreeArc, otra = `.parc`) |
+| `--recompress` | al actualizar, rehace todos los bloques con el método pedido en vez de copiar los que quedan enteros |
 | `-x<máscara>` | excluye archivos; se puede repetir |
 
 Los presets eligen el método según el tipo de cada archivo, como FreeArc: por `arc.groups`
 (extensión) y, si el preset distingue textos o datos ya comprimidos, mirando el contenido. El
 diccionario de cada compresor se achica al tamaño del bloque, así que extraer un archivo chico
 no pide la memoria del preset completo.
+
+Al actualizar (`a`, `u`, `f`), los bloques sólidos que quedan enteros se copian sin recomprimir;
+`--recompress` fuerza a rehacerlos. Con `d` y un `-m` explícito se recompila todo el archivo
+con ese método, igual que FreeArc (es un comando que "copia": `is_COPYING_COMMAND` en
+`Cmdline.hs`).
 
 ### Bloques sólidos: `-s`
 

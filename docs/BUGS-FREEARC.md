@@ -21,6 +21,19 @@ Corregidos el 2026-10-08 como se propone abajo; verificados en Linux, Windows 10
 | P2 | **Un archivo ilegible aborta toda la actualización** (`Permission denied`, archivo bloqueado por otro programa). No se pierde nada (el archivo viejo queda intacto), pero un backup entero falla por un solo archivo. FreeArc #389 tenía el problema opuesto: el archivo desaparecía del archivo comprimido. | media | prueba (exit 4) | avisar, conservar la versión vieja de ese archivo si existe, seguir con el resto y terminar con código 1 o 2 (como 7-Zip) |
 | P3 | **Symlinks incoherentes.** Un enlace a archivo se guarda con el contenido del destino; un enlace a directorio queda como directorio vacío. El enlace en sí nunca se guarda. (FreeArc los seguía y podía entrar en bucle, #211/#162; PArc no entra en bucle.) | media | prueba | en `.parc`: guardar el enlace como enlace (Unix y junctions/symlinks de Windows); en `.arc`: no seguirlos y avisar |
 
+### Corregidos el 2026-10-20 (fuzz de actualización)
+
+| # | problema | sev. | evidencia | arreglo |
+|---|---|---|---|---|
+| P4 | **`d` con `-m` explícito no recompilaba.** `parc d x.arc f -m1` copiaba los bloques viejos; `arc.exe` los rehace todos con ese método (`is_COPYING_COMMAND` → `--recompress` en `Cmdline.hs:433`). | media | `tests/fuzz_update.py`; `tests/update_matrix.sh` caso `delm` | `MethodGiven` en `TModifyOptions`; `PlanUpdate` recibe `Recompress` |
+| P5 | **Actualizar con otro `-s` partía los bloques viejos.** Con `a/u/f` y un criterio distinto del que armó el archivo, PArc rehacía todo bloque por bloque; `arc.exe` conserva los bloques viejos enteros (`computeLen`: `oldLen`/`oldPos`/`minLen`) cuando el criterio es explícito (`-s-`, `-s1f`, `-s100k`…). Con "todo junto" (sin `-s`, `-s` o `-s7z`) sí rehace un bloque por grupo. | media | `tests/fuzz_update.py` seed 1 it=10; `tests/update_matrix.sh` caso `solidkeep` | `SolidBlockLen`, `CritLenMin`/`CritLenMax` y la regla de `computeLen` en `SplitOneType` |
+| P6 | **Método guardado no canónico.** `parc a x.arc … -m4x4` guardaba `4x4` en vez de `4x4:tor:3:<tamaño>` (FreeArc imprime el método interno y el `:b` con `ShowCompressionMethod`), y `-mtor:16` quedaba como `tor:9:…` porque `parc_canon` sólo conocía los presets 0–9 de Tornado. | baja (los archivos se leen igual) | `tests/canon_methods.sh`; `tests/fuzz_update.py` seed 2 it=3 | tablas de Tornado 0–16; 4x4 clasifica sus parámetros como `parse_4x4` y usa el interno por defecto `tor:3:1mb` |
+
+`tests/fuzz_update.py --iters 40 --seed N` compara secuencias aleatorias de `a/u/f/d` contra
+`arc.exe` (estructura, métodos, `arc.exe t` y árbol extraído). También encontró que
+`rep+tor:16` hace caer al *codificador* de FreeArc (#392) mientras PArc lo comprime y `arc.exe`
+lo lee bien.
+
 ## 2. Lo que FreeArc tiene mal y PArc ya corrige ✅
 
 | problema de FreeArc | fuente | sev. | en PArc |

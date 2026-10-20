@@ -113,9 +113,11 @@ begin
 end;
 
 const
-  StdEnc:  array[0..9] of Integer = (0,1,2,3,3,4,4,4,4,4);
-  StdHS:   array[0..9] of Int64   = (0,16*KB,64*KB,128*KB,2*MB,8*MB,32*MB,128*MB,512*MB,2*GB);
-  StdBuf:  array[0..9] of Int64   = (1*MB,1*MB,2*MB,4*MB,8*MB,16*MB,64*MB,256*MB,1*GB,1*GB);
+  StdEnc:  array[0..16] of Integer = (0,1,2,3,3,4,4,4,4,4,4,4,4,4,4,4,4);
+  StdHS:   array[0..16] of Int64   = (0,16*KB,64*KB,128*KB,2*MB,8*MB,32*MB,128*MB,512*MB,2*GB,2*GB,
+                                       256*MB,256*MB,384*MB,512*MB,512*MB,128*MB);
+  StdBuf:  array[0..16] of Int64   = (1*MB,1*MB,2*MB,4*MB,8*MB,16*MB,64*MB,256*MB,1*GB,1*GB,1*GB,
+                                       128*MB,128*MB,128*MB,128*MB,128*MB,128*MB);
 
 { ================================================================================ }
 { Canoniza una cadena de etapas con un límite de diccionario ya calculado          }
@@ -133,6 +135,7 @@ var
     BS, MC, MML, Bar, Sm, HSL, Amp, Hash, Alg, MFi, NFB, PB, LC, LP, HS: Int64;
     MFSet: Boolean;
     M, MR, W, MM, MS, Num9, Enc, Order, Mem, Chunk, Got, Lvl, BPos: Int64;
+    StartI: Integer;
     L: string;
     LZP, A, C3: Boolean;
     Interno: string;
@@ -413,26 +416,46 @@ begin
     end;
 
     { --- 4x4 (C_4x4.cpp/.h): :b<mem> propio (no se limita ni purifica),
-          el resto es el método interno, que hereda el límite y se canoniza. }
+          el resto es el método interno, que hereda el límite y se canoniza.
+          Igual que parse_4x4: un parámetro es propio si empieza con dígito o si el
+          segundo carácter es dígito (t4, i2, r99, b7mb); el primero que no, arranca el
+          método interno. Sin método interno, el default del constructor: tor:3:1mb. }
     if Name = '4x4' then
     begin
-      BPos := -1; BS := Int64(0);
+      BS := 0; StartI := 0;
       for J := 1 to High(Parts) do
       begin
-        L := LowerCase(Parts[J]);
-        if (Copy(L,1,1) = 'b') and (Length(L) > 1) and (L[2] in ['0'..'9']) then
-        begin BPos := J; BS := ParseMem(Copy(L,2,MaxInt), 0); Break; end;
+        L := Parts[J];
+        if (L <> '') and ((L[1] in ['0'..'9']) or
+                          ((Length(L) > 1) and (L[2] in ['0'..'9']))) then
+        begin
+          // Parámetros propios de 4x4: :b<mem>, :t<n>, :i<n>, :r<porcentaje>, un número
+          // suelto (hilos) o una memoria suelta (8mb). Sólo :b queda en el texto canónico
+          // (purify no imprime los que sólo afectan a comprimir).
+          if L[1] in ['0'..'9'] then
+          begin
+            if StrToInt64Def(L, -1) < 0 then BS := ParseMem(L, 0);   // "8mb" = BlockSize
+          end
+          else if (L[1] = 'b') or (L[1] = 'B') then BS := ParseMem(Copy(L, 2, MaxInt), 0);
+        end
+        else
+        begin StartI := J; Break; end;
       end;
-      Interno := '';
-      for J := 1 to High(Parts) do
-        if J <> BPos then
+      if StartI = 0 then Interno := 'tor:3:1mb'
+      else
+      begin
+        Interno := '';
+        for J := StartI to High(Parts) do
         begin
           if Interno <> '' then Interno := Interno + (':');
           Interno := Interno + (Parts[J]);
         end;
+      end;
       Result := '4x4';
+      // ShowCompressionMethod con purify=True no imprime t/i/r (solo afectan a comprimir):
+      // quedan el :b propio y el método interno.
       if BS <> 0 then Result := Result + (':b' + ShowMem(BS));
-      if Interno <> '' then Result := Result + (':' + CanonChain(Interno, Limit));
+      Result := Result + (':' + CanonChain(Interno, Limit));
       Exit;
     end;
 
