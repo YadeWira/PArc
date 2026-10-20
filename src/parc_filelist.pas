@@ -1250,6 +1250,9 @@ begin
     // parseNumber tok 'f'
     j := 1;
     while (j <= Length(Tok)) and (Tok[j] in ['0'..'9']) do Inc(j);
+    // Tiene que haber un número y, si hay letra, una sola y al final: "10m" sí,
+    // "fx" no (antes "-sfx" caía acá y se tomaba como una opción sólida válida).
+    if (j = 1) or (j < Length(Tok)) then Exit(False);
     Num := StrToInt64Def(Copy(Tok, 1, j - 1), 0);
     if j <= Length(Tok) then c := LowerCase(Tok[j]) else c := 'f';
     case c of

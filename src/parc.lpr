@@ -904,11 +904,6 @@ begin
           Opt.DestDir := Copy(S, 4, MaxInt);
         end
         else if S = '--no-progress' then ShowProgress := False
-        else if Copy(S, 1, 4) = '-sfx' then
-        begin
-          ErrLn('ERROR: -sfx ya no existe: PArc no crea autoextraíbles');
-          Halt(1);
-        end
         else if (Copy(S, 1, 2) = '-v') and ParseVolumeSize(Copy(S, 3, MaxInt), VolSize) then
           MO.VolumeSize := VolSize
         else if S = '-o+' then Opt.Overwrite := owAll
@@ -925,11 +920,6 @@ begin
         begin
           MO.Method := Copy(S, 3, MaxInt);   // preset (0..9, x, ...) o método explícito
           MO.MethodGiven := True;
-        end
-        else if Copy(S, 1, 5) = '-fmt=' then
-        begin
-          ErrLn('ERROR: -fmt ya no existe: PArc solo usa el formato .parc');
-          Halt(1);
         end
         else if Copy(S, 1, 2) = '-x' then
         begin
