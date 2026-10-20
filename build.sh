@@ -1,5 +1,5 @@
 #!/bin/sh
-# Compila PArc y su módulo autoextraíble (parcsfx). Uso: ./build.sh [linux64|win64|win32|all] (default: linux64)
+# Compila PArc. Uso: ./build.sh [linux64|win64|win32|all] (default: linux64)
 # win32 (y win64 con todos los packages) usan el cross de PA-Lab en $FPC_CROSS.
 set -e
 cd "$(dirname "$0")"
@@ -13,8 +13,6 @@ build() {
   mkdir -p "$out/units"
   echo "== $target"
   $compiler $FPCFLAGS "$@" -FU"$out/units" -FE"$out" src/parc.lpr
-  # el módulo autoextraíble (parc a -sfx lo busca al lado de parc)
-  $compiler $FPCFLAGS "$@" -FU"$out/units" -FE"$out" src/parcsfx.lpr
 }
 
 case "${1:-linux64}" in

@@ -3,11 +3,14 @@
 PArc is a command-line archiver written in Free Pascal for **Windows 7+ (x86/x64)** and
 **Linux x64**. It uses its own archive format, **`.parc`**, designed as a modernized descendant
 of the FreeArc container: nanosecond timestamps, Windows attributes, Unix permissions,
-symlinks, Reed–Solomon recovery, volumes, authenticated encryption and self-extractors.
+symlinks, Reed–Solomon recovery, volumes and authenticated encryption.
 
 > **PArc does not read or write FreeArc `.arc` files.** The `.arc` format is handled by the
 > companion project [FreeArc-ex](https://github.com/YadeWira/FreeArc-ex), a C++ support fork of
 > FreeArc 0.67. PArc is the Pascal implementation of the `.parc` format.
+>
+> SFX **creation** was dropped (`-sfx` and the `parcsfx` module no longer exist). Existing
+> self-extractors can still be listed, tested and extracted; updating one preserves its stub.
 
 ## Highlights
 
@@ -21,7 +24,7 @@ symlinks, Reed–Solomon recovery, volumes, authenticated encryption and self-ex
 - **Reed–Solomon recovery record** (`-rr`): repairs a damaged range or scattered sectors,
   not just single sectors per group.
 - **Volumes** (`-v`), **strong encryption** (`-p`/`-hp`: AES/Blowfish/Serpent/Twofish,
-  authenticated, 200k PBKDF2 iterations), **SFX** (`-sfx`), stdin/stdout (`-si`, `-so`, `-`).
+  authenticated, 200k PBKDF2 iterations), stdin/stdout (`-si`, `-so`, `-`).
 - **Long paths** (`\\?\` on Windows), symlinks/junctions, masks and recursion.
 - Cancellation leaves no partial files; writes go to a temporary file that replaces the
   original only on success.
@@ -64,13 +67,11 @@ Exit codes: `0` OK, `1` usage error, `2` damaged data, `3` unsupported method/pa
 Requires Free Pascal 3.2 or newer.
 
 ```sh
-./build.sh linux64     # default; produces build/linux64/parc and parcsfx
+./build.sh linux64     # default; produces build/linux64/parc
 ./build.sh win64       # needs the Windows cross toolchain (FPC_CROSS)
 ./build.sh win32
 ./build.sh all
 ```
-
-`parcsfx` is the self-extractor module used by `parc a -sfx`.
 
 ## Testing
 
@@ -78,7 +79,7 @@ The suite runs against `.parc` archives and the C reference sources kept in
 `reference/freearc-0.67/Compression/` for the codecs.
 
 ```sh
-bash tests/stdio.sh tests/volumes.sh tests/sfx.sh
+bash tests/stdio.sh tests/volumes.sh
 bash tests/rs_recovery.sh tests/parc_crypt.sh
 bash tests/dispack.sh tests/srep.sh tests/bcj.sh
 bash tests/run_tornado_tests.sh tests/crypto_vectors.sh
@@ -101,7 +102,7 @@ docs/                    manual and format specification (currently in Spanish)
 tests/                   test suite, codec oracles and fuzzers
 reference/freearc-0.67/  only Compression/: FreeArc 0.67 codec sources used as
                          reference and test oracle for the ported codecs
-build.sh                 builds parc and parcsfx
+build.sh                 builds parc
 ```
 
 The rest of the original FreeArc 0.67 tree (Haskell sources, Unarc, ArcShellExt, docs) is not

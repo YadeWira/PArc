@@ -50,8 +50,6 @@ begin
   OutLn('  -hp[contraseña] cifra también el directorio (sin ella no se ve ni la lista)');
   OutLn('  -ae=<alg>  --encryption=<alg>  aes (default: aes-256/ctr), blowfish, serpent,');
   OutLn('             twofish; con tamaño/modo: serpent-256/cfb, blowfish-448/ctr, ...');
-  OutLn('  -sfx[módulo]  autoextraíble: x.parc -> x.exe (parcsfx de al lado, u otro módulo;');
-  OutLn('             p. ej. -sfx=build/win64/parcsfx.exe para uno de Windows desde Linux)');
   OutLn('  -v<tamaño>  volúmenes de ese tamaño (x.parc.001, .002...; solo .parc): -v100m, -v4g, -v700000k');
   OutLn('  --no-progress  sin línea de progreso (tampoco se muestra si stderr no es una consola)');
   OutLn('Ctrl-C cancela limpiamente (no queda ni el temporal ni un archivo a medio extraer);');
@@ -364,8 +362,6 @@ type
     Recovery: string;        // -rr...: '--' si no se dio la opción
     Encryption: string;      // -ae= / --encryption=
     VolumeSize: Int64;       // -v<tamaño>: volúmenes (solo .parc); 0 = como estaba
-    Sfx: Boolean;            // -sfx[módulo]: autoextraíble
-    SfxModule: string;       //   el módulo ('' = parcsfx al lado de parc)
     DataPassword, HeadersPassword: RawByteString;   // '' = sin cifrar
   end;
 
@@ -564,19 +560,13 @@ begin
   end;
 end;
 
-{ El módulo autoextraíble por defecto: parcsfx al lado del ejecutable de parc. }
-function DefaultSfxModule: string;
-begin
-  Result := ExtractFilePath(Arg(0)) + 'parcsfx' + ExtractFileExt(Arg(0));
-end;
-
 { Antepone Prefix (el módulo) a Target, a través de un temporal. }
 procedure PrependToFile(const Target: string; const Prefix: TBytes);
 var
   Src, Dst: TFileStream;
   Tmp: string;
 begin
-  Tmp := Target + '.sfx.tmp';
+  Tmp := Target + '.prefix.tmp';
   Dst := TFileStream.Create(FsPath(Tmp), fmCreate);
   try
     try
@@ -629,7 +619,7 @@ var
   Opt: TWriteOptions;
   St: TWriteStats;
   i, j, n, Removed, Replaced, Added: Integer;
-  Missing, Verb, OldRR, VolBase, VolInfo, SfxModuleName, SfxOut, FinalName: string;
+  Missing, Verb, OldRR, VolBase, VolInfo, FinalName: string;
   SfxPrefix: TBytes;
   NVol: Integer;
   RRSize: Int64;
@@ -645,11 +635,6 @@ var
   end;
 
 begin
-  if MO.Sfx and ((MO.VolumeSize > 0) or IsVolumeSet(ArcName, VolBase)) then
-  begin
-    ErrLn('ERROR: un autoextraíble no puede ir en volúmenes (-sfx con -v)');
-    Exit(1);
-  end;
   if (Cmd <> 'd') and (Paths.Count = 0) and (MO.StdinFile = '') then
   begin
     ErrLn('ERROR: no se indicaron archivos');
@@ -664,8 +649,8 @@ begin
   A := nil;
   if Exists then A := TArchive.Open(ArcName);
   try
-    // Un autoextraíble que se actualiza sigue siéndolo: se guarda su módulo (lo que va antes
-    // del archivo) para volver a ponerlo
+    // PArc ya no crea autoextraíbles, pero si el archivo ya traía un módulo delante se
+    // guarda (lo que va antes del archivo) y se vuelve a poner al actualizarlo.
     SfxPrefix := nil;
     if (A <> nil) and (A.SFXSize > 0) then SfxPrefix := ReadWholeFile(ArcName, A.SFXSize);
     if (A <> nil) and A.Locked then
@@ -817,25 +802,8 @@ begin
   FinishArchive(ArcName, Opt.VolumeSize);
   FinalName := ArcName;
   if not Exists then Verb := 'Creado' else Verb := 'Actualizado';
-  // -sfx: el módulo delante y extensión del módulo (.exe en Windows, ninguna en Linux)
-  if MO.Sfx then
-  begin
-    if MO.SfxModule <> '' then SfxModuleName := MO.SfxModule else SfxModuleName := DefaultSfxModule;
-    if not FileExists(FsPath(SfxModuleName)) then
-      raise EFOpenError.CreateFmt('no está el módulo autoextraíble %s (se compila con build.sh)', [SfxModuleName]);
-    SfxPrefix := ReadWholeFile(SfxModuleName);
-    SfxOut := ChangeFileExt(ArcName, ExtractFileExt(SfxModuleName));
-    PrependToFile(ArcName, SfxPrefix);
-    if SfxOut <> ArcName then   // (un x.exe que se actualiza con -sfx se queda con su nombre)
-    begin
-      if FileExists(FsPath(SfxOut)) then DeleteFile(FsPath(SfxOut));
-      if not RenameFile(FsPath(ArcName), FsPath(SfxOut)) then
-        raise EFCreateError.CreateFmt('no se pudo renombrar %s a %s', [ArcName, SfxOut]);
-    end;
-    {$IFDEF UNIX}FpChmod(SfxOut, &755);{$ENDIF}
-    FinalName := SfxOut;
-  end
-  else if Length(SfxPrefix) > 0 then
+  // PArc ya no crea autoextraíbles; si el archivo ya traía un módulo delante, se conserva
+  if Length(SfxPrefix) > 0 then
   begin
     PrependToFile(ArcName, SfxPrefix);
     // el archivo se reescribió: que siga siendo ejecutable
@@ -850,7 +818,7 @@ begin
   end;
   if MO.ShownName <> '' then FinalName := MO.ShownName;
   OutLn(Format('%s %s (%s%s): %d archivo(s) y %d directorio(s), %d bytes -> %d bytes',
-    [Verb, FinalName, 'parc' + BoolToStr(MO.Sfx or (Length(SfxPrefix) > 0), ', autoextraíble', ''), VolInfo, St.Files, St.Dirs, St.Bytes, St.ArcSize]));
+    [Verb, FinalName, 'parc' + BoolToStr(Length(SfxPrefix) > 0, ', autoextraíble', ''), VolInfo, St.Files, St.Dirs, St.Bytes, St.ArcSize]));
   if Exists then
     OutLn(Format('  agregados %d, reemplazados %d, borrados %d', [Added, Replaced, Removed]));
   Result := 0;
@@ -902,9 +870,8 @@ begin
         else if S = '--no-progress' then ShowProgress := False
         else if Copy(S, 1, 4) = '-sfx' then
         begin
-          MO.Sfx := True;
-          MO.SfxModule := Copy(S, 5, MaxInt);
-          if (MO.SfxModule <> '') and (MO.SfxModule[1] = '=') then Delete(MO.SfxModule, 1, 1);
+          ErrLn('ERROR: -sfx ya no existe: PArc no crea autoextraíbles');
+          Halt(1);
         end
         else if (Copy(S, 1, 2) = '-v') and ParseVolumeSize(Copy(S, 3, MaxInt), VolSize) then
           MO.VolumeSize := VolSize
@@ -984,9 +951,9 @@ begin
       end
       else if Cmd = 'a' then
       begin
-        if MO.Sfx or (MO.VolumeSize > 0) then
+        if MO.VolumeSize > 0 then
         begin
-          ErrLn('ERROR: -sfx y -v no van con un archivo por stdout ("-")');
+          ErrLn('ERROR: -v no va con un archivo por stdout ("-")');
           Halt(1);
         end;
         OutToStderr := True;

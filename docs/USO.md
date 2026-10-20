@@ -136,29 +136,6 @@ Parte el archivo en pedazos de tamaño fijo, al estilo de 7-Zip: `copia.parc.001
   sola pieza.
 - Si falta un volumen del medio se avisa cuál; si falta el último, el error lo sugiere.
 
-### Autoextraíble: `-sfx`
-
-| opción | efecto |
-|---|---|
-| `-sfx` | crea un ejecutable que se extrae solo: `copia.exe` en Windows, `copia` en Linux |
-| `-sfx=<módulo>` | usa ese módulo; por ejemplo, desde Linux, `-sfx=build/win64/parcsfx.exe` arma uno para Windows |
-
-El ejecutable es el módulo `parcsfx` (se busca al lado de `parc`) con el archivo pegado al
-final; funciona con `.parc`, con `-rr` y con cifrado, pero no con `-v`. `parc` lo lee
-como a cualquier archivo (`parc l copia.exe`, `parc t`, `parc x`), y al actualizarlo
-(`parc a copia.exe nuevo.txt`) sigue siendo autoextraíble.
-
-El autoextraíble entiende:
-
-```
-copia.exe [t|l] [-dp<dir>] [-o+|-o-] [-p<contraseña>] [--no-progress]
-```
-
-Sin comando extrae en el directorio actual. Si un archivo ya existe pregunta
-(`[s]í, [n]o, [t]odos, n[i]nguno`), o lo saltea si no hay consola; `-o+` y `-o-` fuerzan una
-u otra cosa. La contraseña que falta se pide por consola. Abierto con doble clic en Windows,
-espera un Enter antes de cerrar la ventana. Los códigos de salida son los de `parc`.
-
 ### Cifrado
 
 | opción | efecto |
@@ -263,3 +240,7 @@ verificados contra las fuentes C de `reference/freearc-0.67/Compression/`.
 
 El soporte de `.arc` (y de los demás contenedores) está en
 [FreeArc-ex](https://github.com/YadeWira/FreeArc-ex).
+
+La creación de autoextraíbles (`-sfx` y el módulo `parcsfx`) también quedó fuera. PArc
+sigue abriendo, verificando y extrayendo SFX existentes, y al actualizarlos conserva el
+módulo que llevan delante.

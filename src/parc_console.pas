@@ -1,6 +1,5 @@
-{ Lo de consola que comparten parc y el módulo autoextraíble (parcsfx): la línea de
-  progreso, el listado, la pregunta antes de sobrescribir y, en Windows, la pausa final
-  cuando el programa abrió su propia ventana (un SFX con doble clic). }
+{ Lo de consola de parc: la línea de progreso, el listado, la pregunta antes de
+  sobrescribir y, en Windows, la pausa final cuando el programa abrió su propia ventana. }
 unit parc_console;
 
 {$mode objfpc}{$H+}

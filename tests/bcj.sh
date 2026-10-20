@@ -15,7 +15,7 @@ fpc -O2 -Fu"$ROOT/src" -FU"$ROOT/build/tests" -FE"$ROOT/build/tests" "$ROOT/test
   || { echo "no compila test_bcj"; exit 2; }
 TEST=$ROOT/build/tests/test_bcj
 
-CAND="$ROOT/build/linux64/parc $ROOT/build/linux64/parcsfx"
+CAND="$ROOT/build/linux64/parc"
 for f in /mnt/IA_LAB/compartido/parc/samples/src/binarios/*; do [ -f "$f" ] && CAND="$CAND $f"; done
 for f in $CAND; do
   [ -f "$f" ] || continue

@@ -25,13 +25,15 @@ FreeArc-ex.
 | Compatibilidad `.arc` | ❌ descartada: se rechaza con un mensaje que apunta a FreeArc-ex |
 | GUI | ❌ descartada |
 | Contenedores `.zip/.7z/.rar` | ➡ movidos a FreeArc-ex (tag `entrega-arc`) |
+| SFX (creación) | ❌ descartada: no se compila `parcsfx` ni existe `-sfx`; los SFX viejos se leen/extraen y al actualizarlos se conserva su módulo |
 | Rendimiento vs FreeArc 0.67.1 | ✅ PArc gana en tamaño en `-m1`…`-mx` sobre los corpus de prueba (ver abajo) |
 
 ## Qué hace hoy
 
 - Formato `.parc`: fechas en nanosegundos, atributos de Windows, permisos y enlaces de Unix,
-  registro Reed-Solomon (`-rr`), volúmenes (`-v`), cifrado autenticado (`-p`/`-hp`), SFX
-  (`-sfx`), stdin/stdout (`-si`, `-so`, `-`), rutas largas y cancelación sin dejar parciales.
+  registro Reed-Solomon (`-rr`), volúmenes (`-v`), cifrado autenticado (`-p`/`-hp`),
+  stdin/stdout (`-si`, `-so`, `-`), rutas largas y cancelación sin dejar parciales.
+- Los autoextraíbles existentes se listan, verifican y extraen; ya no se crean.
 - Comandos: `l`, `lb`, `t`, `x`, `e`, `a`, `u`, `f`, `d`, `r`.
 - Métodos: `storing`, `lzma`, `ppmd`, `grzip`, `dict`, `rep`, `delta`, `tor`, `lzp`, `mm`,
   `tta`, `4x4`, `exe` (BCJ), `lz4`, `dispack070` y `srep`, solos o en cadena.
@@ -77,7 +79,7 @@ de benchmark.
 
 ```sh
 ./build.sh linux64
-bash tests/stdio.sh tests/volumes.sh tests/sfx.sh
+bash tests/stdio.sh tests/volumes.sh
 bash tests/rs_recovery.sh tests/parc_crypt.sh
 bash tests/dispack.sh tests/srep.sh tests/bcj.sh
 bash tests/run_tornado_tests.sh tests/crypto_vectors.sh
