@@ -18,6 +18,8 @@ comparison and tests).
 - **All the core methods**, singly or chained: `storing`, `lzma`, `ppmd`, `grzip`, `dict`,
   `rep`, `delta`, `tor`, `lzp`, `mm`, `tta`, `4x4`, `exe` (BCJ x86), `lz4`, `dispack070`
   (DisPack) and `srep` (SREP).
+- **ZIP / 7z / RAR**: reads and writes ZIP, and reads 7z and RAR, through the optional
+  **7-Zip ZS** backend (`7zz`), which adds ZSTD, Brotli, LZ4, LZ5, Lizard and FastLZMA2 to ZIP.
 - **`.parc` format**: nanosecond timestamps, Windows attributes and Unix permissions,
   Reed–Solomon recovery record (a damaged range is repairable, not just single sectors),
   volumes (`-v`), strong encryption (`:f` key decoding, authentication tag, 200k PBKDF2
@@ -65,6 +67,10 @@ parc u backup.arc project/                # update changed files
 parc t backup.arc                         # verify
 parc x backup.arc -dpout -o+              # extract, overwrite
 parc r backup.arc                         # repair -> fixed.backup.arc
+
+parc a backup.zip project/ -mzstd:5       # ZIP via 7-Zip ZS (needs 7zz)
+parc x photos.7z -dpout -o+               # read 7z (read-only)
+parc t files.rar                          # test/extract RAR (read-only)
 ```
 
 Exit codes: `0` OK, `1` usage error, `2` damaged data, `3` unsupported method/parameter,
@@ -84,6 +90,11 @@ Requires Free Pascal 3.2 or newer.
 
 `parcsfx` is the self-extractor module used by `parc a -sfx`.
 
+For `.zip`/`.7z`/`.rar`, PArc executes **7-Zip ZS** as an external program. Build it on Linux
+with `tools/build-7zz.sh` (it leaves `7zz` next to `parc`), or point `PARC_7ZZ` to an existing
+`7zz`/`7z` (on Windows, the `7z.exe`/`7zz.exe` from 7-Zip ZS). Those formats are not linked
+into PArc.
+
 ## Testing
 
 The test suite compares PArc against the real FreeArc 0.67.1 binaries as an oracle. Most
@@ -99,6 +110,7 @@ bash tests/compat_matrix.sh  # read matrix for every method
 bash tests/dispack.sh        # DisPack, both directions
 bash tests/srep.sh           # SREP v1-v4 decode, v3 encode, corrupt-stream robustness
 bash tests/canon_methods.sh  # canonical method strings vs arc.exe
+bash tests/containers.sh     # .zip/.7z/.rar via 7-Zip ZS (skips without 7zz)
 bash tests/stdio.sh tests/volumes.sh tests/sfx.sh tests/rs_recovery.sh tests/parc_crypt.sh
 sudo bash tests/fixes.sh     # masks, symlinks, disk-full, FAT32
 python3 tests/fuzz_update.py --iters 20 --seed 1   # randomized update fuzz vs arc.exe

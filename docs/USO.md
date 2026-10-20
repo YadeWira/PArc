@@ -266,6 +266,32 @@ parc x copia.arc -dpdestino -o+           # extrae sobrescribiendo
 parc r copia.arc                          # repara -> fixed.copia.arc
 ```
 
+## Otros formatos: .zip, .7z y .rar
+
+PArc no implementa esos contenedores: delega en **7-Zip ZS** (el binario `7zz`), que se
+ejecuta como proceso externo. Se busca en `PARC_7ZZ`, al lado de `parc` (`7zz`/`7z`) o en el
+`PATH`; se compila con `tools/build-7zz.sh` (Linux). 7-Zip ZS es LGPL 2.1+ (con la restricción
+de unRAR); no se distribuye con PArc.
+
+| extensión | comandos |
+|---|---|
+| `.zip` | `l`, `t`, `x`, `e`, `a`, `u`, `f`, `d` |
+| `.7z` | `l`, `t`, `x`, `e` (solo lectura) |
+| `.rar` | `l`, `t`, `x`, `e` (solo lectura, RAR4 y RAR5) |
+
+Al crear `.zip`, `-m` se traduce a 7-Zip:
+
+- `-m0`…`-m9` o `-mx`: nivel (método por defecto, Deflate);
+- `-mdeflate`, `-mlzma`, `-mppmd`, `-mzstd[:N]`, `-mbrotli[:N]`, `-mlz4`, `-mlz5`,
+  `-mlizard`, `-mflzma2` (`N` = nivel).
+
+Opciones: `-dp<dir>`, `-o+`/`-o-` (sobrescribir/saltear, como en `.arc`), `-p<clave>`,
+`-x<máscara>`, `-r`, `-v<tamaño>` (volúmenes) y `--no-progress`. `-hp`, `-si` y `-sfx` no
+aplican a estos contenedores.
+
+`lb` (bloques internos) no tiene equivalente: usá `l`. Los mensajes y el progreso son los de
+7-Zip; el código de salida se traduce al de PArc (0/1/2/4/6/130).
+
 ## Compatibilidad con FreeArc
 
 - Lee todo lo que escribe FreeArc 0.67: todos los métodos, archivos cifrados (`-p`, `-hp`) y

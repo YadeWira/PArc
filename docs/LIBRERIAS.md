@@ -12,6 +12,7 @@
 | PPMd (`Compression/PPMD`, D. Shkarin) | var. H/I (1999-2001), **modificado por FreeArc** | sin upstream compatible | **No hay reemplazo directo**: Ppmd7 de 7-Zip es var.H con otro range coder | Mantener el propio. Ojo con el bug de x64 que encontró PA-Lab (UNIT_SIZE=12, copia de punteros) |
 | Lua (`HsLua`) | 5.1 | 5.4.x | **No**: 5.4 rompe scripts 5.1 | Solo afecta a los scripts/eventos de `arc.ini`; no al formato |
 | 7z.dll (interop `Arhive7zLib.hs`, `Client7z*.cpp`) | 7-Zip 9.x | 26.x | API COM parecida, con cambios | Solo para abrir .7z/.zip/.rar; no es parte del formato .arc |
+| 7-Zip ZS (`7zz`) en PArc | — (no existía) | 26.02 ZS v1.5.7 (externo) | — | .zip lectura/escritura y .7z/.rar lectura; se ejecuta como proceso, no se enlaza. Aporta ZSTD, Brotli, LZ4, LZ5, Lizard y FastLZMA2 al ZIP |
 | SREP | 3.93 beta (2013; el fuente que trae el repo) | 3.93a beta (2014-10-11, última conocida; es la que referencia `arc.ini`) | mismo formato (v1–v4) | 3.93a guarda `BASE_LEN=0` en v3/v4 y puede emitir matches más cortos que `BASE_LEN` (el largo da la vuelta en 32 bits) |
 | Métodos propios de Bulat Ziganshin: Tornado, REP, 4x4, Dict, LZP, Delta, MM/TTA, GRZip, DisPack | 0.67 | sin upstream mantenido | — | Hay que portarlos desde estas fuentes; el formato de sus streams lo define este código |
 

@@ -29,6 +29,9 @@ son relativas a `reference/freearc-0.67/`.
   `BASE_LEN=0` y largos cortos con vuelta de 32 bits) y codificador v3 (con `BASE_LEN=0`, como 3.93a) en `src/parc_srep.pas`.
   El codificador es un LZ77 greedy de matches ≥512 bytes: válido y compatible, pero comprime
   menos que el srep original (que hace búsqueda exhaustiva). `tests/srep.sh`.
+- **Contenedores .zip/.7z/.rar**: PArc delega en 7-Zip ZS (`7zz`) como proceso externo. `.zip`
+  se lee y escribe (con ZSTD/Brotli/LZ4/LZ5/Lizard/FastLZMA2), `.7z` y `.rar` se leen.
+  `tools/build-7zz.sh` lo compila; `tests/containers.sh` lo prueba. No se enlaza nada.
 - **Diccionarios después de un compresor externo**: en `srep+lzma` el lzma conserva su default
   (como `compressionLimitDictionary`), en `lzma+srep` se limita al bloque.
 
@@ -49,6 +52,7 @@ bash tests/srep.sh              # SREP: v1-v4, codificador, robustez
 bash tests/canon_methods.sh     # texto canónico de los métodos
 bash tests/stdio.sh tests/volumes.sh tests/sfx.sh tests/rs_recovery.sh tests/parc_crypt.sh
 sudo bash tests/fixes.sh        # máscaras, enlaces, disco lleno, FAT32
+bash tests/containers.sh        # .zip/.7z/.rar (requiere 7zz; si no, se saltea)
 python3 tests/fuzz_update.py --iters 20 --seed N   # fuzz de actualización
 ```
 

@@ -6,7 +6,7 @@ program parc;
 
 uses
   {$IFDEF UNIX}cthreads, BaseUnix,{$ENDIF}
-  Classes, SysUtils, Types, DateUtils, parc_os, parc_bytes, parc_methods, parc_archive, parc_extract, parc_writer, parc_encoders, parc_presets, parc_recovery, parc_progress, parc_filelist, parc_volume, parc_console;
+  Classes, SysUtils, Types, DateUtils, parc_os, parc_bytes, parc_methods, parc_archive, parc_extract, parc_writer, parc_encoders, parc_presets, parc_recovery, parc_progress, parc_filelist, parc_volume, parc_console, parc_7zz;
 
 const
   PARC_VERSION = '0.0.3';
@@ -897,6 +897,7 @@ var
   A: TArchive;
   Opt: TExtractOptions;
   MO: TModifyOptions;
+  FO: T7zzOptions;
   Filter, Excludes: TStringList;
   i, Code, Tries: Integer;
   Retry, ShowProgress, Writing, ToStdout: Boolean;
@@ -1063,6 +1064,42 @@ begin
     if MO.DataPassword <> '' then SetArchivePassword(MO.DataPassword);
     if (MO.HeadersPassword <> '') and (MO.HeadersPassword <> MO.DataPassword) then
       AddArchivePassword(MO.HeadersPassword);
+
+    // .zip/.7z/.rar: los maneja 7-Zip ZS (7zz) como proceso externo. PArc no implementa esos
+    // contenedores; se traducen las opciones y se devuelve el código de salida de 7zz.
+    if ForeignKind(ArcName) <> 0 then
+    begin
+      if MO.StdinName <> '' then
+      begin
+        ErrLn('ERROR: -si no va con .zip/.7z/.rar');
+        Halt(1);
+      end;
+      if MO.Sfx then
+      begin
+        ErrLn('ERROR: -sfx no va con .zip/.7z/.rar');
+        Halt(1);
+      end;
+      FO := Default(T7zzOptions);
+      FO.DestDir := Opt.DestDir;
+      FO.Overwrite := Opt.Overwrite = owAll;
+      FO.PasswordGiven := DPwd <> '--';
+      if DPwd <> '--' then FO.Password := DPwd;
+      if (DPwd = '--') and (HPwd <> '--') then
+      begin
+        FO.PasswordGiven := True;
+        FO.Password := HPwd;
+      end;
+      FO.HeadersPassword := HPwd <> '--';
+      if MO.MethodGiven then FO.Method := MO.Method;
+      FO.Excludes := MO.Excludes;
+      FO.Recursive := MO.Recursive;
+      FO.VolumeSize := MO.VolumeSize;
+      FO.NoProgress := not ShowProgress;
+      FO.ShownName := MO.ShownName;
+      Code := RunForeign(Cmd, ArcName, Filter, FO, S);
+      if S <> '' then ErrLn(S);
+      Halt(Code);
+    end;
     if ShowProgress and ErrIsConsole then ProgressHandler := @DrawProgress;
     InstallCancelHandler(@OnCtrlC);
     if Cmd = 'r' then
