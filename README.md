@@ -1,51 +1,35 @@
 # PArc
 
-PArc is a from-scratch rewrite of [FreeArc 0.67](https://sourceforge.net/projects/freearc/) in
-Free Pascal. It is a command-line archiver for **Windows 7+ (x86/x64)** and **Linux x64** that
-reads and writes FreeArc `.arc` archives, plus its own `.parc` format with extra features.
+PArc is a command-line archiver written in Free Pascal for **Windows 7+ (x86/x64)** and
+**Linux x64**. It uses its own archive format, **`.parc`**, designed as a modernized descendant
+of the FreeArc container: nanosecond timestamps, Windows attributes, Unix permissions,
+symlinks, Reed–Solomon recovery, volumes, authenticated encryption and self-extractors.
 
-Everything is written in Pascal: no third-party compression libraries are linked, every codec
-is ported from its reference source (with the original C sources kept in the tree for
-comparison and tests).
+> **PArc does not read or write FreeArc `.arc` files.** The `.arc` format is handled by the
+> companion project [FreeArc-ex](https://github.com/YadeWira/FreeArc-ex), a C++ support fork of
+> FreeArc 0.67. PArc is the Pascal implementation of the `.parc` format.
 
 ## Highlights
 
-- **FreeArc compatible**: reads everything FreeArc 0.67.1 writes (all methods, encrypted
-  archives, recovery record); `.arc` files written by PArc are verified and extracted by
-  `arc.exe`/`unarc` from FreeArc 0.67.1.
-- **Native x64**: LZMA, PPMd, Tornado, REP, Dict, LZP, Delta, MM, TTA, GRZip, 4x4 and LZ4 are
-  ported with 64-bit-safe code (FreeArc had several 32-bit assumptions).
-- **All the core methods**, singly or chained: `storing`, `lzma`, `ppmd`, `grzip`, `dict`,
-  `rep`, `delta`, `tor`, `lzp`, `mm`, `tta`, `4x4`, `exe` (BCJ x86), `lz4`, `dispack070`
-  (DisPack) and `srep` (SREP).
-- **ZIP / 7z / RAR**: reads and writes ZIP, and reads 7z and RAR, through the optional
-  **7-Zip ZS** backend (`7zz`), which adds ZSTD, Brotli, LZ4, LZ5, Lizard and FastLZMA2 to ZIP.
-- **`.parc` format**: nanosecond timestamps, Windows attributes and Unix permissions,
-  Reed–Solomon recovery record (a damaged range is repairable, not just single sectors),
-  volumes (`-v`), strong encryption (`:f` key decoding, authentication tag, 200k PBKDF2
-  iterations) and SFX modules.
-- Long paths (`\\?\` on Windows), symlinks/junctions, stdin/stdout (`-si`, `-so`, `-`),
-  multi-volume extraction, masks and recursion.
+- **Own format**: `.parc` keeps names, sizes, CRCs and solid blocks from the FreeArc layout,
+  and adds 64-bit nanosecond timestamps, Windows attributes and Unix modes/links as optional
+  directory fields.
+- **All codecs implemented in Pascal**, no third-party compression libraries linked:
+  `storing`, `lzma`, `ppmd`, `grzip`, `dict`, `rep`, `delta`, `tor` (Tornado), `lzp`, `mm`,
+  `tta`, `4x4`, `exe` (BCJ x86), `lz4`, `dispack070` (DisPack) and `srep` (SREP), alone or in
+  chains (`exe+dispack070+lzma`, `srep+lzma`, …).
+- **Reed–Solomon recovery record** (`-rr`): repairs a damaged range or scattered sectors,
+  not just single sectors per group.
+- **Volumes** (`-v`), **strong encryption** (`-p`/`-hp`: AES/Blowfish/Serpent/Twofish,
+  authenticated, 200k PBKDF2 iterations), **SFX** (`-sfx`), stdin/stdout (`-si`, `-so`, `-`).
+- **Long paths** (`\\?\` on Windows), symlinks/junctions, masks and recursion.
 - Cancellation leaves no partial files; writes go to a temporary file that replaces the
-  original only when the operation succeeds.
-
-## Repository layout
-
-```
-src/                     PArc sources (Free Pascal)
-docs/                    manuals and format notes (currently in Spanish)
-tests/                   test suite, oracles and fuzzers
-reference/freearc-0.67/  only Compression/: the FreeArc 0.67 codec sources used as the
-                         reference and test oracle. The rest of the original tree
-                         (Haskell sources, Unarc, ArcShellExt, docs) lives in git history
-                         (commit 82ea8d9), not in the working tree.
-build.sh                 builds parc and parcsfx
-```
+  original only on success.
 
 ## Commands
 
 ```
-parc <command> <archive> [files/patterns...] [options]
+parc <command> <archive.parc> [files/patterns...] [options]
 ```
 
 | command | action |
@@ -62,17 +46,13 @@ parc <command> <archive> [files/patterns...] [options]
 | `r` | repair with the recovery record (writes `fixed.<name>`) |
 
 ```sh
-parc a backup.arc project/ -m5 -rr        # FreeArc-compatible, 5% recovery record
-parc a photos.parc photos/ -mx -s-        # own format, max compression, not solid
-parc a secret.arc docs/ -p -hp            # encrypted (asks for the password)
-parc u backup.arc project/                # update changed files
-parc t backup.arc                         # verify
-parc x backup.arc -dpout -o+              # extract, overwrite
-parc r backup.arc                         # repair -> fixed.backup.arc
-
-parc a backup.zip project/ -mzstd:5       # ZIP via 7-Zip ZS (needs 7zz)
-parc x photos.7z -dpout -o+               # read 7z (read-only)
-parc t files.rar                          # test/extract RAR (read-only)
+parc a backup.parc project/ -m5 -rr        # 5% recovery record
+parc a photos.parc photos/ -mx -s-         # max compression, not solid
+parc a secret.parc docs/ -p -hp            # encrypted (asks for the password)
+parc u backup.parc project/                # update changed files
+parc t backup.parc                         # verify
+parc x backup.parc -dpout -o+              # extract, overwrite
+parc r backup.parc                         # repair -> fixed.backup.parc
 ```
 
 Exit codes: `0` OK, `1` usage error, `2` damaged data, `3` unsupported method/parameter,
@@ -92,48 +72,43 @@ Requires Free Pascal 3.2 or newer.
 
 `parcsfx` is the self-extractor module used by `parc a -sfx`.
 
-For `.zip`/`.7z`/`.rar`, PArc executes **7-Zip ZS** as an external program. Build it on Linux
-with `tools/build-7zz.sh` (it leaves `7zz` next to `parc`), or point `PARC_7ZZ` to an existing
-`7zz`/`7z` (on Windows, the `7z.exe`/`7zz.exe` from 7-Zip ZS). Those formats are not linked
-into PArc.
-
 ## Testing
 
-The test suite compares PArc against the real FreeArc 0.67.1 binaries as an oracle. Most
-scripts need `arc.exe` running under Wine and a sample corpus; `tests/srep.sh` also builds the
-reference `srep` from `Compression/SREP`.
+The suite runs against `.parc` archives and the C reference sources kept in
+`reference/freearc-0.67/Compression/` for the codecs.
 
 ```sh
-bash tests/regress.sh        # extraction vs unarc on arc.exe-made archives
-bash tests/order_matrix.sh   # solid block layout vs arc.exe
-bash tests/update_matrix.sh  # a/u/f/d semantics vs arc.exe
-bash tests/write_matrix.sh   # PArc writes, FreeArc reads
-bash tests/compat_matrix.sh  # read matrix for every method
-bash tests/dispack.sh        # DisPack, both directions
-bash tests/srep.sh           # SREP v1-v4 decode, v3 encode, corrupt-stream robustness
-bash tests/canon_methods.sh  # canonical method strings vs arc.exe
-bash tests/containers.sh     # .zip/.7z/.rar via 7-Zip ZS (skips without 7zz)
-bash tests/stdio.sh tests/volumes.sh tests/sfx.sh tests/rs_recovery.sh tests/parc_crypt.sh
-sudo bash tests/fixes.sh     # masks, symlinks, disk-full, FAT32
-python3 tests/fuzz_update.py --iters 20 --seed 1   # randomized update fuzz vs arc.exe
+bash tests/stdio.sh tests/volumes.sh tests/sfx.sh
+bash tests/rs_recovery.sh tests/parc_crypt.sh
+bash tests/dispack.sh tests/srep.sh tests/bcj.sh
+bash tests/run_tornado_tests.sh tests/crypto_vectors.sh
+sudo bash tests/fixes.sh
+python3 tests/fuzz.py build/linux64/parc 100 build/linux64/*.parc
 ```
 
-## Status
+## Repository layout
 
-- CLI: complete and heavily tested against FreeArc 0.67.1 (Linux, Windows 10 x64/x86 and
-  Windows 7 x86).
-- Bugs and codec gaps found in FreeArc 0.67 (and PArc's own) are tracked in
-  `docs/BUGS-FREEARC.md`.
-- A **GUI is planned** as a 1:1 clone of FreeArc's GUI (no GTK2); it has not been started yet.
-- The detailed manuals are currently written in Spanish:
-  [`docs/USO.md`](docs/USO.md) (CLI manual), [`docs/formato/`](docs/formato) (`.arc` and
-  `.parc` format notes), [`docs/BUGS-FREEARC.md`](docs/BUGS-FREEARC.md),
-  [`docs/LIBRERIAS.md`](docs/LIBRERIAS.md) (codec provenance and status),
-  [`docs/ESTADO.md`](docs/ESTADO.md) (project status), [`docs/PLAN-GUI.md`](docs/PLAN-GUI.md).
+```
+src/                     PArc sources (Free Pascal)
+docs/                    manual and format specification (currently in Spanish)
+tests/                   test suite, codec oracles and fuzzers
+reference/freearc-0.67/  only Compression/: FreeArc 0.67 codec sources used as
+                         reference and test oracle for the ported codecs
+build.sh                 builds parc and parcsfx
+```
+
+The rest of the original FreeArc 0.67 tree (Haskell sources, Unarc, ArcShellExt, docs) is not
+part of PArc; it lives in the FreeArc-ex repository and in PArc's git history (commit
+`82ea8d9`).
+
+## Related project
+
+- [FreeArc-ex](https://github.com/YadeWira/FreeArc-ex): extended support fork of FreeArc 0.67,
+  in C++20, for `.arc` and the other container formats.
 
 ## License
 
 GNU General Public License v2.0; see [`LICENSE`](LICENSE).
 
-FreeArc itself is by Bulat Ziganshin; its original source is included in this tree as the
-reference for the format, the codecs and the compatibility tests.
+The codec implementations are ports of FreeArc 0.67 sources by Bulat Ziganshin and
+contributors; `reference/` preserves the original notices.

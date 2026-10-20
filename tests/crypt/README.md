@@ -2,7 +2,7 @@
 
 ## Hecho y validado
 
-- **Especificación** `FORMATO-ARC.md` §7.3 (+ dos subsecciones nuevas: el hex
+- **Especificación** la especificación del formato base (FreeArc-ex, `docs/FORMATO-ARC.md`) §7.3 (+ dos subsecciones nuevas: el hex
   "buggy" de `:k`/`:i` y que cada bloque lleva su propio IV/salt/check-code).
 - **`parc_crypt.pas`**:
   - SHA-512, HMAC-SHA512, PBKDF2-HMAC-SHA512 → verificados contra vectores

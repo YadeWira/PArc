@@ -1,4 +1,4 @@
-{ Lectura de los tipos primitivos del formato (FORMATO-ARC.md §2) desde un buffer en memoria.
+{ Lectura de los tipos primitivos del formato (el formato base de FreeArc §2) desde un buffer en memoria.
   Toda lectura verifica límites y lanza EArcCorrupt si se sale del buffer. }
 unit parc_bytes;
 
@@ -29,7 +29,7 @@ type
     function Bytes(N: SizeInt): RawByteString;
   end;
 
-  { Serialización de los tipos primitivos (FORMATO-ARC.md §2) en un buffer que crece. }
+  { Serialización de los tipos primitivos (el formato base de FreeArc §2) en un buffer que crece. }
   TByteWriter = record
     Data: TBytes;
     Len: SizeInt;

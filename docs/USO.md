@@ -1,8 +1,9 @@
 # PArc — manual de la línea de comandos
 
-PArc es una reescritura de FreeArc 0.67 en Free Pascal, para Windows 7 o posterior (x86 y
-x64) y Linux x64. Lee y escribe archivos `.arc` de FreeArc, y además tiene un formato propio,
-`.parc`, que guarda fechas en nanosegundos y los atributos de Windows y los permisos de Unix.
+PArc es un archivador en Free Pascal para Windows 7 o posterior (x86 y x64) y Linux x64. Usa
+un formato propio, `.parc` (derivado del contenedor de FreeArc), que guarda fechas en
+nanosegundos, los atributos de Windows y los permisos de Unix. PArc no lee ni escribe `.arc`:
+para eso está FreeArc-ex (https://github.com/YadeWira/FreeArc-ex).
 
 ```
 parc <comando> <archivo> [archivos/máscaras...] [opciones]
@@ -38,12 +39,9 @@ Los directorios que se pasan a `a`/`u`/`f` se recorren recursivamente.
 - Un archivo que no se puede leer (sin permiso, o bloqueado por otro programa) se saltea con
   aviso: el resto se agrega igual y, si ya estaba en el archivo, queda la versión anterior.
   PArc termina con el código 6.
-- Enlaces simbólicos (y junctions de Windows): en `.parc` se guardan como enlaces, sin
-  seguirlos. En `.arc`, que no los admite, el enlace a un archivo se guarda con el contenido
-  del destino (como FreeArc) y el enlace a un directorio o roto se saltea con aviso.
+- Enlaces simbólicos (y junctions de Windows): se guardan como enlaces, sin seguirlos.
 - El archivo que se está escribiendo, sus volúmenes y sus temporales no se agregan aunque
-  caigan dentro de una máscara (`parc a x.arc .` no mete `x.arc` dentro de sí mismo).
-  FreeArc 0.67.1 sí lo incluye; en PArc se excluye a propósito.
+  caigan dentro de una máscara (`parc a x.parc .` no mete `x.parc` dentro de sí mismo).
 
 ## Opciones
 
@@ -65,9 +63,8 @@ desarrollador; si no se puede, se avisa y se saltea.
 
 | opción | efecto |
 |---|---|
-| `-m<N>` | preset de FreeArc: `-m0` (sin compresión) a `-m9`, `-mx`. El default es `-m4`, como en FreeArc |
+| `-m<N>` | preset (heredado de FreeArc): `-m0` (sin compresión) a `-m9`, `-mx`. El default es `-m4` |
 | `-m<método>` | un método explícito, por ejemplo `-mlzma:64mb:max` o `-mrep:96m+exe+lzma` |
-| `-fmt=arc` / `-fmt=parc` | formato de salida. Sin la opción: el del archivo que se actualiza, o por la extensión (`.arc` = FreeArc, otra = `.parc`) |
 | `--recompress` | al actualizar, rehace todos los bloques con el método pedido en vez de copiar los que quedan enteros |
 | `-x<máscara>` | excluye archivos; se puede repetir |
 
@@ -112,15 +109,10 @@ Agrega datos de paridad que permiten reparar sectores dañados con `parc r` (o `
 Sin `-rr`, al actualizar un archivo se conserva lo que tenía. Los sectores de menos de 512
 bytes se rechazan (FreeArc se queda sin memoria con ellos).
 
-En `.parc` el registro es Reed-Solomon. En `.arc` sigue siendo el XOR de FreeArc, para que
-`arc.exe` lo use. Con el mismo tamaño:
-
-- el XOR repara un solo sector dañado por grupo: dos daños sueltos que caen en el mismo grupo
-  ya no tienen arreglo;
-- Reed-Solomon reparte el archivo en franjas de hasta 255 sectores, cada una con `m`
-  sectores de paridad. Repara hasta `m` sectores dañados por franja, en cualquier posición,
-  incluida la propia paridad. Los sectores se intercalan entre franjas, así que un tramo
-  contiguo dañado de hasta franjas × `m` sectores también se repara.
+El registro es Reed-Solomon: reparte el archivo en franjas de hasta 255 sectores, cada una con
+`m` sectores de paridad. Repara hasta `m` sectores dañados por franja, en cualquier posición,
+incluida la propia paridad. Los sectores se intercalan entre franjas, así que un tramo
+contiguo dañado de hasta franjas × `m` sectores también se repara.
 
 Con `-rr1%` hay unas 2 o 3 paridades por franja, y con `-rr5%` unas 12. Cuanto más daño suelto
 se quiera tolerar, más por ciento. `parc r` dice qué sectores no pudo reparar.
@@ -128,8 +120,7 @@ se quiera tolerar, más por ciento. `parc r` dice qué sectores no pudo reparar.
 ### Volúmenes: `-v` (solo `.parc`)
 
 Parte el archivo en pedazos de tamaño fijo, al estilo de 7-Zip: `copia.parc.001`,
-`copia.parc.002`… (el último, más chico). Es una función de PArc: FreeArc no parte sus `.arc`,
-así que con `.arc` se rechaza.
+`copia.parc.002`… (el último, más chico).
 
 | opción | efecto |
 |---|---|
@@ -153,7 +144,7 @@ así que con `.arc` se rechaza.
 | `-sfx=<módulo>` | usa ese módulo; por ejemplo, desde Linux, `-sfx=build/win64/parcsfx.exe` arma uno para Windows |
 
 El ejecutable es el módulo `parcsfx` (se busca al lado de `parc`) con el archivo pegado al
-final; funciona con `.parc` y `.arc`, con `-rr` y con cifrado, pero no con `-v`. `parc` lo lee
+final; funciona con `.parc`, con `-rr` y con cifrado, pero no con `-v`. `parc` lo lee
 como a cualquier archivo (`parc l copia.exe`, `parc t`, `parc x`), y al actualizarlo
 (`parc a copia.exe nuevo.txt`) sigue siendo autoextraíble.
 
@@ -177,22 +168,19 @@ espera un Enter antes de cerrar la ventana. Los códigos de salida son los de `p
 | `-hp[<contraseña>]` | cifra también el directorio y el footer: sin la contraseña no se ve ni la lista |
 | `-ae=<alg>`, `--encryption=<alg>` | `aes` (default, aes-256/ctr), `blowfish`, `serpent`, `twofish`; con tamaño y modo: `serpent-256/cfb`, `blowfish-448/ctr`... |
 
-`-p` y `-hp` pueden llevar contraseñas distintas; al leer se prueban las dos, como hace FreeArc.
+`-p` y `-hp` pueden llevar contraseñas distintas; al leer se prueban las dos.
 Si falta la contraseña de un archivo cifrado, se pide por consola (hasta tres intentos).
 Al actualizar un archivo cifrado, los bloques que se reempaquetan se vuelven a cifrar aunque
 no se haya dado `-p`: borrar un archivo no deja el resto en claro.
 
-En `.parc` el cifrado es más fuerte que el de FreeArc (el `.arc` sigue igual, para que
-`arc.exe` lo abra):
+El cifrado de `.parc` usa:
 
-- la clave se deriva con 200 000 iteraciones de PBKDF2-HMAC-SHA512, contra 1000 de FreeArc.
-  Cuesta ~0,6 s, una sola vez por archivo. `-ae=aes:n<N>` elige otra cantidad;
-- la clave se usa completa. FreeArc decodifica mal el hex de la clave y AES-256 le queda en
-  ~212 bits;
-- cada bloque cifrado lleva una etiqueta de autenticación (HMAC-SHA512 de 32 bytes): un
-  cambio en los datos cifrados se detecta ("la autenticación falló"), cosa que el CRC solo
-  no garantiza con el modo CTR;
-- la contraseña va en UTF-8, así que cualquier carácter cuenta.
+- 200 000 iteraciones de PBKDF2-HMAC-SHA512 para derivar la clave. Cuesta ~0,6 s, una sola
+  vez por archivo. `-ae=aes:n<N>` elige otra cantidad;
+- la clave completa (32 bytes para AES-256), sin la decodificación defectuosa de FreeArc;
+- una etiqueta de autenticación (HMAC-SHA512 de 32 bytes) por bloque: un cambio en los datos
+  cifrados se detecta ("la autenticación falló"), cosa que el CRC solo no garantiza con CTR;
+- la contraseña en UTF-8, así que cualquier carácter cuenta.
 
 Los `.parc` cifrados con versiones anteriores de PArc se siguen leyendo y actualizando.
 
@@ -256,56 +244,22 @@ el archivo que estaba a medio escribir. Un segundo Ctrl-C corta en el acto.
 ## Ejemplos
 
 ```sh
-parc a copia.arc proyecto/ -m5 -rr        # compatible con FreeArc, con recuperación
-parc a copia.parc fotos/ -mx -s-          # formato propio, máxima compresión, sin sólido
-parc a privado.arc docs/ -p -hp           # cifrado; pide la contraseña
-parc u copia.arc proyecto/                # actualiza lo que cambió
-parc d copia.arc 'proyecto/tmp/*'         # borra
-parc t copia.arc                          # verifica
-parc x copia.arc -dpdestino -o+           # extrae sobrescribiendo
-parc r copia.arc                          # repara -> fixed.copia.arc
+parc a copia.parc proyecto/ -m5 -rr       # con registro de recuperación
+parc a fotos.parc fotos/ -mx -s-          # máxima compresión, sin sólido
+parc a privado.parc docs/ -p -hp          # cifrado; pide la contraseña
+parc u copia.parc proyecto/               # actualiza lo que cambió
+parc d copia.parc 'proyecto/tmp/*'        # borra
+parc t copia.parc                         # verifica
+parc x copia.parc -dpdestino -o+          # extrae sobrescribiendo
+parc r copia.parc                         # repara -> fixed.copia.parc
 ```
 
-## Otros formatos: .zip, .7z y .rar
+## Relación con FreeArc
 
-PArc no implementa esos contenedores: delega en **7-Zip ZS** (el binario `7zz`), que se
-ejecuta como proceso externo. Se busca en `PARC_7ZZ`, al lado de `parc` (`7zz`/`7z`) o en el
-`PATH`; se compila con `tools/build-7zz.sh` (Linux). 7-Zip ZS es LGPL 2.1+ (con la restricción
-de unRAR); no se distribuye con PArc.
+PArc empezó como una reescritura compatible de FreeArc 0.67, pero ya no lee ni escribe `.arc`.
+El formato `.parc` conserva la estructura de bloques y los métodos, con extensiones propias
+(`docs/formato/FORMATO-PARC.md`). Los compresores son los mismos, portados a Pascal y
+verificados contra las fuentes C de `reference/freearc-0.67/Compression/`.
 
-| extensión | comandos |
-|---|---|
-| `.zip` | `l`, `t`, `x`, `e`, `a`, `u`, `f`, `d` |
-| `.7z` | `l`, `t`, `x`, `e` (solo lectura) |
-| `.rar` | `l`, `t`, `x`, `e` (solo lectura, RAR4 y RAR5) |
-
-Al crear `.zip`, `-m` se traduce a 7-Zip:
-
-- `-m0`…`-m9` o `-mx`: nivel (método por defecto, Deflate);
-- `-mdeflate`, `-mlzma`, `-mppmd`, `-mzstd[:N]`, `-mbrotli[:N]`, `-mlz4`, `-mlz5`,
-  `-mlizard`, `-mflzma2` (`N` = nivel).
-
-Opciones: `-dp<dir>`, `-o+`/`-o-` (sobrescribir/saltear, como en `.arc`), `-p<clave>`,
-`-x<máscara>`, `-r`, `-v<tamaño>` (volúmenes) y `--no-progress`. `-hp`, `-si` y `-sfx` no
-aplican a estos contenedores.
-
-`lb` (bloques internos) no tiene equivalente: usá `l`. Los mensajes y el progreso son los de
-7-Zip; el código de salida se traduce al de PArc (0/1/2/4/6/130).
-
-## Compatibilidad con FreeArc
-
-- Lee todo lo que escribe FreeArc 0.67: todos los métodos, archivos cifrados (`-p`, `-hp`) y
-  el registro de recuperación. Los métodos son `storing`, `lzma`, `ppmd`, `grzip`, `dict`,
-  `rep`, `delta`, `tor`, `lzp`, `mm`, `tta`, `4x4`, `exe` (BCJ), `lz4`, `dispack070` (DisPack)
-  y `srep` (SREP v1–v4), solos o en cadena (`exe+dispack070+lzma`, `srep+lzma`, …).
-- `srep` al comprimir usa un LZ77 greedy de matches largos (≥512 bytes) con *lazy matching*:
-  genera streams v3 válidos (con `BASE_LEN=0`, como 3.93a) que leen el `srep` de referencia,
-  3.93a y FreeArc, con un ratio parecido al del `srep` original.
-- Lo que escribe PArc en `.arc` lo abren y extraen `arc.exe` 0.67.1 y `unarc`.
-- Con el mismo árbol y el mismo preset, PArc arma los mismos bloques sólidos, con los mismos
-  archivos en el mismo orden y el mismo método guardado que `arc.exe`
-  (`tests/order_matrix.sh`). Los tamaños comprimidos coinciden en la mayoría de los bloques;
-  algunos difieren por pocos bytes porque los codificadores LZMA, GRZip y Tornado no son las
-  mismas versiones que trae FreeArc.
-- Con `-m0 -rr...` el archivo completo es idéntico byte a byte al de `arc.exe`.
-- El formato `.parc` (`docs/formato/FORMATO-PARC.md`) solo lo lee PArc.
+El soporte de `.arc` (y de los demás contenedores) está en
+[FreeArc-ex](https://github.com/YadeWira/FreeArc-ex).

@@ -26,7 +26,7 @@ check "parc x idéntico"                    'xsame v.parc.001'
 check "parc l"                             '"$PARC" l v.parc | grep -q "sub/otro.bin"'
 cat v.parc.[0-9][0-9][0-9] > junto.parc
 check "unidos con cat: un .parc normal"    'xsame junto.parc'
-check "-v con .arc: rechazado"            '! "$PARC" a v.arc c -v1m --no-progress >/dev/null 2>&1 && [ ! -e v.arc.001 ] && [ ! -e v.arc.tmp.001 ]'
+check "-v con .arc: rechazado (solo .parc)"            '! "$PARC" a v.arc c -v1m --no-progress >/dev/null 2>&1 && [ ! -e v.arc.001 ] && [ ! -e v.arc.tmp.001 ]'
 
 # Actualizar: conserva el tamaño de volumen; borrar algo grande deja menos volúmenes y los que
 # sobran se borran

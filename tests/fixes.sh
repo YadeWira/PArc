@@ -1,5 +1,5 @@
 #!/bin/bash
-# tests/fixes.sh — correcciones de docs/BUGS-FREEARC.md: máscaras (P1), archivos ilegibles (P2)
+# tests/fixes.sh — correcciones: máscaras (P1), archivos ilegibles (P2)
 # y enlaces simbólicos (P3).
 set -u
 ROOT=$(cd "$(dirname "$0")/.." && pwd)
@@ -50,10 +50,8 @@ rm -rf oe; "$PARC" e l.parc -dpoe -snld --no-progress >/dev/null 2>&1
 check "e: enlace en la raíz"               '[ "$(readlink oe/rel)" = real.txt ]'
 echo nuevo > s/nuevo.txt; "$PARC" a l.parc s/nuevo.txt --no-progress >/dev/null 2>&1
 check "actualizar conserva los enlaces"    '[ "$("$PARC" l l.parc | grep -c "<LINK>")" = 5 ]'
-timeout 60 "$PARC" a l.arc s --no-progress >/dev/null 2>&1
-check ".arc: enlace a archivo con contenido, a directorio salteado" '[ "$("$PARC" l l.arc | grep -c "<LINK>")" = 0 ] && "$PARC" l l.arc | grep -q " s/rel$" && ! "$PARC" l l.arc | grep -q " s/dir$"'
 
-# Disco lleno y FAT32 (sección 6 de docs/BUGS-FREEARC.md): hacen falta volúmenes chicos
+# Disco lleno y FAT32: hacen falta volúmenes chicos
 # montados, así que solo con sudo sin contraseña
 if sudo -n true 2>/dev/null; then
   mkdir -p full/in full/mnt && head -c 3000000 /dev/urandom > full/in/grande.bin && echo a > full/in/a.txt

@@ -1,6 +1,6 @@
 { Verificación y reparación de un archivo FreeArc con RECOVERY_BLOCK (`-rr`).
 
-  El esquema lo describe FORMATO-ARC.md §7.4 y sale de ArcRecover.hs: no es
+  El esquema lo describe el formato base de FreeArc §7.4 y sale de ArcRecover.hs: no es
   Reed-Solomon, es un XOR rotativo. El archivo se recorre desde InitPos en trozos de
   SectorSize, cada trozo se XOR-ea en un sector de recuperación que rota con
   i := (i+1) mod RecSectors arrancando en i0 = (-arc_sectors) mod RecSectors, y de cada

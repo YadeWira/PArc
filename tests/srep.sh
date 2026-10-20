@@ -64,7 +64,7 @@ for spec in "text 200000" "rep 200" "rand 100000" "mix 1" "text 3000000"; do
   cmp -s f f.out && ok "$1 $2 ($sz bytes)" || bad "difiere $1 $2 ($sz bytes)"
 done
 
-echo "== bloque de .arc (byte de guardado)"
+echo "== bloque (byte de guardado)"
 head -c 300000 /dev/urandom > f; "$OUT/srep_ref" -m3f f f.srep >/dev/null 2>&1
 python3 - <<'EOF'
 d = open('f.srep', 'rb').read()

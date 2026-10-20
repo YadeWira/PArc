@@ -1,56 +1,49 @@
-# Librerías de terceros en FreeArc 0.67 y su estado (relevado 2026-09-24)
+# Códecs de FreeArc 0.67 portados a PArc
 
-> Las rutas de FreeArc que aparecen en este documento (`Compression/...`, `Unarc/...`,
-> `Arc.hs`, ...) son relativas a `reference/freearc-0.67/`. En el repo sólo se conserva
-> `Compression/` (referencia de códecs y oráculo de los tests); el resto del fuente de
-> FreeArc 0.67 (Haskell, `Unarc/`, `ArcShellExt/`, `Documentation/`) está en el historial
-> de git (commit `82ea8d9`) y en la distribución original de FreeArc.
+PArc no enlaza bibliotecas de terceros: los compresores y cifrados están portados a Pascal.
+Este documento releva de dónde sale cada uno, contra qué se verificó y qué queda pendiente.
 
-| Librería | En FreeArc | Actual | ¿Formato compatible al actualizar? | Notas |
-|---|---|---|---|---|
-| LZMA SDK (`Compression/LZMA2/C`: LzmaDec/Enc, Bra86/BCJ, LzFind) | 2009-02 (~4.65/9.x) | 26.x | **Sí**: el stream LZMA y BCJ x86 no cambian desde 2001 | Decoder nuevo mucho más rápido (LzmaDec optimizado). El encoder nuevo produce otros bytes, pero igual de válidos |
-| LZ4 (`Compression/LZ4`) | r? 2011-2012 | 1.10.0 | **Sí**: el formato de bloque es estable | Las versiones de 2012 tienen CVE-2014-4611 (overflow en el decoder): **actualizar es un fix de seguridad** |
-| LibTomCrypt (`_Encryption`) | 1.17 | 1.18.2 | **Sí**: AES/Blowfish/Serpent/Twofish/SHA dan la misma salida | 1.18.x es bugfix. Verificar también PBKDF2 y los modos (CTR/CFB) que usa FreeArc |
-| AES de 7-Zip (`_Encryption/7zAES`) | 2009 | 26.x | Sí | Solo si se usa ese AES en vez del de LibTomCrypt |
-| PPMd (`Compression/PPMD`, D. Shkarin) | var. H/I (1999-2001), **modificado por FreeArc** | sin upstream compatible | **No hay reemplazo directo**: Ppmd7 de 7-Zip es var.H con otro range coder | Mantener el propio. Ojo con el bug de x64 que encontró PA-Lab (UNIT_SIZE=12, copia de punteros) |
-| Lua (`HsLua`) | 5.1 | 5.4.x | **No**: 5.4 rompe scripts 5.1 | Solo afecta a los scripts/eventos de `arc.ini`; no al formato |
-| 7z.dll (interop `Arhive7zLib.hs`, `Client7z*.cpp`) | 7-Zip 9.x | 26.x | API COM parecida, con cambios | Solo para abrir .7z/.zip/.rar; no es parte del formato .arc |
-| 7-Zip ZS (`7zz`) en PArc | — (no existía) | 26.02 ZS v1.5.7 (externo) | — | .zip lectura/escritura y .7z/.rar lectura; se ejecuta como proceso, no se enlaza. Aporta ZSTD, Brotli, LZ4, LZ5, Lizard y FastLZMA2 al ZIP |
-| SREP | 3.93 beta (2013; el fuente que trae el repo) | 3.93a beta (2014-10-11, última conocida; es la que referencia `arc.ini`) | mismo formato (v1–v4) | 3.93a guarda `BASE_LEN=0` en v3/v4 y puede emitir matches más cortos que `BASE_LEN` (el largo da la vuelta en 32 bits) |
-| Métodos propios de Bulat Ziganshin: Tornado, REP, 4x4, Dict, LZP, Delta, MM/TTA, GRZip, DisPack | 0.67 | sin upstream mantenido | — | Hay que portarlos desde estas fuentes; el formato de sus streams lo define este código |
+> Las rutas `Compression/...` son relativas a `reference/freearc-0.67/`. En el repo sólo se
+> conserva `Compression/` (fuente de referencia y oráculo de los tests de códecs). El resto
+> del árbol de FreeArc 0.67 está en el historial de git (commit `82ea8d9`) y en el proyecto
+> [FreeArc-ex](https://github.com/YadeWira/FreeArc-ex).
 
-## Implicancia para PArc
-- PArc se escribe en Pascal, así que "actualizar" significa **portar desde la versión actual**
-  cuando el formato es estable (LZMA/BCJ desde el SDK 26.x, LZ4 desde 1.10, crypto desde
-  1.18.2), y **no** desde las copias de 2009-2012 que trae FreeArc.
-- La verificación siempre es contra archivos creados por FreeArc 0.67.1 (oráculo `arc.exe`
-  bajo wine + `unarc` de PA-Lab): una librería nueva no puede cambiar lo que se lee.
-- Los métodos sin upstream se portan desde `Compression/`, usando `unarc` como referencia.
+## Versiones de las que se portó
 
-## Estado en PArc (2026-09-25)
+| Componente | En FreeArc 0.67 | Versión portada | Notas |
+|---|---|---|---|
+| LZMA SDK (`Compression/LZMA2/C`) | 2009-02 | 26.x | El stream LZMA y BCJ x86 no cambian; el encoder nuevo produce bytes válidos, no idénticos |
+| LZ4 (`Compression/LZ4`) | 2011-2012 | 1.10.0 | El formato de bloque es estable; la versión vieja tiene CVE-2014-4611 |
+| LibTomCrypt (`_Encryption`) | 1.17 | 1.18.2 | AES/Blowfish/Serpent/Twofish/SHA dan la misma salida |
+| PPMd (D. Shkarin, modificado por FreeArc) | var. H/I | sin upstream compatible | Se mantiene el port propio (incluido el layout de 32 bits en x64) |
+| SREP | 3.93 beta (2013) | 3.93a beta (2014-10-11) | freeware de Bulat Ziganshin; formato v1–v4 |
+| Tornado, REP, 4x4, Dict, LZP, Delta, MM/TTA, GRZip, DisPack | 0.67 | sin upstream mantenido | Se portaron desde `Compression/`; el stream lo define ese código |
 
-PArc no enlaza código de terceros: todo está portado a Pascal. De dónde sale cada parte:
+## Estado en PArc
 
 | Componente | Portado desde | Verificación |
 |---|---|---|
-| LZMA (descompresión) | especificación de referencia (LzmaSpec) | archivos de arc.exe; matriz de lectura |
-| LZMA (compresión) | LZMA SDK 26.03 | byte a byte contra el SDK C; arc.exe t/x |
-| BCJ x86 (`exe`) | LZMA SDK 26.03 | contra Bra86.c compilado |
-| LZ4 (descompresión) | semántica de LZ4 1.10 (`LZ4_decompress_safe`), sin CVE-2014-4611 | archivos de arc.exe |
-| LZ4 (compresión) | LZ4 1.10 (`LZ4_compress_default` y `LZ4_compress_HC` nivel 9) | byte a byte contra LZ4 1.10 en C; arc.exe t/x en `lz4`, `lz4:hc`, `4x4:lz4`, `exe+lz4`, `b<mem>`, `N%`; lo lee también el decodificador de 2012 de FreeArc |
-| AES, Blowfish, Twofish, SHA-512, PBKDF2 | LibTomCrypt | `tests/crypto_vectors.sh`: 0 diferencias en miles de vectores al azar contra la 1.17 de FreeArc **y** contra la 1.18.2 oficial (las dos dan lo mismo: actualizar no cambia nada) |
-| Serpent | el agregado de FreeArc sobre LibTomCrypt 1.17 (1.18.2 no trae Serpent) | ídem, contra la 1.17 |
-| CTR / CFB | LibTomCrypt (contador little-endian, como FreeArc) | ídem |
-| PPMd, Tornado, REP, 4x4, Dict, LZP, Delta, MM, TTA, GRZip | FreeArc 0.67 (no hay versiones más nuevas compatibles) | matrices de lectura y escritura |
-| DisPack (`dispack070`) | FreeArc 0.67 (`Compression/DisPack`, 0.70) | `tests/dispack.sh`: el bloque de datos es byte a byte el de arc.exe, y lo lee/escribe en las dos direcciones; filtro comparado contra el C con `tests/dispack_ref.cpp` |
-| SREP (`srep`), decodificador | `Compression/SREP/srep.cpp` (3.93 beta) + 3.93a | `tests/srep.sh`: streams de `-m3f` (el de arc.ini), `-m0o`/`-m1o` (v2) y `-m0`/`-m2`/`-m3` (v4), de texto, repetidos, azar y >8 MB; casos sintéticos de 3.93a (`BASE_LEN=0`, largos cortos con vuelta de 32 bits). Con `SREP_393A=<binario>` se prueba interoperabilidad real con 3.93a. El bloque de .arc lleva un byte delante (0 = guardado, 1 = stream) |
+| LZMA (descompresión) | especificación de referencia (LzmaSpec) | streams generados con Python y el SDK; `tests/run_lzma_tests.py` |
+| LZMA (compresión) | LZMA SDK 26.03 | byte a byte contra el SDK C; roundtrip en `.parc` |
+| BCJ x86 (`exe`) | LZMA SDK 26.03 | contra `Bra86.c` compilado, con cortes de buffer (`tests/bcj.sh`) |
+| LZ4 (descompresión) | semántica de LZ4 1.10 (`LZ4_decompress_safe`), sin CVE-2014-4611 | streams de referencia |
+| LZ4 (compresión) | LZ4 1.10 (`LZ4_compress_default` y `LZ4_compress_HC` nivel 9) | byte a byte contra LZ4 1.10 en C; roundtrip en `.parc` |
+| AES, Blowfish, Twofish, SHA-512, PBKDF2 | LibTomCrypt | `tests/crypto_vectors.sh`: 0 diferencias en miles de vectores al azar contra la 1.17 de FreeArc y contra la 1.18.2 oficial |
+| Serpent | el agregado de FreeArc sobre LibTomCrypt 1.17 | ídem, contra la 1.17 |
+| CTR / CFB | LibTomCrypt (contador little-endian) | ídem |
+| PPMd, Tornado, REP, 4x4, Dict, LZP, Delta, MM, TTA, GRZip | FreeArc 0.67 | `tests/run_tornado_tests.sh`, `tests/ppmd`, `tests/mm_tta` y roundtrips en `.parc` |
+| DisPack (`dispack070`) | `Compression/DisPack` (0.70) | `tests/dispack.sh`: filtro byte a byte contra el C y roundtrip en `.parc` |
+| SREP (`srep`), decodificador | `Compression/SREP/srep.cpp` (3.93 beta) + 3.93a | `tests/srep.sh`: streams v1–v4 (texto, repetidos, azar, >8 MB), casos sintéticos de `BASE_LEN=0` y largos con vuelta de 32 bits; interoperabilidad opcional con 3.93a |
+| SREP (`srep`), codificador | `Compression/SREP/srep.cpp` (formato v3) | `tests/srep.sh`: streams decodificados por el srep de referencia; LZ77 greedy (≥512, lazy matching, 4 candidatos por hash), `BASE_LEN=0` como 3.93a |
 
-Diferencia que apareció al comparar: LibTomCrypt rechaza claves de Blowfish de menos de 8
-bytes (y AES/Twofish que no sean de 16/24/32); PArc las aceptaba y podía escribir un archivo
-que FreeArc no abre. Ahora las rechaza igual (`CipherKeySizeValid`).
+Detalle histórico: LibTomCrypt rechaza claves de Blowfish de menos de 8 bytes (y AES/Twofish
+que no sean de 16/24/32); PArc ahora también las rechaza (`CipherKeySizeValid`).
 
-| SREP (`srep`), codificador | `Compression/SREP/srep.cpp` (formato v3) | `tests/srep.sh`: los streams de PArc los decodifica el `srep` de referencia, y arc.exe verifica/extrae un `.arc` con `-msrep`. LZ77 greedy de matches ≥512 con lazy matching y 4 candidatos por hash (tabla proporcional al input); escribe v3 con `BASE_LEN=0` como 3.93a; en binarios con duplicados parciales iguala o supera al srep de referencia y en el resto queda parejo |
+## Fuera de PArc
+
+Los compresores externos de FreeArc (`precomp`, `ecm`, `jpg`, `ppmonstr`, `durilca`, `ccm`,
+`rzm`, etc.) no están portados: son programas aparte y quedan fuera del alcance de PArc, igual
+que los contenedores `.zip`/`.7z`/`.rar`, que atiende FreeArc-ex.
 
 El srep del repo no compila tal cual contra el `Common.h` actual; `tests/srep.sh` arma una
-copia con dos ajustes mínimos para usarlo como referencia. No hacen al formato: Lua 5.1
-(scripts de arc.ini) y 7z.dll.
+copia con dos ajustes mínimos para usarlo como referencia.

@@ -1,7 +1,7 @@
 #!/bin/bash
 # tests/rs_recovery.sh — registro de recuperación Reed-Solomon de .parc ("parc-rs1"):
-# repara un tramo contiguo y sectores sueltos (que el XOR de FreeArc no puede), también con la
-# paridad dañada, y avisa cuando el daño supera lo reparable. El .arc sigue con el XOR (0.36).
+# repara un tramo contiguo y sectores sueltos, también con la paridad dañada, y avisa cuando
+# el daño supera lo reparable.
 set -u
 ROOT=$(cd "$(dirname "$0")/.." && pwd)
 PARC=${PARC_BIN:-$ROOT/build/linux64/parc}
@@ -12,9 +12,7 @@ check() { if eval "$2"; then printf '  ok    %s\n' "$1"; else printf '  FALLA %s
 for i in $(seq 1 8); do head -c 400000 /dev/urandom > "d/r$i.bin"; done; seq 1 300000 > d/t.txt
 
 "$PARC" a a.parc d -m1 -rr5% --no-progress >/dev/null 2>&1
-"$PARC" a a.arc d -m1 -rr5% --no-progress >/dev/null 2>&1
 check ".parc: registro parc-rs1"            '"$PARC" r a.parc | grep -q "parc-rs1"'
-check ".arc: sigue con el XOR de FreeArc"   '"$PARC" r a.arc | grep -q "^Registro de recuperación 0.36"'
 check "sin daño: nada que reparar"          '"$PARC" r a.parc | grep -q "No hay sectores dañados"'
 
 python3 - <<'EOF'
@@ -25,7 +23,7 @@ def damage(src, name, ranges):
     f = open(name, 'r+b')
     for a, b in ranges:
         f.seek(a); f.write(bytes(random.randrange(256) for _ in range(b - a)))
-for ext in ('parc', 'arc'):
+for ext in ('parc',):
     size = os.path.getsize('a.' + ext)
     damage('a.' + ext, 'burst.' + ext, [(200000, 350000)])
     offs = random.sample(range(1000, size - 300000, 4096), 60)
@@ -38,7 +36,6 @@ for f in burst scatter tail; do
   rm -f "fixed.$f.parc"; "$PARC" r "$f.parc" >/dev/null 2>&1
   check ".parc $f: reparado e íntegro"       '[ -f fixed.'"$f"'.parc ] && "$PARC" t fixed.'"$f"'.parc --no-progress | tail -1 | grep -q "Errores: 0"'
 done
-check ".arc scatter: el XOR no alcanza (referencia)" '{ "$PARC" r scatter.arc >/dev/null 2>&1; [ $? = 2 ]; }'
 rm -f fixed.heavy.parc
 check ".parc heavy: irrecuperable, código 2"  '{ "$PARC" r heavy.parc >/dev/null 2>&1; [ $? = 2 ]; }'
 

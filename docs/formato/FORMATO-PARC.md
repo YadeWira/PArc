@@ -1,13 +1,11 @@
 # Formato `.parc` — especificación v1 (borrador, 2026-09-24)
 
-`.parc` es el formato nativo de PArc. Es **derivado** de `.arc` de FreeArc 0.67
-(`FORMATO-ARC.md`, que es la base y define todo lo que acá no se redefine): los mismos
-bloques, descriptores, VInt, footer, directorio en columnas y cadenas de métodos. Las
-diferencias son pocas y a propósito.
+`.parc` es el formato nativo de PArc. Toma la estructura de contenedor de FreeArc 0.67
+(bloques, descriptores, VInt, footer, directorio en columnas y cadenas de métodos) y le
+agrega campos propios. La especificación del contenedor base está en el repo de FreeArc-ex
+(`docs/FORMATO-ARC.md`) y en la distribución original de FreeArc.
 
-Decisión del humano (2026-09-24): formato derivado con versión propia. PArc **lee** `.arc`
-y `.parc`, y **escribe** `.parc` (y, con `-fmt=arc`, `.arc` compatible, ver §6).
-FreeArc no tiene que poder leer `.parc`.
+PArc escribe y lee únicamente `.parc`; no genera ni acepta `.arc`.
 
 ## 1. Firma propia
 
@@ -29,7 +27,7 @@ claro un archivo de versión mayor.
 ## 2. Directorio: campos opcionales (implementados)
 
 `.arc` define un mecanismo de campos opcionales al final del DIR_BLOCK
-(`FORMATO-ARC.md` §6), que FreeArc 0.67 nunca usó: solo escribe `tag_end = 0`. `.parc`
+(el contenedor base), que FreeArc 0.67 nunca usó: solo escribe `tag_end = 0`. `.parc`
 lo usa así:
 
 ```
@@ -60,14 +58,13 @@ PArc crea los enlaces al final y no crea los que apuntan fuera del destino (abso
 `MTIME_NS` cubre ±292 años alrededor de 1970, así que resuelve el problema de 2038 de la
 columna `Time` (Int32) y guarda la precisión de NTFS (100 ns) y ext4 (1 ns).
 
-## 3. Todo lo demás, igual que `.arc`
+## 3. Resto del contenedor (base de FreeArc)
 
 - **Bloques**: HEADER, DATA, DIR, FOOTER y RECOVERY, con los mismos números de tipo.
 - **Descriptores**: los mismos campos y el mismo CRC; solo cambia la firma.
-- **Métodos**: las mismas cadenas (`lzma:...`, `rep:...+...`, `4x4:...`). Los
-  decodificadores de PArc son los mismos para los dos formatos.
+- **Métodos**: las mismas cadenas (`lzma:...`, `rep:...+...`, `4x4:...`).
 - **Footer**: los mismos campos, incluidos `locked`, `recovery` y `comment`.
-- **Cifrado**: la misma cadena de método (`FORMATO-ARC.md` §7.3), con dos parámetros más
+- **Cifrado**: la misma cadena de método que el contenedor base, con dos parámetros más
   que PArc escribe siempre en `.parc` (un lector los acepta también en archivos viejos sin
   ellos):
   - `:f`: el hex de `:s`, `:c`, `:i` y la clave se decodifica bien y la contraseña va en
@@ -86,7 +83,7 @@ columna `Time` (Int32) y guarda la precisión de NTFS (100 ns) y ext4 (1 ns).
 - El CRC de cada archivo es el de sus datos originales; el de cada bloque de control, el
   de sus datos sin comprimir.
 - `rel_pos` del footer y `rel_offsets` del directorio son relativos a la posición del
-  bloque que los contiene (`FORMATO-ARC.md` §5.1 y §6).
+  bloque que los contiene.
 - Nombres en UTF-8 con `/` como separador, relativos, sin `..` ni raíz. En Windows, los
   `\` se convierten a `/`.
 - El directorio se escribe **después** de los bloques de datos que describe. Un archivo
@@ -95,11 +92,10 @@ columna `Time` (Int32) y guarda la precisión de NTFS (100 ns) y ext4 (1 ns).
 
 ## 5. Pendiente
 
-- Formato de RECOVERY_BLOCK de `.arc`: falta especificarlo (`FORMATO-ARC.md` §9).
 
 ## 5b. Registro de recuperación de `.parc`: Reed-Solomon (`parc-rs1`)
 
-Los mismos dos RECOVERY_BLOCK que `.arc` (sectores primero, info+CRCs después), con:
+Dos RECOVERY_BLOCK (sectores primero, info+CRCs después), con:
 
 - addinfo: versión `parc-rs1`, `arcsize`, `offset` y **dos** pares: `(sector_size,
   rec_sectors)` y `(m, S)`, con `rec_sectors = S × m`;
@@ -107,20 +103,10 @@ Los mismos dos RECOVERY_BLOCK que `.arc` (sectores primero, info+CRCs después),
   en S = ⌈N / (255 − m)⌉ franjas: el sector i es el dato i div S de la franja i mod S;
 - la paridad j de la franja s (código de borrado RS sobre GF(2^8), polinomio 0x11D, matriz de
   Cauchy escalada: `src/parc_rs.pas`) es el sector j·S + s del bloque de sectores;
-- los CRCs son, como en `.arc`, uno por sector de datos y uno por sector de paridad, y marcan
+- los CRCs son uno por sector de datos y uno por sector de paridad, y marcan
   qué sectores faltan. Una franja se repara con a lo sumo m sectores dañados.
 
 m es la menor cantidad que da al menos los sectores de recuperación que pide `-rr` con el
 cálculo de FreeArc.
 - ¿Hash más fuerte que CRC-32 por archivo (p. ej. un tag `BLAKE2B`)? A decidir.
 - Enlaces duros, ACL, atributos extendidos: tags futuros.
-
-## 6. Modo compatible: escribir `.arc`
-
-`parc a -fmt=arc` (o una salida con extensión `.arc`) escribe un `.arc` que FreeArc 0.67 y
-Unarc pueden leer: firma `ArC\x01`, versión 0.67, sin campos opcionales (solo
-`tag_end = 0`) y solo métodos que existen en FreeArc 0.67. Se pierde lo que `.arc` no
-puede guardar (fechas de 64 bits, atributos), igual que con FreeArc.
-
-Además de servir para interoperar, es la herramienta de validación del escritor: todo lo
-que PArc escribe en modo `.arc` tiene que pasar `arc.exe t` y `unarc t`.

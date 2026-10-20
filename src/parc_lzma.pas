@@ -1,4 +1,4 @@
-{ Decodificador LZMA1 "raw" (FORMATO-ARC.md §7.1), reanudable y con diccionario circular.
+{ Decodificador LZMA1 "raw" (el formato base de FreeArc §7.1), reanudable y con diccionario circular.
   - Bloques de control: memoria-a-memoria, tamaño de salida conocido, sin marca de fin obligatoria.
   - Bloques de datos: streaming (TLzmaStage); el stream termina con marca de fin, como en
     lzma_decompress2 de FreeArc (C_LZMA.cpp), y el diccionario circular mide dictSize.

@@ -1,5 +1,5 @@
 { Lectura de la estructura de un archivo FreeArc: descriptor final, FOOTER y DIR_BLOCKs.
-  Referencia: docs/formato/FORMATO-ARC.md (§3, §5, §6). }
+  Referencia: el formato base de FreeArc (FreeArc-ex) (§3, §5, §6). }
 unit parc_archive;
 
 {$mode objfpc}{$H+}
@@ -71,7 +71,6 @@ type
     procedure ParseDirectory(const DirBlock: TArcBlock);
   public
     ArcSize: Int64;
-    IsParc: Boolean;    // formato .parc (firma PAr\x01) en vez de .arc
     Footer: TArcBlock;
     ControlBlocks: array of TArcBlock;   // del FOOTER, en orden de archivo, sin el propio footer
     DataBlocks: array of TArcBlock;
@@ -222,10 +221,11 @@ begin
       begin
         if Result.BlockType <> FOOTER_BLOCK then
           Corrupt('el último bloque no es el footer');
-        IsParc := Sig = PARC_SIGNATURE;
+        if Sig <> PARC_SIGNATURE then
+          raise EArcCorrupt.Create('es un archivo .arc: PArc ya no lo soporta (para .arc usá FreeArc-ex)');
         Exit;
       end;
-  raise EArcCorrupt.Create('no es un archivo FreeArc o está dañado (no se encontró el footer)');
+  raise EArcCorrupt.Create('no es un archivo .parc o está dañado (no se encontró el footer)');
 end;
 
 function TArchive.ReadControlBlock(const Block: TArcBlock): TBytes;
@@ -281,7 +281,7 @@ begin
   for i := 0 to High(ControlBlocks) do
     if ControlBlocks[i].Pos < SFXSize then SFXSize := ControlBlocks[i].Pos;
 
-  if IsParc then CheckParcHeader;
+  CheckParcHeader;
   for i := 0 to High(ControlBlocks) do
     if ControlBlocks[i].BlockType = DIR_BLOCK then
       ParseDirectory(ControlBlocks[i]);
@@ -361,7 +361,7 @@ begin
   for i := 0 to NDirs - 1 do
     Dirs[i] := SanitizePath(r.CStr);
 
-  // Cada campo por archivo va en su propia columna (FORMATO-ARC.md §6)
+  // Cada campo por archivo va en su propia columna (el formato base de FreeArc §6)
   if Total > r.Remaining then Corrupt('cantidad de archivos inválida');
   SetLength(Files, FirstFile + Total);
   for i := 0 to Total - 1 do

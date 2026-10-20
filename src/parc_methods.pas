@@ -1,4 +1,4 @@
-{ Métodos de compresión (FORMATO-ARC.md §7). Una cadena "a+b+c" se aplicó de izquierda a
+{ Métodos de compresión (el formato base de FreeArc §7). Una cadena "a+b+c" se aplicó de izquierda a
   derecha al comprimir, así que al descomprimir se arma archivo -> c -> b -> a. }
 unit parc_methods;
 

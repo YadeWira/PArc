@@ -1,4 +1,4 @@
-{ Escritura de archivos .parc y .arc (FORMATO-PARC.md, FORMATO-ARC.md).
+{ Escritura de archivos .parc (FORMATO-PARC.md).
   Orden en disco: HEADER + descriptor, bloques de datos (sin descriptor), DIR_BLOCK +
   descriptor, FOOTER + descriptor. Se escribe a un temporal que se renombra al final: si algo
   falla a mitad de camino no queda un archivo roto con el nombre final. }
@@ -33,7 +33,6 @@ type
   TSolidGroupArray = array of TSolidGroup;
 
   TWriteOptions = record
-    Parc: Boolean;        // .parc (si no, .arc compatible con FreeArc 0.67)
     DirMethod: string;    // compresión del directorio y del footer
     Comment: RawByteString;
     Recovery: string;     // especificación del registro de recuperación ('' = sin), ya resuelta
@@ -70,7 +69,6 @@ uses
   parc_volume;
 
 const
-  VERSION_ARC: array[0..3] of Byte = (0, 0, 6, 7);                // FreeArc 0.67
   VERSION_PARC: array[0..3] of Byte = (PARC_FORMAT_VERSION, 0, 0, 0);
   COPY_BUF = 1 shl 20;
 
@@ -96,19 +94,14 @@ type
     Files: array of TDirFile;
   end;
 
-function Signature(Parc: Boolean): LongWord;
-begin
-  if Parc then Result := PARC_SIGNATURE else Result := ARC_SIGNATURE;
-end;
-
-{ Descriptor local (FORMATO-ARC.md §3): firma, tipo, método, tamaños, CRC de los datos y
+{ Descriptor local (el formato base de FreeArc §3): firma, tipo, método, tamaños, CRC de los datos y
   CRC del propio descriptor. }
 procedure WriteDescriptor(S: TStream; Parc: Boolean; const B: TBlockInfo);
 var
   w: TByteWriter;
 begin
   w.Clear;
-  w.U32(Signature(Parc));
+  w.U32(PARC_SIGNATURE);
   w.VInt(B.BlockType);
   w.CStr(B.Method);
   w.VInt(B.OrigSize);
@@ -127,7 +120,7 @@ var
   w: TByteWriter;
 begin
   w.Clear;
-  w.U32(Signature(Parc));
+  w.U32(PARC_SIGNATURE);
   w.VInt(BlockType);
   w.CStr('storing');
   w.VInt(Size);
@@ -137,7 +130,7 @@ begin
   Result := w.Len;
 end;
 
-{ Registro de recuperación (ArcRecover.hs; FORMATO-ARC.md §7.4): dos RECOVERY_BLOCK storing,
+{ Registro de recuperación (ArcRecover.hs; el formato base de FreeArc §7.4): dos RECOVERY_BLOCK storing,
   el de sectores y el de CRCs+info, protegiendo todo lo escrito hasta acá. El info guarda la
   posición del bloque de CRCs, así que hay que saber de antemano cuánto ocupa el de sectores. }
 procedure WriteRecovery(S: TStream; Parc: Boolean; const Spec: string; var Control: TBlockInfoArray);
@@ -220,7 +213,7 @@ begin
   Result := LongWord(LongInt(Sec));
 end;
 
-{ Serializa el DIR_BLOCK (FORMATO-ARC.md §6 + campos opcionales de FORMATO-PARC.md §2). }
+{ Serializa el DIR_BLOCK (el formato base de FreeArc §6 + campos opcionales de FORMATO-PARC.md §2). }
 function BuildDirectory(const Entries: array of TWriteEntry; const Blocks: array of TDataBlock;
   DirPos: Int64; Parc: Boolean): TBytes;
 var
@@ -333,7 +326,7 @@ begin
   Result := w.Bytes;
 end;
 
-{ FOOTER_BLOCK (FORMATO-ARC.md §5.1): bloques de control, locked, comentario viejo (0),
+{ FOOTER_BLOCK (el formato base de FreeArc §5.1): bloques de control, locked, comentario viejo (0),
   recovery ('') y comentario (0 bytes). }
 function BuildFooter(const Control: array of TBlockInfo; FooterPos: Int64; const Comment: RawByteString;
   const Recovery: string): TBytes;
@@ -480,7 +473,7 @@ begin
   end;
   if (Pwd <> '') and (Size > 0) then
   begin
-    EncMethod := Result.Method + '+' + MakeCipherStage(Opt.Encryption, Pwd, Stored, Opt.Parc);
+    EncMethod := Result.Method + '+' + MakeCipherStage(Opt.Encryption, Pwd, Stored, True);
     Result.Method := Result.Method + '+' + Stored;
   end;
   Result.Pos := S.Position;
@@ -601,9 +594,6 @@ begin
 
   Tmp := FileName + '.tmp';
   Ok := False;
-  // Volúmenes: una función propia de PArc (FreeArc no parte los .arc), así que solo .parc
-  if (Opt.VolumeSize > 0) and not Opt.Parc then
-    raise EArgumentException.Create('los volúmenes (-v) son solo para .parc: FreeArc no lee .arc partidos');
   ProgressBegin('Comprimiendo', Total);
   if Opt.VolumeSize > 0 then S := TVolumeStream.CreateWrite(Tmp, Opt.VolumeSize)
   else S := TFileStream.Create(FsPath(Tmp), fmCreate);
@@ -611,10 +601,10 @@ begin
     try
       // HEADER: firma + versión, sin comprimir
       Hdr.Clear;
-      Hdr.U32(Signature(Opt.Parc));
-      if Opt.Parc then Hdr.Raw(@VERSION_PARC[0], 4) else Hdr.Raw(@VERSION_ARC[0], 4);
+      Hdr.U32(PARC_SIGNATURE);
+      Hdr.Raw(@VERSION_PARC[0], 4);
       SetLength(Control, 1);
-      Control[0] := WriteControlBlock(S, Opt.Parc, HEADER_BLOCK, 'storing', Hdr.Bytes);
+      Control[0] := WriteControlBlock(S, True, HEADER_BLOCK, 'storing', Hdr.Bytes);
 
       // Directorios primero, en un bloque sin datos (como splitToSolidBlocks de FreeArc)
       DirGroup := Default(TSolidGroup);   // CopyFrom = nil: los registros locales no se inicializan solos
@@ -644,21 +634,21 @@ begin
       CheckCancel;
 
       // Directorio (los offsets de los bloques son relativos a su posición)
-      DirData := BuildDirectory(Entries, Blocks, S.Position, Opt.Parc);
+      DirData := BuildDirectory(Entries, Blocks, S.Position, True);
       SetLength(Control, 2);
-      Control[1] := WriteControlBlock(S, Opt.Parc, DIR_BLOCK, Opt.DirMethod, DirData, Opt.Encryption, Opt.HeadersPassword);
+      Control[1] := WriteControlBlock(S, True, DIR_BLOCK, Opt.DirMethod, DirData, Opt.Encryption, Opt.HeadersPassword);
 
       if Opt.Recovery <> '' then
       begin
         // Como ArcvProcessRead.hs: primero un footer provisional (encabezado y directorio, sin
         // recovery), que el registro también protege; al final se repite con la lista entera.
         // Sin él, los bloques de recuperación caen en otro lugar y la paridad de la cola cambia
-        WriteControlBlock(S, Opt.Parc, FOOTER_BLOCK, Opt.DirMethod, BuildFooter(Control, S.Position, Opt.Comment, ''),
+        WriteControlBlock(S, True, FOOTER_BLOCK, Opt.DirMethod, BuildFooter(Control, S.Position, Opt.Comment, ''),
           Opt.Encryption, Opt.HeadersPassword);
-        WriteRecovery(S, Opt.Parc, Opt.Recovery, Control);
+        WriteRecovery(S, True, Opt.Recovery, Control);
       end;
       // Footer (las posiciones de los bloques de control, relativas a la del footer)
-      WriteControlBlock(S, Opt.Parc, FOOTER_BLOCK, Opt.DirMethod, BuildFooter(Control, S.Position, Opt.Comment, Opt.Recovery),
+      WriteControlBlock(S, True, FOOTER_BLOCK, Opt.DirMethod, BuildFooter(Control, S.Position, Opt.Comment, Opt.Recovery),
         Opt.Encryption, Opt.HeadersPassword);
       Result.ArcSize := S.Size;
       Ok := True;

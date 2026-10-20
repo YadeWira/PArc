@@ -50,5 +50,5 @@ hasta el offset 117 y en 118 (justo donde el original pasa a `00`) sale basura.
    la adaptación de `k0`/`k1`.
 2. MM: reproducir el AV con WAV bajo gdb (probablemente el mismo tipo de error de
    stride/alineación que ya apareció, o el manejo de `offset`).
-3. Cuando estén: agregar a `tests/compat_matrix.sh` los WAV/BMP de `media/` y los
+3. Cuando estén: agregar a la suite los WAV/BMP de `media/` y los
    métodos `-mm+` / `-mmfast` / `-mm-` (las tres variantes que pidió PArc).

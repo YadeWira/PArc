@@ -1,4 +1,4 @@
-{ Progreso y cancelación, sin nada de interfaz: la CLI (y después la GUI, PLAN-GUI.md F0)
+{ Progreso y cancelación, sin nada de interfaz: la CLI
   instalan un ProgressHandler que dibuja, y piden cancelar con RequestCancel.
   Extracción y escritura llaman a ProgressAdd por cada trozo procesado (~1 MB); ahí se
   comprueba la cancelación, que lanza EOperationCancelled. El llamado al handler se limita a

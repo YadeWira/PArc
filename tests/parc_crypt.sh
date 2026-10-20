@@ -1,8 +1,7 @@
 #!/bin/bash
-# tests/parc_crypt.sh — cifrado fuerte de .parc (docs/BUGS-FREEARC.md §3): clave bien
+# tests/parc_crypt.sh — cifrado fuerte de .parc : clave bien
 # decodificada (:f), etiqueta de autenticación (:m), 200000 iteraciones de PBKDF2 derivadas
 # una sola vez por archivo, y lectura de los .parc cifrados con el esquema anterior.
-# (El .arc cifrado, compatible con arc.exe, lo prueba tests/crypt_write.sh.)
 set -u
 ROOT=$(cd "$(dirname "$0")/.." && pwd)
 PARC=${PARC_BIN:-$ROOT/build/linux64/parc}
@@ -47,8 +46,6 @@ check "dato alterado: falla la autenticación" '"$PARC" t alt.parc -pClave --no-
 check "contraseña Unicode (UTF-8)"         '"$PARC" t u.parc -p"contraseña日本" --no-progress 2>/dev/null | tail -1 | grep -q "Errores: 0"'
 "$PARC" a n.parc d/f1.txt -pClave -ae=serpent:n5000 --no-progress >/dev/null 2>&1
 check "-ae con :n propio se respeta"       '"$PARC" lb n.parc -pClave 2>/dev/null | grep -q "serpent-256/ctr:f:m:n5000"'
-"$PARC" a a.arc d/f1.txt -pClave --no-progress >/dev/null 2>&1
-check ".arc: sigue con el esquema de FreeArc" '"$PARC" lb a.arc -pClave 2>/dev/null | grep -o "aes[^ +]*" | grep -q "^aes-256/ctr:n1000:r0:s"'
 
 # Actualizar un .parc cifrado: los bloques nuevos con el esquema nuevo, y se sigue leyendo
 echo nuevo > d/nuevo.txt; "$PARC" a c.parc d/nuevo.txt -pClave -hp --no-progress >/dev/null 2>&1

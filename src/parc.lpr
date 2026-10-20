@@ -6,7 +6,7 @@ program parc;
 
 uses
   {$IFDEF UNIX}cthreads, BaseUnix,{$ENDIF}
-  Classes, SysUtils, Types, DateUtils, parc_os, parc_bytes, parc_methods, parc_archive, parc_extract, parc_writer, parc_encoders, parc_presets, parc_recovery, parc_progress, parc_filelist, parc_volume, parc_console, parc_7zz;
+  Classes, SysUtils, Types, DateUtils, parc_os, parc_bytes, parc_methods, parc_archive, parc_extract, parc_writer, parc_encoders, parc_presets, parc_recovery, parc_progress, parc_filelist, parc_volume, parc_console;
 
 const
   PARC_VERSION = '0.0.3';
@@ -633,7 +633,7 @@ var
   SfxPrefix: TBytes;
   NVol: Integer;
   RRSize: Int64;
-  Exists, Newer, ParcOut: Boolean;
+  Exists, Newer: Boolean;
   Recompress: Boolean;           // d con -m explícito: FreeArc recompila todos los bloques
   Old: array of Integer;         // índice en Entries de cada archivo viejo conservado (-1 si no)
 
@@ -685,32 +685,6 @@ begin
       Disk[n].StoredName := SanitizePath(MO.StdinName);
       GetFileMeta(MO.StdinFile, Disk[n].Meta);
       Disk[n].Meta.MTimeNs := Int64(DateTimeToUnix(Now, False)) * 1000000000;
-    end;
-    // .arc no puede guardar enlaces: el de un archivo se guarda con el contenido del destino
-    // (como FreeArc); el de un directorio se saltea con aviso
-    if MO.Fmt <> '' then ParcOut := MO.Fmt = 'parc'
-    else if A <> nil then ParcOut := A.IsParc
-    else ParcOut := LowerCase(ExtractFileExt(ArcName)) <> '.arc';
-    if not ParcOut then
-    begin
-      n := 0;
-      for i := 0 to High(Disk) do
-      begin
-        if Disk[i].Meta.IsLink then
-          if Disk[i].Meta.LinkToDir then
-          begin
-            ErrLn('Aviso: ' + Disk[i].DiskPath + ' es un enlace a un directorio y .arc no guarda enlaces (se saltea)');
-            Continue;
-          end
-          else if not GetFileMeta(Disk[i].DiskPath, Disk[i].Meta) then
-          begin
-            ErrLn('Aviso: ' + Disk[i].DiskPath + ' es un enlace roto (se saltea)');
-            Continue;
-          end;
-        Disk[n] := Disk[i];
-        Inc(n);
-      end;
-      SetLength(Disk, n);
     end;
     if (Cmd <> 'd') and (Length(Disk) = 0) and not Exists then
     begin
@@ -822,9 +796,6 @@ begin
     Opt := Default(TWriteOptions);   // KeepTemp/Comment: los registros locales no se inicializan solos
     Opt.DirMethod := DIR_METHOD;
     Opt.KeepTemp := True;            // el original se cierra antes de reemplazarlo (Windows)
-    if MO.Fmt <> '' then Opt.Parc := MO.Fmt = 'parc'
-    else if A <> nil then Opt.Parc := A.IsParc
-    else Opt.Parc := LowerCase(ExtractFileExt(ArcName)) <> '.arc';
     if A <> nil then Opt.Comment := A.Comment;
     // El tamaño para el % recomendado es el de los datos (aproximado: lo de entrada)
     OldRR := '';
@@ -879,7 +850,7 @@ begin
   end;
   if MO.ShownName <> '' then FinalName := MO.ShownName;
   OutLn(Format('%s %s (%s%s): %d archivo(s) y %d directorio(s), %d bytes -> %d bytes',
-    [Verb, FinalName, BoolToStr(Opt.Parc, 'parc', 'arc') + BoolToStr(MO.Sfx or (Length(SfxPrefix) > 0), ', autoextraíble', ''), VolInfo, St.Files, St.Dirs, St.Bytes, St.ArcSize]));
+    [Verb, FinalName, 'parc' + BoolToStr(MO.Sfx or (Length(SfxPrefix) > 0), ', autoextraíble', ''), VolInfo, St.Files, St.Dirs, St.Bytes, St.ArcSize]));
   if Exists then
     OutLn(Format('  agregados %d, reemplazados %d, borrados %d', [Added, Replaced, Removed]));
   Result := 0;
@@ -897,7 +868,6 @@ var
   A: TArchive;
   Opt: TExtractOptions;
   MO: TModifyOptions;
-  FO: T7zzOptions;
   Filter, Excludes: TStringList;
   i, Code, Tries: Integer;
   Retry, ShowProgress, Writing, ToStdout: Boolean;
@@ -953,7 +923,11 @@ begin
           MO.Method := Copy(S, 3, MaxInt);   // preset (0..9, x, ...) o método explícito
           MO.MethodGiven := True;
         end
-        else if Copy(S, 1, 5) = '-fmt=' then MO.Fmt := LowerCase(Copy(S, 6, MaxInt))
+        else if Copy(S, 1, 5) = '-fmt=' then
+        begin
+          ErrLn('ERROR: -fmt ya no existe: PArc solo usa el formato .parc');
+          Halt(1);
+        end
         else if Copy(S, 1, 2) = '-x' then Excludes.Add(Copy(S, 3, MaxInt))
         // -s- no sólido; -s<mem> tope de bytes por bloque; -s<N>f tope de archivos
         else if Copy(S, 1, 3) = '-rr' then MO.Recovery := Copy(S, 4, MaxInt)
@@ -976,6 +950,11 @@ begin
     if ArcName = '' then
     begin
       Usage;
+      Halt(1);
+    end;
+    if (ArcName <> '-') and (LowerCase(ExtractFileExt(ArcName)) = '.arc') then
+    begin
+      ErrLn('ERROR: PArc ya no lee ni escribe .arc (ahora solo .parc). Para .arc usá FreeArc-ex.');
       Halt(1);
     end;
     Opt.Filter := Filter;
@@ -1013,7 +992,7 @@ begin
         OutToStderr := True;
         ToStdout := True;
         MO.ShownName := '(salida estándar)';
-        if MO.Fmt = 'arc' then S := '.arc' else S := '.parc';
+        S := '.parc';
         ArcName := IncludeTrailingPathDelimiter(GetTempDir) + Format('parc-stdout-%d', [GetProcessID]) + S;
         RegisterTempFile(ArcName);
       end
@@ -1065,41 +1044,7 @@ begin
     if (MO.HeadersPassword <> '') and (MO.HeadersPassword <> MO.DataPassword) then
       AddArchivePassword(MO.HeadersPassword);
 
-    // .zip/.7z/.rar: los maneja 7-Zip ZS (7zz) como proceso externo. PArc no implementa esos
-    // contenedores; se traducen las opciones y se devuelve el código de salida de 7zz.
-    if ForeignKind(ArcName) <> 0 then
-    begin
-      if MO.StdinName <> '' then
-      begin
-        ErrLn('ERROR: -si no va con .zip/.7z/.rar');
-        Halt(1);
-      end;
-      if MO.Sfx then
-      begin
-        ErrLn('ERROR: -sfx no va con .zip/.7z/.rar');
-        Halt(1);
-      end;
-      FO := Default(T7zzOptions);
-      FO.DestDir := Opt.DestDir;
-      FO.Overwrite := Opt.Overwrite = owAll;
-      FO.PasswordGiven := DPwd <> '--';
-      if DPwd <> '--' then FO.Password := DPwd;
-      if (DPwd = '--') and (HPwd <> '--') then
-      begin
-        FO.PasswordGiven := True;
-        FO.Password := HPwd;
-      end;
-      FO.HeadersPassword := HPwd <> '--';
-      if MO.MethodGiven then FO.Method := MO.Method;
-      FO.Excludes := MO.Excludes;
-      FO.Recursive := MO.Recursive;
-      FO.VolumeSize := MO.VolumeSize;
-      FO.NoProgress := not ShowProgress;
-      FO.ShownName := MO.ShownName;
-      Code := RunForeign(Cmd, ArcName, Filter, FO, S);
-      if S <> '' then ErrLn(S);
-      Halt(Code);
-    end;
+
     if ShowProgress and ErrIsConsole then ProgressHandler := @DrawProgress;
     InstallCancelHandler(@OnCtrlC);
     if Cmd = 'r' then

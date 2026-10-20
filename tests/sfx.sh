@@ -52,7 +52,6 @@ check "a sobre el autoextraíble: sigue andando" '[ -x x ] && [ "$(sha d4/c)" = 
 check "-rr: t OK"                        './r t --no-progress | tail -1 | grep -q "Errores: 0"'
 
 check "-sfx con -v: rechazado"           '! "$PARC" a v.parc c -sfx -v1m --no-progress >/dev/null 2>&1'
-check "-sfx con .arc"                    '"$PARC" a a.arc c -m4 -sfx --no-progress >/dev/null 2>&1 && ./a t --no-progress | tail -1 | grep -q "Errores: 0"'
 
 echo "== sfx: $fail fallas"
 [ $fail -eq 0 ]

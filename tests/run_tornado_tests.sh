@@ -138,12 +138,4 @@ for c in 1 2 3 4; do
   done
 done
 
-# Archivos .arc reales de FreeArc 0.67.1 (CRC de cada archivo, sin el CLI)
-ARCS=${ARCS:-/mnt/IA_LAB/compartido/parc/samples/gen/tor.arc $(ls "$LAB"/arcs/*.arc 2>/dev/null)}
-echo; echo "== .arc de FreeArc"
-fpc -O2 -vewn -Fusrc -FUbuild/tests/units -FEbuild/tests tests/test_tornado_arc.lpr >/dev/null || { echo "no compila test_tornado_arc"; exit 1; }
-for a in $ARCS; do
-  if r=$(build/tests/test_tornado_arc "$a" 2>&1); then echo "  ok   $(basename "$a"): $(echo "$r" | grep -v salteado | head -1 | sed 's/^[^"]*//')"
-  else echo "  FAIL $(basename "$a")"; echo "$r" | sed 's/^/       /'; nf=$((nf+1)); fi
-done
 [ "$nf" -eq 0 ]

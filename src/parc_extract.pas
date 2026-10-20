@@ -1,5 +1,5 @@
 { Extracción y test. Cada bloque sólido se descomprime una sola vez, en streaming, y la salida
-  se reparte entre sus archivos en orden (los offsets vienen del directorio, FORMATO-ARC.md §6). }
+  se reparte entre sus archivos en orden (los offsets vienen del directorio, el formato base de FreeArc §6). }
 unit parc_extract;
 
 {$mode objfpc}{$H+}
