@@ -119,6 +119,11 @@ const
   StdBuf:  array[0..16] of Int64   = (1*MB,1*MB,2*MB,4*MB,8*MB,16*MB,64*MB,256*MB,1*GB,1*GB,1*GB,
                                        128*MB,128*MB,128*MB,128*MB,128*MB,128*MB);
 
+function StageNameOf(const S: string): string;
+begin
+  Result := LowerCase(S.Split([':'])[0]);
+end;
+
 { ================================================================================ }
 { Canoniza una cadena de etapas con un límite de diccionario ya calculado          }
 
@@ -502,6 +507,9 @@ begin
   begin
     if I > 0 then Result := Result + ('+');
     Result := Result + (CanonStage(Stages[I]));
+    // compressionLimitDictionary (Compression.hs:199): después de un compresor externo ya no
+    // se achican los diccionarios de las etapas siguientes.
+    if StageNameOf(Stages[I]) = 'srep' then Limit := High(Int64);
   end;
 end;
 

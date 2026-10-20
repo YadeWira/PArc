@@ -27,7 +27,8 @@ ENV = dict(os.environ,
 # (documentado en docs/USO.md): se comparan estructura y método, no el tamaño comprimido.
 METHODS = ['-m0', '-m1', '-m3', '-m4', '-m5', '-m9',
            '-mlzma', '-mppmd', '-mrep', '-mtor:16', '-mtor:3', '-m4x4', '-mdict',
-           '-mexe+lzma', '-mrep:96m+lzma', '-mdelta+lzma']
+           '-mexe+lzma', '-mrep:96m+lzma', '-mdelta+lzma',
+           '-msrep', '-msrep+lzma', '-mdispack', '-mdispack+lzma']
 # (rep+tor:16 queda afuera: hace caer al codificador de arc.exe, #392, y a veces termina con
 #  código 0 y un archivo mal formado; PArc lo comprime bien y arc.exe lo lee. Ver BUGS §1.)
 
@@ -230,6 +231,11 @@ def one_iteration(rng, it):
     # 1. arc.exe tiene que aceptar lo que escribió parc
     t = run(['wine', ARC, 't', ap], wa)
     if 'All OK' not in t.stdout.replace('\r', '\n'):
+        # Sin un srep.exe al lado de Arc.exe, arc.exe no puede descomprimir srep (el
+        # compresor es externo en arc.ini). No es un defecto del archivo de PArc.
+        metodos = [b[2] for b in blocks(ap)]
+        if 'invalid compression method' in (t.stdout + t.stderr) and any('srep' in m for m in metodos):
+            return 'ORACLE: arc.exe sin srep.exe no puede probar srep (entorno)'
         return 'arc.exe t rechaza el archivo de parc\n' + t.stdout + t.stderr
     # 2. estructura igual
     ok, why = same_structure(ap, aa)
