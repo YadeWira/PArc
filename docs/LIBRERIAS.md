@@ -36,7 +36,7 @@ PArc no enlaza código de terceros: todo está portado a Pascal. De dónde sale 
 | CTR / CFB | LibTomCrypt (contador little-endian, como FreeArc) | ídem |
 | PPMd, Tornado, REP, 4x4, Dict, LZP, Delta, MM, TTA, GRZip | FreeArc 0.67 (no hay versiones más nuevas compatibles) | matrices de lectura y escritura |
 | DisPack (`dispack070`) | FreeArc 0.67 (`Compression/DisPack`, 0.70) | `tests/dispack.sh`: el bloque de datos es byte a byte el de arc.exe, y lo lee/escribe en las dos direcciones; filtro comparado contra el C con `tests/dispack_ref.cpp` |
-| SREP (`srep`), decodificador | `Compression/SREP/srep.cpp` (3.93 beta), formatos v1–v3 | `tests/srep.sh`: streams de `-m3f` (el de arc.ini) de texto, repetidos, azar y >8 MB; el v4/Index-LZ se rechaza con "no soportado". El bloque de .arc lleva un byte delante (0 = guardado, 1 = stream) |
+| SREP (`srep`), decodificador | `Compression/SREP/srep.cpp` (3.93 beta), formatos v1–v4 | `tests/srep.sh`: streams de `-m3f` (el de arc.ini), `-m0o`/`-m1o` (v2) y `-m0`/`-m2`/`-m3` (v4), de texto, repetidos, azar y >8 MB. El bloque de .arc lleva un byte delante (0 = guardado, 1 = stream) |
 
 Diferencia que apareció al comparar: LibTomCrypt rechaza claves de Blowfish de menos de 8
 bytes (y AES/Twofish que no sean de 16/24/32); PArc las aceptaba y podía escribir un archivo
@@ -44,6 +44,6 @@ que FreeArc no abre. Ahora las rechaza igual (`CipherKeySizeValid`).
 
 | SREP (`srep`), codificador | `Compression/SREP/srep.cpp` (formato v3) | `tests/srep.sh`: los streams de PArc los decodifica el `srep` de referencia, y arc.exe verifica/extrae un `.arc` con `-msrep`. Es un LZ77 greedy de matches ≥512 (comprime menos que el srep original, que busca de forma exhaustiva) |
 
-Pendiente: el formato v4/Index-LZ. El srep del repo no compila tal cual contra el `Common.h`
-actual; `tests/srep.sh` arma una copia con dos ajustes mínimos para usarlo como referencia. No
-hacen al formato: Lua 5.1 (scripts de arc.ini) y 7z.dll.
+El srep del repo no compila tal cual contra el `Common.h` actual; `tests/srep.sh` arma una
+copia con dos ajustes mínimos para usarlo como referencia. No hacen al formato: Lua 5.1
+(scripts de arc.ini) y 7z.dll.

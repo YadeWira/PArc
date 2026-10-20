@@ -90,10 +90,12 @@ for spec in "text 200000" "rep 200" "rand 100000" "mix 1"; do
   "$OUT/test_srep" f.mine f.own >/dev/null 2>&1 && cmp -s f f.own && ok "PArc lee lo suyo ($1 $2)" || bad "PArc no lee lo suyo ($1 $2)"
 done
 
-echo "== formato v4 (Index-LZ) todavía no soportado"
-head -c 200000 /dev/urandom > f; "$OUT/srep_ref" -m3 f f4.srep >/dev/null 2>&1
-if "$OUT/test_srep" f4.srep f4.out >/dev/null 2>&1; then bad "v4 se decodificó (¿ya está soportado? actualizar el test)"
-else ok "v4 rechazado"; fi
+echo "== formato v4 (Index-LZ)"
+for opt in -m0 -m2 -m3; do
+  gen mix 1
+  "$OUT/srep_ref" $opt f f4.srep >/dev/null 2>&1 || { bad "srep $opt falla"; continue; }
+  "$OUT/test_srep" f4.srep f4.out >/dev/null 2>&1 && cmp -s f f4.out && ok "$opt (v4)" || bad "$opt (v4)"
+done
 
 echo "== srep: $pass ok, $fail fallas"
 [ $fail -eq 0 ]

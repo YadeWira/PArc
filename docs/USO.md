@@ -271,7 +271,7 @@ parc r copia.arc                          # repara -> fixed.copia.arc
 - Lee todo lo que escribe FreeArc 0.67: todos los métodos, archivos cifrados (`-p`, `-hp`) y
   el registro de recuperación. Los métodos son `storing`, `lzma`, `ppmd`, `grzip`, `dict`,
   `rep`, `delta`, `tor`, `lzp`, `mm`, `tta`, `4x4`, `exe` (BCJ), `lz4`, `dispack070` (DisPack)
-  y `srep` (SREP v1–v3), solos o en cadena (`exe+dispack070+lzma`, `srep+lzma`, …).
+  y `srep` (SREP v1–v4), solos o en cadena (`exe+dispack070+lzma`, `srep+lzma`, …).
 - `srep` al comprimir usa un LZ77 greedy de matches largos (≥512 bytes): genera streams
   válidos que lee el `srep` de referencia y FreeArc, aunque comprime menos que el `srep`
   original (que hace una búsqueda exhaustiva).

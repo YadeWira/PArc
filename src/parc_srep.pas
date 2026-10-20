@@ -15,10 +15,6 @@ interface
 uses
   SysUtils, parc_stream, parc_bytes;
 
-type
-  { Formato que PArc todavía no sabe leer (v4/Index-LZ). }
-  ESrepUnsupported = class(Exception);
-
 const
   SREP_SIGNATURE = $50455253;        // 'SREP'
   SREP_BULAT     = $26351817;
@@ -116,63 +112,112 @@ begin
   Result := Integer(LoadU32(Src + Start + 8)) and 255;
 end;
 
-function SrepDecodedSize(Src: PByte; SrcLen: Integer): Int64;
+{ Cabecera común: devuelve la versión (1..4) y deja Start (0 = .srep, 1 = bloque de .arc),
+  HashSize y Seed. -1 si no es un stream srep. }
+function SrepHeader(Src: PByte; SrcLen: Integer; out Ver, Start, HashSize, Seed: Integer): Boolean;
 var
-  H, Ver, Seed, HashSize, Hdr, Pos, Start: Integer;
-  Comp, Orig, Stat: LongWord;
+  H: LongWord;
 begin
-  Result := -1;
-  // En un .arc el bloque antepone un byte: 0 = guardado tal cual, 1 = stream srep.
-  // Un .srep suelto arranca directamente con la firma.
+  Result := False;
   if (SrcLen >= 4) and (LoadU32(Src) = SREP_BULAT) then Start := 0
   else if SrcLen >= 1 then
   begin
-    if Src[0] = 0 then Exit(SrcLen - 1);
+    if Src[0] = 0 then Exit;                       // bloque "guardado tal cual"
     if (SrcLen >= 5) and (LoadU32(Src + 1) = SREP_BULAT) then Start := 1
     else Exit;
   end
   else Exit;
   if SrcLen < Start + 16 then Exit;
-  if (LoadU32(Src + Start) <> SREP_BULAT) or (LoadU32(Src + Start + 4) <> SREP_SIGNATURE) then Exit;
-  H := Integer(LoadU32(Src + Start + 8));
+  if LoadU32(Src + Start + 4) <> SREP_SIGNATURE then Exit;
+  H := LoadU32(Src + Start + 8);
   Ver := H and 255;
-  if (Ver < 1) or (Ver > 3) then Exit;
+  if (Ver < 1) or (Ver > 4) then Exit;
   Seed := (H shr 16) and 255;
   HashSize := ((H shr 24) + 16) and 255;
+  Result := True;
+end;
+
+{ Datos del footer del v4 (Index-LZ). }
+function SrepV4Footer(Src: PByte; SrcLen, Start, Seed: Integer;
+  out StatSize, FooterSize: Int64; out BlockCount: Integer): Boolean;
+var
+  F: Integer;
+begin
+  Result := False;
+  if SrcLen < Start + 16 + 24 then Exit;
+  F := SrcLen - 24;
+  StatSize := Int64(LoadU32(Src + F)) + (Int64(LoadU32(Src + F + 4)) shl 32);
+  FooterSize := LoadU32(Src + F + 8);
+  if (LoadU32(Src + F + 12) and 255) <> 1 then Exit;
+  if (LoadU32(Src + F + 16) <> LongWord(not SREP_SIGNATURE)) or
+     (LoadU32(Src + F + 20) <> LongWord(not SREP_BULAT)) then Exit;
+  if (FooterSize < 24) or (StatSize < 0) then Exit;
+  if Int64(Start) + 16 + Seed + FooterSize + StatSize > SrcLen then Exit;
+  if (FooterSize - 24) mod 4 <> 0 then Exit;
+  BlockCount := (FooterSize - 24) div 4;
+  Result := True;
+end;
+
+function SrepDecodedSize(Src: PByte; SrcLen: Integer): Int64;
+var
+  Ver, Start, HashSize, Seed, Hdr, Pos, I: Integer;
+  Comp, Orig: LongWord;
+  StatSize, FooterSize: Int64;
+  BlockCount: Integer;
+begin
+  Result := -1;
+  if SrcLen < 1 then Exit;
+  if Src[0] = 0 then Exit(SrcLen - 1);            // bloque guardado tal cual
+  if not SrepHeader(Src, SrcLen, Ver, Start, HashSize, Seed) then Exit;
   Hdr := 12 + HashSize;
   Pos := Start + 16 + Seed;
   Result := 0;
-  while Pos + Hdr <= SrcLen do
+  if Ver = 4 then
   begin
-    Comp := LoadU32(Src + Pos);
-    Orig := LoadU32(Src + Pos + 4);
-    Stat := LoadU32(Src + Pos + 8);
-    Inc(Pos, Hdr);
-    if (Comp = 0) and (Orig = 0) then Break;
-    if Int64(Pos) + Int64(Stat) + Int64(Comp) > SrcLen then Exit(-1);
-    Inc(Pos, Integer(Stat) + Integer(Comp));
-    Inc(Result, Int64(Orig));
-  end;
+    if not SrepV4Footer(Src, SrcLen, Start, Seed, StatSize, FooterSize, BlockCount) then Exit(-1);
+    for I := 0 to BlockCount - 1 do
+    begin
+      if Pos + Hdr > SrcLen then Exit(-1);
+      Comp := LoadU32(Src + Pos);
+      Orig := LoadU32(Src + Pos + 4);
+      Inc(Pos, Hdr);
+      if Int64(Pos) + Int64(Comp) > SrcLen then Exit(-1);
+      Inc(Pos, Integer(Comp));
+      Inc(Result, Int64(Orig));
+    end;
+  end
+  else
+    while Pos + Hdr <= SrcLen do
+    begin
+      Comp := LoadU32(Src + Pos);
+      Orig := LoadU32(Src + Pos + 4);
+      Inc(Pos, Hdr);
+      if (Comp = 0) and (Orig = 0) then Break;
+      if Int64(Pos) + Int64(LoadU32(Src + Pos - Hdr + 8)) + Int64(Comp) > SrcLen then Exit(-1);
+      Inc(Pos, Integer(LoadU32(Src + Pos - Hdr + 8)) + Integer(Comp));
+      Inc(Result, Int64(Orig));
+    end;
 end;
 
 function SrepDecode(Src: PByte; SrcLen: Integer; Dst: PByte; DstLen: Int64): Boolean;
 var
-  H, Ver, Seed, HashSize, Hdr, Pos, Start: Integer;
+  Ver, Start, Seed, HashSize, Hdr, Pos, I, BlockCount: Integer;
   BaseLen: LongWord;
-  Comp, Orig, Stat: LongWord;
-  OutPos, BlockStart, BlockEnd, StatPos, LitPos, LitAvail, i, N: Int64;
+  Comp, Orig, Stat, BlockStat: LongWord;
+  OutPos, BlockStart, BlockEnd, StatPos, LitPos, LitAvail, N: Int64;
   L1: Int64;
-  RoundMatches: Boolean;
+  RoundMatches, V4: Boolean;
   Heap: TMatchHeap;
   M: TSrepMatch;
   Lit, OffLo, OffHi, LenCode, Offset: Int64;
   Step: Integer;
+  StatSize, FooterSize, PixelUnused: Int64;
+  V4StatPos, V4StatEnd, V4ListPos: Int64;
 
   procedure CopyMatch(DestPos, SrcStart, Len: Int64); inline;
   var
     k: Int64;
   begin
-    // byte a byte: el match puede solaparse con su destino (LZ normal)
     for k := 0 to Len - 1 do
       Dst[DestPos + k] := Dst[SrcStart + k];
   end;
@@ -184,27 +229,14 @@ var
 
 begin
   Result := False;
-  // Igual que SrepDecodedSize: .srep suelto o bloque de .arc con su byte de guardado.
-  if (SrcLen >= 4) and (LoadU32(Src) = SREP_BULAT) then Start := 0
-  else if SrcLen >= 1 then
+  if SrcLen < 1 then Exit;
+  if Src[0] = 0 then
   begin
-    if Src[0] = 0 then
-    begin
-      if DstLen <> SrcLen - 1 then Exit;
-      if DstLen > 0 then Move(Src[1], Dst[0], DstLen);
-      Exit(True);
-    end;
-    if (SrcLen >= 5) and (LoadU32(Src + 1) = SREP_BULAT) then Start := 1
-    else Exit;
-  end
-  else Exit;
-  if SrcLen < Start + 16 then Exit;
-  if (LoadU32(Src + Start) <> SREP_BULAT) or (LoadU32(Src + Start + 4) <> SREP_SIGNATURE) then Exit;
-  H := Integer(LoadU32(Src + Start + 8));
-  Ver := H and 255;
-  if (Ver < 1) or (Ver > 3) then Exit;      // v4 (Index-LZ) todavía no
-  Seed := (H shr 16) and 255;
-  HashSize := ((H shr 24) + 16) and 255;
+    if DstLen <> SrcLen - 1 then Exit;
+    if DstLen > 0 then Move(Src[1], Dst[0], DstLen);
+    Exit(True);
+  end;
+  if not SrepHeader(Src, SrcLen, Ver, Start, HashSize, Seed) then Exit;
   BaseLen := LoadU32(Src + Start + 12);
   if BaseLen = 0 then Exit;
   RoundMatches := Ver = 1;
@@ -212,51 +244,82 @@ begin
   if RoundMatches then Step := 3 else Step := 4;
   Hdr := 12 + HashSize;
   Pos := Start + 16 + Seed;
+  V4 := Ver = 4;
+
+  V4StatPos := 0; V4StatEnd := 0; V4ListPos := 0; BlockCount := 0;
+  if V4 then
+  begin
+    if not SrepV4Footer(Src, SrcLen, Start, Seed, StatSize, FooterSize, BlockCount) then Exit;
+    V4ListPos := SrcLen - FooterSize;
+    V4StatPos := SrcLen - FooterSize - StatSize;
+    V4StatEnd := SrcLen - FooterSize;
+    if V4StatPos < Pos then Exit;
+    if Int64(BlockCount) * 4 > FooterSize - 24 then Exit;
+  end;
 
   Heap.Count := 0;
   SetLength(Heap.Items, 0);
   OutPos := 0;
+  I := 0;
 
-  while Pos + Hdr <= SrcLen do
+  while True do
   begin
-    Comp := LoadU32(Src + Pos);
-    Orig := LoadU32(Src + Pos + 4);
-    Stat := LoadU32(Src + Pos + 8);
-    Inc(Pos, Hdr);
-    if (Comp = 0) and (Orig = 0) then Break;
-    if (Stat mod 4 <> 0) or (Int64(Pos) + Int64(Stat) + Int64(Comp) > SrcLen) then Exit;
+    if V4 then
+    begin
+      if I >= BlockCount then Break;
+      BlockStat := LoadU32(Src + V4ListPos + I * 4);
+      Inc(I);
+      if Pos + Hdr > SrcLen then Exit;
+      Comp := LoadU32(Src + Pos);
+      Orig := LoadU32(Src + Pos + 4);
+      Inc(Pos, Hdr);
+      if Int64(Pos) + Int64(Comp) > SrcLen then Exit;
+      if (BlockStat < 0) or (V4StatPos + BlockStat > V4StatEnd) then Exit;
+      Stat := BlockStat;
+      StatPos := V4StatPos;
+      Inc(V4StatPos, BlockStat);
+      LitPos := Pos;
+      Inc(Pos, Integer(Comp));
+    end
+    else
+    begin
+      if Pos + Hdr > SrcLen then Break;
+      Comp := LoadU32(Src + Pos);
+      Orig := LoadU32(Src + Pos + 4);
+      Stat := LoadU32(Src + Pos + 8);
+      Inc(Pos, Hdr);
+      if (Comp = 0) and (Orig = 0) then Break;
+      if (Stat mod 4 <> 0) or (Int64(Pos) + Int64(Stat) + Int64(Comp) > SrcLen) then Exit;
+      StatPos := Pos;
+      LitPos := Pos + Int64(Stat);
+      Inc(Pos, Integer(Stat) + Integer(Comp));
+    end;
 
     BlockStart := OutPos;
     BlockEnd := OutPos + Int64(Orig);
     if BlockEnd > DstLen then Exit;
-    StatPos := Pos;
-    LitPos := Pos + Int64(Stat);
     LitAvail := Comp;
 
-    if Ver = 3 then
+    if Ver >= 3 then
     begin
-      // 1. STATs: matches con destino en este bloque o en uno futuro
+      // STATs: matches con origen en este bloque o en uno futuro
       N := Int64(Stat) div 4;
       M.Src := BlockStart;
-      i := 0;
-      while i + 4 <= N do
+      Lit := 0;
+      while Lit + 4 <= N do
       begin
-        Lit := StatWord(i);
-        OffLo := StatWord(i + 1);
-        OffHi := StatWord(i + 2);
-        LenCode := StatWord(i + 3);
-        Inc(i, 4);
-        Offset := (OffLo + (OffHi shl 32)) * L1;
-        M.Dest := M.Src + Lit + Offset;
-        M.Len := LenCode * L1 + BaseLen;
-        if (M.Src + Lit < BlockStart) or (M.Src + Lit >= BlockEnd) or
-           (M.Len > BlockEnd - (M.Src + Lit)) or (M.Dest <= M.Src + Lit) then Exit;
-        Inc(M.Src, Lit);
+        { lit_len, offset_lo, offset_hi, len_code }
+        Offset := (StatWord(Lit + 1) + (Int64(StatWord(Lit + 2)) shl 32)) * L1;
+        M.Dest := M.Src + StatWord(Lit) + Offset;
+        M.Len := Int64(StatWord(Lit + 3)) * L1 + BaseLen;
+        if (M.Src + StatWord(Lit) < BlockStart) or (M.Src + StatWord(Lit) >= BlockEnd) or
+           (M.Len > BlockEnd - (M.Src + StatWord(Lit))) or (M.Dest <= M.Src + StatWord(Lit)) then Exit;
+        Inc(M.Src, StatWord(Lit));
         if M.Dest + M.Len > DstLen then Exit;
         HeapPush(Heap, M);
+        Inc(Lit, 4);
       end;
 
-      // 2. matches cuyo destino cae en este bloque, en orden de destino
       while (Heap.Count > 0) and (Heap.Items[0].Dest < BlockEnd) do
       begin
         M := HeapPop(Heap);
@@ -271,7 +334,6 @@ begin
         OutPos := M.Dest + M.Len;
       end;
 
-      // 3. literales hasta el final del bloque
       if BlockEnd - OutPos <> LitAvail then Exit;
       if LitAvail > 0 then
       begin
@@ -283,25 +345,24 @@ begin
     begin
       // v1/v2: I/O LZ; los matches miran hacia atrás
       N := Int64(Stat) div 4;
-      i := 0;
-      while i + Step <= N do
+      I := 0;
+      while I + Step <= N do
       begin
-        Lit := StatWord(i);
-        OffLo := StatWord(i + 1);
-        Inc(i, 2);
+        Lit := StatWord(I);
+        OffLo := StatWord(I + 1);
+        Inc(I, 2);
         if not RoundMatches then
         begin
-          OffHi := StatWord(i);
-          Inc(i);
+          OffHi := StatWord(I);
+          Inc(I);
           Inc(OffLo, OffHi shl 32);
         end;
-        LenCode := StatWord(i);
-        Inc(i);
-        // basic_pos del C es la posición de salida actual, no el comienzo del bloque
+        LenCode := StatWord(I);
+        Inc(I);
         M.Dest := OutPos + Lit;
         M.Src := (M.Dest div L1) * L1 - OffLo * L1;
         M.Len := LenCode * L1 + BaseLen;
-        if (M.Dest < OutPos) or (M.Src < 0) or (M.Src >= M.Dest) or (M.Dest + M.Len > BlockEnd) then Exit;
+        if (M.Src < 0) or (M.Src >= M.Dest) or (M.Dest + M.Len > BlockEnd) then Exit;
         if Lit > LitAvail then Exit;
         if Lit > 0 then
         begin
@@ -318,10 +379,12 @@ begin
         Inc(OutPos, LitAvail);
       end;
     end;
-
-    Inc(Pos, Integer(Stat) + Integer(Comp));
   end;
 
+  if V4 then
+  begin
+    if V4StatPos <> V4StatEnd then Exit;
+  end;
   Result := (OutPos = DstLen) and (Heap.Count = 0);
 end;
 
@@ -351,8 +414,6 @@ begin
   end;
   SetLength(In_, N);
   if N = 0 then raise EArcCorrupt.Create('srep: bloque vacío');
-  if SrepStreamVersion(@In_[0], N) = 4 then
-    raise ESrepUnsupported.Create('srep: formato v4 (Index-LZ) todavía no soportado');
   Size := SrepDecodedSize(@In_[0], N);
   if Size < 0 then raise EArcCorrupt.Create('srep: cabecera inválida');
   SetLength(FOut, Integer(Size));

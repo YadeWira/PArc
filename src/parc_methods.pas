@@ -471,12 +471,7 @@ begin
     'dispack', 'dispack070':
       Result := TDisPackStage.Create(Source, DispackBlockSize(Params));
     'srep':
-      try
-        Result := TSrepStage.Create(Source);
-      except
-        on E: ESrepUnsupported do
-          raise EUnsupportedMethod.Create(E.Message);
-      end;
+      Result := TSrepStage.Create(Source);
   else
     raise EUnsupportedMethod.CreateFmt('método no soportado todavía: "%s"', [Stage]);
   end;
