@@ -53,7 +53,8 @@ python3 tests/fuzz_update.py --iters 20 --seed N   # fuzz de actualización
 
 ## Limitaciones conocidas
 
-- El codificador SREP es greedy: ratio peor que el `srep` original, streams válidos.
+- El codificador SREP es greedy con lazy matching: ratio parecido (o mejor en binarios con
+  duplicados parciales) que el `srep` original; streams válidos.
 - `srep` codifica solo formato v3; el v4 (Index-LZ) se lee pero no se escribe.
 - `parc a x.arc .` no incluye el propio `x.arc` (FreeArc sí); es intencional.
 - El fuzz de actualización omite el `arc.exe t` de archivos srep si el entorno no tiene el
@@ -64,5 +65,5 @@ python3 tests/fuzz_update.py --iters 20 --seed N   # fuzz de actualización
 ## Próximos pasos posibles
 
 1. GUI (cuando el humano la habilite): decisiones abiertas en `docs/PLAN-GUI.md` §5.
-2. Mejorar el codificador SREP (búsqueda de matches más exhaustiva) si importa el ratio.
+2. Codificador SREP: una búsqueda más exhaustiva podría arañar algo más de ratio.
 3. Escribir v4/Index-LZ en srep (opcional; FreeArc usa `-m3f`, que ya se escribe).

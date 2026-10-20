@@ -441,8 +441,8 @@ end;
 const
   SREP_BASE_LEN = 512;          // -l512 de srep: largo mínimo de un match representable
   SREP_BLOCK    = 8 * 1024 * 1024;
-  SREP_HASH_BITS = 22;
-  SREP_HASH_SIZE = 1 shl SREP_HASH_BITS;
+  SREP_HASH_MIN_BITS = 16;      // tabla de hash según el tamaño del input
+  SREP_HASH_MAX_BITS = 22;
 
 type
   TEncMatch = record
@@ -495,24 +495,28 @@ begin
   if i < Hi then SortBySrc(M, Idx, i, Hi);
 end;
 
-function HashKey(P: PByte): LongWord; inline;
+function HashKey(P: PByte; Bits: Integer): LongWord; inline;
 var
   V: QWord;
 begin
   Move(P^, V, 8);
   V := V * QWord($9E3779B97F4A7C15);
-  Result := LongWord(V shr (64 - SREP_HASH_BITS));
+  Result := LongWord(V shr (64 - Bits));
 end;
 
 function SrepEncode(Src: PByte; SrcLen: Int64): TBytes;
+const
+  CANDIDATES = 4;               // posiciones por bucket de hash a comparar
+  LAZY_GAIN  = 64;              // bytes de mejora para dejar un literal y tomar el match siguiente
 var
-  H1, H2: array of Int64;
+  H: array of Int64;            // CANDIDATES posiciones por bucket
   Matches: array of TEncMatch;
   IdxSrc: array of Integer;
   Lit: TBytes;
   Z: array[0..15] of Byte;
   NM, I, J, J2, NStats, K: Int64;
-  P, Q, BestSrc, BestLen, MaxLen, KEnd, Cur: Int64;
+  P, Q, QQ, BestSrc, BestLen, MaxLen, KEnd, Cur, LB: Int64;
+  HBits: Integer;
   Out_: TEncOut;
   Stats: array of LongWord;
   LitLen, PrevSrc, Off, LenCode: Int64;
@@ -534,60 +538,92 @@ var
     Inc(LitLen, N);
   end;
 
+  procedure Insert(Pos: Int64);
+  var
+    HB: Int64;
+  begin
+    if (Pos < 0) or (Pos + 8 > SrcLen) then Exit;
+    HB := Int64(HashKey(Src + Pos, HBits)) * CANDIDATES;
+    H[HB + 3] := H[HB + 2];
+    H[HB + 2] := H[HB + 1];
+    H[HB + 1] := H[HB];
+    H[HB] := Pos;
+  end;
+
+  { Busca el match más largo en Pos entre los candidatos del bucket. }
+  procedure FindBest(Pos: Int64; out BSrc, BLen: Int64);
+  var
+    HB, Cand: Int64;
+    C, ML: Int64;
+  begin
+    BSrc := -1; BLen := 0;
+    if Pos + SREP_BASE_LEN > SrcLen then Exit;
+    HB := Int64(HashKey(Src + Pos, HBits)) * CANDIDATES;
+    for C := 0 to CANDIDATES - 1 do
+    begin
+      Cand := H[HB + C];
+      if (Cand < 0) or (Cand >= Pos) then Continue;
+      if Pos - Cand > Int64(512) * 1024 * 1024 then Continue;
+      if LoadU32(Src + Cand) <> LoadU32(Src + Pos) then Continue;
+      ML := SrcLen - Pos;
+      if ((Cand div SREP_BLOCK) + 1) * SREP_BLOCK - Cand < ML then
+        ML := ((Cand div SREP_BLOCK) + 1) * SREP_BLOCK - Cand;
+      if ((Pos div SREP_BLOCK) + 1) * SREP_BLOCK - Pos < ML then
+        ML := ((Pos div SREP_BLOCK) + 1) * SREP_BLOCK - Pos;
+      J := 0;
+      while (J < ML) and (Src[Cand + J] = Src[Pos + J]) do Inc(J);
+      if (J >= SREP_BASE_LEN) and (J > BLen) then
+      begin
+        BLen := J; BSrc := Cand;
+      end;
+    end;
+  end;
+
 begin
   Result := nil;
   if SrcLen <= 0 then Exit;
-  SetLength(H1, SREP_HASH_SIZE); SetLength(H2, SREP_HASH_SIZE);
-  for I := 0 to SREP_HASH_SIZE - 1 do begin H1[I] := -1; H2[I] := -1; end;
+  // Tabla proporcional al input (una entrada cada ~16 bytes), acotada a 64-128 MB.
+  HBits := SREP_HASH_MIN_BITS;
+  while (HBits < SREP_HASH_MAX_BITS) and (Int64(1) shl HBits < SrcLen div 16) do Inc(HBits);
+  SetLength(H, (Int64(1) shl HBits) * CANDIDATES);
+  for I := 0 to High(H) do H[I] := -1;
   NM := 0;
 
-  // 1. matches (greedy): comparar contra las dos últimas posiciones de cada hash
+  // 1. matches: greedy con lazy matching
   P := 0;
   while P + SREP_BASE_LEN <= SrcLen do
   begin
-    BestSrc := -1; BestLen := 0;
-    if P + 8 <= SrcLen then
-    begin
-      I := HashKey(Src + P);
-      if (H1[I] >= 0) and (P - H1[I] <= Int64(512) * 1024 * 1024) then Q := H1[I]
-      else if (H2[I] >= 0) and (P - H2[I] <= Int64(512) * 1024 * 1024) then Q := H2[I]
-      else Q := -1;
-      if Q >= 0 then
-      begin
-        MaxLen := SrcLen - P;
-        if ((Q div SREP_BLOCK) + 1) * SREP_BLOCK - Q < MaxLen then
-          MaxLen := ((Q div SREP_BLOCK) + 1) * SREP_BLOCK - Q;
-        if ((P div SREP_BLOCK) + 1) * SREP_BLOCK - P < MaxLen then
-          MaxLen := ((P div SREP_BLOCK) + 1) * SREP_BLOCK - P;
-        J := 0;
-        while (J < MaxLen) and (Src[Q + J] = Src[P + J]) do Inc(J);
-        if J >= SREP_BASE_LEN then begin BestLen := J; BestSrc := Q; end;
-      end;
-    end;
-
+    FindBest(P, BestSrc, BestLen);
     if BestSrc >= 0 then
     begin
+      Insert(P);
+      // lazy: si en P+1 hay un match bastante mejor, P queda como literal
+      if P + 1 + SREP_BASE_LEN <= SrcLen then
+      begin
+        FindBest(P + 1, QQ, LB);
+        if LB > BestLen + LAZY_GAIN then
+        begin
+          Inc(P);
+          BestSrc := QQ;
+          BestLen := LB;
+        end;
+      end;
       AddMatch(BestSrc, P, BestLen);
-      J := P;
+      J := P + 1;
       while (J < P + BestLen) and (J + 8 <= SrcLen) do
       begin
-        I := HashKey(Src + J);
-        H2[I] := H1[I]; H1[I] := J;
+        Insert(J);
         Inc(J);
       end;
       Inc(P, BestLen);
     end
     else
     begin
-      if P + 8 <= SrcLen then
-      begin
-        I := HashKey(Src + P);
-        H2[I] := H1[I]; H1[I] := P;
-      end;
+      Insert(P);
       Inc(P);
     end;
   end;
-  H1 := nil; H2 := nil;
+  SetLength(H, 0);
 
   // 2. índice por Src (los stats van agrupados por el bloque del origen)
   SetLength(IdxSrc, NM);
@@ -598,7 +634,7 @@ begin
   Out_.Data := nil; Out_.Len := 0;
   OutU32(Out_, SREP_BULAT);
   OutU32(Out_, SREP_SIGNATURE);
-  OutU32(Out_, 3 + (1 shl 8));      // v3; hash_num=1 (sin checksum), seed 0, hash_size 16
+  OutU32(Out_, 3 + (1 shl 8));
   OutU32(Out_, SREP_BASE_LEN);
 
   K := 0;
@@ -651,7 +687,7 @@ begin
     OutU32(Out_, LongWord(KEnd - K));
     OutU32(Out_, LongWord(NStats * 16));
     FillChar(Z, SizeOf(Z), 0);
-    OutRaw(Out_, @Z[0], 16);           // hash_size = 16 (sin checksum)
+    OutRaw(Out_, @Z[0], 16);
     if NStats > 0 then OutRaw(Out_, @Stats[0], NStats * 16);
     if LitLen > 0 then OutRaw(Out_, @Lit[0], LitLen);
 
