@@ -12,7 +12,7 @@
 | PPMd (`Compression/PPMD`, D. Shkarin) | var. H/I (1999-2001), **modificado por FreeArc** | sin upstream compatible | **No hay reemplazo directo**: Ppmd7 de 7-Zip es var.H con otro range coder | Mantener el propio. Ojo con el bug de x64 que encontró PA-Lab (UNIT_SIZE=12, copia de punteros) |
 | Lua (`HsLua`) | 5.1 | 5.4.x | **No**: 5.4 rompe scripts 5.1 | Solo afecta a los scripts/eventos de `arc.ini`; no al formato |
 | 7z.dll (interop `Arhive7zLib.hs`, `Client7z*.cpp`) | 7-Zip 9.x | 26.x | API COM parecida, con cambios | Solo para abrir .7z/.zip/.rar; no es parte del formato .arc |
-| SREP | 3.93 beta (2013) | — | (propio de Bulat Ziganshin) | Revisar si hay una versión posterior publicada por el autor |
+| SREP | 3.93 beta (2013; el fuente que trae el repo) | 3.93a beta (2014-10-11, última conocida; es la que referencia `arc.ini`) | mismo formato (v1–v4) | 3.93a guarda `BASE_LEN=0` en v3/v4 y puede emitir matches más cortos que `BASE_LEN` (el largo da la vuelta en 32 bits) |
 | Métodos propios de Bulat Ziganshin: Tornado, REP, 4x4, Dict, LZP, Delta, MM/TTA, GRZip, DisPack | 0.67 | sin upstream mantenido | — | Hay que portarlos desde estas fuentes; el formato de sus streams lo define este código |
 
 ## Implicancia para PArc
@@ -39,7 +39,7 @@ PArc no enlaza código de terceros: todo está portado a Pascal. De dónde sale 
 | CTR / CFB | LibTomCrypt (contador little-endian, como FreeArc) | ídem |
 | PPMd, Tornado, REP, 4x4, Dict, LZP, Delta, MM, TTA, GRZip | FreeArc 0.67 (no hay versiones más nuevas compatibles) | matrices de lectura y escritura |
 | DisPack (`dispack070`) | FreeArc 0.67 (`Compression/DisPack`, 0.70) | `tests/dispack.sh`: el bloque de datos es byte a byte el de arc.exe, y lo lee/escribe en las dos direcciones; filtro comparado contra el C con `tests/dispack_ref.cpp` |
-| SREP (`srep`), decodificador | `Compression/SREP/srep.cpp` (3.93 beta), formatos v1–v4 | `tests/srep.sh`: streams de `-m3f` (el de arc.ini), `-m0o`/`-m1o` (v2) y `-m0`/`-m2`/`-m3` (v4), de texto, repetidos, azar y >8 MB. El bloque de .arc lleva un byte delante (0 = guardado, 1 = stream) |
+| SREP (`srep`), decodificador | `Compression/SREP/srep.cpp` (3.93 beta) + 3.93a | `tests/srep.sh`: streams de `-m3f` (el de arc.ini), `-m0o`/`-m1o` (v2) y `-m0`/`-m2`/`-m3` (v4), de texto, repetidos, azar y >8 MB; casos sintéticos de 3.93a (`BASE_LEN=0`, largos cortos con vuelta de 32 bits). Con `SREP_393A=<binario>` se prueba interoperabilidad real con 3.93a. El bloque de .arc lleva un byte delante (0 = guardado, 1 = stream) |
 
 Diferencia que apareció al comparar: LibTomCrypt rechaza claves de Blowfish de menos de 8
 bytes (y AES/Twofish que no sean de 16/24/32); PArc las aceptaba y podía escribir un archivo

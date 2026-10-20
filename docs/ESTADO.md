@@ -25,7 +25,8 @@ son relativas a `reference/freearc-0.67/`.
 
 - **DisPack (`dispack070`)**: port completo (lectura y escritura) en `src/parc_dispack.pas`.
   El bloque de datos que escribe PArc es byte a byte el de `arc.exe`. `tests/dispack.sh`.
-- **SREP (`srep`)**: decodificador v1–v4 y codificador v3 en `src/parc_srep.pas`.
+- **SREP (`srep`)**: decodificador v1–v4 (compatible con 3.93 y con 3.93a, la que usa FreeArc:
+  `BASE_LEN=0` y largos cortos con vuelta de 32 bits) y codificador v3 en `src/parc_srep.pas`.
   El codificador es un LZ77 greedy de matches ≥512 bytes: válido y compatible, pero comprime
   menos que el srep original (que hace búsqueda exhaustiva). `tests/srep.sh`.
 - **Diccionarios después de un compresor externo**: en `srep+lzma` el lzma conserva su default

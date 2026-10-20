@@ -97,6 +97,42 @@ for opt in -m0 -m2 -m3; do
   "$OUT/test_srep" f4.srep f4.out >/dev/null 2>&1 && cmp -s f f4.out && ok "$opt (v4)" || bad "$opt (v4)"
 done
 
+echo "== formato de SREP 3.93a (BASE_LEN=0 y largos cortos con vuelta de 32 bits)"
+python3 - <<'PY'
+import struct
+SIG, SREP = 0x26351817, 0x50455253
+
+def write(path, base, block_out, stats, lits):
+    hdr = struct.pack('<4I', SIG, SREP, 3 | (1 << 8), base)   # v3, hash_num=1, seed 0
+    st = b''.join(struct.pack('<4I', *s) for s in stats)
+    blk = struct.pack('<3I', len(lits), len(block_out), len(st)) + b'\0' * 16
+    open(path, 'wb').write(hdr + blk + st + lits)
+    open(path + '.expected', 'wb').write(block_out)
+
+# 1) BASE_LEN=0 (3.93a): match de 2 bytes en dest=10 desde src=0
+out = b'abcdefghij' + b'ab' + b'Z' * 9
+write('s0.srep', 0, out, [(0, 10, 0, 2)], out[:10] + out[12:])
+
+# 2) BASE_LEN=512 con un match de 477 (<BASE_LEN): len_code = 477-512 en 32 bits
+out = b'A' * 577 + b'B' * 23
+write('s477.srep', 512, out, [(0, 100, 0, (477 - 512) & 0xFFFFFFFF)], out[:100] + out[577:])
+PY
+"$OUT/test_srep" s0.srep s0.out >/dev/null 2>&1 && cmp -s s0.srep.expected s0.out && ok "v3 BASE_LEN=0 (3.93a)" || bad "v3 BASE_LEN=0 (3.93a)"
+"$OUT/test_srep" s477.srep s477.out >/dev/null 2>&1 && cmp -s s477.srep.expected s477.out && ok "match corto con vuelta de 32 bits" || bad "match corto con vuelta de 32 bits"
+
+if [ -n "${SREP_393A:-}" ] && [ -x "${SREP_393A}" ]; then
+  echo "== interoperabilidad con SREP 3.93a ($SREP_393A)"
+  gen mix 1
+  for opt in -m3f -m3 -m0o; do
+    "$SREP_393A" $opt f f393a.srep >/dev/null 2>&1 || { bad "3.93a $opt falla"; continue; }
+    "$OUT/test_srep" f393a.srep f393a.out >/dev/null 2>&1 && cmp -s f f393a.out && ok "3.93a $opt -> PArc" || bad "3.93a $opt -> PArc"
+  done
+  "$OUT/test_srep" e f p393a.srep >/dev/null 2>&1
+  "$SREP_393A" -d p393a.srep p393a.out >/dev/null 2>&1 && cmp -s f p393a.out && ok "PArc -> 3.93a" || bad "PArc -> 3.93a"
+else
+  echo "  (SREP_393A no definido: se omite la interoperabilidad con 3.93a)"
+fi
+
 echo "== robustez: streams dañados (sin crash ni cuelgue)"
 gen mix 1
 "$OUT/srep_ref" -m3f f f.srep >/dev/null 2>&1

@@ -238,10 +238,19 @@ begin
   end;
   if not SrepHeader(Src, SrcLen, Ver, Start, HashSize, Seed) then Exit;
   BaseLen := LoadU32(Src + Start + 12);
-  if BaseLen = 0 then Exit;
   RoundMatches := Ver = 1;
-  if RoundMatches then L1 := BaseLen else L1 := 1;
-  if RoundMatches then Step := 3 else Step := 4;
+  if RoundMatches then
+  begin
+    if BaseLen = 0 then Exit;      // v1 codifica largos como code*L + L
+    L1 := BaseLen;
+    Step := 3;
+  end
+  else
+  begin
+    // v2/v3/v4: 3.93a guarda BASE_LEN=0 en v3/v4 (los matches pueden empezar en 1 byte)
+    L1 := 1;
+    Step := 4;
+  end;
   Hdr := 12 + HashSize;
   Pos := Start + 16 + Seed;
   V4 := Ver = 4;
@@ -311,8 +320,10 @@ begin
         { lit_len, offset_lo, offset_hi, len_code }
         Offset := (StatWord(Lit + 1) + (Int64(StatWord(Lit + 2)) shl 32)) * L1;
         M.Dest := M.Src + StatWord(Lit) + Offset;
-        M.Len := Int64(StatWord(Lit + 3)) * L1 + BaseLen;
-        if (M.Src + StatWord(Lit) < BlockStart) or (M.Src + StatWord(Lit) >= BlockEnd) or
+        // El C calcula el largo en 32 bits: 3.93 codifica matches más cortos que BASE_LEN
+        // (partidos en el borde de bloque) y el valor da la vuelta (p.ej. -35 + 512 = 477).
+        M.Len := (Int64(StatWord(Lit + 3)) * L1 + BaseLen) and $FFFFFFFF;
+        if (M.Len < 1) or (M.Src + StatWord(Lit) < BlockStart) or (M.Src + StatWord(Lit) >= BlockEnd) or
            (M.Len > BlockEnd - (M.Src + StatWord(Lit))) or (M.Dest <= M.Src + StatWord(Lit)) then Exit;
         Inc(M.Src, StatWord(Lit));
         if M.Dest + M.Len > DstLen then Exit;
@@ -361,8 +372,8 @@ begin
         Inc(I);
         M.Dest := OutPos + Lit;
         M.Src := (M.Dest div L1) * L1 - OffLo * L1;
-        M.Len := LenCode * L1 + BaseLen;
-        if (M.Src < 0) or (M.Src >= M.Dest) or (M.Dest + M.Len > BlockEnd) then Exit;
+        M.Len := (LenCode * L1 + BaseLen) and $FFFFFFFF;
+        if (M.Len < 1) or (M.Src < 0) or (M.Src >= M.Dest) or (M.Dest + M.Len > BlockEnd) then Exit;
         if Lit > LitAvail then Exit;
         if Lit > 0 then
         begin
