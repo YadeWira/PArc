@@ -450,7 +450,8 @@ end;
 { ---------------------------------------------------------------------------------------- }
 
 const
-  SREP_BASE_LEN = 512;          // -l512 de srep: largo mínimo de un match representable
+  SREP_MIN_MATCH = 512;         // largo mínimo de match que buscamos (como -l512)
+  SREP_BASE_LEN  = 0;           // BASE_LEN del header: 0 como SREP 3.93a en v3/v4
   SREP_BLOCK    = 8 * 1024 * 1024;
   SREP_HASH_MIN_BITS = 16;      // tabla de hash según el tamaño del input
   SREP_HASH_MAX_BITS = 22;
@@ -568,7 +569,7 @@ var
     C, ML: Int64;
   begin
     BSrc := -1; BLen := 0;
-    if Pos + SREP_BASE_LEN > SrcLen then Exit;
+    if Pos + SREP_MIN_MATCH > SrcLen then Exit;
     HB := Int64(HashKey(Src + Pos, HBits)) * CANDIDATES;
     for C := 0 to CANDIDATES - 1 do
     begin
@@ -583,7 +584,7 @@ var
         ML := ((Pos div SREP_BLOCK) + 1) * SREP_BLOCK - Pos;
       J := 0;
       while (J < ML) and (Src[Cand + J] = Src[Pos + J]) do Inc(J);
-      if (J >= SREP_BASE_LEN) and (J > BLen) then
+      if (J >= SREP_MIN_MATCH) and (J > BLen) then
       begin
         BLen := J; BSrc := Cand;
       end;
@@ -602,14 +603,14 @@ begin
 
   // 1. matches: greedy con lazy matching
   P := 0;
-  while P + SREP_BASE_LEN <= SrcLen do
+  while P + SREP_MIN_MATCH <= SrcLen do
   begin
     FindBest(P, BestSrc, BestLen);
     if BestSrc >= 0 then
     begin
       Insert(P);
       // lazy: si en P+1 hay un match bastante mejor, P queda como literal
-      if P + 1 + SREP_BASE_LEN <= SrcLen then
+      if P + 1 + SREP_MIN_MATCH <= SrcLen then
       begin
         FindBest(P + 1, QQ, LB);
         if LB > BestLen + LAZY_GAIN then
@@ -646,7 +647,7 @@ begin
   OutU32(Out_, SREP_BULAT);
   OutU32(Out_, SREP_SIGNATURE);
   OutU32(Out_, 3 + (1 shl 8));
-  OutU32(Out_, SREP_BASE_LEN);
+  OutU32(Out_, SREP_BASE_LEN);   // 0: como 3.93a (el decodificador usa len = code + BASE_LEN)
 
   K := 0;
   I := 0;
@@ -667,7 +668,7 @@ begin
         LitLen := Matches[IdxSrc[I]].Src - PrevSrc;
         if LitLen < 0 then LitLen := 0;
         Off := Matches[IdxSrc[I]].Dest - Matches[IdxSrc[I]].Src;
-        LenCode := Matches[IdxSrc[I]].Len - SREP_BASE_LEN;
+        LenCode := Matches[IdxSrc[I]].Len - SREP_BASE_LEN;   // con BASE_LEN=0 queda el largo tal cual
         SetLength(Stats, NStats * 4 + 4);
         Stats[NStats * 4 + 0] := LongWord(LitLen);
         Stats[NStats * 4 + 1] := LongWord(Off and $FFFFFFFF);

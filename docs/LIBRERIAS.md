@@ -45,7 +45,7 @@ Diferencia que apareció al comparar: LibTomCrypt rechaza claves de Blowfish de 
 bytes (y AES/Twofish que no sean de 16/24/32); PArc las aceptaba y podía escribir un archivo
 que FreeArc no abre. Ahora las rechaza igual (`CipherKeySizeValid`).
 
-| SREP (`srep`), codificador | `Compression/SREP/srep.cpp` (formato v3) | `tests/srep.sh`: los streams de PArc los decodifica el `srep` de referencia, y arc.exe verifica/extrae un `.arc` con `-msrep`. LZ77 greedy de matches ≥512 con lazy matching y 4 candidatos por hash (tabla proporcional al input); en binarios con duplicados parciales iguala o supera al srep de referencia y en el resto queda parejo |
+| SREP (`srep`), codificador | `Compression/SREP/srep.cpp` (formato v3) | `tests/srep.sh`: los streams de PArc los decodifica el `srep` de referencia, y arc.exe verifica/extrae un `.arc` con `-msrep`. LZ77 greedy de matches ≥512 con lazy matching y 4 candidatos por hash (tabla proporcional al input); escribe v3 con `BASE_LEN=0` como 3.93a; en binarios con duplicados parciales iguala o supera al srep de referencia y en el resto queda parejo |
 
 El srep del repo no compila tal cual contra el `Common.h` actual; `tests/srep.sh` arma una
 copia con dos ajustes mínimos para usarlo como referencia. No hacen al formato: Lua 5.1

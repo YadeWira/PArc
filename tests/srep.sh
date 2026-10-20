@@ -90,6 +90,17 @@ for spec in "text 200000" "rep 200" "rand 100000" "mix 1"; do
   "$OUT/test_srep" f.mine f.own >/dev/null 2>&1 && cmp -s f f.own && ok "PArc lee lo suyo ($1 $2)" || bad "PArc no lee lo suyo ($1 $2)"
 done
 
+echo "== header del codificador (v3 con BASE_LEN=0, como 3.93a)"
+gen mix 1
+"$OUT/test_srep" e f f.b0 >/dev/null 2>&1
+if python3 - <<'PY'
+import struct
+w = struct.unpack('<4I', open('f.b0', 'rb').read(16))
+raise SystemExit(0 if (w[2] & 255) == 3 and w[3] == 0 else 1)
+PY
+then ok "versión 3 y BASE_LEN=0"; else bad "header inesperado (¿versión o BASE_LEN?)"; fi
+"$OUT/srep_ref" -d f.b0 f.b0.out >/dev/null 2>&1 && cmp -s f f.b0.out && ok "3.93 lo decodifica" || bad "3.93 no lo decodifica"
+
 echo "== formato v4 (Index-LZ)"
 for opt in -m0 -m2 -m3; do
   gen mix 1

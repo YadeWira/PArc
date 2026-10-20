@@ -273,8 +273,8 @@ parc r copia.arc                          # repara -> fixed.copia.arc
   `rep`, `delta`, `tor`, `lzp`, `mm`, `tta`, `4x4`, `exe` (BCJ), `lz4`, `dispack070` (DisPack)
   y `srep` (SREP v1–v4), solos o en cadena (`exe+dispack070+lzma`, `srep+lzma`, …).
 - `srep` al comprimir usa un LZ77 greedy de matches largos (≥512 bytes) con *lazy matching*:
-  genera streams válidos que lee el `srep` de referencia y FreeArc, con un ratio parecido al
-  del `srep` original.
+  genera streams v3 válidos (con `BASE_LEN=0`, como 3.93a) que leen el `srep` de referencia,
+  3.93a y FreeArc, con un ratio parecido al del `srep` original.
 - Lo que escribe PArc en `.arc` lo abren y extraen `arc.exe` 0.67.1 y `unarc`.
 - Con el mismo árbol y el mismo preset, PArc arma los mismos bloques sólidos, con los mismos
   archivos en el mismo orden y el mismo método guardado que `arc.exe`
