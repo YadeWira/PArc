@@ -20,6 +20,7 @@ const
   DIRTAG_WIN_ATTR  = 2;
   DIRTAG_UNIX_MODE = 3;
   DIRTAG_SYMLINK   = 6;   // enlaces: cantidad, y por cada uno índice, destino (CStr) y si apunta a un directorio
+  DIRTAG_MTIME_NS_DELTA = 7;  // como MTIME_NS pero delta zigzag VInt (pérdida cero)
   SCAN_MAX = 4096;             // el descriptor del FOOTER empieza dentro de los últimos 4096 bytes
 
   DESCR_BLOCK    = 0;
@@ -323,6 +324,8 @@ var
   FieldLen, FieldEnd: SizeInt;
   BlockOfs: Int64;
   LinkCount, LinkIdx: Int64;
+  PrevNs, Delta: Int64;
+  ZZ: QWord;
 begin
   Data := ReadControlBlock(DirBlock);
   r.Init(PByte(Data), Length(Data));
@@ -397,6 +400,19 @@ begin
             Files[FirstFile + i].MTimeNs := Int64(QWord(r.U32) or (QWord(r.U32) shl 32));
             Files[FirstFile + i].HasMTimeNs := True;
           end;
+      DIRTAG_MTIME_NS_DELTA:
+        begin
+          PrevNs := 0;
+          for i := 0 to Total - 1 do
+          begin
+            ZZ := r.VInt;
+            if (ZZ and 1) <> 0 then Delta := -Int64((ZZ shr 1) + 1)
+            else Delta := Int64(ZZ shr 1);
+            Inc(PrevNs, Delta);
+            Files[FirstFile + i].MTimeNs := PrevNs;
+            Files[FirstFile + i].HasMTimeNs := True;
+          end;
+        end;
       DIRTAG_WIN_ATTR:
         if FieldLen = 4 * Total then
           for i := 0 to Total - 1 do

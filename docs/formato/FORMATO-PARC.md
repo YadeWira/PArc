@@ -50,13 +50,15 @@ Todos los arrays por archivo van en el mismo orden que las columnas del director
 | 4 | `CTIME_NS` | 0 | N × Int64 LE | reservado (creación) |
 | 5 | `ATIME_NS` | 0 | N × Int64 LE | reservado (acceso) |
 | 6 | `SYMLINK` | 0 | VInt K, y K veces: VInt índice, CStr destino, U8 a_directorio | enlaces simbólicos (y junctions de Windows). La entrada es un archivo de tamaño 0, sin datos, que va en el bloque de directorios. Destino en UTF-8 con `/`, tal como estaba en el enlace (relativo o absoluto) |
+| 7 | `MTIME_NS_DELTA` | 0 | N × VInt (zigzag) | igual que `MTIME_NS` pero cada valor es el delta con signo respecto del archivo anterior (el primero, respecto de 0). Es el que escribe PArc: pierde cero precisión y, como los archivos de un bloque suelen tener fechas parecidas, ocupa menos. Un lector viejo que no conoce este tag se queda con la columna `Time` (segundos) |
 
 Un lector que no conoce `SYMLINK` extrae un archivo vacío en lugar del enlace. Al extraer,
 PArc crea los enlaces al final y no crea los que apuntan fuera del destino (absolutos o con
 `..` que sube más allá de la raíz) salvo con `-snld`.
 
-`MTIME_NS` cubre ±292 años alrededor de 1970, así que resuelve el problema de 2038 de la
-columna `Time` (Int32) y guarda la precisión de NTFS (100 ns) y ext4 (1 ns).
+`MTIME_NS`/`MTIME_NS_DELTA` cubren ±292 años alrededor de 1970, así que resuelven el problema
+de 2038 de la columna `Time` (Int32) y guardan la precisión de NTFS (100 ns) y ext4 (1 ns).
+PArc escribe `MTIME_NS_DELTA`; sigue leyendo `MTIME_NS` de los archivos ya creados.
 
 ## 3. Resto del contenedor (base de FreeArc)
 

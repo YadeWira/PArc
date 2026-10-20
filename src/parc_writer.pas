@@ -213,6 +213,14 @@ begin
   Result := LongWord(LongInt(Sec));
 end;
 
+{ ZigZag: mapea Int64 a QWord para que los deltas chicos (positivos o negativos) ocupen
+  pocos bytes en VInt. }
+function ZigZag(V: Int64): QWord;
+begin
+  if V >= 0 then Result := QWord(V) shl 1
+  else Result := (QWord(-V) shl 1) - 1;
+end;
+
 { Serializa el DIR_BLOCK (el formato base de FreeArc §6 + campos opcionales de FORMATO-PARC.md §2). }
 function BuildDirectory(const Entries: array of TWriteEntry; const Blocks: array of TDataBlock;
   DirPos: Int64; Parc: Boolean): TBytes;
@@ -222,6 +230,7 @@ var
   Dirs: TStringList;
   DirIdx: array of Integer;
   b, i, n, k: Integer;
+  PrevNs, Ns: Int64;
   AllWin, AllUnix: Boolean;
 
   procedure OptField(Tag: Integer; const Field: TByteWriter);
@@ -281,9 +290,17 @@ begin
   // 4. Campos opcionales (solo .parc)
   if Parc then
   begin
+    // MTimeNs como delta zigzag desde el archivo anterior: pérdida cero y, como los
+    // archivos de un mismo bloque suelen tener fechas parecidas, ocupa mucho menos.
     f.Clear;
-    for i := 0 to n - 1 do f.I64(Entries[All[i].Entry].Meta.MTimeNs);
-    OptField(DIRTAG_MTIME_NS, f);
+    PrevNs := 0;
+    for i := 0 to n - 1 do
+    begin
+      Ns := Entries[All[i].Entry].Meta.MTimeNs;
+      f.VInt(ZigZag(Ns - PrevNs));
+      PrevNs := Ns;
+    end;
+    OptField(DIRTAG_MTIME_NS_DELTA, f);
     AllWin := n > 0;
     AllUnix := n > 0;
     for i := 0 to n - 1 do
