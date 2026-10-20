@@ -81,6 +81,7 @@ The suite runs against `.parc` archives and the C reference sources kept in
 `reference/freearc-0.67/Compression/` for the codecs.
 
 ```sh
+bash tests/cli.sh
 bash tests/stdio.sh tests/volumes.sh
 bash tests/rs_recovery.sh tests/parc_crypt.sh
 bash tests/dispack.sh tests/srep.sh tests/bcj.sh

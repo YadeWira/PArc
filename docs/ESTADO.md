@@ -96,6 +96,7 @@ Cambios que lo hacen posible (todos dentro de `.parc`; los códecs son los mismo
 
 ```sh
 ./build.sh linux64
+bash tests/cli.sh
 bash tests/stdio.sh tests/volumes.sh
 bash tests/rs_recovery.sh tests/parc_crypt.sh
 bash tests/dispack.sh tests/srep.sh tests/bcj.sh
