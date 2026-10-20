@@ -35,9 +35,12 @@ PArc no enlaza código de terceros: todo está portado a Pascal. De dónde sale 
 | Serpent | el agregado de FreeArc sobre LibTomCrypt 1.17 (1.18.2 no trae Serpent) | ídem, contra la 1.17 |
 | CTR / CFB | LibTomCrypt (contador little-endian, como FreeArc) | ídem |
 | PPMd, Tornado, REP, 4x4, Dict, LZP, Delta, MM, TTA, GRZip | FreeArc 0.67 (no hay versiones más nuevas compatibles) | matrices de lectura y escritura |
+| DisPack (`dispack070`) | FreeArc 0.67 (`Compression/DisPack`, 0.70) | `tests/dispack.sh`: el bloque de datos es byte a byte el de arc.exe, y lo lee/escribe en las dos direcciones; filtro comparado contra el C con `tests/dispack_ref.cpp` |
 
 Diferencia que apareció al comparar: LibTomCrypt rechaza claves de Blowfish de menos de 8
 bytes (y AES/Twofish que no sean de 16/24/32); PArc las aceptaba y podía escribir un archivo
 que FreeArc no abre. Ahora las rechaza igual (`CipherKeySizeValid`).
 
-No portados, porque no hacen al formato: Lua 5.1 (scripts de arc.ini), 7z.dll y SREP.
+No portados todavía: **SREP** (`srep`, el preprocesador LZ77 de Bulat que arc.ini usa como
+compresor externo; su stream sí puede aparecer en un `.arc`). No hacen al formato: Lua 5.1
+(scripts de arc.ini) y 7z.dll.

@@ -137,7 +137,7 @@ var
     M, MR, W, MM, MS, Num9, Enc, Order, Mem, Chunk, Got, Lvl, BPos: Int64;
     StartI: Integer;
     L: string;
-    LZP, A, C3: Boolean;
+    LZP, A, C3, Ext: Boolean;
     Interno: string;
     I: Integer;
 
@@ -355,6 +355,31 @@ begin
       Result := Result + (':' + ShowMem(BS));
       if HS <> StdHS[Num9] then Result := Result + (':h' + ShowMem(HS));
       if C3 and (Enc <> StdEnc[Num9]) then Result := Result + (':c' + IntToStr(Enc));
+      Exit;
+    end;
+
+    { --- dispack (C_DisPack.cpp): BlockSize por defecto 8 MB; :x no cambia el flujo. }
+    if (Name = 'dispack') or (Name = 'dispack070') then
+    begin
+      BS := 8*MB;
+      Ext := False;
+      for J := 1 to High(Parts) do
+      begin
+        L := LowerCase(Parts[J]);
+        if L = 'x' then
+        begin
+          Ext := True;
+          Continue;
+        end;
+        if (L <> '') and (L[1] = 'b') and (Length(L) > 1) then
+          BS := CMem(Copy(L, 2, MaxInt), BS)
+        else if L <> '' then
+          BS := CMem(L, BS);
+      end;
+      if BS <= 0 then BS := 8*MB;
+      Result := 'dispack070';
+      if BS <> 8*MB then Result := Result + (':' + ShowMem(BS));   // Show no pone la 'b'
+      if Ext then Result := Result + (':x');
       Exit;
     end;
 

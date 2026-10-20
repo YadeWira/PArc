@@ -28,6 +28,21 @@ type
     constructor Create(ATarget: TOutStage);
   end;
 
+  { dispack (C_DisPack.cpp, DISPACK_METHOD::compress): junta tramos de 16 KB que parecen
+    ejecutable, los filtra con DisPackFilter y los escribe con tag; el resto va como datos.
+    Acá se acumula el bloque entero y se codifica en DoFinish. }
+  TDisPackEncStage = class(TOutStage)
+  private
+    FData: TBytes;
+    FLen: SizeInt;
+    FBlockSize: Integer;
+  protected
+    procedure DoWrite(Buf: PByte; Count: SizeInt); override;
+    procedure DoFinish; override;
+  public
+    constructor Create(ATarget: TOutStage; ABlockSize: Integer);
+  end;
+
   { 4x4 al comprimir (_4x4MTCompressor, C_4x4.cpp): U32 versión 0 y, por cada bloque de
     BlockSize bytes, [Int32 tamaño original, o -1 si se guardó sin comprimir][U32 largo][datos].
     Los bloques se comprimen en paralelo con el método interno y se escriben en orden. }
@@ -85,7 +100,7 @@ implementation
 uses
   Math, parc_filters, parc_ppmd, parc_methods, parc_lzp, parc_parallel, parc_lzmaenc,
   parc_repenc, parc_deltaenc, parc_dictenc, parc_ttaenc, parc_mmenc, parc_torenc, parc_grzipenc,
-  parc_crypt, parc_canon, parc_lz4enc;
+  parc_crypt, parc_canon, parc_lz4enc, parc_dispack;
 
 { ¿La etapa es de cifrado? El nombre va antes de '-' (bits) o '/' (modo): "aes-256/ctr". }
 function IsCipherStage(const Stage: string): Boolean;
@@ -364,7 +379,8 @@ begin
         end;
       'tor': if not TorEncAvailable(Stage) then Exit(False);
       'lz4': if not Lz4EncAvailable(Stage) then Exit(False);
-      'storing', 'exe', 'ppmd', 'lzp', 'lzma', 'rep', 'delta', 'dict', 'tta', 'mm', 'grzip': ;
+      'storing', 'exe', 'ppmd', 'lzp', 'lzma', 'rep', 'delta', 'dict', 'tta', 'mm', 'grzip',
+      'dispack', 'dispack070': ;
     else
       Exit(False);
     end;
@@ -407,6 +423,8 @@ begin
       // Con marca de fin: en los bloques de datos el decodificador de FreeArc la exige
       Result := TLzmaEncStage.Create(Target, ParseLzmaEncParams(Parts), True);
     'exe':     Result := TBcjEncStage.Create(Target);
+    'dispack', 'dispack070':
+      Result := TDisPackEncStage.Create(Target, DispackBlockSize(Parts));
     'lzp':
       begin
         { MinCompression ("N%"): lo usa solo el compresor; ParseLzpParams lo saltea. }
@@ -425,6 +443,45 @@ begin
   else
     raise EUnsupportedEncoder.CreateFmt('todavía no se puede comprimir con "%s"', [Stage]);
   end;
+end;
+
+{ TDisPackEncStage }
+
+constructor TDisPackEncStage.Create(ATarget: TOutStage; ABlockSize: Integer);
+begin
+  inherited Create(ATarget);
+  FBlockSize := ABlockSize;
+  if FBlockSize <= 0 then FBlockSize := DISPACK_BLOCK;
+  FData := nil;
+  FLen := 0;
+end;
+
+procedure TDisPackEncStage.DoWrite(Buf: PByte; Count: SizeInt);
+var
+  Cap: SizeInt;
+begin
+  if Count <= 0 then Exit;
+  if FLen + Count > Length(FData) then
+  begin
+    Cap := Length(FData);
+    if Cap = 0 then Cap := 64 * 1024;
+    while Cap < FLen + Count do Cap := Cap * 2;
+    SetLength(FData, Cap);
+  end;
+  Move(Buf^, FData[FLen], Count);
+  Inc(FLen, Count);
+end;
+
+procedure TDisPackEncStage.DoFinish;
+var
+  Enc: TBytes;
+begin
+  if FLen > 0 then
+  begin
+    Enc := DispackEncode(@FData[0], FLen, FBlockSize);
+    if Length(Enc) > 0 then Emit(@Enc[0], Length(Enc));
+  end;
+  inherited DoFinish;
 end;
 
 function CreateEncoderChain(const Method: string; Target: TOutStage): TOutStage;
