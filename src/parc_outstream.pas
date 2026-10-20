@@ -38,10 +38,15 @@ type
   private
     FStream: TStream;
     FBytes: Int64;
+    FBuf: TBytes;
+    FUsed: Integer;
+    procedure Flush;
   protected
     procedure DoWrite(Buf: PByte; Count: SizeInt); override;
+    procedure DoFinish; override;
   public
     constructor Create(AStream: TStream);
+    destructor Destroy; override;
     property Bytes: Int64 read FBytes;
   end;
 
@@ -119,16 +124,50 @@ end;
 
 { TStreamSink }
 
+const
+  STREAM_SINK_BUF = 64 * 1024;
+
 constructor TStreamSink.Create(AStream: TStream);
 begin
   inherited Create(nil);
   FStream := AStream;
+  SetLength(FBuf, STREAM_SINK_BUF);
+end;
+
+destructor TStreamSink.Destroy;
+begin
+  Flush;
+  inherited Destroy;
+end;
+
+procedure TStreamSink.Flush;
+begin
+  if FUsed > 0 then
+  begin
+    FStream.WriteBuffer(FBuf[0], FUsed);
+    FUsed := 0;
+  end;
 end;
 
 procedure TStreamSink.DoWrite(Buf: PByte; Count: SizeInt);
 begin
-  FStream.WriteBuffer(Buf^, Count);
   Inc(FBytes, Count);
+  // Los codecs emiten muchos pedazos chicos (el rango-coder de PPMd, por ejemplo): juntarlos
+  // evita una llamada a write por pedazo. Lo grande va directo, sin copia.
+  if Count >= Length(FBuf) then
+  begin
+    Flush;
+    FStream.WriteBuffer(Buf^, Count);
+    Exit;
+  end;
+  if FUsed + Count > Length(FBuf) then Flush;
+  Move(Buf^, FBuf[FUsed], Count);
+  Inc(FUsed, Count);
+end;
+
+procedure TStreamSink.DoFinish;
+begin
+  Flush;
 end;
 
 { TMemSink }
