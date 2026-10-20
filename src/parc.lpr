@@ -9,7 +9,7 @@ uses
   Classes, SysUtils, Types, DateUtils, parc_os, parc_bytes, parc_methods, parc_archive, parc_extract, parc_writer, parc_encoders, parc_presets, parc_recovery, parc_progress, parc_filelist, parc_volume, parc_console;
 
 const
-  PARC_VERSION = '0.0.3';
+  PARC_VERSION = '0.0.1';
   // Método por defecto: el mismo que FreeArc (-m4)
   DEFAULT_METHOD = '4';
   // Directorio y footer: lo mismo que usa FreeArc
@@ -17,7 +17,7 @@ const
 
 procedure Usage;
 begin
-  OutLn('PArc ' + PARC_VERSION + ' — archivador compatible con FreeArc');
+  OutLn('PArc ' + PARC_VERSION + ' — archivador .parc');
   OutLn('Uso: parc <comando> <archivo> [archivos/máscaras...] [opciones]');
   OutLn('  l   lista el contenido');
   OutLn('  lb  lista los bloques (estructura interna)');
