@@ -17,7 +17,7 @@ ok()  { pass=$((pass+1)); echo "  ok   $*"; }
 bad() { fail=$((fail+1)); echo "  FAIL $*"; }
 
 echo "== compilar srep de referencia"
-mkdir -p ref && cp -a "$ROOT/Compression" ref/ 2>/dev/null
+mkdir -p ref && cp -a "$ROOT/reference/freearc-0.67/Compression" ref/ 2>/dev/null
 S=ref/Compression/SREP
 sed -i 's/\bindex\b/srep_index/g' "$S/compress_inmem.cpp" "$S/compress_cdc.cpp" "$S/compress.cpp" "$S/srep.cpp"
 cat > "$S/ref_wrap.cpp" <<'EOF'

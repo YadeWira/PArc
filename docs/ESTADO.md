@@ -3,6 +3,16 @@
 Resumen para retomar el trabajo sin releer toda la historia. Lo que está hecho, lo que falta y
 cómo verificarlo.
 
+## Layout del repo
+
+```
+src/  docs/  tests/  build.sh        PArc
+reference/freearc-0.67/               fuente original de FreeArc 0.67 (referencia/oráculo)
+```
+
+Las rutas `Compression/...`, `Unarc/...`, `Arc.hs`, etc. que se citan en los demás documentos
+son relativas a `reference/freearc-0.67/`.
+
 ## Fases
 
 | fase | estado | dónde |

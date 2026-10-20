@@ -1,5 +1,8 @@
 # Librerías de terceros en FreeArc 0.67 y su estado (relevado 2026-09-24)
 
+> Las rutas de FreeArc que aparecen en este documento (`Compression/...`, `Unarc/...`,
+> `Arc.hs`, ...) son relativas a `reference/freearc-0.67/`.
+
 | Librería | En FreeArc | Actual | ¿Formato compatible al actualizar? | Notas |
 |---|---|---|---|---|
 | LZMA SDK (`Compression/LZMA2/C`: LzmaDec/Enc, Bra86/BCJ, LzFind) | 2009-02 (~4.65/9.x) | 26.x | **Sí**: el stream LZMA y BCJ x86 no cambian desde 2001 | Decoder nuevo mucho más rápido (LzmaDec optimizado). El encoder nuevo produce otros bytes, pero igual de válidos |

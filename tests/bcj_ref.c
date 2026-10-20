@@ -5,7 +5,7 @@
 #include <stdlib.h>
 #include <string.h>
 typedef unsigned char Byte; typedef unsigned int UInt32; typedef size_t SizeT;
-#include "../Compression/LZMA2/C/Bra86.c"
+#include "../reference/freearc-0.67/Compression/LZMA2/C/Bra86.c"
 #define BUFSZ (1<<18)
 int main(int argc, char **argv) {
   srand(atoi(argv[1])); int enc = atoi(argv[2]);

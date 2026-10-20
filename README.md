@@ -27,6 +27,17 @@ comparison and tests).
 - Cancellation leaves no partial files; writes go to a temporary file that replaces the
   original only when the operation succeeds.
 
+## Repository layout
+
+```
+src/                     PArc sources (Free Pascal)
+docs/                    manuals and format notes (currently in Spanish)
+tests/                   test suite, oracles and fuzzers
+reference/freearc-0.67/  original FreeArc 0.67 sources (Haskell/C++), used as the
+                         format/codec reference and test oracle; not part of the build
+build.sh                 builds parc and parcsfx
+```
+
 ## Commands
 
 ```

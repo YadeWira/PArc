@@ -1,5 +1,8 @@
 # Formato de archivo FreeArc (`.arc`) — especificación para PArc
 
+> Las rutas de FreeArc que aparecen en este documento (`Compression/...`, `Unarc/...`,
+> `Arc.hs`, ...) son relativas a `reference/freearc-0.67/`.
+
 Estado: **v0.1 (2026-09-24)**, derivada de las fuentes de FreeArc 0.67
 (`ArhiveStructure.hs`, `ArhiveDirectory.hs`, `ByteStream.hs`, `Compression.hs`,
 `Unarc/ArcStructure.h`, `Compression/LZMA2/C_LZMA.cpp`) y **validada byte a byte**

@@ -11,7 +11,7 @@ W=${CRYPTO_WORK:-/mnt/IA_LAB/agentes/PArc/crypto_vectors}
 TAR=${LTC_TAR:-/mnt/IA_LAB/compartido/parc/crypto-oracle/ltc-1.18.2.tar.xz}
 mkdir -p "$W/u" && cd "$W" || exit 2
 [ -f libtomcrypt-1.18.2/libtomcrypt.a ] || { tar xf "$TAR" && make -C libtomcrypt-1.18.2 -j8 >/dev/null 2>&1; } || exit 2
-E=$ROOT/Compression/_Encryption
+E=$ROOT/reference/freearc-0.67/Compression/_Encryption
 g++ -O2 -fpermissive -w -x c++ -DLTC117 -I"$E/headers" -I"$E" -o o117 "$ROOT/tests/crypto/oracle.c" || exit 2
 gcc -O2 -I libtomcrypt-1.18.2/src/headers -o o118 "$ROOT/tests/crypto/oracle.c" libtomcrypt-1.18.2/libtomcrypt.a || exit 2
 fpc -O2 -Fu"$ROOT/src" -FU"$W/u" -o"$W/ptest" "$ROOT/tests/crypto/ptest.pas" >/dev/null || exit 2

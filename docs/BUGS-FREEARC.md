@@ -1,5 +1,8 @@
 # Bugs y limitaciones de FreeArc 0.67, y qué hace PArc con cada uno
 
+> Las rutas de FreeArc que aparecen en este documento (`Compression/...`, `Unarc/...`,
+> `Arc.hs`, ...) son relativas a `reference/freearc-0.67/`.
+
 Inventario armado el 2026-10-08 a partir de cuatro fuentes:
 
 - **código**: comentarios TODO/bug del código original de FreeArc (raíz del repo, `Compression/`, `Unarc/`);
