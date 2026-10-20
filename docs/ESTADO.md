@@ -26,7 +26,7 @@ FreeArc-ex.
 | GUI | ❌ descartada |
 | Contenedores `.zip/.7z/.rar` | ➡ movidos a FreeArc-ex (tag `entrega-arc`) |
 | SFX (creación) | ❌ descartada: no se compila `parcsfx` ni existe `-sfx`; los SFX viejos se leen/extraen y al actualizarlos se conserva su módulo |
-| Rendimiento vs FreeArc 0.67.1 | ✅ PArc gana en tamaño en `-m1`…`-mx` sobre los corpus de prueba (ver abajo) |
+| Rendimiento vs FreeArc 0.67.1 | ✅ PArc gana en tamaño y velocidad en `-m1`…`-mx` sobre los corpus de prueba (ver abajo) |
 
 ## Qué hace hoy
 
@@ -41,39 +41,56 @@ FreeArc-ex.
 
 ## Rendimiento vs FreeArc 0.67.1
 
-Objetivo: que `-m1`…`-m9`/`-mx` produzcan archivos **más chicos** que FreeArc 0.67.1 con los
-presets internos (`arc.exe -cfg-`), sin comparar contenedores ni compatibilidad.
+Objetivo: que `-m1`…`-m9`/`-mx` produzcan archivos **más chicos y en menos tiempo** que
+FreeArc 0.67.1 con sus presets internos (`arc.exe -cfg-`), sin comparar contenedores ni
+compatibilidad.
 
-Medición con `tests/bench_vs_freearc.sh` sobre seis corpus (12–44 MB): texto C (/usr/include),
-fuente Python, documentación HTML, binarios `.so`, mixto y el corpus heterogéneo de pruebas.
-En los seis, PArc gana en **todos** los niveles. Resumen del delta de tamaño total (PArc −
-FreeArc; negativo = PArc más chico):
+Medición con `tests/bench_vs_freearc.sh` sobre siete corpus (5–44 MB): cabeceras C
+(`/usr/include`), fuente Python, documentación HTML, binarios `.so`, mixto, el corpus
+heterogéneo de pruebas y 3.000 archivos chicos (5 MB). En los siete, PArc gana en tamaño
+en **todos** los niveles. Delta de tamaño total (PArc − FreeArc; negativo = PArc más chico):
 
-| nivel | texto | binarios | mixto |
-|---|---|---|---|
-| `-m1` | −13 % a −16 % | −10,2 % | −9,7 % |
-| `-m2` | −2,4 % a −5,2 % | −1,5 % | −1,4 % |
-| `-m3` | −1,8 % a −7,2 % | −0,3 % | −0,6 % |
-| `-m4` | −2,4 % a −7,5 % | −1,0 % | −1,1 % |
-| `-m5` | −0,5 % a −0,7 % | −0,2 % | −0,25 % |
-| `-m6`…`-mx` | −0,3 % a −0,9 % | −0,24 % | −0,31 % |
+| nivel | texto | binarios | mixto | 3.000 chicos |
+|---|---|---|---|---|
+| `-m1` | −13,1 % a −16,2 % | −10,2 % | −9,7 % | −17,8 % |
+| `-m2` | −3,0 % a −6,1 % | −1,5 % | −1,6 % | −9,7 % |
+| `-m3` | −2,2 % a −7,7 % | −1,2 % | −1,2 % | −4,6 % |
+| `-m4` | −3,4 % a −8,0 % | −2,8 % | −2,3 % | −4,2 % |
+| `-m5` | −0,6 % a −1,3 % | −0,9 % | −0,6 % | −0,5 % |
+| `-m6`…`-mx` | −0,3 % a −0,7 % | −0,2 % | −0,3 % | −0,3 % |
 
-Cambios que lo hacen posible (todos dentro de `.parc`; los códecs siguen siendo los mismos):
+Velocidad (tiempo de pared; el de FreeArc incluye el arranque de Wine). En el corpus mixto
+de 44 MB:
 
+| nivel | PArc | FreeArc | | nivel | PArc | FreeArc |
+|---|---|---|---|---|---|---|
+| `-m1` | 1,17 s | 2,03 s | | `-m6` | 9,40 s | 10,84 s |
+| `-m2` | 1,96 s | 2,81 s | | `-m7` | 9,21 s | 10,75 s |
+| `-m3` | 3,42 s | 4,16 s | | `-m8` | 9,30 s | 11,00 s |
+| `-m4` | 4,93 s | 6,41 s | | `-m9` | 8,99 s | 10,81 s |
+| `-m5` | 7,07 s | 8,74 s | | `-mx` | 8,95 s | 11,02 s |
+
+En los siete corpus PArc también es más rápido en todos los niveles; las diferencias de
+pocos por ciento están en el orden del ruido de una corrida. El margen de tamaño en `-m5` y
+`-m6` sobre el corpus heterogéneo es chico (0,04–0,14 %), así que en datos muy distintos
+puede quedar cerca.
+
+Cambios que lo hacen posible (todos dentro de `.parc`; los códecs son los mismos):
+
+- **Salida con buffer**: `TStreamSink` junta 64 KB antes de escribir. Los codecs emitían
+  muchos pedazos chicos (sobre todo el range-coder de PPMd) y ~14 % del tiempo se iba en
+  `write`. PPMd sobre 20 MB de texto pasó de 4,6 s a ~2,7–3,5 s (FreeArc: 2,86 s).
 - **LZMA `fast`**: se portaron los agregados de FreeArc a `GetOptimumFast` (poda del match
   principal por longitud/distancia y aceptación relajada de rep-matches). Antes `-m3` perdía
   0,8 % en binarios; ahora gana.
-- **Presets más fuertes** que los de FreeArc en el mismo nivel: `-m1` usa Tornado con ventana
-  de 16 MB en vez de 8 MB; `-m2`, ventana de 64 MB; `-m4`, `fb=32`; `-m5`, PPMd 12/192 MB; y
-  el grupo de texto de `-m6`+ usa `dict:m800:s250:75%`, LZP al 90 % y PPMd 16/384 MB.
+- **Presets más fuertes y más rápidos** que los de FreeArc en el mismo nivel:
+  `-m1` Tornado con ventana de 16 MB; `-m2` 64 MB; `-m3` LZMA `fast` con `mc8`; `-m4`/`-m5`
+  binarios con `4x4:i0:lzma:8mb:max` (mejor y más rápido que `normal:32:mc8/mc32`);
+  `-m5` PPMd 12/192 MB; GRZip con hash 2^20 (`-m2`/`-m3`) y 2^17 (`-m4`); y el grupo de
+  texto de `-m6`+ con `dict:m800:s250:75%`, LZP al 90 % y PPMd 16/384 MB.
 - **Directorio**: el mtime en ns se guarda como delta zigzag VInt (tag 7), sin perder
-  precisión. Ahorra ~2 KB por cada 1.300 archivos y deja el sobrecosto de metadatos de PArc
-  (fechas ns + modo Unix, que FreeArc no guarda) en unos 2,5–7 KB por cada 1.000–2.500 archivos.
+  precisión. Ahorra ~2 KB por cada 1.300 archivos.
 - El registro de recuperación es sólo Reed-Solomon; el XOR de `.arc` ya no existe.
-
-Contrapartida: algunos niveles son más lentos que FreeArc (por ejemplo `-m1` ~1,5× y `-m5`
-~1,4× en el corpus mixto), a cambio de archivos más chicos. Los tiempos están en el script
-de benchmark.
 
 ## Pruebas
 

@@ -128,18 +128,18 @@ const
     '',
     'ex1binary = xtor:5',  // PARC: ventana 16m, nivel máximo (FreeArc: 8m/nivel 3)
     'ex2binary = xtor:6',  // PARC: ventana 64m (FreeArc: 16m)
-    'ex3binary = xlzma:96mb:fast  :32:mc4',
-    'ex4binary = xlzma:96mb:normal:32:mc8',  // PARC: fb 32 (FreeArc: 16)
-    'ex5binary = xlzma:96mb:normal:32:mc32',
+    'ex3binary = xlzma:96mb:fast  :32:mc8',  // PARC: mc8, más chico y aún más rápido
+    'ex4binary = 4x4:i0:lzma: 8mb:max',  // PARC: más rápido y más chico que normal:32:mc8
+    'ex5binary = 4x4:i0:lzma: 8mb:max',  // PARC: mc32 era 1,4x más lento en binarios
     'ex6binary = 4x4:i0:lzma: 8mb:max',
     'ex7binary = 4x4:i0:lzma:16mb:max',
     'ex8binary = 4x4:i0:lzma:32mb:max',
     'ex9binary = 4x4:i0:lzma:64mb:max',
     '',
     'ex1t = ex1b',
-    'ex2t = grzip:m4',
-    'ex3t = grzip:m2',
-    'ex4t = grzip:m1',
+    'ex2t = grzip:m4:h20',  // PARC: hash 2^20
+    'ex3t = grzip:m2:h20',  // PARC: hash 2^20
+    'ex4t = grzip:m1:h17',  // PARC: hash 2^17
     'ex5t = dict:p: 64m:80% + lzp: 64m: 65:d1m:s32:h22:90% + xppmd:12:192m',  // PARC: 8:96->12:192
     'ex6t = dict:p: 64m:80% + lzp: 80m:105:d1m:s32:h22:92% + xppmd:12:192m',
     'ex#t = dict:p:128m:80% + lzp:160m:145:d1m:s32:h23:92% + xppmd:16:384m'

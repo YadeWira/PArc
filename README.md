@@ -21,6 +21,8 @@ symlinks, Reed–Solomon recovery, volumes and authenticated encryption.
   `storing`, `lzma`, `ppmd`, `grzip`, `dict`, `rep`, `delta`, `tor` (Tornado), `lzp`, `mm`,
   `tta`, `4x4`, `exe` (BCJ x86), `lz4`, `dispack070` (DisPack) and `srep` (SREP), alone or in
   chains (`exe+dispack070+lzma`, `srep+lzma`, …).
+- **Faster and smaller than FreeArc 0.67.1** at `-m1`…`-mx` on the test corpora (both
+  compressed size and wall-clock time; see `docs/ESTADO.md`).
 - **Reed–Solomon recovery record** (`-rr`): repairs a damaged range or scattered sectors,
   not just single sectors per group.
 - **Volumes** (`-v`), **strong encryption** (`-p`/`-hp`: AES/Blowfish/Serpent/Twofish,
