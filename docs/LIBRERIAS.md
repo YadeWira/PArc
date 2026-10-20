@@ -1,7 +1,10 @@
 # Librerías de terceros en FreeArc 0.67 y su estado (relevado 2026-09-24)
 
 > Las rutas de FreeArc que aparecen en este documento (`Compression/...`, `Unarc/...`,
-> `Arc.hs`, ...) son relativas a `reference/freearc-0.67/`.
+> `Arc.hs`, ...) son relativas a `reference/freearc-0.67/`. En el repo sólo se conserva
+> `Compression/` (referencia de códecs y oráculo de los tests); el resto del fuente de
+> FreeArc 0.67 (Haskell, `Unarc/`, `ArcShellExt/`, `Documentation/`) está en el historial
+> de git (commit `82ea8d9`) y en la distribución original de FreeArc.
 
 | Librería | En FreeArc | Actual | ¿Formato compatible al actualizar? | Notas |
 |---|---|---|---|---|

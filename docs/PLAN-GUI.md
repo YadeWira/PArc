@@ -1,7 +1,10 @@
 # Plan de la GUI de PArc (v0.1, 2026-09-24)
 
 Basado en el relevamiento de la GUI de FreeArc 0.67 (GUI.hs, FileManager*.hs, UI.hs, CUI.hs,
-DLLUI.hs, ArcShellExt/). Todavía no hay decisiones tomadas: ver §5.
+DLLUI.hs, ArcShellExt/). Esos fuentes ya no están en el árbol de trabajo (se recortó
+`reference/freearc-0.67/` a `Compression/`); se recuperan con
+`git show 82ea8d9:reference/freearc-0.67/GUI.hs` (o del commit completo) o de la distribución
+original de FreeArc. Todavía no hay decisiones tomadas: ver §5.
 
 > **Estado (2026-10-20):** la GUI **no se empieza hasta que el humano lo diga**. No es una
 > fase en curso: primero van los bugs y la actualización de codecs. Decisiones ya tomadas:

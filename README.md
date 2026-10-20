@@ -35,8 +35,10 @@ comparison and tests).
 src/                     PArc sources (Free Pascal)
 docs/                    manuals and format notes (currently in Spanish)
 tests/                   test suite, oracles and fuzzers
-reference/freearc-0.67/  original FreeArc 0.67 sources (Haskell/C++), used as the
-                         format/codec reference and test oracle; not part of the build
+reference/freearc-0.67/  only Compression/: the FreeArc 0.67 codec sources used as the
+                         reference and test oracle. The rest of the original tree
+                         (Haskell sources, Unarc, ArcShellExt, docs) lives in git history
+                         (commit 82ea8d9), not in the working tree.
 build.sh                 builds parc and parcsfx
 ```
 

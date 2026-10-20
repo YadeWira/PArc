@@ -1,7 +1,10 @@
 # Formato de archivo FreeArc (`.arc`) — especificación para PArc
 
 > Las rutas de FreeArc que aparecen en este documento (`Compression/...`, `Unarc/...`,
-> `Arc.hs`, ...) son relativas a `reference/freearc-0.67/`.
+> `Arc.hs`, ...) son relativas a `reference/freearc-0.67/`. En el repo sólo se conserva
+> `Compression/` (referencia de códecs y oráculo de los tests); el resto del fuente de
+> FreeArc 0.67 (Haskell, `Unarc/`, `ArcShellExt/`, `Documentation/`) está en el historial
+> de git (commit `82ea8d9`) y en la distribución original de FreeArc.
 
 Estado: **v0.1 (2026-09-24)**, derivada de las fuentes de FreeArc 0.67
 (`ArhiveStructure.hs`, `ArhiveDirectory.hs`, `ByteStream.hs`, `Compression.hs`,

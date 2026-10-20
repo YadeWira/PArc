@@ -20,7 +20,7 @@ T=$REPO/build/tests/test_tornado
 if [ ! -x "$TOR" ]; then
   echo "== compilando el oráculo en $LAB"
   mkdir -p "$LAB/src/Tornado"
-  F=$ROOT/reference/freearc-0.67/Compression
+  F=$REPO/reference/freearc-0.67/Compression
   cp "$F/Common.h" "$F/Common.cpp" "$F/Compression.h" "$LAB/src/"
   cp "$F"/Tornado/*.cpp "$F"/Tornado/*.h "$LAB/src/Tornado/"
   sed -i 's/^int compress_all_at_once = 0;/int compress_all_at_once = getenv("TOR_AAO")!=NULL;/' "$LAB/src/Tornado/main.cpp"

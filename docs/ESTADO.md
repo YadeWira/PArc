@@ -7,7 +7,9 @@ cómo verificarlo.
 
 ```
 src/  docs/  tests/  build.sh        PArc
-reference/freearc-0.67/               fuente original de FreeArc 0.67 (referencia/oráculo)
+reference/freearc-0.67/Compression/   referencia de códecs y oráculo de los tests
+                                       (el resto del fuente original está en el historial
+                                       de git, commit 82ea8d9)
 ```
 
 Las rutas `Compression/...`, `Unarc/...`, `Arc.hs`, etc. que se citan en los demás documentos
