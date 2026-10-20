@@ -161,7 +161,7 @@ begin
           s512, h0, a1. N% -> MinCompression; N -> MinMatchLen. :c se purifica. }
     if Name = 'rep' then
     begin
-      BS := ParseMem(Pr(0), 64*MB);
+      BS := ParseMem(Pr(1), 64*MB);
       if BS > Limit then BS := Limit;                 { SetDictionary }
       MC := 100; MML := 512; Bar := INT_MAX;
       Sm := 512; HSL := 0;   Amp := 1;
@@ -190,7 +190,7 @@ begin
           mc0, pb2, lc3, lp0. SetDictionary: dict=max(32kb, mem) en 32-bit. }
     if Name = 'lzma' then
     begin
-      BS := ParseMem(Pr(0), 64*MB);
+      BS := ParseMem(Pr(1), 64*MB);
       if BS > Limit then BS := Limit;
       if BS < 32*KB then BS := 32*KB;
       Hash := Int64(0); Alg := 1; MFi := 0;  { 0=HT4 1=BT2 2=BT3 3=BT4 4=HC4 }
@@ -274,7 +274,7 @@ begin
           Presets: p -> l8192 m400 s100; f -> l2048 m100 s50 r0. }
     if Name = 'dict' then
     begin
-      BS := ParseMem(Pr(0), 64*MB);
+      BS := ParseMem(Pr(1), 64*MB);
       if BS > Limit then BS := Limit;
       MC := 100; W := 20; LC := 2048; MM := 100; MS := 50; MR := 4;
       for J := 1 to High(Parts) do
@@ -306,7 +306,7 @@ begin
           Show imprime :<mm>:h<h> SIEMPRE. SetBlockSize: h=min(h,1+lb(BS-1)). }
     if Name = 'lzp' then
     begin
-      BS := ParseMem(Pr(0), 8*MB);
+      BS := ParseMem(Pr(1), 8*MB);
       if BS > Limit then BS := Limit;
       MC := 100; MML := 64; HSL := 18; Bar := INT_MAX; Sm := 32;
       for J := 1 to High(Parts) do
