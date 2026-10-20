@@ -131,7 +131,9 @@ begin
   else
     OutLn(Format('Extraídos %d archivo(s) y %d directorio(s), %d bytes. Saltados: %d. Errores: %d',
       [St.Files, St.Dirs, St.Bytes, St.Skipped, St.Errors]));
-  if St.Errors > 0 then Result := 2 else Result := 0;
+  if St.Unsupported then Result := 3
+  else if St.Errors > 0 then Result := 2
+  else Result := 0;
 end;
 
 { Orden en que Windows (NTFS, y wine) devuelve un directorio: sin distinguir mayúsculas,

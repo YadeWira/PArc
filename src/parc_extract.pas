@@ -29,6 +29,7 @@ type
   TExtractStats = record
     Files, Dirs, Errors, Skipped: Integer;
     Bytes: Int64;
+    Unsupported: Boolean;   // algún bloque usa un método que PArc todavía no sabe leer
   end;
 
   TLogProc = procedure(const Msg: string);
@@ -385,6 +386,7 @@ begin
       except
         on E: EUnsupportedMethod do
         begin
+          Result.Unsupported := True;
           Log(Format('ERROR: %s (bloque en pos %d, %d archivo(s))', [E.Message, Blk.Pos, Blk.FileCount]));
           ReportLost(Blk, LastWanted);
         end;
