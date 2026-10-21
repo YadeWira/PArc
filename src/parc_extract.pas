@@ -390,6 +390,143 @@ begin
       '" will try to repair it (writes fixed.' + ExtractFileName(A.FileName) + ').');
 end;
 
+{ Decodifica un bloque completo a un temporal, en un hilo. La extracción posterior lee de ese
+  temporal y conserva el orden y el comportamiento del camino serial. }
+type
+  TDecodeTemps = array of string;
+
+  TDecodeBlockJob = class(TParallelJob)
+  public
+    A: TArchive;
+    BlockIndex: Integer;
+    TempName: string;
+    OK: Boolean;
+    ErrMsg: string;
+    procedure Process; override;
+  end;
+
+procedure TDecodeBlockJob.Process;
+var
+  Blk: TArcBlock;
+  Stream, OutS: TStream;
+  Chain: TInStage;
+  Buf: TBytes;
+  Remaining: Int64;
+  n: SizeInt;
+begin
+  OK := False;
+  try
+    Blk := A.DataBlocks[BlockIndex];
+    Stream := OpenArchiveStream(A.FileName);
+    try
+      Chain := CreateDecoderChain(Blk.Method, TFileSliceStage.Create(Stream, Blk.Pos, Blk.CompSize));
+      try
+        OutS := TFileStream.Create(FsPath(TempName), fmCreate);
+        try
+          SetLength(Buf, COPY_BUF);
+          Remaining := Blk.OrigSize;
+          while Remaining > 0 do
+          begin
+            if Remaining > Length(Buf) then n := Length(Buf) else n := Remaining;
+            Chain.ReadExact(@Buf[0], n);
+            OutS.WriteBuffer(Buf[0], n);
+            Dec(Remaining, n);
+          end;
+        finally
+          OutS.Free;
+        end;
+      finally
+        Chain.Free;
+      end;
+    finally
+      Stream.Free;
+    end;
+    OK := True;
+  except
+    on E: EOperationCancelled do raise;
+    on E: Exception do
+    begin
+      OK := False;
+      ErrMsg := E.Message;
+    end;
+  end;
+end;
+
+{ Decodifica en paralelo los bloques que tienen archivos pedidos. Si algo falla, borra los
+  temporales y devuelve False: la extracción sigue por el camino serial normal. }
+function TryDecodeBlocksParallel(A: TArchive; const Opt: TExtractOptions;
+  out Temps: TDecodeTemps): Boolean;
+const
+  MAX_DECODED = Int64(2) shl 30;
+var
+  b, i, n, Count, LastWanted: Integer;
+  Total: Int64;
+  Jobs: array of TDecodeBlockJob;
+  Pool: TJobPool;
+  Tmp: string;
+begin
+  Result := False;
+  Temps := nil;
+  SetLength(Temps, Length(A.DataBlocks));
+  Count := 0;
+  Total := 0;
+  for b := 0 to High(A.DataBlocks) do
+  begin
+    LastWanted := -1;
+    for i := A.DataBlocks[b].FirstFile to A.DataBlocks[b].FirstFile + A.DataBlocks[b].FileCount - 1 do
+      if not A.Files[i].IsDir and not A.Files[i].IsLink and Wanted(Opt, A.Files[i].Name) then LastWanted := i;
+    if LastWanted >= 0 then
+    begin
+      Inc(Count);
+      Inc(Total, A.DataBlocks[b].OrigSize);
+    end;
+  end;
+  if (Count < 2) or (Total > MAX_DECODED) then Exit;
+
+  SetLength(Jobs, Count);
+  n := 0;
+  for b := 0 to High(A.DataBlocks) do
+  begin
+    LastWanted := -1;
+    for i := A.DataBlocks[b].FirstFile to A.DataBlocks[b].FirstFile + A.DataBlocks[b].FileCount - 1 do
+      if not A.Files[i].IsDir and not A.Files[i].IsLink and Wanted(Opt, A.Files[i].Name) then LastWanted := i;
+    if LastWanted < 0 then Continue;
+    Tmp := A.FileName + '.dec' + IntToStr(b);
+    DeleteFile(FsPath(Tmp));
+    Temps[b] := Tmp;
+    Jobs[n] := TDecodeBlockJob.Create;
+    Jobs[n].A := A;
+    Jobs[n].BlockIndex := b;
+    Jobs[n].TempName := Tmp;
+    Inc(n);
+  end;
+
+  Pool := TJobPool.Create(ThreadCount(4), Count);
+  try
+    try
+      for i := 0 to Count - 1 do Pool.Submit(Jobs[i]);
+      for i := 0 to Count - 1 do Pool.WaitJob(Jobs[i]);
+      Result := True;
+      for i := 0 to Count - 1 do
+        if not Jobs[i].OK then Result := False;
+    finally
+      Pool.Free;
+    end;
+  except
+    for i := 0 to High(Temps) do
+      if Temps[i] <> '' then DeleteFile(FsPath(Temps[i]));
+    for i := 0 to Count - 1 do Jobs[i].Free;
+    raise;
+  end;
+  for i := 0 to Count - 1 do Jobs[i].Free;
+  if not Result then
+  begin
+    for i := 0 to High(Temps) do
+      if Temps[i] <> '' then DeleteFile(FsPath(Temps[i]));
+    Temps := nil;
+  end;
+end;
+
 function ExtractArchive(A: TArchive; const Opt: TExtractOptions; Log: TLogProc): TExtractStats;
 var
   b, i, LastWanted: Integer;
@@ -404,6 +541,9 @@ var
   F: TArcFileEntry;
   Lm: TFileMeta;
   DoWrite, Opened: Boolean;
+  Temps: TDecodeTemps;
+  TempStream: TFileStream;
+  DecodedParallel: Boolean;
   StdOutS: TStream;        // -so
   Cur: Integer;            // el archivo que se está procesando en el bloque (-1: ninguno)
   CurWriting: Boolean;     //   y si ya se estaba escribiendo en el disco
@@ -455,6 +595,8 @@ begin
   try
   SetLength(Buf, COPY_BUF);
   Mode := Opt.Overwrite;
+  Temps := nil;
+  DecodedParallel := TryDecodeBlocksParallel(A, Opt, Temps);
 
   // Total para el progreso: lo que se descomprime, incluidos los archivos no pedidos que hay
   // que atravesar dentro de un bloque sólido
@@ -484,11 +626,18 @@ begin
     if LastWanted < 0 then Continue;
 
     Chain := nil;
+    TempStream := nil;
     Cur := -1;
     CurWriting := False;
     try
       try
-        Chain := CreateDecoderChain(Blk.Method, A.OpenBlockData(Blk));
+        if DecodedParallel and (b <= High(Temps)) and (Temps[b] <> '') then
+        begin
+          TempStream := TFileStream.Create(FsPath(Temps[b]), fmOpenRead);
+          Chain := TFileSliceStage.Create(TempStream, 0, Blk.OrigSize);
+        end
+        else
+          Chain := CreateDecoderChain(Blk.Method, A.OpenBlockData(Blk));
         for i := Blk.FirstFile to LastWanted do
         begin
           Cur := i;
@@ -611,6 +760,12 @@ begin
       end;
     finally
       Chain.Free;
+      TempStream.Free;
+      if (b <= High(Temps)) and (Temps[b] <> '') then
+      begin
+        DeleteFile(FsPath(Temps[b]));
+        Temps[b] := '';
+      end;
     end;
   end;
 
@@ -683,6 +838,9 @@ begin
       if A.Files[i].IsDir and Wanted(Opt, A.Files[i].Name) then
         RestoreMeta(DiskName(Opt, A.Files[i].Name), A.Files[i]);
   finally
+    if Temps <> nil then
+      for i := 0 to High(Temps) do
+        if Temps[i] <> '' then DeleteFile(FsPath(Temps[i]));
     StdOutS.Free;   // (THandleStream no cierra el handle)
   end;
 end;

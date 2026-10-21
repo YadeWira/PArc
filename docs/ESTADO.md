@@ -96,8 +96,10 @@ What makes this possible (all inside `.parc`; the codecs are unchanged):
   parallel at every level (mixed corpus `-m9`: ~8.8 s -> ~6.3 s; `-m5`: ~7.1 s -> ~4.3 s;
   `-mx`: ~46 s serial -> ~32 s);
   `-mx` is still slower than `-m9`.
-- **Verification (`t`)** also verifies independent blocks in parallel: mixed corpus ~3.5 s ->
+- **Verification (`t`)** verifies independent blocks in parallel: mixed corpus ~3.5 s ->
   ~2.5 s at `-m6`, and ~48.5 s -> ~32.6 s at `-mx`.
+- **Extraction (`x`/`e`)** decodes independent blocks in parallel to temp files, then writes
+  sequentially: mixed corpus ~3.2 s -> ~2.4 s at `-m6`, and ~48.4 s -> ~33.2 s at `-mx`.
 - **Directory**: mtime in ns is stored as zigzag VInt deltas (tag 7), losslessly. Saves ~2 KB
   per 1,300 files.
 - Recovery is Reed-Solomon only; the `.arc` XOR scheme is gone.

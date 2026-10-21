@@ -201,7 +201,10 @@ archive has a recovery record, PArc suggests `parc r`.
 | `--no-progress` | disable the progress line |
 
 The `t` command verifies independent blocks in parallel (workers limited by `PARC_THREADS`), so
-its speed scales with the number of blocks. The progress line (phase, percentage, MB, speed,
+its speed scales with the number of blocks. Extraction (`x`/`e`) decodes independent blocks in
+parallel to temporary files and then writes the files sequentially, so output order, overwrite
+prompts, links and error reporting are unchanged. Temporary space is up to the decoded size;
+archives with more than 2 GB of decoded blocks use the serial path. The progress line (phase, percentage, MB, speed,
 remaining time and current file) is shown on
 stderr only when it is a console; when redirected it does not appear. Ctrl-C cancels cleanly:
 when compressing, the temporary file is removed and an existing archive remains intact; when
@@ -224,7 +227,7 @@ extracting, the half-written file is deleted. A second Ctrl-C stops immediately.
 
 | variable | effect |
 |---|---|
-| `PARC_THREADS` | threads for parallel compressors (4x4, grzip), block compression and `t` verification; defaults to CPU cores |
+| `PARC_THREADS` | threads for parallel compressors (4x4, grzip), block compression, `t` verification and parallel block decoding for extraction; defaults to CPU cores |
 
 ## Examples
 
