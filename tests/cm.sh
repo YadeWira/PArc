@@ -31,6 +31,8 @@ check "-mx extrae idéntico"       'cmp corpus/prosa.txt outmx/corpus/prosa.txt'
 
 $PARC a m6.parc corpus -m6 --no-progress >/dev/null 2>&1
 check "-mx más chico que -m6"     '[ "$(stat -c%s mx.parc)" -lt "$(stat -c%s m6.parc)" ]'
+rm -f mx1.parc; PARC_THREADS=1 "$PARC" a mx1.parc corpus/prosa.txt -mx --no-progress >/dev/null 2>&1
+check "-mx paralelo == serial"    '[ "$(stat -c%s mx.parc)" = "$(stat -c%s mx1.parc)" ]'
 
 cp mx.parc bad.parc
 python3 - <<'PY'

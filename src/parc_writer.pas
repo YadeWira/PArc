@@ -42,6 +42,7 @@ type
     DataPassword: RawByteString;     // -p: cifra los bloques de datos ('' = sin cifrar)
     HeadersPassword: RawByteString;  // -hp: cifra también directorio y footer
     VolumeSize: Int64;    // -v: volúmenes de este tamaño (FileName.001, .002...); solo .parc
+    Parallel: Boolean;    // comprimir grupos independientes en paralelo (solo -mx)
   end;
 
   TWriteStats = record
@@ -53,7 +54,7 @@ type
 
 { Escribe el archivo completo. Los grupos se escriben en orden; los directorios (entradas con
   Meta.IsDir) van en un bloque inicial sin datos, como hace FreeArc. }
-function WriteArchive(const FileName: string; const Entries: array of TWriteEntry;
+function WriteArchive(const FileName: string; const Entries: TWriteEntryArray;
   const Groups: array of TSolidGroup; const Opt: TWriteOptions; Log: TLogProc): TWriteStats;
 
 { Reemplaza FileName por el temporal que dejó WriteArchive con KeepTemp. }
@@ -66,7 +67,7 @@ implementation
 
 uses
   parc_bytes, parc_crc, parc_stream, parc_outstream, parc_encoders, parc_methods, parc_recovery, parc_progress,
-  parc_volume;
+  parc_volume, parc_parallel;
 
 const
   VERSION_PARC: array[0..3] of Byte = (PARC_FORMAT_VERSION, 0, 0, 0);
@@ -427,8 +428,8 @@ begin
     end;
 end;
 
-function WriteDataBlock(S: TStream; const Entries: array of TWriteEntry; const G: TSolidGroup;
-  const Opt: TWriteOptions; Log: TLogProc; var Stats: TWriteStats): TDataBlock;
+function WriteDataBlock(S: TStream; const Entries: TWriteEntryArray; const G: TSolidGroup;
+  const Opt: TWriteOptions; Log: TLogProc; var Stats: TWriteStats; Quiet: Boolean = False): TDataBlock;
 var
   Chain: TOutStage;
   Buf: TBytes;
@@ -503,7 +504,7 @@ begin
       n := G.Files[i];
       Crc := CRC_INIT;
       Size := 0;
-      if not Entries[n].Meta.IsDir then ProgressFile(Entries[n].StoredName);
+      if not Quiet and not Entries[n].Meta.IsDir then ProgressFile(Entries[n].StoredName);
       if not Entries[n].Meta.IsDir and not Entries[n].Meta.IsLink and (Entries[n].SrcArc <> nil) then
       begin
         with Entries[n] do
@@ -529,7 +530,7 @@ begin
             CurChain.ReadExact(@Buf[0], Got);
             Crc := UpdateCRC(Crc, @Buf[0], Got);
             Chain.Write(@Buf[0], Got);
-            ProgressAdd(Got);
+            if not Quiet then ProgressAdd(Got);
             Inc(Size, Got);
             Dec(Remaining, Got);
           end;
@@ -552,7 +553,7 @@ begin
             begin
               Crc := UpdateCRC(Crc, @Buf[0], Got);
               Chain.Write(@Buf[0], Got);
-              ProgressAdd(Got);
+              if not Quiet then ProgressAdd(Got);
               Inc(Size, Got);
             end;
           until Got <= 0;
@@ -560,7 +561,7 @@ begin
           F.Free;
         end;
         if Size <> Entries[n].Meta.Size then
-          Log(Format('Warning: %s changed size while being read (%d -> %d bytes)',
+          if not Quiet and Assigned(Log) then Log(Format('Warning: %s changed size while being read (%d -> %d bytes)',
             [Entries[n].DiskPath, Entries[n].Meta.Size, Size]));
         Inc(Stats.Files);
         Inc(Stats.Bytes, Size);
@@ -579,7 +580,39 @@ begin
   Result.CompSize := S.Position - Result.Pos;
 end;
 
-function WriteArchive(const FileName: string; const Entries: array of TWriteEntry;
+{ Un bloque comprimido en un hilo, con su propio archivo temporal y estadísticas. }
+type
+  TWriteBlockJob = class(TParallelJob)
+  public
+    Entries: TWriteEntryArray;
+    Group: TSolidGroup;
+    Opt: TWriteOptions;
+    TempName: string;
+    Block: TDataBlock;
+    Stats: TWriteStats;
+    OrigBytes: Int64;
+    procedure Process; override;
+  end;
+
+procedure TWriteBlockJob.Process;
+var
+  F: TFileStream;
+  i: Integer;
+begin
+  OrigBytes := 0;
+  for i := 0 to High(Group.Files) do
+    if not Entries[Group.Files[i]].Meta.IsDir then
+      Inc(OrigBytes, Entries[Group.Files[i]].Meta.Size);
+  Stats := Default(TWriteStats);
+  F := TFileStream.Create(FsPath(TempName), fmCreate);
+  try
+    Block := WriteDataBlock(F, Entries, Group, Opt, nil, Stats, True);
+  finally
+    F.Free;
+  end;
+end;
+
+function WriteArchive(const FileName: string; const Entries: TWriteEntryArray;
   const Groups: array of TSolidGroup; const Opt: TWriteOptions; Log: TLogProc): TWriteStats;
 var
   Tmp: string;
@@ -588,10 +621,15 @@ var
   Control: TBlockInfoArray;
   Blocks: array of TDataBlock;
   DirGroup: TSolidGroup;
-  i, n: Integer;
+  AllGroups: TSolidGroupArray;
+  Jobs: array of TWriteBlockJob;
+  Pool: TJobPool;
+  i, n, k: Integer;
   DirData: TBytes;
-  Ok: Boolean;
+  Ok, UseParallel: Boolean;
   Total: Int64;
+  TmpBlock: string;
+  F: TFileStream;
 begin
   Result := Default(TWriteStats);
   if not EncoderAvailable(Opt.DirMethod) then
@@ -634,17 +672,92 @@ begin
           DirGroup.Files[n] := i;
         end;
       Blocks := nil;
+      SetLength(AllGroups, 0);
       if Length(DirGroup.Files) > 0 then
       begin
-        SetLength(Blocks, 1);
-        Blocks[0] := WriteDataBlock(S, Entries, DirGroup, Opt, Log, Result);
+        SetLength(AllGroups, 1);
+        AllGroups[0] := DirGroup;
       end;
       for i := 0 to High(Groups) do
         if Length(Groups[i].Files) > 0 then
         begin
+          n := Length(AllGroups);
+          SetLength(AllGroups, n + 1);
+          AllGroups[n] := Groups[i];
+        end;
+
+      UseParallel := Opt.Parallel and (Length(AllGroups) > 1) and
+        (Opt.DataPassword = '') and (Opt.HeadersPassword = '');
+      if UseParallel then
+      begin
+        n := 0;
+        for i := 0 to High(AllGroups) do
+          for k := 0 to High(AllGroups[i].Files) do
+            if not Entries[AllGroups[i].Files[k]].Meta.IsDir then
+            begin
+              Inc(n);
+              Break;
+            end;
+        if n < 2 then UseParallel := False;   // los directorios solos no justifican hilos
+      end;
+      if UseParallel then
+        for i := 0 to High(Entries) do
+          if Entries[i].SrcArc <> nil then UseParallel := False;
+      if UseParallel then
+        for i := 0 to High(AllGroups) do
+          if AllGroups[i].CopyFrom <> nil then UseParallel := False;
+
+      if UseParallel then
+      begin
+        n := Length(AllGroups);
+        SetLength(Jobs, n);
+        Pool := TJobPool.Create(ThreadCount(4), n);
+        try
+          for i := 0 to n - 1 do
+          begin
+            Jobs[i] := TWriteBlockJob.Create;
+            Jobs[i].Entries := Entries;
+            Jobs[i].Group := AllGroups[i];
+            Jobs[i].Opt := Opt;
+            Jobs[i].TempName := FileName + '.blk' + IntToStr(i);
+            Pool.Submit(Jobs[i]);
+          end;
+          SetLength(Blocks, n);
+          for i := 0 to n - 1 do
+          begin
+            Pool.WaitJob(Jobs[i]);
+            Blocks[i] := Jobs[i].Block;
+            Blocks[i].Pos := S.Position;
+            F := TFileStream.Create(FsPath(Jobs[i].TempName), fmOpenRead);
+            try
+              S.CopyFrom(F, 0);
+            finally
+              F.Free;
+            end;
+            Inc(Result.Files, Jobs[i].Stats.Files);
+            Inc(Result.Dirs, Jobs[i].Stats.Dirs);
+            Inc(Result.Bytes, Jobs[i].Stats.Bytes);
+            ProgressAdd(Jobs[i].OrigBytes);
+          end;
+        finally
+          for i := 0 to High(Jobs) do
+          begin
+            if Jobs[i] <> nil then
+            begin
+              TmpBlock := Jobs[i].TempName;
+              Jobs[i].Free;
+              if TmpBlock <> '' then DeleteFile(FsPath(TmpBlock));
+            end;
+          end;
+          Pool.Free;
+        end;
+      end
+      else
+        for i := 0 to High(AllGroups) do
+        begin
           n := Length(Blocks);
           SetLength(Blocks, n + 1);
-          Blocks[n] := WriteDataBlock(S, Entries, Groups[i], Opt, Log, Result);
+          Blocks[n] := WriteDataBlock(S, Entries, AllGroups[i], Opt, Log, Result);
         end;
 
       ProgressEnd;

@@ -74,8 +74,9 @@ compressor's dictionary is reduced to the block size, so extracting a small file
 require the full preset memory.
 
 `-mx` uses the **context-mixing** codec (`cm`, lpaq1-style) for text and binaries: it produces
-clearly smaller archives but is several times slower than `-m9`. `-m9` keeps the fast
-LZMA/PPMd path.
+clearly smaller archives but is several times slower than `-m9`. When there are several
+independent blocks, `-mx` compresses them in parallel (workers limited by `PARC_THREADS`).
+`-m9` keeps the fast LZMA/PPMd path.
 
 When updating (`a`, `u`, `f`), solid blocks that remain intact are copied without recompression;
 `--recompress` forces rebuilding them. With `d` and an explicit `-m`, the whole archive is
@@ -221,7 +222,7 @@ extracting, the half-written file is deleted. A second Ctrl-C stops immediately.
 
 | variable | effect |
 |---|---|
-| `PARC_THREADS` | number of threads for parallel compressors (4x4, grzip); defaults to CPU cores |
+| `PARC_THREADS` | threads for parallel compressors (4x4, grzip) and for `-mx` block workers; defaults to CPU cores |
 
 ## Examples
 
