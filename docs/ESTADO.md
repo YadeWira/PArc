@@ -115,6 +115,7 @@ What makes this possible (all inside `.parc`; the codecs are unchanged):
 | Windows 10 x64 (WOW64) | win32 | same basic tests and a cross-checked archive on Linux |
 | Windows 7 SP1 x64 | win32 and win64 | create/test/extract, encryption and Linux ↔ Windows cross-check |
 | Linux ↔ Windows | both | `.parc` round-trip compared byte by byte with `diff` |
+| Windows (final presets) | win32/win64 | Wine 10.0 smoke: `-m2`, `-m3`, `-mx`, `-mxx`, create/test/extract and `diff` |
 
 SREP with the 32-bit binary was verified under Wine and with an archive cross-checked on Linux
 (the rest of the Windows tests ran in the real VMs).
