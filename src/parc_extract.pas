@@ -491,7 +491,7 @@ begin
     for i := A.DataBlocks[b].FirstFile to A.DataBlocks[b].FirstFile + A.DataBlocks[b].FileCount - 1 do
       if not A.Files[i].IsDir and not A.Files[i].IsLink and Wanted(Opt, A.Files[i].Name) then LastWanted := i;
     if LastWanted < 0 then Continue;
-    Tmp := A.FileName + '.dec' + IntToStr(b);
+    Tmp := A.FileName + Format('.dec-%d-%d', [GetProcessID, b]);
     DeleteFile(FsPath(Tmp));
     Temps[b] := Tmp;
     Jobs[n] := TDecodeBlockJob.Create;
