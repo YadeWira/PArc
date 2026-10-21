@@ -9,7 +9,7 @@ unit parc_cm;
 interface
 
 uses
-  Classes, SysUtils, parc_bytes, parc_outstream, parc_stream;
+  Classes, SysUtils, Math, parc_bytes, parc_outstream, parc_stream;
 
 { Compress Src[0..SrcLen) into Dst (8-byte original size + arithmetic-coded data). }
 function CmCompressMem(Src: PByte; SrcLen: SizeInt; out Dst: TBytes; Level: Integer = 6): Boolean;
@@ -318,7 +318,7 @@ type
   TCMAPM = class(TCMStateMap)
   public
     constructor Create(AN: Integer);
-    function PP(y, pr, cx: Integer; limit: Integer = 255): Integer;
+    function PP(y, pr, cx: Integer; limit: Integer = 255): Integer; inline;
   end;
 
   TCMMixer = class
@@ -386,7 +386,7 @@ begin
   else Result := not ((not V) shr N);
 end;
 
-function Squash(D: Integer): Integer;
+function Squash(D: Integer): Integer; inline;
 var
   w: Integer;
 begin
@@ -423,20 +423,18 @@ begin
   for i := 0 to N - 1 do t[i] := LongWord(1) shl 31;
 end;
 
-procedure TCMStateMap.Update(y, limit: Integer);
+procedure TCMStateMap.Update(y, limit: Integer); inline;
 var
-  nn, pv: Integer;
-  v: Int64;
+  nn, pv, v: LongInt;
   incv: LongWord;
 begin
   nn := t[cxt] and 1023;
   pv := t[cxt] shr 10;
   if nn < limit then Inc(t[cxt])
   else t[cxt] := (t[cxt] and $fffffc00) or LongWord(limit);
-  v := AShr((Int64(y shl 22) - pv), 3) * SM_DT[nn];
-  incv := LongWord(v) and $fffffc00;
+  v := SarLongint((y shl 22) - pv, 3);
+  incv := LongWord(v * SM_DT[nn]) and $fffffc00;
   t[cxt] := t[cxt] + incv;
-  if cxt < 0 then cxt := 0;
 end;
 
 function TCMStateMap.P(y, cx, limit: Integer): Integer;
@@ -478,8 +476,8 @@ constructor TCMMixer.Create(AN, AM: Integer);
 begin
   inherited Create;
   N := AN; M := AM; cxt := 0; nx := 0; pr := 2048;
-  SetLength(tx, N);
-  SetLength(wx, N * M);
+  SetLength(tx, 7);
+  SetLength(wx, 7 * M);
 end;
 
 procedure TCMMixer.Add(x: Integer);
@@ -495,25 +493,30 @@ end;
 function TCMMixer.P: Integer;
 var
   sum: Int64;
-  i: Integer;
+  w: PInteger;
 begin
-  sum := 0;
-  for i := 0 to N - 1 do Inc(sum, Int64(tx[i]) * wx[cxt * N + i]);
-  pr := Squash(AShr(sum, 8) shr 8);
+  w := @wx[cxt * 7];
+  sum := Int64(tx[0]) * w[0] + Int64(tx[1]) * w[1] + Int64(tx[2]) * w[2] +
+         Int64(tx[3]) * w[3] + Int64(tx[4]) * w[4] + Int64(tx[5]) * w[5] +
+         Int64(tx[6]) * w[6];
+  pr := Squash(sum shr 16);
   Result := pr;
 end;
 
 procedure TCMMixer.Update(y: Integer);
 var
-  err, i: Integer;
-  v: Int64;
+  err: Integer;
+  w: PInteger;
 begin
   err := ((y shl 12) - pr) * 7;
-  for i := 0 to N - 1 do
-  begin
-    v := AShr(Int64(tx[i]) * err + $8000, 16);
-    wx[cxt * N + i] := wx[cxt * N + i] + Integer(v);
-  end;
+  w := @wx[cxt * 7];
+  Inc(w[0], SarLongint(tx[0] * err + $8000, 16));
+  Inc(w[1], SarLongint(tx[1] * err + $8000, 16));
+  Inc(w[2], SarLongint(tx[2] * err + $8000, 16));
+  Inc(w[3], SarLongint(tx[3] * err + $8000, 16));
+  Inc(w[4], SarLongint(tx[4] * err + $8000, 16));
+  Inc(w[5], SarLongint(tx[5] * err + $8000, 16));
+  Inc(w[6], SarLongint(tx[6] * err + $8000, 16));
   nx := 0;
 end;
 
@@ -526,7 +529,7 @@ begin
   SetLength(t, N + 64);
 end;
 
-function TCMHashTable.Entry(i: LongWord): PByte;
+function TCMHashTable.Entry(i: LongWord): PByte; inline;
 var
   chk: Byte;
   idx: LongWord;
@@ -663,7 +666,12 @@ var
   i, j, order, len: Integer;
   c: Byte;
 begin
-  for i := 0 to 5 do cp[i]^ := STATE_TABLE[cp[i]^][y];
+  cp[0]^ := STATE_TABLE[cp[0]^][y];
+  cp[1]^ := STATE_TABLE[cp[1]^][y];
+  cp[2]^ := STATE_TABLE[cp[2]^][y];
+  cp[3]^ := STATE_TABLE[cp[3]^][y];
+  cp[4]^ := STATE_TABLE[cp[4]^][y];
+  cp[5]^ := STATE_TABLE[cp[5]^][y];
   m.Update(y);
 
   Inc(bcount);
@@ -699,7 +707,7 @@ begin
   else if bcount > 0 then
   begin
     j := (y + 1) shl ((bcount and 3) - 1);
-    for i := 1 to 5 do Inc(cp[i], j);
+    Inc(cp[1], j); Inc(cp[2], j); Inc(cp[3], j); Inc(cp[4], j); Inc(cp[5], j);
   end;
   cp[0] := @t0[h[0] + LongWord(c0)];
 
@@ -714,7 +722,12 @@ begin
   end
   else
     order := 5 + Ord(len >= 8) + Ord(len >= 12) + Ord(len >= 16) + Ord(len >= 32);
-  for i := 0 to 5 do m.Add(STRETCH[sm[i].P(y, cp[i]^, 1023)]);
+  m.Add(STRETCH[sm[0].P(y, cp[0]^, 1023)]);
+  m.Add(STRETCH[sm[1].P(y, cp[1]^, 1023)]);
+  m.Add(STRETCH[sm[2].P(y, cp[2]^, 1023)]);
+  m.Add(STRETCH[sm[3].P(y, cp[3]^, 1023)]);
+  m.Add(STRETCH[sm[4].P(y, cp[4]^, 1023)]);
+  m.Add(STRETCH[sm[5].P(y, cp[5]^, 1023)]);
   m.SetCtx(order + 10 * Integer(h[0] shr 13));
   pr := m.P;
   pr := (pr + 3 * a1.PP(y, pr, c0)) shr 2;
@@ -832,6 +845,37 @@ begin
   Result := FOut;
 end;
 
+{ Quick order-0 entropy estimate over a few samples: random/encrypted data is stored
+  directly instead of spending seconds in the CM model only to fall back to raw. }
+function LooksIncompressible(Src: PByte; SrcLen: SizeInt): Boolean;
+var
+  Count: array[0..255] of Int64;
+  Chunk, Total, Start, I, J, Take: SizeInt;
+  P: Double;
+  H: Double;
+begin
+  Result := False;
+  if SrcLen < 4096 then Exit;
+  FillChar(Count, SizeOf(Count), 0);
+  Total := 0;
+  Chunk := Min(SrcLen, 65536);
+  for I := 0 to 3 do
+  begin
+    Start := (Int64(SrcLen - Chunk) * I) div 3;
+    Take := Chunk;
+    for J := 0 to Take - 1 do Inc(Count[Src[Start + J]]);
+    Inc(Total, Take);
+  end;
+  H := 0;
+  for I := 0 to 255 do
+    if Count[I] > 0 then
+    begin
+      P := Count[I] / Total;
+      H := H - P * (Ln(P) / Ln(2));
+    end;
+  Result := H > 7.95;
+end;
+
 { Public block API }
 
 function CmCompressMem(Src: PByte; SrcLen: SizeInt; out Dst: TBytes; Level: Integer): Boolean;
@@ -841,6 +885,14 @@ var
   i, n: Integer;
 begin
   Result := False;
+  if LooksIncompressible(Src, SrcLen) then
+  begin
+    SetLength(Dst, 9 + SrcLen);
+    for i := 0 to 7 do Dst[i] := Byte(QWord(SrcLen) shr (8 * i));
+    Dst[8] := 1;
+    if SrcLen > 0 then Move(Src^, Dst[9], SrcLen);
+    Exit(True);
+  end;
   E := TCMEncoder.Create(Level, True, Src, SrcLen);
   try
     C := E.Compress;

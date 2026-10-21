@@ -4,7 +4,7 @@
 set -e
 cd "$(dirname "$0")"
 
-FPCFLAGS="-O2 -Xs -vewn -Fusrc"
+FPCFLAGS="-O3 -Xs -vewn -Fusrc"
 FPC_CROSS="${FPC_CROSS:-/mnt/IA_LAB/compartido/parc/fpc-cross}"
 
 build() {
