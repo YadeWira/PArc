@@ -266,20 +266,31 @@ begin
   Result := 0;
 end;
 
+function TimingText(T0, T1: QWord; Bytes: Int64): string;
+begin
+  if (Bytes <= 0) or (T1 <= T0) then Exit('');
+  Result := Format('   time: %.2f s   speed: %.1f MB/s',
+    [(T1 - T0) / 1000.0, Bytes / ((T1 - T0) / 1000.0) / 1048576.0]);
+end;
+
 function CmdExtract(A: TArchive; const Cmd: string; const Opt0: TExtractOptions): Integer;
 var
   Opt: TExtractOptions;
   St: TExtractStats;
+  T0, T1: QWord;
 begin
   Opt := Opt0;
   Opt.TestOnly := Cmd = 't';
   Opt.FlatNames := Cmd = 'e';
+  T0 := GetTickCount64;
   St := ExtractArchive(A, Opt, @LogLine);
+  T1 := GetTickCount64;
   if Opt.TestOnly then
-    OutLn(Format('Verified %d file(s), %d bytes. Errors: %d', [St.Files, St.Bytes, St.Errors]))
+    OutLn(Format('Verified %d file(s), %d bytes. Errors: %d%s',
+      [St.Files, St.Bytes, St.Errors, TimingText(T0, T1, St.Bytes)]))
   else
-    OutLn(Format('Extracted %d file(s) and %d director(ies), %d bytes. Skipped: %d. Errors: %d',
-      [St.Files, St.Dirs, St.Bytes, St.Skipped, St.Errors]));
+    OutLn(Format('Extracted %d file(s) and %d director(ies), %d bytes. Skipped: %d. Errors: %d%s',
+      [St.Files, St.Dirs, St.Bytes, St.Skipped, St.Errors, TimingText(T0, T1, St.Bytes)]));
   if St.Unsupported then Result := 3
   else if St.Errors > 0 then Result := 2
   else Result := 0;
@@ -791,6 +802,7 @@ var
   Opt: TWriteOptions;
   St: TWriteStats;
   i, j, n, Removed, Replaced, Added: Integer;
+  T0, T1: QWord;
   Missing, Verb, OldRR, VolBase, VolInfo, FinalName: string;
   SfxPrefix: TBytes;
   NVol: Integer;
@@ -968,7 +980,9 @@ begin
     Opt.VolumeSize := MO.VolumeSize;
     if (Opt.VolumeSize = 0) and IsVolumeSet(ArcName, VolBase) then
       Opt.VolumeSize := FileSizeOf(VolumeName(ArcName, 1));
+    T0 := GetTickCount64;
     St := WriteArchive(ArcName, Entries, Groups, Opt, @LogLine);
+    T1 := GetTickCount64;
   finally
     A.Free;
   end;
@@ -992,6 +1006,15 @@ begin
   if MO.ShownName <> '' then FinalName := MO.ShownName;
   OutLn(Format('%s %s (%s%s): %d file(s) and %d director(ies), %d bytes -> %d bytes',
     [Verb, FinalName, 'parc' + BoolToStr(Length(SfxPrefix) > 0, ', self-extracting', ''), VolInfo, St.Files, St.Dirs, St.Bytes, St.ArcSize]));
+  if St.Bytes > 0 then
+  begin
+    if T1 > T0 then
+      OutLn(Format('  ratio: %.2f%%   time: %.2f s   speed: %.1f MB/s',
+        [100.0 * St.ArcSize / St.Bytes, (T1 - T0) / 1000.0,
+         St.Bytes / ((T1 - T0) / 1000.0) / 1048576.0]))
+    else
+      OutLn(Format('  ratio: %.2f%%', [100.0 * St.ArcSize / St.Bytes]));
+  end;
   if Exists then
     OutLn(Format('  added %d, replaced %d, deleted %d', [Added, Replaced, Removed]));
   Result := 0;
