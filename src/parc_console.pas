@@ -153,7 +153,9 @@ begin
   TotalComp := 0;
   for i := 0 to High(A.DataBlocks) do Inc(TotalComp, A.DataBlocks[i].CompSize);
   Ratio := '';
-  if TotalSize > 0 then Ratio := Format('   ratio: %.1f%%', [100.0 * TotalComp / TotalSize]);
+  // En archivos diminutos los encabezados dominan y el ratio no significa nada.
+  if TotalSize >= 64 * 1024 then
+    Ratio := Format('   ratio: %.1f%%', [100.0 * TotalComp / TotalSize]);
   OutLn('Archive: ' + A.FileName);
   OutLn(Format('  %d file(s)   size: %s   packed: %s%s',
     [Length(A.Files), FmtSize(TotalSize), FmtSize(TotalComp), Ratio]));
