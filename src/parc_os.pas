@@ -168,6 +168,16 @@ begin
   else Result := '\\?\' + F;
 end;
 
+function IsDirectoryPath(const P: string): Boolean;
+var
+  Attr: LongInt;
+begin
+  // DirectoryExists() de FPC devuelve False para directorios con el atributo de punto de
+  // reanálisis (por ejemplo los que Wine expone para las unidades Z:); FileGetAttr sí los ve.
+  Attr := FileGetAttr(FsPath(P));
+  Result := (Attr <> -1) and ((Attr and faDirectory) <> 0);
+end;
+
 function MakeDirs(const Dir: string): Boolean;
 var
   F, Prefix: string;
@@ -189,8 +199,8 @@ begin
     if (i > Length(F)) or (F[i] = '\') then
     begin
       Prefix := Copy(F, 1, i - 1);
-      if not DirectoryExists(FsPath(Prefix)) then
-        if not CreateDir(FsPath(Prefix)) and not DirectoryExists(FsPath(Prefix)) then Exit(False);
+      if not IsDirectoryPath(Prefix) then
+        if not CreateDir(FsPath(Prefix)) and not IsDirectoryPath(Prefix) then Exit(False);
     end;
   Result := True;
 end;
