@@ -3,9 +3,12 @@
   FreeArc en el mismo nivel (ver docs/ESTADO.md). }
 
 const
-  BUILTIN_METHOD_SUBSTS: array[0..138] of string = (
+  BUILTIN_METHOD_SUBSTS: array[0..141] of string = (
     ';High-level method definitions',
     'x  = 9            ;highest compression mode using only internal algorithms',
+    'x$text = dict:p:128m:75%:l8192:m800:s250+lzp:160m:145:d1m:s32:h23:90%+cm',
+    'x$binary = rep+exe+delta+cm',
+    'x$obj = rep+exe+delta+cm',
     'ax = 9p           ;highest compression mode involving external compressors',
     '0  = storing',
     '1  = 1b',

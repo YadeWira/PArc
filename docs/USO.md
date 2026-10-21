@@ -64,7 +64,7 @@ if that fails, PArc warns and skips it.
 | option | effect |
 |---|---|
 | `-m<N>` | preset (from FreeArc): `-m0` (store) to `-m9`, `-mx`. Default is `-m4` |
-| `-m<method>` | explicit method, e.g. `-mlzma:64mb:max` or `-mrep:96m+exe+lzma` |
+| `-m<method>` | explicit method, e.g. `-mlzma:64mb:max`, `-mcm` or `-mrep:96m+exe+lzma` |
 | `--recompress` | when updating, rebuild every block with the requested method instead of copying intact ones |
 | `-x<pattern>` | exclude files; may be repeated |
 
@@ -72,6 +72,10 @@ Presets choose a method per file type, like FreeArc: through `arc.groups` (exten
 the preset distinguishes text or already-compressed data, by inspecting content. Each
 compressor's dictionary is reduced to the block size, so extracting a small file does not
 require the full preset memory.
+
+`-mx` uses the **context-mixing** codec (`cm`, lpaq1-style) for text and binaries: it produces
+clearly smaller archives but is several times slower than `-m9`. `-m9` keeps the fast
+LZMA/PPMd path.
 
 When updating (`a`, `u`, `f`), solid blocks that remain intact are copied without recompression;
 `--recompress` forces rebuilding them. With `d` and an explicit `-m`, the whole archive is

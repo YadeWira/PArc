@@ -45,7 +45,7 @@ implementation
 
 uses
   parc_crypt, StrUtils, parc_os, parc_lzma, parc_filters, parc_lz4, parc_rep, parc_lzp, parc_ppmd,
-  parc_dict, parc_tornado, parc_grzip, parc_parallel, parc_tta, parc_mm, parc_dispack, parc_srep;
+  parc_dict, parc_tornado, parc_grzip, parc_parallel, parc_tta, parc_mm, parc_dispack, parc_srep, parc_cm;
 
 var
   GPassword: RawByteString;
@@ -472,6 +472,8 @@ begin
       Result := TDisPackStage.Create(Source, DispackBlockSize(Params));
     'srep':
       Result := TSrepStage.Create(Source);
+    'cm':
+      Result := TCmDecStage.Create(Source);
   else
     raise EUnsupportedMethod.CreateFmt('method not supported yet: "%s"', [Stage]);
   end;

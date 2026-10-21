@@ -18,6 +18,7 @@ document records where each one comes from, what it was verified against, and wh
 | PPMd (D. Shkarin, modified by FreeArc) | var. H/I | no compatible upstream | Kept as PArc's own port (including the 32-bit layout on x64) |
 | SREP | 3.93 beta (2013) | 3.93a beta (2014-10-11) | freeware by Bulat Ziganshin; v1–v4 format |
 | Tornado, REP, 4x4, Dict, LZP, Delta, MM/TTA, GRZip, DisPack | 0.67 | no maintained upstream | Ported from `Compression/`; that code defines the stream |
+| Context mixing `cm` | lpaq1 (2007) | lpaq1 model | GPLv2; ported to Pascal and wrapped as a block codec. Used by `-mx`; much slower than LZMA/PPMd |
 
 ## Status in PArc
 
@@ -35,6 +36,7 @@ document records where each one comes from, what it was verified against, and wh
 | DisPack (`dispack070`) | `Compression/DisPack` (0.70) | `tests/dispack.sh`: filter byte-for-byte against C and `.parc` round-trip |
 | SREP (`srep`), decoder | `Compression/SREP/srep.cpp` (3.93 beta) + 3.93a | `tests/srep.sh`: v1–v4 streams (text, repeats, random, >8 MB), synthetic `BASE_LEN=0` cases and lengths that wrap 32 bits; optional interoperability with 3.93a |
 | SREP (`srep`), encoder | `Compression/SREP/srep.cpp` (v3 format) | `tests/srep.sh`: streams decoded by reference srep; greedy LZ77 (≥512, lazy matching, 4 hash candidates), `BASE_LEN=0` like 3.93a |
+| Context mixing (`cm`) | lpaq1 by Matt Mahoney (GPLv2) | `tests/cm.sh`: round-trip of text/binary/empty data, `-mx` ratio vs `-m9`, damaged stream (code 2) and encrypted archives |
 
 Historical note: LibTomCrypt rejects Blowfish keys shorter than 8 bytes (and AES/Twofish keys
 that are not 16/24/32 bytes); PArc now rejects them too (`CipherKeySizeValid`).

@@ -65,7 +65,7 @@ begin
   OutLn('  -so       x/e: write extracted contents to stdout (parc x a.parc data.txt -so)');
   OutLn('  -si[name]  a: add stdin data under that name (tar cf - dir | parc a x.parc -sidir.tar)');
   OutLn('  "-" as archive: read from stdin (l/t/x/e) or write to stdout (a)');
-  OutLn('  -m<method> preset -m0..-m9, -mx (default -m4, like FreeArc) or a method, e.g. -mlzma');
+  OutLn('  -m<method> preset -m0..-m9, -mx (default -m4) or a method, e.g. -mlzma, -mcm (-mx uses CM, slow)');
   OutLn('  -s  like FreeArc: -s- non-solid, -se by extension, -s<N> or -s<N>f N files per');
   OutLn('     block, -s<N>m (or k/g/b) blocks of at least that size; combinable: -se100f10m');
   OutLn('  -x<pattern>  exclude (attached: -x*.txt; may be repeated)');

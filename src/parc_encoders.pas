@@ -113,7 +113,7 @@ implementation
 uses
   Math, parc_filters, parc_ppmd, parc_methods, parc_lzp, parc_parallel, parc_lzmaenc,
   parc_repenc, parc_deltaenc, parc_dictenc, parc_ttaenc, parc_mmenc, parc_torenc, parc_grzipenc,
-  parc_crypt, parc_canon, parc_lz4enc, parc_dispack, parc_srep;
+  parc_crypt, parc_canon, parc_lz4enc, parc_dispack, parc_srep, parc_cm;
 
 { ¿La etapa es de cifrado? El nombre va antes de '-' (bits) o '/' (modo): "aes-256/ctr". }
 function IsCipherStage(const Stage: string): Boolean;
@@ -392,7 +392,7 @@ begin
         end;
       'tor': if not TorEncAvailable(Stage) then Exit(False);
       'lz4': if not Lz4EncAvailable(Stage) then Exit(False);
-      'storing', 'exe', 'ppmd', 'lzp', 'lzma', 'rep', 'delta', 'dict', 'tta', 'mm', 'grzip',
+      'storing', 'exe', 'ppmd', 'lzp', 'lzma', 'rep', 'delta', 'dict', 'tta', 'mm', 'grzip', 'cm',
       'dispack', 'dispack070', 'srep': ;
     else
       Exit(False);
@@ -424,6 +424,7 @@ begin
         end;
       end;
     'storing': Result := TStoringStage.Create(Target);
+    'cm':      Result := TCmEncStage.Create(Target);
     'rep':     Result := TRepEncStage.Create(Target, Parts);
     'delta':   Result := TDeltaEncStage.Create(Target, Parts);
     'dict':    Result := TDictEncStage.Create(Target, Parts);

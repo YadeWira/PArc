@@ -22,10 +22,10 @@ Documentation: [manual](docs/USO.md) · [format](docs/formato/FORMATO-PARC.md) �
   directory fields.
 - **All codecs implemented in Pascal**, no third-party compression libraries linked:
   `storing`, `lzma`, `ppmd`, `grzip`, `dict`, `rep`, `delta`, `tor` (Tornado), `lzp`, `mm`,
-  `tta`, `4x4`, `exe` (BCJ x86), `lz4`, `dispack070` (DisPack) and `srep` (SREP), alone or in
+  `tta`, `4x4`, `exe` (BCJ x86), `lz4`, `dispack070` (DisPack), `srep` (SREP) and `cm` (context mixing), alone or in
   chains (`exe+dispack070+lzma`, `srep+lzma`, …).
-- **Faster and smaller than FreeArc 0.67.1** at `-m1`…`-mx` on the test corpora (both
-  compressed size and wall-clock time; see `docs/ESTADO.md`).
+- **Smaller and faster than FreeArc 0.67.1** at `-m1`…`-m9` on the test corpora. `-mx` adds
+  a context-mixing codec (`cm`): 8–16% smaller, at the cost of speed (see `docs/ESTADO.md`).
 - **Reed–Solomon recovery record** (`-rr`): repairs a damaged range or scattered sectors,
   not just single sectors per group.
 - **Volumes** (`-v`), **strong encryption** (`-p`/`-hp`: AES/Blowfish/Serpent/Twofish,
@@ -88,7 +88,7 @@ The suite runs against `.parc` archives and the C reference sources kept in
 ```sh
 bash tests/cli.sh
 bash tests/stdio.sh tests/volumes.sh
-bash tests/rs_recovery.sh tests/parc_crypt.sh
+bash tests/rs_recovery.sh tests/parc_crypt.sh tests/cm.sh
 bash tests/dispack.sh tests/srep.sh tests/bcj.sh
 bash tests/run_tornado_tests.sh tests/crypto_vectors.sh
 sudo bash tests/fixes.sh

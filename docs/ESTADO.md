@@ -26,7 +26,7 @@ The rest of the FreeArc 0.67 tree is in git history (commit `82ea8d9`) and in Fr
 | GUI | ❌ dropped |
 | `.zip/.7z/.rar` containers | ➡ moved to FreeArc-ex (tag `entrega-arc`) |
 | SFX (creation) | ❌ dropped: `parcsfx` is not built and `-sfx` does not exist; old SFX archives are read/extracted and updating them preserves their stub |
-| Performance vs FreeArc 0.67.1 | ✅ PArc wins on size and speed at `-m1`…`-mx` on the test corpora (see below) |
+| Performance vs FreeArc 0.67.1 | ✅ PArc wins on size at `-m1`…`-mx`; faster through `-m9`, while `-mx` trades speed for ratio (see below) |
 
 ## What it does today
 
@@ -36,7 +36,8 @@ The rest of the FreeArc 0.67 tree is in git history (commit `82ea8d9`) and in Fr
 - Existing self-extractors can be listed, tested and extracted; no new ones are created.
 - Commands: `l`, `lb`, `t`, `x`, `e`, `a`, `u`, `f`, `d`, `r`.
 - Methods: `storing`, `lzma`, `ppmd`, `grzip`, `dict`, `rep`, `delta`, `tor`, `lzp`, `mm`,
-  `tta`, `4x4`, `exe` (BCJ), `lz4`, `dispack070` and `srep`, alone or chained.
+  `tta`, `4x4`, `exe` (BCJ), `lz4`, `dispack070`, `srep` and `cm` (context mixing), alone or
+  chained.
 - FreeArc built-in presets ported: `-m0`…`-m9`, `-mx` and the `d/t/xt/xb/binary/rep` families.
 
 ## Performance vs FreeArc 0.67.1
@@ -56,7 +57,8 @@ Total-size delta (PArc − FreeArc; negative = PArc smaller):
 | `-m3` | −2.2% to −7.7% | −1.2% | −1.2% | −4.6% |
 | `-m4` | −3.4% to −8.0% | −2.8% | −2.3% | −4.2% |
 | `-m5` | −0.6% to −1.3% | −0.9% | −0.6% | −0.5% |
-| `-m6`…`-mx` | −0.3% to −0.7% | −0.2% | −0.3% | −0.3% |
+| `-m6`…`-m9` | −0.3% to −0.7% | −0.2% | −0.3% | −0.3% |
+| `-mx` (CM) | −9.2% to −16.1% | −8.2% | −8.2% | −7.5% |
 
 Speed (wall-clock time; FreeArc's includes Wine startup). On the 44 MB mixed corpus:
 
@@ -66,11 +68,13 @@ Speed (wall-clock time; FreeArc's includes Wine startup). On the 44 MB mixed cor
 | `-m2` | 1.96 s | 2.81 s | | `-m7` | 9.21 s | 10.75 s |
 | `-m3` | 3.42 s | 4.16 s | | `-m8` | 9.30 s | 11.00 s |
 | `-m4` | 4.93 s | 6.41 s | | `-m9` | 8.99 s | 10.81 s |
-| `-m5` | 7.07 s | 8.74 s | | `-mx` | 8.95 s | 11.02 s |
+| `-m5` | 7.07 s | 8.74 s | | `-mx` (CM) | 58.2 s | 10.8 s |
 
-On all seven corpora PArc is also faster at every level; differences of a few percent are
-within single-run noise. Size margins at `-m5` and `-m6` on the heterogeneous corpus are small
-(0.04–0.14%), so very different data may end up close.
+On all seven corpora PArc is also faster at every level up to `-m9`; differences of a few
+percent are within single-run noise. `-mx` uses context mixing and is much slower (roughly
+10–58 s vs 3–11 s for FreeArc `-mx` on the 5–44 MB corpora) in exchange for the large ratio
+gain above. Size margins at `-m5` and `-m6` on the heterogeneous corpus are small (0.04–0.14%),
+so very different data may end up close.
 
 What makes this possible (all inside `.parc`; the codecs are unchanged):
 
@@ -85,6 +89,9 @@ What makes this possible (all inside `.parc`; the codecs are unchanged):
   binaries with `4x4:i0:lzma:8mb:max` (better and faster than `normal:32:mc8/mc32`);
   `-m5` PPMd 12/192 MB; GRZip with a 2^20 hash (`-m2`/`-m3`) and 2^17 (`-m4`); and the text
   group for `-m6`+ with `dict:m800:s250:75%`, 90% LZP and PPMd 16/384 MB.
+- **Context mixing (`cm`)**: lpaq1-style model ported to Pascal and used by `-mx` on text and
+  binaries (`-mx` text: 1.81 MB vs 2.16 MB for FreeArc on the 20 MB corpus; binaries: 5.45 MB
+  vs 5.93 MB). It stores incompressible blocks raw, but is several times slower than `-m9`.
 - **Directory**: mtime in ns is stored as zigzag VInt deltas (tag 7), losslessly. Saves ~2 KB
   per 1,300 files.
 - Recovery is Reed-Solomon only; the `.arc` XOR scheme is gone.
@@ -108,7 +115,7 @@ SREP with the 32-bit binary was verified under Wine and with an archive cross-ch
 ./build.sh linux64
 bash tests/cli.sh
 bash tests/stdio.sh tests/volumes.sh
-bash tests/rs_recovery.sh tests/parc_crypt.sh
+bash tests/rs_recovery.sh tests/parc_crypt.sh tests/cm.sh
 bash tests/dispack.sh tests/srep.sh tests/bcj.sh
 bash tests/run_tornado_tests.sh tests/crypto_vectors.sh
 bash tests/run_lzma_tests.py build/tests/test_lzma
