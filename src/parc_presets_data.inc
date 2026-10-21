@@ -3,12 +3,16 @@
   FreeArc en el mismo nivel (ver docs/ESTADO.md). }
 
 const
-  BUILTIN_METHOD_SUBSTS: array[0..141] of string = (
+  BUILTIN_METHOD_SUBSTS: array[0..151] of string = (
     ';High-level method definitions',
     'x  = 9            ;highest compression mode using only internal algorithms',
-    'x$text = dict:p:128m:75%:l8192:m800:s250+lzp:160m:145:d1m:s32:h23:90%+cm',
-    'x$binary = rep+exe+delta+cm',
-    'x$obj = rep+exe+delta+cm',
+    'x$text = dict:p:128m:75%:l8192:m800:s250+lzp:160m:145:d1m:s32:h23:90%+ppmd:20:1g',
+    'x$binary = rep+exe+delta+lzma:256m:max',
+    'x$obj = rep+exe+delta+lzma:256m:max',
+    'xx$text = dict:p:128m:75%:l8192:m800:s250+lzp:160m:145:d1m:s32:h23:90%+cm',
+    'xx$binary = rep+exe+delta+cm',
+    'xx$obj = rep+exe+delta+cm',
+    'xx = 9            ;absolutely maximum ratio, CM: slow decompression',
     'ax = 9p           ;highest compression mode involving external compressors',
     '0  = storing',
     '1  = 1b',
@@ -22,7 +26,7 @@ const
     '3t  = dict:p: 64m:85% + lzp: 64m: 24:h20        :92% + grzip:m3:8m:l | ex3t',
     '4t  = dict:p: 64m:80% + lzp: 64m: 65:d1m:s16:h20:90% + ppmd:8:96m    | ex4t',
     '5t  = dict:p: 64m:80% + lzp: 80m:105:d1m:s32:h22:92% + ppmd:12:192m  | ex5t',
-    '#t  = dict:p:128m:75%:l8192:m800:s250 + lzp:160m:145:d1m:s32:h23:90% + ppmd:16:384m',  // PARC: más fuerte que FreeArc
+    '#t  = dict:p:128m:75%:l8192:m800:s250 + lzp:160m:145:d1m:s32:h23:90% + ppmd:18:512m',  // PARC: más fuerte que FreeArc
     '',
     ';Binary files compression with slow and/or memory-expensive decompression',
     '#b  = #rep+#bx',
@@ -54,6 +58,12 @@ const
     '3binary = lzma: 96m:fast  :32:mc4     | ex3binary',
     '4binary = lzma: 96m:normal:16:mc8   | | ex4binary',
     '5binary = lzma: 96m:normal:32:mc32  | | ex5binary',
+    '2$binary = rep+exe+delta+4x4:lzma:8mb:fast',
+    '2$obj    = rep+exe+delta+4x4:lzma:8mb:fast',
+    '3$binary = rep+exe+delta+4x4:lzma:8mb:normal',
+    '3$obj    = rep+exe+delta+4x4:lzma:8mb:normal',
+    '5$binary = rep+exe+delta+4x4:lzma:8mb:max',
+    '5$obj    = rep+exe+delta+4x4:lzma:8mb:max',
     '6binary = lzma: 32m:max',
     '7binary = lzma: 64m:max',
     '8binary = lzma:128m:max',
@@ -145,7 +155,7 @@ const
     'ex4t = grzip:m1:h17',  // PARC: hash 2^17
     'ex5t = dict:p: 64m:80% + lzp: 64m: 65:d1m:s32:h22:90% + xppmd:12:192m',  // PARC: 8:96->12:192
     'ex6t = dict:p: 64m:80% + lzp: 80m:105:d1m:s32:h22:92% + xppmd:12:192m',
-    'ex#t = dict:p:128m:80% + lzp:160m:145:d1m:s32:h23:92% + xppmd:16:384m'
+    'ex#t = dict:p:128m:80% + lzp:160m:145:d1m:s32:h23:92% + xppmd:18:512m'
   );
 
   ARC_GROUPS: array[0..379] of string = (

@@ -63,7 +63,7 @@ if that fails, PArc warns and skips it.
 
 | option | effect |
 |---|---|
-| `-m<N>` | preset (from FreeArc): `-m0` (store) to `-m9`, `-mx`. Default is `-m4` |
+| `-m<N>` | preset (from FreeArc): `-m0` (store) to `-m9`, `-mx` (maximum ratio with fast decompression), `-mxx` (CM maximum ratio, slow decompression). Default is `-m4` |
 | `-m<method>` | explicit method, e.g. `-mlzma:64mb:max`, `-mcm` or `-mrep:96m+exe+lzma` |
 | `--recompress` | when updating, rebuild every block with the requested method instead of copying intact ones |
 | `-x<pattern>` | exclude files; may be repeated |
@@ -73,10 +73,12 @@ the preset distinguishes text or already-compressed data, by inspecting content.
 compressor's dictionary is reduced to the block size, so extracting a small file does not
 require the full preset memory.
 
-`-mx` uses the **context-mixing** codec (`cm`, lpaq1-style) for text and binaries: it produces
-clearly smaller archives but is slower than `-m9`. Independent data blocks are compressed in
-parallel (workers limited by `PARC_THREADS`) at every level; encrypted and incremental
-repacks stay serial. `-m9` keeps the fast LZMA/PPMd path.
+`-mx` is the maximum preset that still decompresses fast: PPMd for text and LZMA for binaries
+(both with the level's filters). It is slightly smaller than `-m9` and decompresses at similar
+speed. `-mxx` uses the **context-mixing** codec (`cm`, lpaq1-style) for text and binaries: it
+produces clearly smaller archives, but decompression is roughly 5–40× slower than `-mx`.
+Independent data blocks are compressed in parallel (workers limited by `PARC_THREADS`) at every
+level; encrypted and incremental repacks stay serial.
 
 When updating (`a`, `u`, `f`), solid blocks that remain intact are copied without recompression;
 `--recompress` forces rebuilding them. With `d` and an explicit `-m`, the whole archive is
@@ -233,7 +235,8 @@ extracting, the half-written file is deleted. A second Ctrl-C stops immediately.
 
 ```sh
 parc a backup.parc project/ -m5 -rr       # with a recovery record
-parc a photos.parc photos/ -mx -s-        # maximum compression, non-solid
+parc a photos.parc photos/ -mx -s-        # maximum ratio with fast decode, non-solid
+parc a photos.parc photos/ -mxx -s-       # absolute maximum ratio (CM), slow decode
 parc a private.parc docs/ -p -hp          # encryption; prompts for the password
 parc u backup.parc project/               # update what changed
 parc d backup.parc 'project/tmp/*'        # delete

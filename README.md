@@ -24,8 +24,9 @@ Documentation: [manual](docs/USO.md) · [format](docs/formato/FORMATO-PARC.md) �
   `storing`, `lzma`, `ppmd`, `grzip`, `dict`, `rep`, `delta`, `tor` (Tornado), `lzp`, `mm`,
   `tta`, `4x4`, `exe` (BCJ x86), `lz4`, `dispack070` (DisPack), `srep` (SREP) and `cm` (context mixing), alone or in
   chains (`exe+dispack070+lzma`, `srep+lzma`, …).
-- **Smaller and faster than FreeArc 0.67.1** at `-m1`…`-m9` on the test corpora. `-mx` adds
-  a context-mixing codec (`cm`): 8–16% smaller, at the cost of speed (see `docs/ESTADO.md`).
+- **Smaller and faster than FreeArc 0.67.1** at `-m1`…`-m9` on the test corpora. `-mx` gives
+  the smallest archives that still decompress fast; `-mxx` adds context mixing (`cm`) for the
+  absolute smallest archives, at the cost of decompression speed (see `docs/ESTADO.md`).
 - **Reed–Solomon recovery record** (`-rr`): repairs a damaged range or scattered sectors,
   not just single sectors per group.
 - **Volumes** (`-v`), **strong encryption** (`-p`/`-hp`: AES/Blowfish/Serpent/Twofish,
@@ -55,7 +56,8 @@ parc <command> <archive.parc> [files/patterns...] [options]
 
 ```sh
 parc a backup.parc project/ -m5 -rr        # 5% recovery record
-parc a photos.parc photos/ -mx -s-         # max compression, not solid
+parc a photos.parc photos/ -mx -s-         # max ratio, fast decode, not solid
+parc a photos.parc photos/ -mxx -s-        # absolute max ratio (CM), slow decode
 parc a secret.parc docs/ -p -hp            # encrypted (asks for the password)
 parc u backup.parc project/                # update changed files
 parc t backup.parc                         # verify

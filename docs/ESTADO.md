@@ -26,7 +26,7 @@ The rest of the FreeArc 0.67 tree is in git history (commit `82ea8d9`) and in Fr
 | GUI | ❌ dropped |
 | `.zip/.7z/.rar` containers | ➡ moved to FreeArc-ex (tag `entrega-arc`) |
 | SFX (creation) | ❌ dropped: `parcsfx` is not built and `-sfx` does not exist; old SFX archives are read/extracted and updating them preserves their stub |
-| Performance vs FreeArc 0.67.1 | ✅ PArc wins on size at `-m1`…`-mx`; faster through `-m9`, while `-mx` trades speed for ratio (see below) |
+| Performance vs FreeArc 0.67.1 | ✅ PArc wins on size at `-m1`…`-mx`; faster through `-m9`; `-mx` is fast to decode, `-mxx` is the CM maximum (see below) |
 
 ## What it does today
 
@@ -38,43 +38,44 @@ The rest of the FreeArc 0.67 tree is in git history (commit `82ea8d9`) and in Fr
 - Methods: `storing`, `lzma`, `ppmd`, `grzip`, `dict`, `rep`, `delta`, `tor`, `lzp`, `mm`,
   `tta`, `4x4`, `exe` (BCJ), `lz4`, `dispack070`, `srep` and `cm` (context mixing), alone or
   chained.
-- FreeArc built-in presets ported: `-m0`…`-m9`, `-mx` and the `d/t/xt/xb/binary/rep` families.
+- FreeArc built-in presets ported: `-m0`…`-m9`, `-mx`, `-mxx` and the `d/t/xt/xb/binary/rep` families.
 
 ## Performance vs FreeArc 0.67.1
 
 Goal: make `-m1`…`-m9`/`-mx` produce **smaller archives in less time** than FreeArc 0.67.1
 with its built-in presets (`arc.exe -cfg-`), without comparing containers or compatibility.
 
-Measured with `tests/bench_vs_freearc.sh` on seven corpora (5–44 MB): C headers
-(`/usr/include`), Python sources, HTML documentation, `.so` binaries, mixed, the heterogeneous
-test corpus and 3,000 small files (5 MB). PArc wins on size at **every** level on all seven.
-Total-size delta (PArc − FreeArc; negative = PArc smaller):
+Measured with `tests/bench_vs_freearc.sh` on four corpora (5–43 MB): text, binaries, mixed
+and 3,000 small files. Both use 4 threads (`PARC_THREADS=4`, `-mt4`); time is the best of two
+runs. PArc wins on size at **every** level on all four. Total-size delta (PArc − FreeArc;
+negative = PArc smaller):
 
 | level | text | binaries | mixed | 3,000 small files |
 |---|---|---|---|---|
-| `-m1` | −13.1% to −16.2% | −10.2% | −9.7% | −17.8% |
-| `-m2` | −3.0% to −6.1% | −1.5% | −1.6% | −9.7% |
-| `-m3` | −2.2% to −7.7% | −1.2% | −1.2% | −4.6% |
-| `-m4` | −3.4% to −8.0% | −2.8% | −2.3% | −4.2% |
-| `-m5` | −0.6% to −1.3% | −0.9% | −0.6% | −0.5% |
-| `-m6`…`-m9` | −0.3% to −0.7% | −0.2% | −0.3% | −0.3% |
-| `-mx` (CM) | −9.2% to −16.1% | −8.2% | −8.2% | −7.5% |
+| `-m1` | −14.0% | −10.2% | −9.7% | −17.8% |
+| `-m2` | −3.9% | −13.5% | −9.1% | −10.2% |
+| `-m3` | −2.9% | −7.4% | −5.0% | −4.8% |
+| `-m4` | −3.4% | −2.8% | −2.3% | −4.2% |
+| `-m5` | −1.3% | −0.9% | −0.9% | −0.5% |
+| `-m6`…`-m9` | −1.0% | −0.2% | −0.3% | −0.3% |
+| `-mx` (fast decode) | −1.0% | −0.2% | −0.4% | −0.3% |
+| `-mxx` (CM) | −16.1% | −8.2% | −8.2% | −7.5% |
 
-Speed (wall-clock time; FreeArc's includes Wine startup). On the 44 MB mixed corpus:
+Speed on the 44 MB mixed corpus (wall-clock; FreeArc includes Wine startup):
 
 | level | PArc | FreeArc | | level | PArc | FreeArc |
 |---|---|---|---|---|---|---|
-| `-m1` | 1.10 s | 1.87 s | | `-m6` | 6.42 s | 10.96 s |
-| `-m2` | 1.59 s | 2.74 s | | `-m7` | 6.50 s | 10.80 s |
-| `-m3` | 2.68 s | 4.28 s | | `-m8` | 6.19 s | 10.73 s |
-| `-m4` | 4.18 s | 6.34 s | | `-m9` | 6.28 s | 10.82 s |
-| `-m5` | 4.32 s | 9.04 s | | `-mx` (CM) | 32.0 s | 10.5 s |
+| `-m1` | 0.99 s | 1.68 s | | `-m6` | 6.28 s | 10.28 s |
+| `-m2` | 1.39 s | 2.44 s | | `-m7` | 6.06 s | 10.32 s |
+| `-m3` | 2.93 s | 3.97 s | | `-m8` | 5.80 s | 10.29 s |
+| `-m4` | 4.10 s | 6.21 s | | `-m9` | 5.93 s | 10.60 s |
+| `-m5` | 4.03 s | 8.60 s | | `-mx` (fast) | 5.62 s | 10.48 s |
 
-On all seven corpora PArc is also faster at every level up to `-m9`; differences of a few
-percent are within single-run noise. `-mx` uses context mixing and is much slower (roughly
-4–32 s vs 3–11 s for FreeArc `-mx` on the 5–44 MB corpora) in exchange for the large ratio
-gain above. Size margins at `-m5` and `-m6` on the heterogeneous corpus are small (0.04–0.14%),
-so very different data may end up close.
+`-mx` replaces CM with PPMd/LZMA: it is still smaller than FreeArc `-mx` and decompresses
+about 12× faster than the old CM path on the mixed corpus (31 s → 2.5 s). Decompression
+of `-mxx` is 5–40× slower than `-mx` depending on the corpus, in exchange for 7.5–16.1%
+smaller archives. Size margins at `-m5`/`-m6` are small (0.3–0.9%), so other data may end
+up close.
 
 What makes this possible (all inside `.parc`; the codecs are unchanged):
 
@@ -89,17 +90,18 @@ What makes this possible (all inside `.parc`; the codecs are unchanged):
   binaries with `4x4:i0:lzma:8mb:max` (better and faster than `normal:32:mc8/mc32`);
   `-m5` PPMd 12/192 MB; GRZip with a 2^20 hash (`-m2`/`-m3`) and 2^17 (`-m4`); and the text
   group for `-m6`+ with `dict:m800:s250:75%`, 90% LZP and PPMd 16/384 MB.
-- **Context mixing (`cm`)**: lpaq1-style model ported to Pascal and used by `-mx` on text and
-  binaries (`-mx` text: 1.81 MB vs 2.16 MB for FreeArc on the 20 MB corpus; binaries: 5.45 MB
+- **Context mixing (`cm`)**: lpaq1-style model ported to Pascal and used by `-mxx` on text and
+  binaries (`-mxx` text: 1.81 MB vs 2.16 MB for FreeArc on the 20 MB corpus; binaries: 5.45 MB
   vs 5.93 MB). It stores incompressible blocks raw, and `-O3` plus hot-loop optimisations
   brought 20 MB text from ~31 s to ~22 s. Independent data blocks are compressed in
   parallel at every level (mixed corpus `-m9`: ~8.8 s -> ~6.3 s; `-m5`: ~7.1 s -> ~4.3 s;
-  `-mx`: ~46 s serial -> ~32 s);
-  `-mx` is still slower than `-m9`.
+  `-mxx`: ~46 s serial -> ~32 s). `-mx` uses PPMd/LZMA instead, so it compresses and
+  decompresses much faster.
 - **Verification (`t`)** verifies independent blocks in parallel: mixed corpus ~3.5 s ->
-  ~2.5 s at `-m6`, and ~48.5 s -> ~32.6 s at `-mx`.
+  ~2.5 s at `-m6`, and ~48.5 s -> ~32.6 s at `-mxx`.
 - **Extraction (`x`/`e`)** decodes independent blocks in parallel to temp files, then writes
-  sequentially: mixed corpus ~3.2 s -> ~2.4 s at `-m6`, and ~48.4 s -> ~33.2 s at `-mx`.
+  sequentially: mixed corpus ~3.2 s -> ~2.4 s at `-m6`, and ~48.4 s -> ~33.2 s at `-mxx`.
+  `-mx` verifies/extracts in ~2.5 s on the same corpus.
 - **Directory**: mtime in ns is stored as zigzag VInt deltas (tag 7), losslessly. Saves ~2 KB
   per 1,300 files.
 - Recovery is Reed-Solomon only; the `.arc` XOR scheme is gone.
