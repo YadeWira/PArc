@@ -57,6 +57,13 @@ printf 'cambiado\n' > ov/src/a.txt
 ck "-o- no sobrescribe"        '"$PARC" x t.parc -dpov -o- --no-progress >/dev/null 2>&1; grep -q cambiado ov/src/a.txt'
 ck "-o+ sobrescribe"           '"$PARC" x t.parc -dpov -o+ --no-progress >/dev/null 2>&1; grep -q alpha4 ov/src/a.txt'
 
+# ayuda y versión
+ck "sin argumentos: 0"         '"$PARC" >/dev/null 2>&1; [ $? = 0 ]'
+ck "--version"                '"$PARC" --version | grep -q "^PArc 0.0.1"'
+ck "help: 0"                  '"$PARC" help >/dev/null 2>&1; [ $? = 0 ]'
+ck "help de comando"          '"$PARC" help x | grep -q "Extract keeping"'
+ck "comando desconocido: 1"   '"$PARC" nope >/dev/null 2>&1; [ $? = 1 ]'
+
 # dañado
 cp t.parc bad.parc; printf X | dd of=bad.parc bs=1 seek=100 conv=notrunc 2>/dev/null
 ck "t dañado: código 2"        '"$PARC" t bad.parc --no-progress >/dev/null 2>&1; [ $? = 2 ]'

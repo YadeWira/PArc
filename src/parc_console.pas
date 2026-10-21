@@ -129,29 +129,47 @@ begin
   Result := FormatDateTime('yyyy-mm-dd hh:nn:ss', UnixToDateTime(t, True));
 end;
 
+function FmtSize(Bytes: Int64): string;
+begin
+  if Bytes >= Int64(1) shl 30 then
+    Result := FormatFloat('0.0', Bytes / (Int64(1) shl 30)) + ' GB'
+  else if Bytes >= Int64(1) shl 20 then
+    Result := FormatFloat('0.0', Bytes / (Int64(1) shl 20)) + ' MB'
+  else if Bytes >= 1024 then
+    Result := FormatFloat('0.0', Bytes / 1024) + ' KB'
+  else
+    Result := IntToStr(Bytes) + ' B';
+end;
+
 procedure CmdList(A: TArchive);
 var
   i: Integer;
   TotalSize, TotalComp: Int64;
   Kind: string;
+  Ratio: string;
 begin
-  OutLn('Date/time (UTC)               Size       CRC  Name');
-  OutLn('-------------------  --------------  --------  ------');
   TotalSize := 0;
+  for i := 0 to High(A.Files) do Inc(TotalSize, A.Files[i].Size);
+  TotalComp := 0;
+  for i := 0 to High(A.DataBlocks) do Inc(TotalComp, A.DataBlocks[i].CompSize);
+  Ratio := '';
+  if TotalSize > 0 then Ratio := Format('   ratio: %.1f%%', [100.0 * TotalComp / TotalSize]);
+  OutLn('Archive: ' + A.FileName);
+  OutLn(Format('  %d file(s)   size: %s   packed: %s%s',
+    [Length(A.Files), FmtSize(TotalSize), FmtSize(TotalComp), Ratio]));
+  OutLn('');
+  OutLn('  Modified             Size  CRC       Name');
+  OutLn('  -------------------  ----  --------  ----');
   for i := 0 to High(A.Files) do
     with A.Files[i] do
     begin
       if IsDir then Kind := '<DIR>' else if IsLink then Kind := '<LINK>' else Kind := IntToStr(Size);
       if IsLink then
-        OutLn(Format('%s  %14s  %.8x  %s -> %s', [FmtTime(Time), Kind, Crc, Name, LinkTarget]))
+        OutLn(Format('  %s  %14s  %.8x  %s -> %s', [FmtTime(Time), Kind, Crc, Name, LinkTarget]))
       else
-        OutLn(Format('%s  %14s  %.8x  %s', [FmtTime(Time), Kind, Crc, Name]));
-      Inc(TotalSize, Size);
+        OutLn(Format('  %s  %14s  %.8x  %s', [FmtTime(Time), Kind, Crc, Name]));
     end;
-  TotalComp := 0;
-  for i := 0 to High(A.DataBlocks) do Inc(TotalComp, A.DataBlocks[i].CompSize);
-  OutLn('-------------------  --------------  --------  ------');
-  OutLn(Format('%d file(s), %d bytes, compressed %d bytes', [Length(A.Files), TotalSize, TotalComp]));
+  OutLn('  -------------------  ----  --------  ----');
   if A.Comment <> '' then OutLn('Comment: ' + A.Comment);
 end;
 

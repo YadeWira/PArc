@@ -7,9 +7,13 @@ FreeArc-ex for that (https://github.com/YadeWira/FreeArc-ex).
 
 ```
 parc <command> <archive> [files/patterns...] [options]
+parc help [command]
+parc --version
 ```
 
-Options may appear in any position. The first non-option argument is the archive; the rest are
+Running `parc` without arguments shows a short help summary (exit code 0). `parc help` shows
+the full option reference, and `parc help <command>` explains one command. Options may appear
+in any position. The first non-option argument is the archive; the rest are
 the files or patterns the command operates on.
 
 ## Commands

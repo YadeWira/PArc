@@ -44,45 +44,167 @@ begin
   else Result := 'could not create "' + Name + '": ' + Reason;
 end;
 
+procedure PrintBanner;
+begin
+  OutLn('PArc ' + PARC_VERSION + '  ·  .parc archiver');
+end;
+
+procedure ShortHelp;
+begin
+  PrintBanner;
+  OutLn('');
+  OutLn('Usage:');
+  OutLn('  parc <command> <archive> [files...] [options]');
+  OutLn('  parc help [command]');
+  OutLn('');
+  OutLn('Commands:');
+  OutLn('  l    list contents              x    extract with paths');
+  OutLn('  lb   list internal blocks       e    extract without paths');
+  OutLn('  t    test archive               a    add / update archive');
+  OutLn('  u    update newer files         f    freshen existing files');
+  OutLn('  d    delete files               r    repair with recovery record');
+  OutLn('');
+  OutLn('Common options:');
+  OutLn('  -m<level>   -m0..-m9, -mx, -mxx (default -m4)');
+  OutLn('  -s...       solid blocks: -s-, -se, -s<N>f, -s<N>m');
+  OutLn('  -dp<dir>    extraction destination');
+  OutLn('  -o+ / -o-   overwrite / skip existing files');
+  OutLn('  -p<pass>    encrypt or read an encrypted archive');
+  OutLn('  --no-progress   hide the progress line');
+  OutLn('');
+  OutLn('Examples:');
+  OutLn('  parc a backup.parc ~/Documents -m6');
+  OutLn('  parc t backup.parc');
+  OutLn('  parc x backup.parc -dp~/restore -o+');
+  OutLn('');
+  OutLn('Run "parc help" for all options, or "parc help <command>".');
+end;
+
+procedure LongHelp;
+begin
+  PrintBanner;
+  OutLn('');
+  OutLn('Usage:');
+  OutLn('  parc <command> <archive> [files/patterns...] [options]');
+  OutLn('  parc help [command]');
+  OutLn('  parc --version');
+  OutLn('');
+  OutLn('Commands:');
+  OutLn('  l    list archive contents');
+  OutLn('  lb   list internal blocks (technical)');
+  OutLn('  t    test archive integrity (decompress and check CRCs)');
+  OutLn('  x    extract, keeping stored paths');
+  OutLn('  e    extract, without stored paths');
+  OutLn('  a    add files, replacing existing ones; create archive if missing');
+  OutLn('  u    add or replace only files newer than the archived copy');
+  OutLn('  f    freshen only files already in the archive');
+  OutLn('  d    delete files matching the given names/patterns');
+  OutLn('  r    repair with the recovery record; writes fixed.<name>');
+  OutLn('');
+  OutLn('General options:');
+  OutLn('  -dp<dir>        extraction destination (attached: -dpout)');
+  OutLn('  -o+ / -o-       overwrite / skip existing files (default: ask)');
+  OutLn('  -snld           allow links pointing outside the destination');
+  OutLn('  -so             x/e: write file contents to stdout');
+  OutLn('  -si[name]       a: add stdin as that name (default: stdin)');
+  OutLn('  -x<pattern>     exclude files (attached, may be repeated)');
+  OutLn('  -r              patterns also match files in subdirectories');
+  OutLn('  --recompress    rebuild intact blocks instead of copying them');
+  OutLn('  --no-progress   hide the progress line');
+  OutLn('');
+  OutLn('Compression:');
+  OutLn('  -m<method>      preset -m0..-m9 (default -m4), -mx (max, fast decode),');
+  OutLn('                  -mxx (CM max, slow decode), or a method: -mlzma, -mcm');
+  OutLn('  -s...           solid blocks: -s- non-solid, -se by extension,');
+  OutLn('                  -s<N>f N files, -s<N>m blocks of at least N bytes');
+  OutLn('                  default: 64 MB for -m1..-m3, 32 MB for -m4..-m9/-mx');
+  OutLn('  -rr[spec]       recovery record: -rr, -rr5%, -rr10, -rr-');
+  OutLn('');
+  OutLn('Encryption:');
+  OutLn('  -p<password>    encrypt data; on read, password for the archive');
+  OutLn('  -hp[password]   also encrypt the directory/footer');
+  OutLn('  -ae=<alg>       aes (default), blowfish, serpent, twofish');
+  OutLn('');
+  OutLn('Volumes and streams:');
+  OutLn('  -v<size>        volumes: -v100m, -v4g, -v700000k');
+  OutLn('  "-" as archive  read from stdin or write to stdout');
+  OutLn('');
+  OutLn('Examples:');
+  OutLn('  parc a backup.parc ~/Documents -m6');
+  OutLn('  parc u backup.parc ~/Documents');
+  OutLn('  parc l backup.parc "*.txt"');
+  OutLn('  parc t backup.parc');
+  OutLn('  parc x backup.parc -dp~/restore -o+');
+  OutLn('  parc a backup.parc ~/src -psecret -rr5%');
+  OutLn('');
+  OutLn('Exit codes: 0 ok · 1 usage · 2 corrupt · 3 unsupported · 4 I/O · 5 password ·');
+  OutLn('            6 warnings · 130 cancelled.');
+  OutLn('Full manual: docs/USO.md');
+end;
+
+function CommandHelp(const Name: string): Boolean;
+var C: string;
+begin
+  C := LowerCase(Name);
+  Result := True;
+  case C of
+    'l':
+      begin
+        OutLn('parc l <archive> [patterns...] [options]');
+        OutLn('  List archive contents. Patterns filter the listing.');
+      end;
+    'lb':
+      begin
+        OutLn('parc lb <archive>');
+        OutLn('  List internal control and data blocks with their codecs.');
+      end;
+    't':
+      begin
+        OutLn('parc t <archive> [patterns...] [options]');
+        OutLn('  Decompress and verify CRCs without writing files.');
+      end;
+    'x':
+      begin
+        OutLn('parc x <archive> [patterns...] [options]');
+        OutLn('  Extract keeping stored paths.');
+        OutLn('  Common: -dp<dir>, -o+, -o-, -snld, -p<pass>, -so');
+      end;
+    'e':
+      begin
+        OutLn('parc e <archive> [patterns...] [options]');
+        OutLn('  Extract without stored paths (flat names).');
+        OutLn('  Common: -dp<dir>, -o+, -o-, -snld, -p<pass>, -so');
+      end;
+    'a', 'u', 'f':
+      begin
+        OutLn('parc ' + C + ' <archive> <files...> [options]');
+        OutLn('  a: add/replace · u: only newer · f: only files already archived');
+        OutLn('  Common: -m<level>, -s..., -p<pass>, -rr..., -x<pattern>, -r');
+      end;
+    'd':
+      begin
+        OutLn('parc d <archive> <names/patterns...> [options]');
+        OutLn('  Delete matching entries from the archive.');
+      end;
+    'r':
+      begin
+        OutLn('parc r <archive>');
+        OutLn('  Repair using the recovery record; writes fixed.<name>.');
+      end;
+  else
+    Result := False;
+  end;
+end;
+
+function IsCommand(const C: string): Boolean;
+begin
+  Result := (C = 'l') or (C = 'lb') or (C = 't') or (C = 'x') or (C = 'e') or
+            (C = 'a') or (C = 'u') or (C = 'f') or (C = 'd') or (C = 'r');
+end;
+
 procedure Usage;
 begin
-  OutLn('PArc ' + PARC_VERSION + ' — .parc archiver');
-  OutLn('Usage: parc <command> <archive> [files/patterns...] [options]');
-  OutLn('  l   list contents');
-  OutLn('  lb  list internal blocks');
-  OutLn('  t   test (decompress and compare CRCs, without writing)');
-  OutLn('  x   extract keeping paths');
-  OutLn('  e   extract without paths');
-  OutLn('  a   add and replace (create the archive if missing)');
-  OutLn('  u   add and replace only if the disk copy is newer');
-  OutLn('  f   freshen only files already in the archive if the disk copy is newer');
-  OutLn('  d   delete the given names/patterns from the archive');
-  OutLn('  r   repair with the recovery record (-rr): writes fixed.<name>');
-  OutLn('Options:');
-  OutLn('  -dp<dir>  destination directory (attached: -dpdest)');
-  OutLn('  -o+       overwrite existing files             -o-  skip them (default)');
-  OutLn('  -snld     also create links pointing outside the destination');
-  OutLn('  -so       x/e: write extracted contents to stdout (parc x a.parc data.txt -so)');
-  OutLn('  -si[name]  a: add stdin data under that name (tar cf - dir | parc a x.parc -sidir.tar)');
-  OutLn('  "-" as archive: read from stdin (l/t/x/e) or write to stdout (a)');
-  OutLn('  -m<method> preset -m0..-m9 (default -m4), -mx (max, fast decode), -mxx (CM max,');
-  OutLn('             slow decode), or a method, e.g. -mlzma, -mcm');
-  OutLn('  -s  like FreeArc: -s- non-solid, -se by extension, -s<N> or -s<N>f N files per');
-  OutLn('     block, -s<N>m (or k/g/b) blocks of at least that size; combinable: -se100f10m');
-  OutLn('  -x<pattern>  exclude (attached: -x*.txt; may be repeated)');
-  OutLn('  -r     patterns (*.txt, src/*.pas) also search subdirectories');
-  OutLn('  -rr[N%|N|Nm|N;S|N*S|-]  recovery record (no value: 4%/2%/1% by size;');
-  OutLn('             N = 512-byte sectors; -rr- removes it)');
-  OutLn('Full manual: docs/USO.md');
-  OutLn('  -p<password>  on read: password of an encrypted archive (prompted if missing);');
-  OutLn('                when compressing: encrypt data (bare -p prompts)');
-  OutLn('  -hp[password] also encrypt the directory (without it not even the listing is visible)');
-  OutLn('  -ae=<alg>  --encryption=<alg>  aes (default: aes-256/ctr), blowfish, serpent,');
-  OutLn('             twofish; with size/mode: serpent-256/cfb, blowfish-448/ctr, ...');
-  OutLn('  -v<size>  volumes of that size (x.parc.001, .002...; .parc only): -v100m, -v4g, -v700000k');
-  OutLn('  --no-progress  no progress line (also hidden when stderr is not a console)');
-  OutLn('Ctrl-C cancels cleanly (no temporary or half-written file is left);');
-  OutLn('a second Ctrl-C stops immediately. Exit code on cancel: 130.');
+  LongHelp;
 end;
 
 procedure PrintBlock(const B: TArcBlock);
@@ -892,12 +1014,46 @@ var
   Retry, ShowProgress, Writing, ToStdout: Boolean;
   DPwd, HPwd: string;
 begin
+  Cmd := '';
+  if ArgCount >= 1 then Cmd := Arg(1);
+  if (Cmd = '--version') or (Cmd = '-V') or (Cmd = 'version') then
+  begin
+    OutLn('PArc ' + PARC_VERSION);
+    Halt(0);
+  end;
+  if (Cmd = '--help') or (Cmd = '-h') then
+  begin
+    LongHelp;
+    Halt(0);
+  end;
+  if Cmd = 'help' then
+  begin
+    if ArgCount < 2 then LongHelp
+    else if not CommandHelp(Arg(2)) then
+    begin
+      ErrLn('ERROR: unknown command "' + Arg(2) + '"');
+      ErrLn('Run "parc help" for usage.');
+      Halt(1);
+    end;
+    Halt(0);
+  end;
   if ArgCount < 2 then
   begin
-    Usage;
+    if Cmd = '' then
+    begin
+      ShortHelp;
+      Halt(0);
+    end;
+    ErrLn('ERROR: missing archive for command "' + Cmd + '"');
+    ErrLn('Run "parc help ' + Cmd + '" for usage.');
     Halt(1);
   end;
-  Cmd := Arg(1);
+  if not IsCommand(Cmd) then
+  begin
+    ErrLn('ERROR: unknown command "' + Cmd + '"');
+    ErrLn('Run "parc help" for usage.');
+    Halt(1);
+  end;
   Opt := Default(TExtractOptions);
   Opt.Overwrite := owSkip;
   ArcName := '';

@@ -8,7 +8,7 @@ W=${FIXES_WORK:-/mnt/IA_LAB/agentes/PArc/fixes}
 rm -rf -- "${W:?}"; mkdir -p "$W" && cd "$W" || exit 2
 fail=0
 check() { if eval "$2"; then printf '  ok    %s\n' "$1"; else printf '  FAIL %s\n' "$1"; fail=$((fail+1)); fi; }
-names() { "$PARC" l "$1" 2>/dev/null | awk 'NR>2 && !/^---/ && !/file\(s\)/ {print $5}' | sort | tr '\n' ' '; }
+names() { "$PARC" l "$1" 2>/dev/null | awk '$1 ~ /^[0-9][0-9][0-9][0-9]-/ {print $5}' | sort | tr '\n' ' '; }
 
 # P1: máscaras
 mkdir -p m/src/sub && echo a > m/src/a.txt && echo c > m/src/sub/c.txt && echo p > m/src/x.pas && touch m/makefile
