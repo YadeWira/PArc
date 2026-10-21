@@ -74,9 +74,9 @@ compressor's dictionary is reduced to the block size, so extracting a small file
 require the full preset memory.
 
 `-mx` uses the **context-mixing** codec (`cm`, lpaq1-style) for text and binaries: it produces
-clearly smaller archives but is several times slower than `-m9`. When there are several
-independent blocks, `-mx` compresses them in parallel (workers limited by `PARC_THREADS`).
-`-m9` keeps the fast LZMA/PPMd path.
+clearly smaller archives but is slower than `-m9`. Independent data blocks are compressed in
+parallel (workers limited by `PARC_THREADS`) at every level; encrypted and incremental
+repacks stay serial. `-m9` keeps the fast LZMA/PPMd path.
 
 When updating (`a`, `u`, `f`), solid blocks that remain intact are copied without recompression;
 `--recompress` forces rebuilding them. With `d` and an explicit `-m`, the whole archive is

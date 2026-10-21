@@ -64,11 +64,11 @@ Speed (wall-clock time; FreeArc's includes Wine startup). On the 44 MB mixed cor
 
 | level | PArc | FreeArc | | level | PArc | FreeArc |
 |---|---|---|---|---|---|---|
-| `-m1` | 1.17 s | 2.03 s | | `-m6` | 9.05 s | 10.81 s |
-| `-m2` | 1.96 s | 2.81 s | | `-m7` | 9.22 s | 10.72 s |
-| `-m3` | 3.42 s | 4.16 s | | `-m8` | 8.95 s | 10.75 s |
-| `-m4` | 4.93 s | 6.41 s | | `-m9` | 8.76 s | 10.62 s |
-| `-m5` | 7.07 s | 8.74 s | | `-mx` (CM) | 32.1 s | 10.8 s |
+| `-m1` | 1.10 s | 1.87 s | | `-m6` | 6.42 s | 10.96 s |
+| `-m2` | 1.59 s | 2.74 s | | `-m7` | 6.50 s | 10.80 s |
+| `-m3` | 2.68 s | 4.28 s | | `-m8` | 6.19 s | 10.73 s |
+| `-m4` | 4.18 s | 6.34 s | | `-m9` | 6.28 s | 10.82 s |
+| `-m5` | 4.32 s | 9.04 s | | `-mx` (CM) | 32.0 s | 10.5 s |
 
 On all seven corpora PArc is also faster at every level up to `-m9`; differences of a few
 percent are within single-run noise. `-mx` uses context mixing and is much slower (roughly
@@ -92,8 +92,10 @@ What makes this possible (all inside `.parc`; the codecs are unchanged):
 - **Context mixing (`cm`)**: lpaq1-style model ported to Pascal and used by `-mx` on text and
   binaries (`-mx` text: 1.81 MB vs 2.16 MB for FreeArc on the 20 MB corpus; binaries: 5.45 MB
   vs 5.93 MB). It stores incompressible blocks raw, and `-O3` plus hot-loop optimisations
-  brought 20 MB text from ~31 s to ~22 s, and `-mx` compresses independent blocks in parallel
-  (mixed corpus: ~46 s serial -> ~32 s); it is still several times slower than `-m9`.
+  brought 20 MB text from ~31 s to ~22 s. Independent data blocks are compressed in
+  parallel at every level (mixed corpus `-m9`: ~8.8 s -> ~6.3 s; `-m5`: ~7.1 s -> ~4.3 s;
+  `-mx`: ~46 s serial -> ~32 s);
+  `-mx` is still slower than `-m9`.
 - **Directory**: mtime in ns is stored as zigzag VInt deltas (tag 7), losslessly. Saves ~2 KB
   per 1,300 files.
 - Recovery is Reed-Solomon only; the `.arc` XOR scheme is gone.

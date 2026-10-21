@@ -808,7 +808,7 @@ begin
 
     Opt := Default(TWriteOptions);   // KeepTemp/Comment: los registros locales no se inicializan solos
     Opt.DirMethod := DIR_METHOD;
-    Opt.Parallel := MO.Method = 'x';
+    Opt.Parallel := True;
     Opt.KeepTemp := True;            // el original se cierra antes de reemplazarlo (Windows)
     if A <> nil then Opt.Comment := A.Comment;
     // El tamaño para el % recomendado es el de los datos (aproximado: lo de entrada)

@@ -42,7 +42,7 @@ type
     DataPassword: RawByteString;     // -p: cifra los bloques de datos ('' = sin cifrar)
     HeadersPassword: RawByteString;  // -hp: cifra también directorio y footer
     VolumeSize: Int64;    // -v: volúmenes de este tamaño (FileName.001, .002...); solo .parc
-    Parallel: Boolean;    // comprimir grupos independientes en paralelo (solo -mx)
+    Parallel: Boolean;    // comprimir grupos de datos independientes en paralelo
   end;
 
   TWriteStats = record
