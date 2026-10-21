@@ -108,7 +108,7 @@ What makes this possible (all inside `.parc`; the codecs are unchanged):
   per 1,300 files.
 - Recovery is Reed-Solomon only; the `.arc` XOR scheme is gone.
 
-## Verified platforms (0.0.1)
+## Verified platforms (0.0.2)
 
 | platform | binary | tests |
 |---|---|---|

@@ -59,7 +59,7 @@ ck "-o+ sobrescribe"           '"$PARC" x t.parc -dpov -o+ --no-progress >/dev/n
 
 # ayuda y versión
 ck "sin argumentos: 0"         '"$PARC" >/dev/null 2>&1; [ $? = 0 ]'
-ck "--version"                '"$PARC" --version | grep -q "^PArc 0.0.1"'
+ck "--version"                '"$PARC" --version | grep -q "^PArc 0.0.2"'
 ck "help: 0"                  '"$PARC" help >/dev/null 2>&1; [ $? = 0 ]'
 ck "help de comando"          '"$PARC" help x | grep -q "Extract keeping"'
 ck "comando desconocido: 1"   '"$PARC" nope >/dev/null 2>&1; [ $? = 1 ]'
