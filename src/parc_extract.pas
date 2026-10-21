@@ -45,7 +45,7 @@ function MatchesAny(const Name: string; Masks: TStrings): Boolean;
 implementation
 
 uses
-  DateUtils, parc_os, parc_bytes, parc_crc, parc_stream, parc_methods, parc_progress;
+  DateUtils, parc_os, parc_bytes, parc_crc, parc_stream, parc_methods, parc_progress, parc_parallel, parc_volume;
 
 const
   COPY_BUF = 1 shl 20;
@@ -178,6 +178,218 @@ begin
   end;
 end;
 
+{ Verificación de un bloque en un hilo. No escribe nada: descomprime, calcula CRCs y
+  guarda los mensajes para que el hilo principal los emita en orden. }
+type
+  TVerifyJob = class(TParallelJob)
+  public
+    A: TArchive;
+    BlockIndex: Integer;
+    Opt: TExtractOptions;
+    Stats: TExtractStats;
+    Messages: TStringList;
+    Damaged: Boolean;
+    constructor Create;
+    destructor Destroy; override;
+    procedure Process; override;
+  end;
+
+constructor TVerifyJob.Create;
+begin
+  inherited Create;
+  Messages := TStringList.Create;
+end;
+
+destructor TVerifyJob.Destroy;
+begin
+  Messages.Free;
+  inherited Destroy;
+end;
+
+procedure TVerifyJob.Process;
+var
+  Blk: TArcBlock;
+  Stream: TStream;
+  Chain: TInStage;
+  Buf: TBytes;
+  i, Cur, LastWanted, n: Integer;
+  F: TArcFileEntry;
+  Crc: LongWord;
+  Remaining: Int64;
+
+  procedure MarkRemaining;
+  var k: Integer;
+  begin
+    for k := Cur to LastWanted do
+      if not A.Files[k].IsDir and not A.Files[k].IsLink and Wanted(Opt, A.Files[k].Name) then
+      begin
+        Messages.Add('ERROR: ' + A.Files[k].Name + ' could not be verified');
+        Inc(Stats.Errors);
+      end;
+  end;
+
+begin
+  Stats := Default(TExtractStats);
+  Damaged := False;
+  Blk := A.DataBlocks[BlockIndex];
+  LastWanted := -1;
+  for i := Blk.FirstFile to Blk.FirstFile + Blk.FileCount - 1 do
+    if not A.Files[i].IsDir and not A.Files[i].IsLink and Wanted(Opt, A.Files[i].Name) then LastWanted := i;
+  if LastWanted < 0 then Exit;
+
+  SetLength(Buf, COPY_BUF);
+  Stream := OpenArchiveStream(A.FileName);
+  Cur := Blk.FirstFile;
+  try
+    try
+      Chain := CreateDecoderChain(Blk.Method, TFileSliceStage.Create(Stream, Blk.Pos, Blk.CompSize));
+      try
+      for i := Blk.FirstFile to LastWanted do
+      begin
+        Cur := i;
+        F := A.Files[i];
+        if F.IsDir or F.IsLink then Continue;
+        if not Wanted(Opt, F.Name) then
+        begin
+          SkipBytes(Chain, F.Size, Buf);
+          Continue;
+        end;
+        Crc := CRC_INIT;
+        Remaining := F.Size;
+        while Remaining > 0 do
+        begin
+          if Remaining > Length(Buf) then n := Length(Buf) else n := Remaining;
+          Chain.ReadExact(@Buf[0], n);
+          Crc := UpdateCRC(Crc, @Buf[0], n);
+          Dec(Remaining, n);
+        end;
+        if (Crc xor CRC_INIT) <> F.Crc then
+        begin
+          Messages.Add(Format('CRC ERROR: %s (expected %.8x, got %.8x)', [F.Name, F.Crc, Crc xor CRC_INIT]));
+          Inc(Stats.Errors);
+        end
+        else
+        begin
+          Messages.Add('OK       ' + F.Name);
+          Inc(Stats.Files);
+          Inc(Stats.Bytes, F.Size);
+        end;
+      end;
+      finally
+        Chain.Free;
+      end;
+    except
+      on E: EUnsupportedMethod do
+      begin
+        Damaged := True;
+        Stats.Unsupported := True;
+        Messages.Add(Format('ERROR: %s (block at %d, %d file(s))', [E.Message, Blk.Pos, Blk.FileCount]));
+        MarkRemaining;
+      end;
+      on E: EArcCorrupt do
+      begin
+        Damaged := True;
+        Messages.Add(Format('ERROR: %s (block at %d)', [E.Message, Blk.Pos]));
+        MarkRemaining;
+      end;
+    end;
+  finally
+    Stream.Free;
+  end;
+end;
+
+{ `t` con bloques independientes en paralelo. La salida se emite en orden de bloque. }
+function VerifyArchiveParallel(A: TArchive; const Opt: TExtractOptions; Log: TLogProc): TExtractStats;
+var
+  Total, Orig: Int64;
+  b, i, n, Count, LastWanted: Integer;
+  Jobs: array of TVerifyJob;
+  Pool: TJobPool;
+  Damaged: Boolean;
+begin
+  Result := Default(TExtractStats);
+  Damaged := False;
+  Total := 0;
+  for b := 0 to High(A.DataBlocks) do
+  begin
+    LastWanted := -1;
+    for i := A.DataBlocks[b].FirstFile to A.DataBlocks[b].FirstFile + A.DataBlocks[b].FileCount - 1 do
+      if not A.Files[i].IsDir and not A.Files[i].IsLink and Wanted(Opt, A.Files[i].Name) then LastWanted := i;
+    for i := A.DataBlocks[b].FirstFile to LastWanted do
+      if not A.Files[i].IsDir then Inc(Total, A.Files[i].Size);
+  end;
+  ProgressBegin('Verifying', Total);
+
+  for i := 0 to High(A.Files) do
+    if A.Files[i].IsDir and Wanted(Opt, A.Files[i].Name) then Inc(Result.Dirs);
+
+  Count := 0;
+  for b := 0 to High(A.DataBlocks) do
+  begin
+    LastWanted := -1;
+    for i := A.DataBlocks[b].FirstFile to A.DataBlocks[b].FirstFile + A.DataBlocks[b].FileCount - 1 do
+      if not A.Files[i].IsDir and not A.Files[i].IsLink and Wanted(Opt, A.Files[i].Name) then LastWanted := i;
+    if LastWanted >= 0 then Inc(Count);
+  end;
+  SetLength(Jobs, Count);
+  n := 0;
+  for b := 0 to High(A.DataBlocks) do
+  begin
+    LastWanted := -1;
+    for i := A.DataBlocks[b].FirstFile to A.DataBlocks[b].FirstFile + A.DataBlocks[b].FileCount - 1 do
+      if not A.Files[i].IsDir and not A.Files[i].IsLink and Wanted(Opt, A.Files[i].Name) then LastWanted := i;
+    if LastWanted < 0 then Continue;
+    Jobs[n] := TVerifyJob.Create;
+    Jobs[n].A := A;
+    Jobs[n].BlockIndex := b;
+    Jobs[n].Opt := Opt;
+    Inc(n);
+  end;
+
+  if Count = 1 then
+    Jobs[0].Process
+  else if Count > 1 then
+  begin
+    Pool := TJobPool.Create(ThreadCount(4), Count);
+    try
+      for i := 0 to Count - 1 do Pool.Submit(Jobs[i]);
+      for i := 0 to Count - 1 do Pool.WaitJob(Jobs[i]);
+    finally
+      Pool.Free;
+    end;
+  end;
+
+  // Mensajes y estadísticas en orden de bloque, como el camino serial.
+  for i := 0 to Count - 1 do
+  begin
+    for n := 0 to Jobs[i].Messages.Count - 1 do Log(Jobs[i].Messages[n]);
+    Inc(Result.Files, Jobs[i].Stats.Files);
+    Inc(Result.Errors, Jobs[i].Stats.Errors);
+    Inc(Result.Bytes, Jobs[i].Stats.Bytes);
+    if Jobs[i].Stats.Unsupported then Result.Unsupported := True;
+    if Jobs[i].Damaged then Damaged := True;
+    Orig := 0;
+    for n := Jobs[i].A.DataBlocks[Jobs[i].BlockIndex].FirstFile to
+             Jobs[i].A.DataBlocks[Jobs[i].BlockIndex].FirstFile + Jobs[i].A.DataBlocks[Jobs[i].BlockIndex].FileCount - 1 do
+      if not A.Files[n].IsDir then Inc(Orig, A.Files[n].Size);
+    ProgressAdd(Orig);
+    Jobs[i].Free;
+  end;
+
+  // Enlaces: no tienen datos, se verifican como en el camino serial.
+  for i := 0 to High(A.Files) do
+    if A.Files[i].IsLink and Wanted(Opt, A.Files[i].Name) then
+    begin
+      Log('OK       ' + A.Files[i].Name + ' -> ' + A.Files[i].LinkTarget);
+      Inc(Result.Files);
+    end;
+
+  ProgressEnd;
+  if Damaged and (A.Recovery <> '') then
+    Log('The archive has a recovery record: "parc r ' + ExtractFileName(A.FileName) +
+      '" will try to repair it (writes fixed.' + ExtractFileName(A.FileName) + ').');
+end;
+
 function ExtractArchive(A: TArchive; const Opt: TExtractOptions; Log: TLogProc): TExtractStats;
 var
   b, i, LastWanted: Integer;
@@ -234,6 +446,7 @@ var
   end;
 
 begin
+  if Opt.TestOnly then Exit(VerifyArchiveParallel(A, Opt, Log));
   Result := Default(TExtractStats);
   BlockDamaged := False;
   StdOutS := nil;
