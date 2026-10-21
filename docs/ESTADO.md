@@ -85,6 +85,7 @@ What makes this possible (all inside `.parc`; the codecs are unchanged):
 - **LZMA `fast`**: FreeArc's additions to `GetOptimumFast` were ported (main-match pruning by
   length/distance and relaxed rep-match acceptance). `-m3` used to lose 0.8% on binaries; now
   it wins.
+- **Automatic solid blocks**: without `-s`, 64 MB for `-m1`…`-m3` and 32 MB for `-m4`…`-m9`/`-mx`. On Silesia this improved compression time and ratio at every level; small archives still use one block. `-mxx` keeps a single block for ratio.
 - **GRZip adaptive LZP**: BWT blocks of 4 MB or more use `l64/h22` (fewer, longer matches); small blocks keep the fast LZP parameters. The choice is stored in each block's mode, so old decoders remain compatible. This makes `-m4` 1.2–1.4% smaller on text and many small files.
 - **Stronger and faster presets** than FreeArc's at the same level:
   `-m1` Tornado with a 16 MB window; `-m2` 64 MB; `-m3` LZMA `fast` with `mc8`; `-m4`/`-m5`

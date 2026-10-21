@@ -383,6 +383,7 @@ type
     MethodGiven: Boolean;    // -m explícito (con d, FreeArc recompila todo: --recompress)
     Recompress: Boolean;     // --recompress: rehacer todos los bloques viejos
     Solid: TFaCrits;         // -s...: criterios de corte de los bloques sólidos (FaParseSolidOption)
+    SolidGiven: Boolean;     // -s explícito (no aplicar el tamaño de bloque automático)
     Excludes: TStringList;   // -x<máscara>
     Recursive: Boolean;      // -r: las máscaras buscan también en los subdirectorios
     StdinName: string;       // -si[nombre]: un archivo más, leído de stdin, con ese nombre
@@ -414,6 +415,26 @@ begin
   end;
 end;
 
+{ Tamaño de bloque sólido automático: sin -s, los niveles rápidos usan 64 MB y los altos
+  32 MB. Así los bloques aprovechan varios hilos; en corpus chicos no cambia nada. -s- o
+  cualquier -s explícito desactivan esta heurística. }
+function EffectiveSolid(const MO: TModifyOptions): TFaCrits;
+var
+  M: string;
+  L: Integer;
+  BS: Int64;
+begin
+  Result := MO.Solid;
+  if MO.SolidGiven then Exit;
+  M := MO.Method.Split(['/'])[0];
+  if M = 'xx' then Exit;                 // CM: priorizar ratio, no partir
+  L := FaDetectLevel(MO.Method);
+  if L < 1 then Exit;
+  if L <= 3 then BS := Int64(64) shl 20 else BS := Int64(32) shl 20;
+  SetLength(Result, 1);
+  Result[0] := FaCrit(fcSize, BS);
+end;
+
 { Agrupa entradas nuevas en bloques sólidos exactamente como FreeArc 0.67 (parc_filelist):
   orden gerpn, tipo por arc.groups y por contenido, un grupo por método y los cortes de -s,
   de dict/grzip/lzp y de tta/mm. }
@@ -436,7 +457,7 @@ begin
     Files[i].Size := Entries[Idx[i]].Meta.Size;
   end;
   // -s: los criterios de FreeArc (FaParseSolidOption); sin -s, todo junto
-  Crits := MO.Solid;
+  Crits := EffectiveSolid(MO);
   Blocks := FaSolidBlocks(Files, GM, Crits, FaDetectLevel(MO.Method));
   for i := 0 to High(Blocks) do
   begin
@@ -570,7 +591,7 @@ begin
     begin
       M[n] := L2[y]; EM[n] := E2[y]; Inc(y); Inc(n);
     end;
-  Blocks := FaSolidBlocks(M, GM, MO.Solid, FaDetectLevel(MO.Method), True, not Recompress);
+  Blocks := FaSolidBlocks(M, GM, EffectiveSolid(MO), FaDetectLevel(MO.Method), True, not Recompress);
   for k := 0 to High(Blocks) do
   begin
     g := Length(Groups);
@@ -936,7 +957,7 @@ begin
         else if Copy(S, 1, 3) = '-rr' then MO.Recovery := Copy(S, 4, MaxInt)
         else if S = '-r' then MO.Recursive := True
         else if (Copy(S, 1, 2) = '-s') and FaParseSolidOption(Copy(S, 3, MaxInt), MO.Solid) then
-          // (los criterios quedaron en MO.Solid)
+          MO.SolidGiven := True
         else if Copy(S, 1, 3) = '-hp' then HPwd := Copy(S, 4, MaxInt)
         else if Copy(S, 1, 2) = '-p' then DPwd := Copy(S, 3, MaxInt)
         else if Copy(S, 1, 4) = '-ae=' then MO.Encryption := Copy(S, 5, MaxInt)

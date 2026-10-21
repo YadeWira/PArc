@@ -87,8 +87,10 @@ recompressed with that method, just like FreeArc (a "copying" command:
 
 ### Solid blocks: `-s`
 
-Same as FreeArc. Without `-s`, all files using the same method go into one solid block (except
-for compressor-specific splits).
+Without `-s`, PArc uses an automatic solid-block size: **64 MB** for `-m1`…`-m3` and
+**32 MB** for `-m4`…`-m9`/`-mx`. This lets large archives use several workers; small archives
+still fit in one block. Use `-s-`, `-s...` or an explicit `-s<N>m` to override it. `-mxx` keeps
+all data together to maximize the CM ratio.
 
 | option | effect |
 |---|---|
