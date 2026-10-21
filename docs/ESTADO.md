@@ -55,7 +55,7 @@ negative = PArc smaller):
 | `-m1` | −14.0% | −10.2% | −9.7% | −17.8% |
 | `-m2` | −3.9% | −13.5% | −9.1% | −10.2% |
 | `-m3` | −2.9% | −7.4% | −5.0% | −4.8% |
-| `-m4` | −3.4% | −2.8% | −2.3% | −4.2% |
+| `-m4` | −4.5% | −2.8% | −2.5% | −5.4% |
 | `-m5` | −1.3% | −0.9% | −0.9% | −0.5% |
 | `-m6`…`-m9` | −1.0% | −0.2% | −0.3% | −0.3% |
 | `-mx` (fast decode) | −1.0% | −0.2% | −0.4% | −0.3% |
@@ -68,7 +68,7 @@ Speed on the 44 MB mixed corpus (wall-clock; FreeArc includes Wine startup):
 | `-m1` | 0.99 s | 1.68 s | | `-m6` | 6.28 s | 10.28 s |
 | `-m2` | 1.39 s | 2.44 s | | `-m7` | 6.06 s | 10.32 s |
 | `-m3` | 2.93 s | 3.97 s | | `-m8` | 5.80 s | 10.29 s |
-| `-m4` | 4.10 s | 6.21 s | | `-m9` | 5.93 s | 10.60 s |
+| `-m4` | 4.63 s | 6.21 s | | `-m9` | 5.93 s | 10.60 s |
 | `-m5` | 4.03 s | 8.60 s | | `-mx` (fast) | 5.62 s | 10.48 s |
 
 `-mx` replaces CM with PPMd/LZMA: it is still smaller than FreeArc `-mx` and decompresses
@@ -85,6 +85,7 @@ What makes this possible (all inside `.parc`; the codecs are unchanged):
 - **LZMA `fast`**: FreeArc's additions to `GetOptimumFast` were ported (main-match pruning by
   length/distance and relaxed rep-match acceptance). `-m3` used to lose 0.8% on binaries; now
   it wins.
+- **GRZip adaptive LZP**: BWT blocks of 4 MB or more use `l64/h22` (fewer, longer matches); small blocks keep the fast LZP parameters. The choice is stored in each block's mode, so old decoders remain compatible. This makes `-m4` 1.2–1.4% smaller on text and many small files.
 - **Stronger and faster presets** than FreeArc's at the same level:
   `-m1` Tornado with a 16 MB window; `-m2` 64 MB; `-m3` LZMA `fast` with `mc8`; `-m4`/`-m5`
   binaries with `4x4:i0:lzma:8mb:max` (better and faster than `normal:32:mc8/mc32`);
@@ -126,7 +127,7 @@ SREP with the 32-bit binary was verified under Wine and with an archive cross-ch
 ./build.sh linux64
 bash tests/cli.sh
 bash tests/stdio.sh tests/volumes.sh
-bash tests/rs_recovery.sh tests/parc_crypt.sh tests/cm.sh
+bash tests/rs_recovery.sh tests/parc_crypt.sh tests/cm.sh tests/grzip.sh
 bash tests/dispack.sh tests/srep.sh tests/bcj.sh
 bash tests/run_tornado_tests.sh tests/crypto_vectors.sh
 bash tests/run_lzma_tests.py build/tests/test_lzma

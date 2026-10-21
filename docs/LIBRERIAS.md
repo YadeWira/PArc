@@ -32,7 +32,7 @@ document records where each one comes from, what it was verified against, and wh
 | AES, Blowfish, Twofish, SHA-512, PBKDF2 | LibTomCrypt | `tests/crypto_vectors.sh`: 0 differences over thousands of random vectors against FreeArc's 1.17 and official 1.18.2 |
 | Serpent | FreeArc's addition to LibTomCrypt 1.17 | same, against 1.17 |
 | CTR / CFB | LibTomCrypt (little-endian counter) | same |
-| PPMd, Tornado, REP, 4x4, Dict, LZP, Delta, MM, TTA, GRZip | FreeArc 0.67 | `tests/run_tornado_tests.sh`, `tests/ppmd`, `tests/mm_tta` and `.parc` round-trips |
+| PPMd, Tornado, REP, 4x4, Dict, LZP, Delta, MM, TTA, GRZip | FreeArc 0.67 | `tests/run_tornado_tests.sh`, `tests/ppmd`, `tests/mm_tta`, `tests/grzip.sh` and `.parc` round-trips; GRZip raises LZP to l64/h22 adaptively for BWT blocks >=4 MB |
 | DisPack (`dispack070`) | `Compression/DisPack` (0.70) | `tests/dispack.sh`: filter byte-for-byte against C and `.parc` round-trip |
 | SREP (`srep`), decoder | `Compression/SREP/srep.cpp` (3.93 beta) + 3.93a | `tests/srep.sh`: v1–v4 streams (text, repeats, random, >8 MB), synthetic `BASE_LEN=0` cases and lengths that wrap 32 bits; optional interoperability with 3.93a |
 | SREP (`srep`), encoder | `Compression/SREP/srep.cpp` (v3 format) | `tests/srep.sh`: streams decoded by reference srep; greedy LZ77 (≥512, lazy matching, 4 hash candidates), `BASE_LEN=0` like 3.93a |

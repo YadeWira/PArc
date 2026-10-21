@@ -115,6 +115,24 @@ begin
   Result := (LongWord(1) shl (((Mode div 256) mod 256) and 31)) - 1;
 end;
 
+{ Los bloques grandes de texto se benefician de un LZP con match mínimo más largo y tabla
+  hash más grande; los bloques chicos (muchos archivos) rinden mejor con los valores rápidos.
+  El modo elegido queda guardado en el encabezado del bloque, así que el decodificador no
+  necesita saber nada de esta heurística. }
+procedure AdaptMode(var Mode: LongInt; Size: SizeInt);
+const
+  AutoBlock = 4 * 1024 * 1024;
+  FlagsMask = GRZ_Compression_ST4 or GRZ_Compression_MTF;
+begin
+  // Solo BWT+WFC (m1): es el modo que usa -m4 y el que se beneficia de un LZP más fuerte.
+  // ST4/MTF (m2..m4) quedan con los parámetros rápidos para no perder velocidad.
+  if (Size < AutoBlock) or (Mode div 256 = 0) or ((Mode and FlagsMask) <> 0) then Exit;
+  if ModeMinLen(Mode) < 64 then
+    Mode := (Mode and $FFFF) or (64 shl 16);
+  if ((Mode div 256) mod 256) < 22 then
+    Mode := (Mode and $FFFF00FF) or (22 shl 8);
+end;
+
 { ---------- LZP (LZP.c) ---------- }
 
 const
@@ -1692,6 +1710,7 @@ var
   Buffer, LZPBuffer: PByte;
 begin
   SSize := Size;
+  AdaptMode(Mode, Size);
   PutI32(Output, Size);
   if (Size < 32) or (Size > GRZ_MaxBlockSize) then Exit(StoreBlock(Input, Size, Output, 0));
   if Size < 1024 then Mode := Mode or GRZ_Compression_ST4;
