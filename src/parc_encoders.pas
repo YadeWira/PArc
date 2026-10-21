@@ -113,7 +113,7 @@ implementation
 uses
   Math, parc_filters, parc_ppmd, parc_methods, parc_lzp, parc_parallel, parc_lzmaenc,
   parc_repenc, parc_deltaenc, parc_dictenc, parc_ttaenc, parc_mmenc, parc_torenc, parc_grzipenc,
-  parc_crypt, parc_canon, parc_lz4enc, parc_dispack, parc_srep, parc_cm;
+  parc_crypt, parc_canon, parc_lz4enc, parc_dispack, parc_srep, parc_cm, parc_bcj2;
 
 { ¿La etapa es de cifrado? El nombre va antes de '-' (bits) o '/' (modo): "aes-256/ctr". }
 function IsCipherStage(const Stage: string): Boolean;
@@ -393,7 +393,7 @@ begin
       'tor': if not TorEncAvailable(Stage) then Exit(False);
       'lz4': if not Lz4EncAvailable(Stage) then Exit(False);
       'storing', 'exe', 'ppmd', 'lzp', 'lzma', 'rep', 'delta', 'dict', 'tta', 'mm', 'grzip', 'cm',
-      'dispack', 'dispack070', 'srep': ;
+      'dispack', 'dispack070', 'srep', 'bcj2', 'exe2': ;
     else
       Exit(False);
     end;
@@ -437,6 +437,7 @@ begin
       // Con marca de fin: en los bloques de datos el decodificador de FreeArc la exige
       Result := TLzmaEncStage.Create(Target, ParseLzmaEncParams(Parts), True);
     'exe':     Result := TBcjEncStage.Create(Target);
+    'bcj2', 'exe2': Result := TBcj2EncStage.Create(Target);
     'dispack', 'dispack070':
       Result := TDisPackEncStage.Create(Target, DispackBlockSize(Parts));
     'srep':

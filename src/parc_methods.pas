@@ -45,7 +45,8 @@ implementation
 
 uses
   parc_crypt, StrUtils, parc_os, parc_lzma, parc_filters, parc_lz4, parc_rep, parc_lzp, parc_ppmd,
-  parc_dict, parc_tornado, parc_grzip, parc_parallel, parc_tta, parc_mm, parc_dispack, parc_srep, parc_cm;
+  parc_dict, parc_tornado, parc_grzip, parc_parallel, parc_tta, parc_mm, parc_dispack, parc_srep, parc_cm,
+  parc_bcj2;
 
 var
   GPassword: RawByteString;
@@ -442,6 +443,8 @@ begin
       end;
     'exe':
       Result := TBcjX86Stage.Create(Source);
+    'bcj2', 'exe2':
+      Result := TBcj2DecStage.Create(Source);
     'delta':
       Result := TDeltaStage.Create(Source);
     'lz4':

@@ -36,6 +36,7 @@ document records where each one comes from, what it was verified against, and wh
 | DisPack (`dispack070`) | `Compression/DisPack` (0.70) | `tests/dispack.sh`: filter byte-for-byte against C and `.parc` round-trip |
 | SREP (`srep`), decoder | `Compression/SREP/srep.cpp` (3.93 beta) + 3.93a | `tests/srep.sh`: v1–v4 streams (text, repeats, random, >8 MB), synthetic `BASE_LEN=0` cases and lengths that wrap 32 bits; optional interoperability with 3.93a |
 | SREP (`srep`), encoder | `Compression/SREP/srep.cpp` (v3 format) | `tests/srep.sh`: streams decoded by reference srep; greedy LZ77 (≥512, lazy matching, 4 hash candidates), `BASE_LEN=0` like 3.93a |
+| BCJ2-style filter (`bcj2`) | own implementation (4 streams: main, CALL/JMP, Jcc, service bits) | `tests/bcj2.sh`: round-trip on synthetic x86 markers, random bytes and empty input. **Experimental**: not used by presets yet; compared with 7-Zip BCJ2 on binaries |
 | Context mixing (`cm`) | lpaq1 by Matt Mahoney (GPLv2) | `tests/cm.sh`: round-trip of text/binary/empty data, `-mxx` ratio vs `-m9`, `-mx` fast path, damaged stream (code 2) and encrypted archives |
 
 Historical note: LibTomCrypt rejects Blowfish keys shorter than 8 bytes (and AES/Twofish keys
