@@ -13,6 +13,7 @@
 #   WINEPREFIX prefijo de Wine (por defecto $HOME/.wine)
 #   PARC       binario de PArc (por defecto build/linux64/parc)
 #   LEVELS     niveles a probar (por defecto "1 2 3 4 5 6 7 8 9 x")
+#   THREADS    hilos de compresión para ambos (por defecto 4)
 set -u
 
 ROOT=$(cd "$(dirname "$0")/.." && pwd)
@@ -20,6 +21,7 @@ PARC=${PARC:-$ROOT/build/linux64/parc}
 : "${ARC_EXE:?definí ARC_EXE con el Arc.exe de FreeArc 0.67.1}"
 export WINEPREFIX=${WINEPREFIX:-$HOME/.wine}
 LEVELS=${LEVELS:-1 2 3 4 5 6 7 8 9 x}
+THREADS=${THREADS:-4}
 
 [ $# -ge 1 ] || { echo "uso: ARC_EXE=... $0 <corpus> [más corpus...]" >&2; exit 2; }
 [ -x "$PARC" ] || { echo "no existe $PARC (compilá con ./build.sh linux64)" >&2; exit 2; }
@@ -36,9 +38,9 @@ for corpus in "$@"; do
   for m in $LEVELS; do
     rm -f "$TMP/p.parc" "$TMP/a.arc"
     t0=$(now_ns)
-    "$PARC" a "$TMP/p.parc" "$corpus" -m"$m" --no-progress >/dev/null 2>&1
+    PARC_THREADS="$THREADS" "$PARC" a "$TMP/p.parc" "$corpus" -m"$m" --no-progress >/dev/null 2>&1
     t1=$(now_ns)
-    wine "$ARC_EXE" a -cfg- "$TMP/a.arc" "$corpus" -m"$m" >/dev/null 2>&1
+    wine "$ARC_EXE" a -cfg- -mt"$THREADS" "$TMP/a.arc" "$corpus" -m"$m" >/dev/null 2>&1
     t2=$(now_ns)
     ps=$(stat -c%s "$TMP/p.parc" 2>/dev/null || echo 0)
     as=$(stat -c%s "$TMP/a.arc" 2>/dev/null || echo 0)
