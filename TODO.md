@@ -1,6 +1,6 @@
 # PArc — pending work and details
 
-Updated: 2026-10-21  
+Updated: 2026-10-21 (single-thread TILIN run, `rep` fix)  
 Current release: **0.0.2** (`v0.0.2`, GitHub release published).  
 Format: `.parc` only. License: GPL-2.0.
 
@@ -21,7 +21,8 @@ split by `-s`. PArc `-m1` uses `rep:96mb + 4x4:tor:16mb`.
 | Time | **1,98 s** | 11,64 s |
 | Speed | **949,6 MB/s** | 153,7 MB/s |
 
-PArc is **3,9 % smaller and ~5,9× slower**. Full per-level table:
+PArc is **3,9 % smaller and ~5,9× slower**. Full per-level table (0.0.2, before the `rep` fix
+below; `-m2`/`-m3`/`-m5` are now 56,39 % / 56,26 % / 56,06 %):
 
 | Level | Size | Ratio | Compression | Verification |
 |---|---:|---:|---:|---:|
@@ -50,6 +51,38 @@ All runs were 4 threads; each archive was verified with `t` and deleted afterwar
 
 The bottleneck is the Pascal Tornado match finder and REP, not the container or I/O.
 
+### Single-thread comparison (2026-10-21)
+
+With one thread on both sides (`PARC_THREADS=1`, `Arc.exe -cfg- -mt1` under Wine, same machine),
+the gap disappears: `-m1` is 40,1 s for PArc vs 40,7 s CPU for FreeArc, with 57,76 % vs 57,60 %.
+So the ~5,9× gap above is about **how each tool parallelizes a single large file**, not raw
+match-finder speed. FreeArc also picks different methods depending on `-mt` (with `-mt4` its
+`-m2` is `rep:96mb+4x4:tor:16mb`; with `-mt1` it is smaller), so 1- and 4-thread comparisons do
+not compare the same FreeArc methods.
+
+| Level | PArc | FreeArc | Δ size | PArc comp. | FreeArc comp. | PArc `t` | FreeArc `t` |
+|---|---:|---:|---:|---:|---:|---:|---:|
+| `-m1` | 57,76 % | 57,60 % | +0,26 % | 40,1 s | 52,9 s (40,7 CPU) | 10,7 s | 19,5 s |
+| `-m2` | 56,39 % | 56,39 % | −0,00 % | 157,5 s | 146,8 s | 35,8 s | 29,8 s |
+| `-m3` | 56,26 % | 54,80 % | +2,68 % | 238,4 s | 401,5 s | 37,5 s | 99,7 s |
+| `-m4` | 56,06 % | 54,51 % | +2,85 % | 436,5 s | 529,5 s | 41,6 s | 90,1 s |
+| `-m5` | 56,06 % | 54,43 % | +3,00 % | 297,4 s | 894,9 s | 36,1 s | 103,9 s |
+| `-m6` | 45,54 % | 45,54 % | −0,01 % | 796,2 s | 732,8 s | 85,8 s | 75,2 s |
+| `-m7` | 44,35 % | 44,36 % | −0,03 % | 842,8 s | 747,5 s | 83,9 s | 73,4 s |
+| `-m8` | 40,45 % | 40,46 % | −0,01 % | 654,4 s | 661,1 s | 78,5 s | 66,8 s |
+| `-m9` | 40,25 % | 40,29 % | −0,10 % | 652,3 s | 671,5 s | 78,7 s | 67,0 s |
+
+One run per level on a shared, loaded machine (load 15–35): times are noisy. PArc `-m2`/`-m3`/`-m5`
+include the `rep` fix. Report: `/mnt/IA_LAB/agentes/PArc/bench_tilin_1thread.md`.
+
+Open points from this run:
+
+- `-m3`…`-m5` are 2,7–3,0 % larger than FreeArc on TILIN (FreeArc uses LZMA 96 MB there, PArc
+  `4x4:lzma:8mb`), while compressing 1,2–3× and verifying 2,2–2,9× faster. Decide whether large
+  blocks should get a bigger LZMA dictionary.
+- `-m6`…`-m9` verification is 14–18 % slower than FreeArc (PPMd decode).
+- `-m4` and `-m5` produce the same size on large binaries (same effective method).
+
 ### Experiments already tried
 
 | Variant | Size | Time |
@@ -67,6 +100,8 @@ single 64-bit move in `FindMatchLen`.
 
 ### Next options
 
+0. First compare multi-thread behaviour: how FreeArc splits/parallelizes one large file at
+   `-mt4` vs PArc's `4x4`; that is where the gap is.
 1. Optimize/port the Tornado match finder and REP (C/asm or a much tighter Pascal path),
    preserving the stream; target is a large fraction of the current 43,8 % hotspot.
 2. Add a multi-stream mode for a single large file (e.g. 16/32 independent LZ77 streams); measure
@@ -98,17 +133,16 @@ Plan: port `Ppmd7.c`/`Ppmd7Enc.c`/`Ppmd7Dec.c` to Pascal, add a `ppmd7` method, 
 
 A direct replacement without preprocessing does not pass the ratio gate.
 
-## P1 — level monotonicity on TILIN
+## Done — level monotonicity on TILIN
 
-On this archive, `-m2`, `-m3` and `-m5` are worse than `-m1`/`-m4`:
+Cause: the PArc-specific `2$binary`/`3$binary`/`5$binary` (and `$obj`) overrides used bare `rep`
+(64 MB window) instead of the level's `#rep` (`rep:96m`). On small corpora the window is clipped to
+the block, so it did not show; on a 1,8 GB tar, matches 64–96 MB away were lost (dictionary 8 MB vs
+96 MB LZMA only accounts for ~0,35 %). Fixed by using `2rep`/`3rep`/`5rep`.
 
-- `-m1`: 57,76 %; `-m2`: 61,05 %; `-m3`: 60,73 %; `-m4`: 56,06 %; `-m5`: 60,52 %.
-- `-m6`…`-m9` then improve sharply (45,54 % → 40,25 %) at slow speeds.
-
-Likely caused by the per-type methods chosen by those presets on a large tar. Investigate method
-selection/grouping so levels are monotonic on large single files, without regressing the four
-standard corpora. Candidate: use LZMA for large binary blocks at m2/m3/m5, or adjust the group
-rules.
+TILIN now: `-m1` 57,76 %, `-m2` 56,39 %, `-m3` 56,26 %, `-m4` 56,06 %, `-m5` 56,06 %, then
+45,54 % → 40,25 %. Linux suite passes; on a 151 MB binary corpus `-m2` is 3,3 % smaller, `-m3`
++744 bytes, `-m5` identical.
 
 ## P1 — BCJ2 exact
 
@@ -181,5 +215,5 @@ Still to consider:
 - [ ] Real Windows 10/7 re-test for 0.0.2.
 - [ ] Tornado/REP speed work.
 - [ ] Ppmd7 port.
-- [ ] Preset monotonicity for large single files.
+- [x] Preset monotonicity for large single files.
 - [ ] Exact BCJ2 (optional).
