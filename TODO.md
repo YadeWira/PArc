@@ -163,6 +163,31 @@ Open points:
 - Thread budget: extraction/verify workers × per-block decoder threads (4x4) still nest.
 - Many-file FreeArc numbers are under Wine (file creation dominates); compare natively on win10.
 
+## Done — LZMA encoder speed/ratio (branch perf2/lzma2)
+
+512 MB TILIN slice, 1 thread, compress CPU s (FreeArc 0.67 `-mt1`), size:
+
+| method | 41af3bc | now | FreeArc | size now vs FreeArc |
+|---|---:|---:|---:|---:|
+| `lzma:8mb:max` | 246–249 | 189–196 | 279–281 | −0.04 % |
+| `lzma:8mb:normal` | 119 | 110 | 134 | −0.02 % |
+| `lzma:8mb:fast` | 68 | 56 | 76 | same stream |
+| `lzma:96mb:max` | 289–307 | 229–250 | 353–376 | −0.06 % |
+| `lzma:96mb:normal` | 152 | 149–152 | 154–161 | −0.03 % (speed: only 1–8 % ahead) |
+
+Decoding is ~13–15 s vs FreeArc's ~20.5 s. Open points:
+
+- The multi-thread match finder (bt4 `:normal`/`:max`) only runs when the caller grants
+  threads (`LzmaEncThreadGrant`, see docs/ESTADO.md); the global thread budget must set it.
+- `4x4:lzma:8mb:normal` on the slice is +0.024 % vs FreeArc: some 8 MB blocks (e.g. slice
+  offset 472 MB) compress 1.4 % worse with `ht4` `mc16` than FreeArc's SDK 9.x parser, although
+  `:fast` (same match finder) is byte-identical; not found yet. The whole-stream `:normal` is
+  smaller.
+- `:fast` streams are identical to FreeArc's; whole-archive size then depends on the container
+  (+15–20 bytes on one-file archives).
+- 32 bits: big dictionaries are shrunk to what can be reserved (e.g. `lzma:1gb:fast` →
+  960mb under Wine). Several big blocks compressed in parallel each probe on their own.
+
 ## P1 — BCJ2 exact
 
 A BCJ2-style filter is present as experimental `-mbcj2`/`-mexe2`, with round-trip tests, but it is
