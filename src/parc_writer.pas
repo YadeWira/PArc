@@ -587,23 +587,174 @@ begin
   Result.CompSize := S.Position - Result.Pos;
 end;
 
-{ Un bloque comprimido en un hilo, con su propio archivo temporal y estadísticas. }
+{ Salida de un bloque comprimido en un hilo. Mientras el bloque no es el siguiente a escribir,
+  lo comprimido se guarda en memoria (con el presupuesto global de parc_parallel) y, si no
+  alcanza, sigue en un temporal. Cuando le toca, el hilo principal vuelca lo guardado al archivo
+  y el resto se escribe directo ahí: el bloque en curso no pasa por memoria ni por disco dos
+  veces. Position es la lógica (bytes escritos a este bloque), que es lo que usa WriteDataBlock. }
+type
+  TBlockOut = class(TStream)
+  private
+    FLock: TRTLCriticalSection;
+    FChunks: array of TBytes;   // en memoria, en orden; el último puede estar a medio llenar
+    FCount: Integer;
+    FLastUsed: SizeInt;
+    FReserved: Int64;           // reservado del presupuesto global
+    FSpill: TFileStream;        // lo que no entró en memoria (después de lo de FChunks)
+    FSpillName: string;
+    FDirect: TStream;           // <> nil: ya es su turno, se escribe al archivo
+    FPos: Int64;
+  protected
+    function GetSize: Int64; override;
+  public
+    constructor Create(const SpillName: string);
+    destructor Destroy; override;
+    function Write(const Buffer; Count: LongInt): LongInt; override;
+    function Read(var Buffer; Count: LongInt): LongInt; override;
+    function Seek(const Offset: Int64; Origin: TSeekOrigin): Int64; override;
+    { Vuelca lo guardado en S y pasa a escribir directo ahí (hilo principal). }
+    procedure GoDirect(S: TStream);
+  end;
+
+const
+  OUT_CHUNK = 1 shl 20;
+
+constructor TBlockOut.Create(const SpillName: string);
+begin
+  inherited Create;
+  InitCriticalSection(FLock);
+  FSpillName := SpillName;
+end;
+
+destructor TBlockOut.Destroy;
+begin
+  FChunks := nil;
+  if FReserved > 0 then MemBudgetRelease(FReserved);
+  FReserved := 0;
+  if FSpill <> nil then
+  begin
+    FreeAndNil(FSpill);
+    DeleteFile(FsPath(FSpillName));
+  end;
+  DoneCriticalSection(FLock);
+  inherited Destroy;
+end;
+
+function TBlockOut.GetSize: Int64;
+begin
+  Result := FPos;
+end;
+
+function TBlockOut.Read(var Buffer; Count: LongInt): LongInt;
+begin
+  raise EStreamError.Create('TBlockOut: read not supported');
+end;
+
+function TBlockOut.Seek(const Offset: Int64; Origin: TSeekOrigin): Int64;
+begin
+  if not (((Origin = soBeginning) and (Offset = FPos)) or ((Origin <> soBeginning) and (Offset = 0))) then
+    raise EStreamError.Create('TBlockOut: seek not supported');
+  Result := FPos;
+end;
+
+function TBlockOut.Write(const Buffer; Count: LongInt): LongInt;
+var
+  P: PByte;
+  n: SizeInt;
+begin
+  Result := Count;
+  if Count <= 0 then Exit;
+  P := @Buffer;
+  EnterCriticalSection(FLock);
+  try
+    Inc(FPos, Count);
+    if FDirect <> nil then
+    begin
+      FDirect.WriteBuffer(P^, Count);
+      Exit;
+    end;
+    while (Count > 0) and (FSpill = nil) do
+    begin
+      if (FCount = 0) or (FLastUsed = Length(FChunks[FCount - 1])) then
+      begin
+        // otro pedazo, si el presupuesto lo permite (las escrituras grandes, de su tamaño)
+        if Count > OUT_CHUNK then n := Count else n := OUT_CHUNK;
+        if not MemBudgetTryReserve(n) then
+        begin
+          FSpill := TFileStream.Create(FsPath(FSpillName), fmCreate);
+          Break;
+        end;
+        Inc(FReserved, n);
+        if FCount = Length(FChunks) then SetLength(FChunks, 2 * FCount + 8);
+        SetLength(FChunks[FCount], n);
+        Inc(FCount);
+        FLastUsed := 0;
+      end;
+      n := Length(FChunks[FCount - 1]) - FLastUsed;
+      if n > Count then n := Count;
+      Move(P^, FChunks[FCount - 1][FLastUsed], n);
+      Inc(FLastUsed, n);
+      Inc(P, n);
+      Dec(Count, n);
+    end;
+    if Count > 0 then FSpill.WriteBuffer(P^, Count);
+  finally
+    LeaveCriticalSection(FLock);
+  end;
+end;
+
+procedure TBlockOut.GoDirect(S: TStream);
+var
+  i: Integer;
+begin
+  EnterCriticalSection(FLock);
+  try
+    for i := 0 to FCount - 1 do
+    begin
+      if i < FCount - 1 then S.WriteBuffer(FChunks[i][0], Length(FChunks[i]))
+      else if FLastUsed > 0 then S.WriteBuffer(FChunks[i][0], FLastUsed);
+      FChunks[i] := nil;
+    end;
+    FChunks := nil;
+    FCount := 0;
+    if FReserved > 0 then MemBudgetRelease(FReserved);
+    FReserved := 0;
+    if FSpill <> nil then
+    begin
+      FSpill.Position := 0;
+      S.CopyFrom(FSpill, FSpill.Size);
+      FreeAndNil(FSpill);
+      DeleteFile(FsPath(FSpillName));
+    end;
+    FDirect := S;
+  finally
+    LeaveCriticalSection(FLock);
+  end;
+end;
+
+{ Un bloque comprimido en un hilo, con su salida y sus estadísticas. }
 type
   TWriteBlockJob = class(TParallelJob)
   public
     Entries: TWriteEntryArray;
     Group: TSolidGroup;
     Opt: TWriteOptions;
-    TempName: string;
+    Output: TBlockOut;
     Block: TDataBlock;
     Stats: TWriteStats;
     OrigBytes: Int64;
     procedure Process; override;
+    destructor Destroy; override;
   end;
+
+destructor TWriteBlockJob.Destroy;
+begin
+  Output.Free;
+  inherited Destroy;
+end;
 
 procedure TWriteBlockJob.Process;
 var
-  F: TFileStream;
   i: Integer;
 begin
   OrigBytes := 0;
@@ -611,12 +762,7 @@ begin
     if not Entries[Group.Files[i]].Meta.IsDir then
       Inc(OrigBytes, Entries[Group.Files[i]].Meta.Size);
   Stats := Default(TWriteStats);
-  F := TFileStream.Create(FsPath(TempName), fmCreate);
-  try
-    Block := WriteDataBlock(F, Entries, Group, Opt, nil, Stats, True);
-  finally
-    F.Free;
-  end;
+  Block := WriteDataBlock(Output, Entries, Group, Opt, nil, Stats, True);
 end;
 
 function WriteArchive(const FileName: string; const Entries: TWriteEntryArray;
@@ -634,9 +780,8 @@ var
   i, n, k: Integer;
   DirData: TBytes;
   Ok, UseParallel: Boolean;
-  Total: Int64;
-  TmpBlock: string;
-  F: TFileStream;
+  Total, BlockPos: Int64;
+  Window: Integer;
 begin
   Result := Default(TWriteStats);
   if not EncoderAvailable(Opt.DirMethod) then
@@ -693,7 +838,8 @@ begin
           AllGroups[n] := Groups[i];
         end;
 
-      UseParallel := Opt.Parallel and (Length(AllGroups) > 1) and
+      // (con un solo hilo se escribe directo, sin pasar por el camino de los trabajos)
+      UseParallel := Opt.Parallel and (Length(AllGroups) > 1) and (ThreadCount(4) >= 2) and
         (Opt.DataPassword = '') and (Opt.HeadersPassword = '');
       if UseParallel then
       begin
@@ -726,37 +872,34 @@ begin
             Jobs[i].Entries := Entries;
             Jobs[i].Group := AllGroups[i];
             Jobs[i].Opt := Opt;
-            Jobs[i].TempName := FileName + '.blk' + IntToStr(i);
-            Pool.Submit(Jobs[i]);
+            Jobs[i].Output := TBlockOut.Create(FileName + '.blk' + IntToStr(i));
           end;
+          // Ventana de trabajos en vuelo: lo que no es el bloque en curso espera en memoria,
+          // así que no se arranca todo de una vez
+          Window := 2 * Pool.MaxWorkers;
+          for i := 0 to n - 1 do
+            if i < Window then Pool.Submit(Jobs[i]);
           SetLength(Blocks, n);
           for i := 0 to n - 1 do
           begin
-            Pool.WaitJob(Jobs[i]);
-            Blocks[i] := Jobs[i].Block;
             Blocks[i].Pos := S.Position;
-            F := TFileStream.Create(FsPath(Jobs[i].TempName), fmOpenRead);
-            try
-              S.CopyFrom(F, 0);
-            finally
-              F.Free;
-            end;
+            Jobs[i].Output.GoDirect(S);   // lo ya comprimido, y el resto directo al archivo
+            Pool.WaitJob(Jobs[i]);
+            if i + Window < n then Pool.Submit(Jobs[i + Window]);
+            BlockPos := Blocks[i].Pos;
+            Blocks[i] := Jobs[i].Block;
+            Blocks[i].Pos := BlockPos;
+            if S.Position - BlockPos <> Blocks[i].CompSize then
+              raise Exception.Create('parallel block size mismatch');
+            FreeAndNil(Jobs[i].Output);
             Inc(Result.Files, Jobs[i].Stats.Files);
             Inc(Result.Dirs, Jobs[i].Stats.Dirs);
             Inc(Result.Bytes, Jobs[i].Stats.Bytes);
             ProgressAdd(Jobs[i].OrigBytes);
           end;
         finally
-          for i := 0 to High(Jobs) do
-          begin
-            if Jobs[i] <> nil then
-            begin
-              TmpBlock := Jobs[i].TempName;
-              Jobs[i].Free;
-              if TmpBlock <> '' then DeleteFile(FsPath(TmpBlock));
-            end;
-          end;
-          Pool.Free;
+          Pool.Free;   // espera a los hilos antes de liberar sus trabajos (y sus temporales)
+          for i := 0 to High(Jobs) do Jobs[i].Free;
         end;
       end
       else

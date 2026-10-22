@@ -86,6 +86,13 @@ type
 { Hilos a usar: PARC_THREADS si está definido; si no, los núcleos, hasta Cap. }
 function ThreadCount(Cap: Integer): Integer;
 
+{ Presupuesto global de memoria para resultados que esperan su turno (bloques comprimidos en
+  paralelo que todavía no se pueden escribir): min(1 GB, RAM/4), 256 MB en 32 bits;
+  PARC_BUFMEM=<MB> lo reemplaza. TryReserve no espera: si no alcanza devuelve False y el que
+  pidió usa otro camino (un temporal). }
+function MemBudgetTryReserve(Bytes: Int64): Boolean;
+procedure MemBudgetRelease(Bytes: Int64);
+
 implementation
 
 uses
@@ -151,6 +158,41 @@ begin
   end;
   if Result > 64 then Result := 64;
   if Result < 1 then Result := 1;
+end;
+
+var
+  BudgetLock: TRTLCriticalSection;
+  BudgetLimit: Int64 = -1;   // -1: todavía no calculado
+  BudgetUsed: Int64 = 0;
+
+function MemBudgetTryReserve(Bytes: Int64): Boolean;
+var
+  Ram: Int64;
+begin
+  EnterCriticalSection(BudgetLock);
+  try
+    if BudgetLimit < 0 then
+    begin
+      BudgetLimit := Int64(StrToIntDef(GetEnvironmentVariable('PARC_BUFMEM'), -1)) shl 20;
+      if BudgetLimit < 0 then
+      begin
+        {$IFDEF CPU64}BudgetLimit := Int64(1) shl 30;{$ELSE}BudgetLimit := Int64(256) shl 20;{$ENDIF}
+        Ram := PhysicalMemory;
+        if (Ram > 0) and (Ram div 4 < BudgetLimit) then BudgetLimit := Ram div 4;
+      end;
+    end;
+    Result := BudgetUsed + Bytes <= BudgetLimit;
+    if Result then Inc(BudgetUsed, Bytes);
+  finally
+    LeaveCriticalSection(BudgetLock);
+  end;
+end;
+
+procedure MemBudgetRelease(Bytes: Int64);
+begin
+  EnterCriticalSection(BudgetLock);
+  Dec(BudgetUsed, Bytes);
+  LeaveCriticalSection(BudgetLock);
 end;
 
 { TJobPool }
@@ -325,4 +367,8 @@ begin
   Inc(FPos, Result);
 end;
 
+initialization
+  InitCriticalSection(BudgetLock);
+finalization
+  DoneCriticalSection(BudgetLock);
 end.

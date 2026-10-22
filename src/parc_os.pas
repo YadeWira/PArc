@@ -83,6 +83,8 @@ function ReadPassword(const Prompt: string; out Pwd: string): Boolean;
 
 { Núcleos disponibles. TThread.ProcessorCount de FPC 3.2.2 devuelve siempre 1 en Linux. }
 function CpuCount: Integer;
+{ Memoria física total en bytes (0 si no se sabe). }
+function PhysicalMemory: Int64;
 
 implementation
 
@@ -140,8 +142,38 @@ end;
 {$IFDEF LINUX}
 const
   _SC_NPROCESSORS_ONLN = 84;   // glibc
+  _SC_PAGESIZE = 30;
+  _SC_PHYS_PAGES = 85;
 function sysconf(name: LongInt): PtrInt; cdecl; external 'c';
 {$ENDIF}
+{$IFDEF WINDOWS}
+type
+  TParcMemStatusEx = record
+    dwLength, dwMemoryLoad: DWORD;
+    ullTotalPhys, ullAvailPhys, ullTotalPageFile, ullAvailPageFile,
+    ullTotalVirtual, ullAvailVirtual, ullAvailExtendedVirtual: QWord;
+  end;
+function ParcGlobalMemoryStatusEx(var Buf: TParcMemStatusEx): BOOL; stdcall;
+  external 'kernel32.dll' name 'GlobalMemoryStatusEx';
+{$ENDIF}
+
+function PhysicalMemory: Int64;
+{$IFDEF WINDOWS}
+var
+  M: TParcMemStatusEx;
+{$ENDIF}
+begin
+  Result := 0;
+  {$IFDEF LINUX}
+  if (sysconf(_SC_PHYS_PAGES) > 0) and (sysconf(_SC_PAGESIZE) > 0) then
+    Result := Int64(sysconf(_SC_PHYS_PAGES)) * sysconf(_SC_PAGESIZE);
+  {$ENDIF}
+  {$IFDEF WINDOWS}
+  M := Default(TParcMemStatusEx);
+  M.dwLength := SizeOf(M);
+  if ParcGlobalMemoryStatusEx(M) then Result := Int64(M.ullTotalPhys);
+  {$ENDIF}
+end;
 
 function CpuCount: Integer;
 begin
