@@ -28,6 +28,8 @@ type
     constructor Create;
     destructor Destroy; override;
     procedure Process; virtual; abstract;
+    { Para reusar un trabajo ya terminado (y esperado): limpia el error y el evento. }
+    procedure ResetForReuse;
   end;
 
   TJobPool = class;
@@ -75,6 +77,9 @@ type
   protected
     { El próximo bloque de la fuente, ya cargado, o nil al final del stream. }
     function ReadJob: TParallelJob; virtual; abstract;
+    { Un bloque ya entregado: por defecto se libera; una subclase puede guardarlo para
+      reciclar sus buffers. }
+    procedure ReleaseJob(Job: TParallelJob); virtual;
   public
     { MaxThreads: tope por defecto (PARC_THREADS lo reemplaza); ExtraJobs: bloques leídos por
       adelantado además de uno por hilo. }
@@ -103,6 +108,13 @@ destructor TParallelJob.Destroy;
 begin
   RTLEventDestroy(FDone);
   inherited Destroy;
+end;
+
+procedure TParallelJob.ResetForReuse;
+begin
+  FErrClass := nil;
+  FErrMsg := '';
+  RTLEventResetEvent(FDone);
 end;
 
 procedure TParallelJob.Run;
@@ -262,6 +274,11 @@ begin
   inherited Destroy;
 end;
 
+procedure TParallelBlockStage.ReleaseJob(Job: TParallelJob);
+begin
+  Job.Free;
+end;
+
 procedure TParallelBlockStage.FillQueue;
 var
   Job: TParallelJob;
@@ -285,7 +302,11 @@ begin
   if FErrClass <> nil then raise FErrClass.Create(FErrMsg);
   while (FCur = nil) or (FPos >= FCur.OutSize) do
   begin
-    FreeAndNil(FCur);
+    if FCur <> nil then
+    begin
+      ReleaseJob(FCur);
+      FCur := nil;
+    end;
     if FEof then Exit(0);
     try
       FillQueue;

@@ -8,10 +8,14 @@
 
   Hilos: el C calcula los hashes (Job.process) en hilos de fondo y los consume en orden FIFO;
   el trabajo de un hilo solo lee bytes ya leídos que nadie modifica hasta consumirlo y solo
-  escribe su propia ranura de ht[], así que calcularlo en el momento del Put da lo mismo.
+  escribe su propia ranura de ht[], así que hacerlo en un hilo o en el momento del Put da lo
+  mismo. Acá, con más de un hilo (RepHashThreads), también va a hilos de fondo (THashTask);
+  antes de mover FBuf (EnsureCap) o de volver a llenarlo desde 0 (fin de la ventana) se
+  esperan todos los trabajos en vuelo (DrainTasks).
   Lo que SÍ cambia la salida es HTBUFS = max(16, 2*GetCompressionThreads()): cuántas lecturas
   de adelanto se hacen (DataEnd acota la búsqueda) y el contenido "viejo" de las ranuras
-  (ver ProcessJob). Con <= 8 hilos HTBUFS=16 (valor por defecto, Threads=1).
+  (ver ProcessJob). Con <= 8 hilos HTBUFS=16 (valor por defecto, Threads=1); no depende de
+  los hilos de hashing.
 
   Memoria: ventana BlockSize (se reserva a medida que llegan datos) + hash HashSize*4
   + ht HTBUFS*HTCOUNT*4 (256 KB con l512) + tablas de un bloque de 8 MB. }
@@ -44,6 +48,7 @@ type
 
   TRepJob = record
     Slot, BufPos, Bytes: LongInt;  // ranura en FHt, inicio en FBuf, bytes a indexar
+    Busy: Boolean;                 // su hashing está en vuelo en un hilo de fondo
   end;
 
   TRepEncStage = class(TOutStage)
@@ -66,6 +71,10 @@ type
     FLens, FOffs, FDLens, FDOffs: TRepIntArray;
     FNLens, FNOffs, FNDLens, FNDOffs: LongInt;
     FLiterals: LongInt;
+    FPool: TObject;                     // TJobPool de hashing (nil = en línea)
+    FTasks: array of TObject;           // THashTask por ranura de FJobs (se reusan)
+    procedure WaitTask(Idx: LongInt);
+    procedure DrainTasks;
     procedure Push(var A: TRepIntArray; var N: LongInt; V: LongInt);
     procedure EnsureCap(Need: LongInt);
     procedure HashJob(Slot, BufPos, Bytes: LongInt);
@@ -79,6 +88,7 @@ type
   public
     constructor Create(ATarget: TOutStage; const APar: TRepEncParams);
     constructor Create(ATarget: TOutStage; const Params: TStringArray);
+    destructor Destroy; override;
   end;
 
 function DefaultRepEncParams: TRepEncParams;
@@ -90,10 +100,42 @@ procedure CheckRepEncParams(const P: TRepEncParams; out L, HashSize: LongInt);
 { GetCompressionMem de REP_METHOD: BlockSize + HashSize*4 }
 function RepEncMemory(const P: TRepEncParams): Int64;
 
+{ Hilos de fondo para el hashing de REP (HashingThreads del C): sale de PARC_THREADS / los
+  núcleos, como los demás pools; 1 = en línea, sin hilos. }
+function RepHashThreads: Integer;
+
 implementation
 
 uses
-  parc_methods;
+  parc_methods, parc_parallel;
+
+const
+  { Tope de hilos de hashing: el hashing (~1 GB/s por hilo) solo tiene que ir delante del
+    bucle de búsqueda, que corre en el hilo que escribe. }
+  REP_HASH_MAXTHREADS = 2;
+  { Prefetch en ProcessJob: cuántos bloques de L bytes por delante (0 = sin el de datos) }
+  REP_PF_HASH = 16;
+  REP_PF_DATA = 8;
+
+type
+  { Job::process de rep_compress en un hilo de fondo }
+  THashTask = class(TParallelJob)
+  public
+    Stage: TRepEncStage;
+    Slot, BufPos, Bytes: LongInt;
+    procedure Process; override;
+  end;
+
+procedure THashTask.Process;
+begin
+  Stage.HashJob(Slot, BufPos, Bytes);
+end;
+
+function RepHashThreads: Integer;
+begin
+  Result := ThreadCount(REP_HASH_MAXTHREADS);
+  if Result > REP_HASH_MAXTHREADS then Result := REP_HASH_MAXTHREADS;
+end;
 
 const
   PRIME = 153191;
@@ -273,7 +315,7 @@ end;
 
 constructor TRepEncStage.Create(ATarget: TOutStage; const APar: TRepEncParams);
 var
-  i: Integer;
+  i, n: Integer;
   pw, b: LongWord;
 begin
   // Validar y reservar ANTES de inherited Create: si algo falla, Destroy ve FTarget=nil
@@ -310,6 +352,49 @@ begin
   FMoreInput := True;
   FMoreHashed := True;
   FState := stNotStarted;
+  // Hashing en hilos de fondo, como HashingThreads del C. No cambia la salida: HTBUFS sale
+  // de APar.Threads, no de estos hilos.
+  n := RepHashThreads;
+  if n > 1 then
+  begin
+    FPool := TJobPool.Create(n, FHtBufs);
+    SetLength(FTasks, FHtBufs);
+    for i := 0 to FHtBufs - 1 do
+    begin
+      FTasks[i] := THashTask.Create;
+      THashTask(FTasks[i]).Stage := Self;
+    end;
+  end;
+end;
+
+destructor TRepEncStage.Destroy;
+var
+  i: Integer;
+begin
+  if FPool <> nil then
+  begin
+    // Ningún hilo puede seguir leyendo FBuf o escribiendo FHt después de esto
+    try DrainTasks; except end;
+    FreeAndNil(FPool);
+  end;
+  for i := 0 to High(FTasks) do FTasks[i].Free;
+  inherited Destroy;
+end;
+
+{ Espera el hashing en vuelo del trabajo FJobs[Idx] (si lo hay) y relanza su error. }
+procedure TRepEncStage.WaitTask(Idx: LongInt);
+begin
+  if not FJobs[Idx].Busy then Exit;
+  FJobs[Idx].Busy := False;
+  TJobPool(FPool).WaitJob(TParallelJob(FTasks[Idx]));
+end;
+
+{ Espera todos los hashings en vuelo (antes de mover FBuf o de volver a llenarlo desde 0). }
+procedure TRepEncStage.DrainTasks;
+var
+  k: LongInt;
+begin
+  for k := 0 to FJobCount - 1 do WaitTask((FJobHead + k) mod FHtBufs);
 end;
 
 procedure TRepEncStage.Push(var A: TRepIntArray; var N: LongInt; V: LongInt);
@@ -328,8 +413,93 @@ begin
   if NewCap < Need then NewCap := Need;
   if NewCap < 1 shl 20 then NewCap := 1 shl 20;
   if NewCap > FBlockSize then NewCap := FBlockSize;
+  if FPool <> nil then DrainTasks;   // SetLength puede mover FBuf
   SetLength(FBuf, NewCap);
 end;
+
+{ Un bloque de L bytes (L par) del hash rodante: recorre los L hashes que empiezan en p[0..L)
+  (h es el de p[0]) y deja en h el de p[L], en maxh/maxi el máximo con signo y su índice
+  (maxh entra = h, maxi = 0).
+  El hash rodante h' = h*PRIME + (p[L] - p[0]*PRIME^L) es una cadena serie de imul; acá se
+  avanza de a dos pasos, h'' = h*PRIME^2 + (t0*PRIME + t1), y h' se calcula fuera de la
+  cadena: la mitad de latencia. Todo es mod 2^32, así que hashes, máximos e índices son los
+  mismos que paso a paso. En x86_64 va en ensamblador (FPC saca h o p a memoria en Pascal);
+  está aparte de HashJob para que las variables del asm no saquen de los registros las del
+  camino de L impar. }
+procedure RepHashEvenBlock(p: PByte; L: LongInt; pl: LongWord; var h, maxh: LongWord;
+  var maxi: LongInt);
+{$IF DEFINED(CPUX86_64) AND NOT DEFINED(PARC_NOASM)}
+var
+  pp: PByte;
+  LL: LongInt;
+  pw, hh, mh: LongWord;
+  mi: LongInt;
+begin
+  pp := p; LL := L; pw := pl; hh := h; mh := maxh;
+  asm
+    movq    pp, %rsi
+    movslq  LL, %r8
+    leaq    (%rsi,%r8), %rdi
+    movl    pw, %r9d
+    movl    hh, %eax
+    movl    mh, %r10d
+    xorl    %r11d, %r11d
+    xorl    %ecx, %ecx
+  .Lrephash2:
+    movzbl  (%rsi,%rcx), %edx
+    imull   %r9d, %edx
+    movzbl  (%rdi,%rcx), %r12d
+    subl    %edx, %r12d            // t0 = p[i+L] - p[i]*PRIME^L
+    movzbl  1(%rsi,%rcx), %edx
+    imull   %r9d, %edx
+    movzbl  1(%rdi,%rcx), %r13d
+    subl    %edx, %r13d            // t1 = p[i+1+L] - p[i+1]*PRIME^L
+    imull   $0x25667, %eax, %r14d
+    addl    %r12d, %r14d           // h1 = h*PRIME + t0
+    cmpl    %r10d, %eax
+    cmovgl  %eax, %r10d
+    cmovgl  %ecx, %r11d            // si h > maxh: maxh := h; maxi := i
+    leal    1(%rcx), %edx
+    cmpl    %r10d, %r14d
+    cmovgl  %r14d, %r10d
+    cmovgl  %edx, %r11d            // si h1 > maxh: maxh := h1; maxi := i+1
+    imull   $0x25667, %r12d, %r12d
+    addl    %r13d, %r12d
+    imull   $0x76C55D71, %eax, %eax
+    addl    %r12d, %eax            // h = h*PRIME^2 + (t0*PRIME + t1)
+    addl    $2, %ecx
+    cmpl    %r8d, %ecx
+    jl      .Lrephash2
+    movl    %eax, hh
+    movl    %r10d, mh
+    movl    %r11d, mi
+  end ['rax', 'rcx', 'rdx', 'rsi', 'rdi', 'r8', 'r9', 'r10', 'r11', 'r12', 'r13', 'r14'];
+  h := hh; maxh := mh; maxi := mi;
+end;
+{$ELSE}
+const
+  P2 = LongWord($76C55D71);   // PRIME^2 mod 2^32
+var
+  q: PByte;
+  i, mi: LongInt;
+  hh, h1, mh, t0, t1: LongWord;
+begin
+  q := p + L;
+  hh := h; mh := maxh; mi := 0;
+  i := 0;
+  while i < L do
+  begin
+    t0 := LongWord(q[i]) - LongWord(p[i]) * pl;
+    t1 := LongWord(q[i + 1]) - LongWord(p[i + 1]) * pl;
+    h1 := hh * PRIME + t0;
+    if LongInt(hh) > LongInt(mh) then begin mh := hh; mi := i; end;
+    if LongInt(h1) > LongInt(mh) then begin mh := h1; mi := i + 1; end;
+    hh := hh * P2 + (t0 * PRIME + t1);
+    Inc(i, 2);
+  end;
+  h := hh; maxh := mh; maxi := mi;
+end;
+{$ENDIF}
 
 { Job::process: por cada bloque de L bytes guarda el hash máximo (con signo) de los L hashes
   rodantes que empiezan en él y su índice. }
@@ -353,13 +523,21 @@ begin
   for blk := 0 to NumBlocks - 1 do
   begin
     maxh := h; maxi := 0;
-    pe := p + L;
-    i := 0;
-    while p < pe do
+    if not Odd(L) then
     begin
-      if LongInt(h) > LongInt(maxh) then begin maxh := h; maxi := i; end;
-      h := h * pr + p[L] - LongWord(p[0]) * pl;  // update_hash(ptr[0], ptr[L])
-      Inc(p); Inc(i);
+      RepHashEvenBlock(p, L, pl, h, maxh, maxi);   // de a dos pasos
+      Inc(p, L);
+    end
+    else
+    begin
+      pe := p + L;
+      i := 0;
+      while p < pe do
+      begin
+        if LongInt(h) > LongInt(maxh) then begin maxh := h; maxi := i; end;
+        h := h * pr + p[L] - LongWord(p[0]) * pl;  // update_hash(ptr[0], ptr[L])
+        Inc(p); Inc(i);
+      end;
     end;
     hp^ := LongInt(maxh); Inc(hp);
     hp^ := maxi; Inc(hp);
@@ -369,8 +547,9 @@ end;
 { Cola de rep_compress tras READ_LEN (bloque "ЧТЕНИЕ ВХОДНЫХ ДАННЫХ") }
 procedure TRepEncStage.AfterRead(Size: LongInt);
 var
-  bytes: LongInt;
+  bytes, idx: LongInt;
   J: TRepJob;
+  T: THashTask;
 begin
   if FDoItOnce then begin EmitU32(LongWord(FBlockSize)); FDoItOnce := False; end;
   if Size = 0 then FMoreInput := False;
@@ -384,8 +563,19 @@ begin
   J.Slot := FHtIndex * FHtCount;
   J.BufPos := FNextJobI;
   J.Bytes := bytes;
-  HashJob(J.Slot, J.BufPos, J.Bytes);    // en el C lo hace un hilo; ver comentario de la unidad
-  FJobs[(FJobHead + FJobCount) mod FHtBufs] := J;
+  idx := (FJobHead + FJobCount) mod FHtBufs;
+  // En el C lo hace un hilo; ver comentario de la unidad
+  J.Busy := (FPool <> nil) and (bytes >= FL);
+  if J.Busy then
+  begin
+    T := THashTask(FTasks[idx]);
+    T.ResetForReuse;
+    T.Slot := J.Slot; T.BufPos := J.BufPos; T.Bytes := J.Bytes;
+    TJobPool(FPool).Submit(T);
+  end
+  else
+    HashJob(J.Slot, J.BufPos, J.Bytes);
+  FJobs[idx] := J;
   Inc(FJobCount);
   Inc(FNextJobI, bytes);
   FHtIndex := (FHtIndex + 1) mod FHtBufs;
@@ -396,14 +586,23 @@ end;
   Rareza del C: consume ceil((next_fill-last_i)/L) pares aunque el trabajo haya escrito
   floor(bytes/L); si bytes no es múltiplo de L (última lectura parcial, o BlockSize que no es
   múltiplo de HTBLOCK/L) lee un par "viejo" de la ranura (cero o de un trabajo anterior).
-  Eso es determinista y acá se reproduce igual, porque FHt tiene las mismas ranuras. }
+  Eso es determinista y acá se reproduce igual, porque FHt tiene las mismas ranuras.
+  Velocidad: casi todo el tiempo son fallos de caché (una lectura al azar de hasharr por
+  bloque y otra de buf[match]); como los hashes de los bloques siguientes ya están en FHt, se
+  adelantan esas lecturas con prefetch (solo dentro de la ranura de este trabajo: la siguiente
+  puede estar escribiéndola un hilo de hashing). Las coincidencias se extienden de a 8 bytes
+  (en little endian) con el mismo resultado que byte a byte. }
 procedure TRepEncStage.ProcessJob(const J: TRepJob);
 var
-  hp, next_fill, hash, i, match, LowBound, HighBound, st, en, q, pm, offset, lim: LongInt;
+  hp, next_fill, hash, i, match, LowBound, HighBound, st, en, q, pm, offset, lim, SlotEnd, pf: LongInt;
   b: PByte;
+  {$IFDEF ENDIAN_LITTLE}
+  x: QWord;
+  {$ENDIF}
 begin
   b := @FBuf[0];
   hp := J.Slot;
+  SlotEnd := J.Slot + FHtCount;
   next_fill := J.BufPos + J.Bytes;
   while FLastI < next_fill do
   begin
@@ -411,6 +610,16 @@ begin
       raise Exception.Create('rep: estado interno inconsistente (ht)');
     hash := FHt[hp];
     i := FHt[hp + 1] + FLastI;
+    // La entrada de hasharr de REP_PF_HASH bloques más adelante y los datos del candidato de
+    // REP_PF_DATA bloques más adelante (su entrada ya debería estar en caché). Solo adelanta
+    // lecturas: el resultado no cambia.
+    if hp + 2 * REP_PF_HASH < SlotEnd then
+      prefetch(FHashArr[LongWord(FHt[hp + 2 * REP_PF_HASH]) and LongWord(FHashMask)]);
+    if (REP_PF_DATA > 0) and (hp + 2 * REP_PF_DATA < SlotEnd) then
+    begin
+      pf := FHashArr[LongWord(FHt[hp + 2 * REP_PF_DATA]) and LongWord(FHashMask)];
+      if pf > 0 then prefetch(b[pf - 1]);
+    end;
     Inc(hp, 2);
     if i >= FLastMatch then
     begin
@@ -425,15 +634,36 @@ begin
         lim := FLastMatch; if LowBound > lim then lim := LowBound;
         q := i; pm := match;
         st := -1;
-        while q > lim do
+        {$IFDEF ENDIAN_LITTLE}
+        // De a 8 bytes: el byte distinto más alto (Bsr) es el primero que encuentra el bucle
+        while q - 8 >= lim do
         begin
-          Dec(pm); Dec(q);
-          if b[pm] <> b[q] then begin st := q + 1; Break; end;
+          x := PQWord(b + q - 8)^ xor PQWord(b + pm - 8)^;
+          if x <> 0 then begin st := q - 8 + LongInt(BsrQWord(x) shr 3) + 1; Break; end;
+          Dec(q, 8); Dec(pm, 8);
         end;
-        if st < 0 then st := q;
+        if st < 0 then
+        {$ENDIF}
+        begin
+          while q > lim do
+          begin
+            Dec(pm); Dec(q);
+            if b[pm] <> b[q] then begin st := q + 1; Break; end;
+          end;
+          if st < 0 then st := q;
+        end;
         // find_match_end(buf+match, buf+i, buf+min(DataEnd,HighBound))
         lim := FDataEnd; if HighBound < lim then lim := HighBound;
         q := i; pm := match;
+        {$IFDEF ENDIAN_LITTLE}
+        // De a 8 bytes: el byte distinto más bajo (Bsf) es donde termina la coincidencia
+        while q + 8 <= lim do
+        begin
+          x := PQWord(b + q)^ xor PQWord(b + pm)^;
+          if x <> 0 then begin Inc(q, LongInt(BsfQWord(x) shr 3)); lim := q; Break; end;
+          Inc(q, 8); Inc(pm, 8);
+        end;
+        {$ENDIF}
         while (q < lim) and (b[pm] = b[q]) do begin Inc(pm); Inc(q); end;
         en := q;
         if i - match < FBarrier then lim := FMinLen else lim := FSmallLen;
@@ -482,7 +712,9 @@ begin
   end;
   if FNextFlush = FBlockSize then
   begin
-    // Fin de la ventana: seguir llenándola desde el principio
+    // Fin de la ventana: seguir llenándola desde el principio (las lecturas nuevas pisan FBuf
+    // desde 0: ningún hashing en vuelo puede estar leyendo ahí)
+    if FPool <> nil then DrainTasks;
     FDataEnd := 0; FLastMatch := 0; FLastI := 0; FNextJobI := 0; FNextFlush := 0;
   end;
   outsize := 4 * 2 + 4 * FNLens + 4 * FNOffs + 4 * FNDLens + FLiterals;
@@ -542,6 +774,7 @@ begin
         begin
           // HashingThreads.Get(): en el C, sin trabajos pendientes se colgaría
           if FJobCount = 0 then raise Exception.Create('rep: estado interno inconsistente (sin trabajos)');
+          WaitTask(FJobHead);
           J := FJobs[FJobHead];
           FJobHead := (FJobHead + 1) mod FHtBufs;
           Dec(FJobCount);
@@ -604,6 +837,7 @@ procedure TRepEncStage.DoFinish;
 begin
   FFinal := True;
   Pump;
+  if FPool <> nil then DrainTasks;
   // La memoria grande ya no hace falta
   FBuf := nil; FHashArr := nil; FHt := nil;
 end;

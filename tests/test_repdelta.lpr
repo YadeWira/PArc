@@ -12,6 +12,7 @@ program test_repdelta;
 {$mode objfpc}{$H+}
 
 uses
+  {$IFDEF UNIX}cthreads,{$ENDIF}   // parc_repenc hashea en hilos de fondo
   SysUtils, Classes, parc_outstream, parc_stream, parc_rep, parc_filters, parc_repenc, parc_deltaenc;
 
 var
