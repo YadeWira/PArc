@@ -190,6 +190,9 @@ type
     Stats: TExtractStats;
     Messages: TStringList;
     Damaged: Boolean;
+    Orig: Int64;           // bytes que se descomprimen (para el progreso)
+    DoneKB: LongInt;       // progreso, en KB: lo suma el hilo principal (ProgressAdd no es
+                           // para otros hilos)
     constructor Create;
     destructor Destroy; override;
     procedure Process; override;
@@ -216,7 +219,18 @@ var
   i, Cur, LastWanted, n: Integer;
   F: TArcFileEntry;
   Crc: LongWord;
-  Remaining: Int64;
+  Remaining, Pending: Int64;
+
+  procedure Advance(Bytes: Int64);
+  begin
+    Inc(Pending, Bytes);
+    if Pending >= 1024 then
+    begin
+      InterlockedExchangeAdd(DoneKB, LongInt(Pending shr 10));
+      Pending := Pending and 1023;
+    end;
+    CheckCancel;
+  end;
 
   procedure MarkRemaining;
   var k: Integer;
@@ -232,10 +246,14 @@ var
 begin
   Stats := Default(TExtractStats);
   Damaged := False;
+  Pending := 0;
   Blk := A.DataBlocks[BlockIndex];
   LastWanted := -1;
   for i := Blk.FirstFile to Blk.FirstFile + Blk.FileCount - 1 do
     if not A.Files[i].IsDir and not A.Files[i].IsLink and Wanted(Opt, A.Files[i].Name) then LastWanted := i;
+  Orig := 0;
+  for i := Blk.FirstFile to LastWanted do
+    if not A.Files[i].IsDir then Inc(Orig, A.Files[i].Size);
   if LastWanted < 0 then Exit;
 
   SetLength(Buf, COPY_BUF);
@@ -252,7 +270,14 @@ begin
         if F.IsDir or F.IsLink then Continue;
         if not Wanted(Opt, F.Name) then
         begin
-          SkipBytes(Chain, F.Size, Buf);
+          Remaining := F.Size;   // (solo hay que atravesarlo)
+          while Remaining > 0 do
+          begin
+            if Remaining > Length(Buf) then n := Length(Buf) else n := Remaining;
+            Chain.ReadExact(@Buf[0], n);
+            Advance(n);
+            Dec(Remaining, n);
+          end;
           Continue;
         end;
         Crc := CRC_INIT;
@@ -262,6 +287,7 @@ begin
           if Remaining > Length(Buf) then n := Length(Buf) else n := Remaining;
           Chain.ReadExact(@Buf[0], n);
           Crc := UpdateCRC(Crc, @Buf[0], n);
+          Advance(n);
           Dec(Remaining, n);
         end;
         if (Crc xor CRC_INIT) <> F.Crc then
@@ -306,7 +332,10 @@ var
   b, i, n, Count, LastWanted: Integer;
   Jobs: array of TVerifyJob;
   Pool: TJobPool;
-  Damaged: Boolean;
+  Damaged, Finished: Boolean;
+  Reported: array of Int64;
+  Done: Int64;
+  k: Integer;
 begin
   Result := Default(TExtractStats);
   Damaged := False;
@@ -347,34 +376,46 @@ begin
     Inc(n);
   end;
 
-  if Count = 1 then
-    Jobs[0].Process
-  else if Count > 1 then
-  begin
-    Pool := TJobPool.Create(ThreadCount(4), Count);
-    try
-      for i := 0 to Count - 1 do Pool.Submit(Jobs[i]);
-      for i := 0 to Count - 1 do Pool.WaitJob(Jobs[i]);
-    finally
-      Pool.Free;
+  // Mensajes y estadísticas en orden de bloque, como el camino serial; el progreso lo suma
+  // este hilo con lo que va avisando cada trabajo (también con un solo bloque: así se ve)
+  SetLength(Reported, Count);
+  try
+    if Count > 0 then
+    begin
+      Pool := TJobPool.Create(ThreadCount(4), Count);
+      try
+        for i := 0 to Count - 1 do Pool.Submit(Jobs[i]);
+        for i := 0 to Count - 1 do
+          repeat
+            Finished := Pool.WaitJobFor(Jobs[i], PROGRESS_INTERVAL);
+            for k := i to Count - 1 do
+            begin
+              Done := Int64(Jobs[k].DoneKB) shl 10;
+              if Done > Reported[k] then
+              begin
+                ProgressAdd(Done - Reported[k]);
+                Reported[k] := Done;
+              end;
+            end;
+          until Finished;
+      finally
+        Pool.Free;
+      end;
     end;
-  end;
 
-  // Mensajes y estadísticas en orden de bloque, como el camino serial.
-  for i := 0 to Count - 1 do
-  begin
-    for n := 0 to Jobs[i].Messages.Count - 1 do Log(Jobs[i].Messages[n]);
-    Inc(Result.Files, Jobs[i].Stats.Files);
-    Inc(Result.Errors, Jobs[i].Stats.Errors);
-    Inc(Result.Bytes, Jobs[i].Stats.Bytes);
-    if Jobs[i].Stats.Unsupported then Result.Unsupported := True;
-    if Jobs[i].Damaged then Damaged := True;
-    Orig := 0;
-    for n := Jobs[i].A.DataBlocks[Jobs[i].BlockIndex].FirstFile to
-             Jobs[i].A.DataBlocks[Jobs[i].BlockIndex].FirstFile + Jobs[i].A.DataBlocks[Jobs[i].BlockIndex].FileCount - 1 do
-      if not A.Files[n].IsDir then Inc(Orig, A.Files[n].Size);
-    ProgressAdd(Orig);
-    Jobs[i].Free;
+    for i := 0 to Count - 1 do
+    begin
+      for n := 0 to Jobs[i].Messages.Count - 1 do Log(Jobs[i].Messages[n]);
+      Inc(Result.Files, Jobs[i].Stats.Files);
+      Inc(Result.Errors, Jobs[i].Stats.Errors);
+      Inc(Result.Bytes, Jobs[i].Stats.Bytes);
+      if Jobs[i].Stats.Unsupported then Result.Unsupported := True;
+      if Jobs[i].Damaged then Damaged := True;
+      Orig := Jobs[i].Orig;
+      if Orig > Reported[i] then ProgressAdd(Orig - Reported[i]);
+    end;
+  finally
+    for i := 0 to Count - 1 do Jobs[i].Free;
   end;
 
   // Enlaces: no tienen datos, se verifican como en el camino serial.
