@@ -45,7 +45,8 @@ function MatchesAny(const Name: string; Masks: TStrings): Boolean;
 implementation
 
 uses
-  DateUtils, parc_os, parc_bytes, parc_crc, parc_stream, parc_methods, parc_progress, parc_parallel, parc_volume;
+  DateUtils, parc_os, parc_bytes, parc_crc, parc_stream, parc_methods, parc_progress, parc_parallel, parc_volume,
+  parc_strmap;
 
 const
   COPY_BUF = 1 shl 20;
@@ -189,6 +190,9 @@ type
     Stats: TExtractStats;
     Messages: TStringList;
     Damaged: Boolean;
+    Orig: Int64;           // bytes que se descomprimen (para el progreso)
+    DoneKB: LongInt;       // progreso, en KB: lo suma el hilo principal (ProgressAdd no es
+                           // para otros hilos)
     constructor Create;
     destructor Destroy; override;
     procedure Process; override;
@@ -215,7 +219,18 @@ var
   i, Cur, LastWanted, n: Integer;
   F: TArcFileEntry;
   Crc: LongWord;
-  Remaining: Int64;
+  Remaining, Pending: Int64;
+
+  procedure Advance(Bytes: Int64);
+  begin
+    Inc(Pending, Bytes);
+    if Pending >= 1024 then
+    begin
+      InterlockedExchangeAdd(DoneKB, LongInt(Pending shr 10));
+      Pending := Pending and 1023;
+    end;
+    CheckCancel;
+  end;
 
   procedure MarkRemaining;
   var k: Integer;
@@ -231,10 +246,14 @@ var
 begin
   Stats := Default(TExtractStats);
   Damaged := False;
+  Pending := 0;
   Blk := A.DataBlocks[BlockIndex];
   LastWanted := -1;
   for i := Blk.FirstFile to Blk.FirstFile + Blk.FileCount - 1 do
     if not A.Files[i].IsDir and not A.Files[i].IsLink and Wanted(Opt, A.Files[i].Name) then LastWanted := i;
+  Orig := 0;
+  for i := Blk.FirstFile to LastWanted do
+    if not A.Files[i].IsDir then Inc(Orig, A.Files[i].Size);
   if LastWanted < 0 then Exit;
 
   SetLength(Buf, COPY_BUF);
@@ -251,7 +270,14 @@ begin
         if F.IsDir or F.IsLink then Continue;
         if not Wanted(Opt, F.Name) then
         begin
-          SkipBytes(Chain, F.Size, Buf);
+          Remaining := F.Size;   // (solo hay que atravesarlo)
+          while Remaining > 0 do
+          begin
+            if Remaining > Length(Buf) then n := Length(Buf) else n := Remaining;
+            Chain.ReadExact(@Buf[0], n);
+            Advance(n);
+            Dec(Remaining, n);
+          end;
           Continue;
         end;
         Crc := CRC_INIT;
@@ -261,6 +287,7 @@ begin
           if Remaining > Length(Buf) then n := Length(Buf) else n := Remaining;
           Chain.ReadExact(@Buf[0], n);
           Crc := UpdateCRC(Crc, @Buf[0], n);
+          Advance(n);
           Dec(Remaining, n);
         end;
         if (Crc xor CRC_INIT) <> F.Crc then
@@ -305,7 +332,10 @@ var
   b, i, n, Count, LastWanted: Integer;
   Jobs: array of TVerifyJob;
   Pool: TJobPool;
-  Damaged: Boolean;
+  Damaged, Finished: Boolean;
+  Reported: array of Int64;
+  Done: Int64;
+  k: Integer;
 begin
   Result := Default(TExtractStats);
   Damaged := False;
@@ -346,34 +376,46 @@ begin
     Inc(n);
   end;
 
-  if Count = 1 then
-    Jobs[0].Process
-  else if Count > 1 then
-  begin
-    Pool := TJobPool.Create(ThreadCount(4), Count);
-    try
-      for i := 0 to Count - 1 do Pool.Submit(Jobs[i]);
-      for i := 0 to Count - 1 do Pool.WaitJob(Jobs[i]);
-    finally
-      Pool.Free;
+  // Mensajes y estadísticas en orden de bloque, como el camino serial; el progreso lo suma
+  // este hilo con lo que va avisando cada trabajo (también con un solo bloque: así se ve)
+  SetLength(Reported, Count);
+  try
+    if Count > 0 then
+    begin
+      Pool := TJobPool.Create(ThreadCount(4), Count);
+      try
+        for i := 0 to Count - 1 do Pool.Submit(Jobs[i]);
+        for i := 0 to Count - 1 do
+          repeat
+            Finished := Pool.WaitJobFor(Jobs[i], PROGRESS_INTERVAL);
+            for k := i to Count - 1 do
+            begin
+              Done := Int64(Jobs[k].DoneKB) shl 10;
+              if Done > Reported[k] then
+              begin
+                ProgressAdd(Done - Reported[k]);
+                Reported[k] := Done;
+              end;
+            end;
+          until Finished;
+      finally
+        Pool.Free;
+      end;
     end;
-  end;
 
-  // Mensajes y estadísticas en orden de bloque, como el camino serial.
-  for i := 0 to Count - 1 do
-  begin
-    for n := 0 to Jobs[i].Messages.Count - 1 do Log(Jobs[i].Messages[n]);
-    Inc(Result.Files, Jobs[i].Stats.Files);
-    Inc(Result.Errors, Jobs[i].Stats.Errors);
-    Inc(Result.Bytes, Jobs[i].Stats.Bytes);
-    if Jobs[i].Stats.Unsupported then Result.Unsupported := True;
-    if Jobs[i].Damaged then Damaged := True;
-    Orig := 0;
-    for n := Jobs[i].A.DataBlocks[Jobs[i].BlockIndex].FirstFile to
-             Jobs[i].A.DataBlocks[Jobs[i].BlockIndex].FirstFile + Jobs[i].A.DataBlocks[Jobs[i].BlockIndex].FileCount - 1 do
-      if not A.Files[n].IsDir then Inc(Orig, A.Files[n].Size);
-    ProgressAdd(Orig);
-    Jobs[i].Free;
+    for i := 0 to Count - 1 do
+    begin
+      for n := 0 to Jobs[i].Messages.Count - 1 do Log(Jobs[i].Messages[n]);
+      Inc(Result.Files, Jobs[i].Stats.Files);
+      Inc(Result.Errors, Jobs[i].Stats.Errors);
+      Inc(Result.Bytes, Jobs[i].Stats.Bytes);
+      if Jobs[i].Stats.Unsupported then Result.Unsupported := True;
+      if Jobs[i].Damaged then Damaged := True;
+      Orig := Jobs[i].Orig;
+      if Orig > Reported[i] then ProgressAdd(Orig - Reported[i]);
+    end;
+  finally
+    for i := 0 to Count - 1 do Jobs[i].Free;
   end;
 
   // Enlaces: no tienen datos, se verifican como en el camino serial.
@@ -527,6 +569,580 @@ begin
   end;
 end;
 
+{ Extracción paralela directa: cada hilo descomprime un bloque y escribe sus archivos en el
+  destino, sin el temporal intermedio (que escribía y releía todo dos veces y solo se usaba
+  hasta 2 GB). Cada bloque hace lo mismo que el camino serial (mismos mensajes, mismo manejo de
+  bloques dañados y de archivos a medias); los mensajes se guardan y se emiten en orden de
+  bloque. Solo se usa cuando el resultado no depende del orden entre bloques: sin nombres de
+  destino repetidos (tampoco sin distinguir mayúsculas: el destino puede ser vfat/exFAT/NTFS),
+  sin preguntas de sobrescritura y sin -so/t.
+  Memoria: los bloques que se decodifican a la vez se limitan según lo que estima cada
+  decodificador; si igual falta memoria (EOutOfMemory), el trabajo borra lo que había escrito
+  y el bloque se rehace después, en el hilo principal y sin otros decodificadores en marcha,
+  como en el camino serial. }
+type
+  { Lo compartido por los trabajos de una extracción. }
+  TExtractShared = class
+  public
+    DirLock: TRTLCriticalSection;
+    Dirs: TStrIntMap;      // directorios de destino ya creados
+    Abort: LongInt;        // 1: otro trabajo falló sin remedio, los demás cortan
+    LowMem: LongInt;       // 1: a alguno le faltó memoria; los que no empezaron se postergan
+    constructor Create;
+    destructor Destroy; override;
+    procedure EnsureDir(const Dir: string);
+  end;
+
+  EExtractAborted = class(Exception);
+
+  TExtractBlockJob = class(TParallelJob)
+  public
+    A: TArchive;
+    BlockIndex: Integer;
+    Opt: TExtractOptions;
+    Mode: TOverwriteMode;
+    Shared: TExtractShared;
+    Stats: TExtractStats;
+    Messages: TStringList;
+    Damaged: Boolean;
+    Orig: Int64;           // bytes que se descomprimen (para el progreso)
+    DoneKB: LongInt;       // progreso, en KB (lo lee el hilo principal)
+    Reported: Int64;       // lo que el hilo principal ya pasó al progreso
+    CurFile: LongInt;      // índice del archivo en curso (-1: ninguno)
+    OutOfMem: Boolean;     // faltó memoria (o se postergó): rehacer en el hilo principal
+    InMainThread: Boolean; // rehecho en el hilo principal: informa el progreso directamente
+    Created: TStringList;  // archivos que este trabajo creó (se borran si hay que rehacerlo)
+    constructor Create;
+    destructor Destroy; override;
+    procedure Extract;
+    procedure Process; override;
+    procedure ReportProgress;
+  end;
+
+constructor TExtractShared.Create;
+begin
+  inherited Create;
+  InitCriticalSection(DirLock);
+  Dirs.Init(256);
+end;
+
+destructor TExtractShared.Destroy;
+begin
+  DoneCriticalSection(DirLock);
+  inherited Destroy;
+end;
+
+procedure TExtractShared.EnsureDir(const Dir: string);
+begin
+  EnterCriticalSection(DirLock);
+  try
+    if Dirs.Get(Dir) < 0 then
+    begin
+      MakeDirs(Dir);
+      Dirs.Put(Dir, 1);
+    end;
+  finally
+    LeaveCriticalSection(DirLock);
+  end;
+end;
+
+constructor TExtractBlockJob.Create;
+begin
+  inherited Create;
+  Messages := TStringList.Create;
+  Created := TStringList.Create;
+  CurFile := -1;
+end;
+
+destructor TExtractBlockJob.Destroy;
+begin
+  Messages.Free;
+  Created.Free;
+  inherited Destroy;
+end;
+
+{ En un hilo del pool. Si falta memoria no es un error todavía: se deshace lo hecho (lo que se
+  escribió se borra; los mensajes y las estadísticas se descartan) y el hilo principal lo
+  rehace cuando no quede ningún otro decodificador en marcha. }
+procedure TExtractBlockJob.Process;
+var
+  k: Integer;
+begin
+  OutOfMem := False;
+  if Shared.LowMem <> 0 then
+  begin
+    OutOfMem := True;   // postergado: no sumarle otro decodificador a los que ya no entran
+    Exit;
+  end;
+  try
+    Extract;
+  except
+    on EOutOfMemory do
+    begin
+      InterlockedExchange(Shared.LowMem, 1);
+      for k := 0 to Created.Count - 1 do DeleteFile(FsPath(Created[k]));
+      Created.Clear;
+      Messages.Clear;
+      CurFile := -1;
+      OutOfMem := True;
+    end;
+  end;
+end;
+
+{ Solo desde el hilo principal. }
+procedure TExtractBlockJob.ReportProgress;
+var
+  Done: Int64;
+begin
+  Done := Int64(DoneKB) shl 10;
+  if Done > Reported then
+  begin
+    ProgressAdd(Done - Reported);
+    Reported := Done;
+  end;
+end;
+
+procedure TExtractBlockJob.Extract;
+var
+  Blk: TArcBlock;
+  Stream: TStream;
+  Chain: TInStage;
+  Buf: TBytes;
+  i, Cur, LastWanted: Integer;
+  n: SizeInt;
+  F: TArcFileEntry;
+  ActualCrc: LongWord;
+  Remaining, Pending: Int64;
+  OutF: TFileStream;
+  OutName: string;
+  DoWrite, Opened, CurWriting: Boolean;
+
+  // Progreso (en KB, que el hilo principal suma) y corte si se canceló o si otro trabajo falló
+  procedure Advance(Bytes: Int64);
+  begin
+    Inc(Pending, Bytes);
+    if Pending >= 1024 then
+    begin
+      InterlockedExchangeAdd(DoneKB, LongInt(Pending shr 10));
+      Pending := Pending and 1023;
+      if InMainThread then ReportProgress;
+    end;
+    CheckCancel;
+    if Shared.Abort <> 0 then raise EExtractAborted.Create('aborted');
+  end;
+
+  procedure Skip(Count: Int64);
+  begin
+    while Count > 0 do
+    begin
+      if Count > Length(Buf) then n := Length(Buf) else n := Count;
+      Chain.ReadExact(@Buf[0], n);
+      Advance(n);
+      Dec(Count, n);
+    end;
+  end;
+
+  procedure MarkRemaining;
+  var
+    k: Integer;
+  begin
+    Damaged := True;
+    for k := Cur to LastWanted do
+      if not A.Files[k].IsDir and not A.Files[k].IsLink and Wanted(Opt, A.Files[k].Name) then
+      begin
+        if (k = Cur) and CurWriting then
+          Messages.Add('ERROR: ' + A.Files[k].Name + ' is incomplete (whatever could be recovered was kept)')
+        else
+          Messages.Add('ERROR: ' + A.Files[k].Name + ' could not be extracted');
+        Inc(Stats.Errors);
+      end;
+  end;
+
+begin
+  Stats := Default(TExtractStats);
+  Damaged := False;
+  Pending := 0;
+  DoneKB := 0;   // (al rehacerlo, el progreso solo avanza cuando pasa lo ya informado)
+  Blk := A.DataBlocks[BlockIndex];
+  LastWanted := -1;
+  for i := Blk.FirstFile to Blk.FirstFile + Blk.FileCount - 1 do
+    if not A.Files[i].IsDir and not A.Files[i].IsLink and Wanted(Opt, A.Files[i].Name) then LastWanted := i;
+  Orig := 0;
+  for i := Blk.FirstFile to LastWanted do
+    if not A.Files[i].IsDir then Inc(Orig, A.Files[i].Size);
+  if LastWanted < 0 then Exit;
+  SetLength(Buf, COPY_BUF);
+  Cur := Blk.FirstFile;
+  CurWriting := False;
+  Stream := OpenArchiveStream(A.FileName);
+  try
+    try
+      Chain := CreateDecoderChain(Blk.Method, TFileSliceStage.Create(Stream, Blk.Pos, Blk.CompSize));
+      try
+        for i := Blk.FirstFile to LastWanted do
+        begin
+          Cur := i;
+          CurWriting := False;
+          F := A.Files[i];
+          if F.IsDir or F.IsLink then Continue;   // los enlaces se crean al final
+          if not Wanted(Opt, F.Name) then
+          begin
+            Skip(F.Size);
+            Continue;
+          end;
+          CurFile := i;
+          if InMainThread then ProgressFile(F.Name);
+          OutName := DiskName(Opt, F.Name);
+          OutF := nil;
+          DoWrite := True;
+          // (como en el camino serial: más de 4 GB no entra en FAT/FAT32)
+          if (F.Size > High(LongWord)) and IsFatVolume(ExtractFileDir(ExpandFileName(OutName))) then
+          begin
+            Messages.Add(Format('ERROR: %s is %d bytes and the destination is FAT/FAT32 (4 GB per-file maximum): not extracted',
+              [F.Name, F.Size]));
+            Inc(Stats.Errors);
+            Skip(F.Size);
+            Continue;
+          end;
+          // Sin preguntas acá (con owAsk solo se llega si no existe ninguno): owAll
+          // sobrescribe, lo demás saltea
+          if FileExists(FsPath(OutName)) and (Mode <> owAll) then
+          begin
+            Messages.Add('Skipped (already exists): ' + OutName);
+            Inc(Stats.Skipped);
+            DoWrite := False;
+          end
+          else
+          begin
+            Shared.EnsureDir(ExtractFileDir(ExpandFileName(OutName)));
+            OutF := TFileStream.Create(FsPath(OutName), fmCreate);
+            Created.Add(OutName);
+          end;
+          Opened := OutF <> nil;
+          CurWriting := Opened;
+          try
+            try
+              ActualCrc := CRC_INIT;
+              Remaining := F.Size;
+              while Remaining > 0 do
+              begin
+                if Remaining > Length(Buf) then n := Length(Buf) else n := Remaining;
+                Chain.ReadExact(@Buf[0], n);
+                ActualCrc := UpdateCRC(ActualCrc, @Buf[0], n);
+                if OutF <> nil then OutF.WriteBuffer(Buf[0], n);
+                Advance(n);
+                Dec(Remaining, n);
+              end;
+            finally
+              OutF.Free;
+            end;
+          except
+            on E: EStreamError do
+            begin
+              if Opened then
+              begin
+                DeleteFile(FsPath(OutName));
+                raise EInOutError.CreateFmt('could not write %s (%s): disk full or permission denied?',
+                  [OutName, E.Message]);
+              end;
+              raise;
+            end;
+            // Datos dañados o método desconocido: queda lo que se pudo recuperar (como en el
+            // camino serial; se informa como incompleto)
+            on EArcCorrupt do raise;
+            on EUnsupportedMethod do raise;
+            // Cualquier otro corte (cancelado, otro bloque falló, falta de memoria...): no
+            // dejarlo a medias
+            on Exception do
+            begin
+              if Opened then DeleteFile(FsPath(OutName));
+              raise;
+            end;
+          end;
+          ActualCrc := ActualCrc xor CRC_INIT;
+          CurWriting := False;
+          Cur := i + 1;
+          if Opened then RestoreMeta(OutName, F);
+          if ActualCrc <> F.Crc then
+          begin
+            Messages.Add(Format('CRC ERROR: %s (expected %.8x, got %.8x)', [F.Name, F.Crc, ActualCrc]));
+            Inc(Stats.Errors);
+          end
+          else if DoWrite then
+          begin
+            Messages.Add('Extracted ' + F.Name);
+            Inc(Stats.Files);
+            Inc(Stats.Bytes, F.Size);
+          end;
+        end;
+      finally
+        Chain.Free;
+      end;
+    except
+      on E: EUnsupportedMethod do
+      begin
+        Stats.Unsupported := True;
+        Messages.Add(Format('ERROR: %s (block at %d, %d file(s))', [E.Message, Blk.Pos, Blk.FileCount]));
+        MarkRemaining;
+      end;
+      on E: EArcCorrupt do
+      begin
+        Messages.Add(Format('ERROR: %s (block at %d)', [E.Message, Blk.Pos]));
+        MarkRemaining;
+      end;
+    end;
+  finally
+    Stream.Free;
+  end;
+end;
+
+{ Clave para comparar nombres de destino sin distinguir mayúsculas. En Windows, la del
+  sistema; en el resto, el destino también puede no distinguirlas (vfat, exFAT, ntfs3, ext4
+  con casefold) y sin cwstring WideLowerCase solo pasa ASCII: se pliegan ASCII, Latin-1,
+  Latin Extended-A, griego y cirílico en UTF-8, que es donde hay mayúsculas en la práctica.
+  Plegar de más solo hace que se use el camino de siempre. }
+function CaseFoldKey(const Name: string): string;
+{$IFDEF WINDOWS}
+begin
+  Result := UTF8Encode(WideLowerCase(UTF8Decode(Name)));
+end;
+{$ELSE}
+var
+  i, n: Integer;
+  c: LongWord;
+begin
+  Result := Name;
+  n := Length(Result);
+  i := 1;
+  while i <= n do
+  begin
+    if Result[i] in ['A'..'Z'] then
+    begin
+      Result[i] := Chr(Ord(Result[i]) + 32);
+      Inc(i);
+    end
+    else if (Ord(Result[i]) in [$C2..$DF]) and (i < n) and ((Ord(Result[i + 1]) and $C0) = $80) then
+    begin
+      // Secuencia de 2 bytes: U+0080..U+07FF
+      c := (LongWord(Ord(Result[i]) and $1F) shl 6) or LongWord(Ord(Result[i + 1]) and $3F);
+      case c of
+        $C0..$D6, $D8..$DE: Inc(c, $20);                       // Latin-1
+        $100..$137, $14A..$177: c := c or 1;                   // Latin Extended-A (pares)
+        $139..$148, $179..$17E: if (c and 1) = 1 then Inc(c);  //   (impares)
+        $178: c := $FF;
+        $391..$3A1, $3A3..$3AB: Inc(c, $20);                   // griego
+        $400..$40F: Inc(c, $50);                               // cirílico
+        $410..$42F: Inc(c, $20);
+        $460..$481, $48A..$4BF, $4D0..$52F: c := c or 1;
+      end;
+      Result[i] := Chr($C0 or (c shr 6));
+      Result[i + 1] := Chr($80 or (c and $3F));
+      Inc(i, 2);
+    end
+    else
+      Inc(i);
+  end;
+end;
+{$ENDIF}
+
+{ Memoria que estima el decodificador de un bloque: por cada etapa, el mayor parámetro de
+  memoria (diccionario, ventana de rep, modelo de ppmd...) sin pasar del tamaño del bloque (con
+  un mínimo, por los modelos que no dependen de él), más los búferes. Es aproximada: solo
+  decide cuántos bloques se decodifican a la vez; si se queda corta, el trabajo al que le falte
+  memoria se rehace solo. }
+function EstimateDecodeMem(const Method: string; OrigSize: Int64): Int64;
+var
+  Stages, Params: TStringArray;
+  s, k: Integer;
+  p: string;
+  m: QWord;
+  StageMax, Cap: Int64;
+begin
+  Result := 8 shl 20;
+  Cap := OrigSize;
+  if Cap < 64 shl 20 then Cap := 64 shl 20;
+  Stages := Method.Split(['+']);
+  for s := 0 to High(Stages) do
+  begin
+    Params := Stages[s].Split([':']);
+    StageMax := 0;
+    for k := 1 to High(Params) do
+    begin
+      p := Params[k];
+      while (p <> '') and not (p[1] in ['0'..'9']) do Delete(p, 1, 1);   // d64m, mem48m, *1gb...
+      // Solo con sufijo explícito: un entero pelado suele ser un orden o un nivel
+      if (p <> '') and (LowerCase(p[Length(p)]) in ['b', 'k', 'm', 'g']) and ParseMem(p, m) then
+        if (m <= QWord(High(Int64))) and (Int64(m) > StageMax) then StageMax := Int64(m);
+    end;
+    if StageMax > Cap then StageMax := Cap;
+    Inc(Result, StageMax);
+  end;
+end;
+
+{ Cuántos bloques se pueden decodificar a la vez: hasta Threads, mientras los más grandes
+  entren en la mitad de la memoria física y del espacio de direcciones (ulimit -v, ~2 GB en
+  win32). }
+function ThreadsForMemory(const Est: array of Int64; Threads: Integer): Integer;
+var
+  Sorted: array of Int64;
+  i, j: Integer;
+  t, Budget, Lim, Sum: Int64;
+begin
+  Budget := High(Int64);
+  Lim := PhysicalMemory;
+  if Lim > 0 then Budget := Lim div 2;
+  Lim := AddressSpaceLimit;
+  if (Lim > 0) and (Lim div 2 < Budget) then Budget := Lim div 2;
+  {$IFNDEF CPU64}
+  if Budget > Int64(1) shl 30 then Budget := Int64(1) shl 30;
+  {$ENDIF}
+  SetLength(Sorted, Length(Est));
+  for i := 0 to High(Est) do Sorted[i] := Est[i];
+  // Los Threads más grandes (selección parcial, de mayor a menor)
+  for i := 0 to High(Sorted) do
+  begin
+    if i >= Threads then Break;
+    for j := i + 1 to High(Sorted) do
+      if Sorted[j] > Sorted[i] then
+      begin
+        t := Sorted[i]; Sorted[i] := Sorted[j]; Sorted[j] := t;
+      end;
+  end;
+  Result := 0;
+  Sum := 0;
+  while (Result < Threads) and (Result <= High(Sorted)) do
+  begin
+    if Sum + Sorted[Result] > Budget then Break;
+    Inc(Sum, Sorted[Result]);
+    Inc(Result);
+  end;
+end;
+
+{ Intenta la extracción paralela directa. False (sin haber tocado nada) si no corresponde. }
+function TryExtractParallel(A: TArchive; const Opt: TExtractOptions; Mode: TOverwriteMode;
+  Log: TLogProc; var Stats: TExtractStats; var Damaged: Boolean): Boolean;
+var
+  b, i, k, m, Count, LastWanted, Threads, Cur: Integer;
+  Jobs: array of TExtractBlockJob;
+  Est: array of Int64;
+  Pool: TJobPool;
+  Names: TStrIntMap;
+  Name: string;
+  Shared: TExtractShared;
+  Finished: Boolean;
+begin
+  Result := False;
+  if Opt.TestOnly or Opt.ToStdout then Exit;
+  Threads := ThreadCount(4);
+  if Threads < 2 then Exit;
+  Count := 0;
+  SetLength(Est, Length(A.DataBlocks));
+  for b := 0 to High(A.DataBlocks) do
+  begin
+    LastWanted := -1;
+    for i := A.DataBlocks[b].FirstFile to A.DataBlocks[b].FirstFile + A.DataBlocks[b].FileCount - 1 do
+      if not A.Files[i].IsDir and not A.Files[i].IsLink and Wanted(Opt, A.Files[i].Name) then LastWanted := i;
+    if LastWanted >= 0 then
+    begin
+      Est[Count] := EstimateDecodeMem(A.DataBlocks[b].Method, A.DataBlocks[b].OrigSize);
+      Inc(Count);
+    end;
+  end;
+  if Count < 2 then Exit;
+  SetLength(Est, Count);
+  // Si no entran al menos dos decodificadores a la vez, el camino de siempre (uno por vez)
+  Threads := ThreadsForMemory(Est, Threads);
+  if Threads < 2 then Exit;
+  // Nombres de destino repetidos, también sin distinguir mayúsculas (el orden decidiría cuál
+  // queda, y dos hilos crearían el mismo archivo a la vez), nombres inválidos (el camino
+  // serial los informa en su bloque) o preguntas de sobrescritura: no
+  Names.Init(Length(A.Files));
+  try
+    for i := 0 to High(A.Files) do
+      if not A.Files[i].IsDir and Wanted(Opt, A.Files[i].Name) then
+      begin
+        Name := DiskName(Opt, A.Files[i].Name);
+        if (Mode = owAsk) and not A.Files[i].IsLink and FileExists(FsPath(Name)) then Exit;
+        Name := CaseFoldKey(Name);
+        if Names.Get(Name) >= 0 then Exit;
+        Names.Put(Name, i);
+      end;
+  except
+    on EArcCorrupt do Exit;
+  end;
+
+  SetLength(Jobs, Count);
+  Shared := TExtractShared.Create;
+  try
+    k := 0;
+    for b := 0 to High(A.DataBlocks) do
+    begin
+      LastWanted := -1;
+      for i := A.DataBlocks[b].FirstFile to A.DataBlocks[b].FirstFile + A.DataBlocks[b].FileCount - 1 do
+        if not A.Files[i].IsDir and not A.Files[i].IsLink and Wanted(Opt, A.Files[i].Name) then LastWanted := i;
+      if LastWanted < 0 then Continue;
+      Jobs[k] := TExtractBlockJob.Create;
+      Jobs[k].A := A;
+      Jobs[k].BlockIndex := b;
+      Jobs[k].Opt := Opt;
+      Jobs[k].Mode := Mode;
+      Jobs[k].Shared := Shared;
+      Inc(k);
+    end;
+    Cur := 0;
+    Pool := TJobPool.Create(Threads, Count);
+    try
+      try
+        for i := 0 to Count - 1 do Pool.Submit(Jobs[i]);
+        // En orden de bloque: mensajes y estadísticas cuando termina cada uno; mientras tanto,
+        // el progreso de todos (el progreso solo se informa desde este hilo)
+        for i := 0 to Count - 1 do
+        begin
+          Cur := i;
+          repeat
+            Finished := Pool.WaitJobFor(Jobs[i], PROGRESS_INTERVAL);
+            for k := i to Count - 1 do Jobs[k].ReportProgress;
+            if not Finished and (Jobs[i].CurFile >= 0) then ProgressFile(A.Files[Jobs[i].CurFile].Name);
+          until Finished;
+          if Jobs[i].OutOfMem then
+          begin
+            // Faltó memoria (o se postergó): se rehace acá cuando ya no queda ningún otro
+            // decodificador en marcha. Si así tampoco alcanza, es el error del camino serial
+            for k := i + 1 to Count - 1 do Pool.WaitJobQuiet(Jobs[k]);
+            Jobs[i].OutOfMem := False;   // (si falla acá, lo ya extraído de este bloque se informa)
+            Jobs[i].InMainThread := True;
+            Jobs[i].Extract;
+          end;
+          for k := 0 to Jobs[i].Messages.Count - 1 do Log(Jobs[i].Messages[k]);
+          Inc(Stats.Files, Jobs[i].Stats.Files);
+          Inc(Stats.Errors, Jobs[i].Stats.Errors);
+          Inc(Stats.Skipped, Jobs[i].Stats.Skipped);
+          Inc(Stats.Bytes, Jobs[i].Stats.Bytes);
+          if Jobs[i].Stats.Unsupported then Stats.Unsupported := True;
+          if Jobs[i].Damaged then Damaged := True;
+          if Jobs[i].Orig > Jobs[i].Reported then ProgressAdd(Jobs[i].Orig - Jobs[i].Reported);
+          Jobs[i].Reported := Jobs[i].Orig;
+        end;
+      except
+        InterlockedExchange(Shared.Abort, 1);   // los demás cortan en su próximo pedazo
+        FreeAndNil(Pool);                       // y se espera que terminen
+        // Lo que sí quedó en el disco (archivos completos de este bloque y de los siguientes
+        // que terminaron o cortaron después) se informa, como lo habría hecho el camino serial
+        for k := Cur to Count - 1 do
+          if not Jobs[k].OutOfMem then
+            for m := 0 to Jobs[k].Messages.Count - 1 do Log(Jobs[k].Messages[m]);
+        raise;
+      end;
+    finally
+      Pool.Free;
+    end;
+  finally
+    for i := 0 to Count - 1 do Jobs[i].Free;
+    Shared.Free;
+  end;
+  Result := True;
+end;
+
 function ExtractArchive(A: TArchive; const Opt: TExtractOptions; Log: TLogProc): TExtractStats;
 var
   b, i, LastWanted: Integer;
@@ -543,7 +1159,7 @@ var
   DoWrite, Opened: Boolean;
   Temps: TDecodeTemps;
   TempStream: TFileStream;
-  DecodedParallel: Boolean;
+  DecodedParallel, DirectParallel: Boolean;
   StdOutS: TStream;        // -so
   Cur: Integer;            // el archivo que se está procesando en el bloque (-1: ninguno)
   CurWriting: Boolean;     //   y si ya se estaba escribiendo en el disco
@@ -596,7 +1212,7 @@ begin
   SetLength(Buf, COPY_BUF);
   Mode := Opt.Overwrite;
   Temps := nil;
-  DecodedParallel := TryDecodeBlocksParallel(A, Opt, Temps);
+  DecodedParallel := False;
 
   // Total para el progreso: lo que se descomprime, incluidos los archivos no pedidos que hay
   // que atravesar dentro de un bloque sólido
@@ -618,6 +1234,13 @@ begin
       Inc(Result.Dirs);
     end;
 
+  DirectParallel := TryExtractParallel(A, Opt, Mode, Log, Result, BlockDamaged);
+  // Si no (nombres repetidos, preguntas pendientes), decodificar en paralelo a temporales y
+  // escribir en orden; con un solo hilo eso solo agregaría una escritura y una lectura de todo
+  if not DirectParallel and (ThreadCount(4) >= 2) then
+    DecodedParallel := TryDecodeBlocksParallel(A, Opt, Temps);
+
+  if not DirectParallel then
   for b := 0 to High(A.DataBlocks) do
   begin
     Blk := A.DataBlocks[b];
@@ -726,6 +1349,15 @@ begin
                 raise EInOutError.CreateFmt('could not write %s (%s): disk full or permission denied?',
                   [OutName, E.Message]);
               end;
+              raise;
+            end;
+            // Datos dañados o método desconocido: queda lo que se pudo recuperar (se informa
+            // como incompleto); cualquier otro corte (falta de memoria...) tampoco lo deja a medias
+            on EArcCorrupt do raise;
+            on EUnsupportedMethod do raise;
+            on Exception do
+            begin
+              if Opened then DeleteFile(FsPath(OutName));
               raise;
             end;
           end;

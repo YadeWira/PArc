@@ -19,6 +19,7 @@ type
   TParallelJob = class
   private
     FDone: PRTLEvent;
+    FFinished: LongInt;    // 1 cuando terminó (el evento se puede haber consumido en una espera con tope)
     FErrClass: ExceptClass;
     FErrMsg: string;
     procedure Run;
@@ -59,6 +60,10 @@ type
     destructor Destroy; override;   // espera que los hilos terminen su trabajo actual
     procedure Submit(Job: TParallelJob);
     procedure WaitJob(Job: TParallelJob);   // relanza la excepción del trabajo, si la hubo
+    { Como WaitJob pero espera como mucho Ms: False si el trabajo todavía no terminó. }
+    function WaitJobFor(Job: TParallelJob; Ms: Cardinal): Boolean;
+    { Espera que termine sin relanzar su error (que queda para WaitJob/WaitJobFor). }
+    procedure WaitJobQuiet(Job: TParallelJob);
     property MaxWorkers: Integer read FMaxWorkers;
   end;
 
@@ -90,6 +95,13 @@ type
 
 { Hilos a usar: PARC_THREADS si está definido; si no, los núcleos, hasta Cap. }
 function ThreadCount(Cap: Integer): Integer;
+
+{ Presupuesto global de memoria para resultados que esperan su turno (bloques comprimidos en
+  paralelo que todavía no se pueden escribir): min(1 GB, RAM/4), 256 MB en 32 bits;
+  PARC_BUFMEM=<MB> lo reemplaza. TryReserve no espera: si no alcanza devuelve False y el que
+  pidió usa otro camino (un temporal). }
+function MemBudgetTryReserve(Bytes: Int64): Boolean;
+procedure MemBudgetRelease(Bytes: Int64);
 
 implementation
 
@@ -129,6 +141,7 @@ begin
       FErrMsg := E.Message;
     end;
   end;
+  InterlockedExchange(FFinished, 1);
   RTLEventSetEvent(FDone);
 end;
 
@@ -163,6 +176,41 @@ begin
   end;
   if Result > 64 then Result := 64;
   if Result < 1 then Result := 1;
+end;
+
+var
+  BudgetLock: TRTLCriticalSection;
+  BudgetLimit: Int64 = -1;   // -1: todavía no calculado
+  BudgetUsed: Int64 = 0;
+
+function MemBudgetTryReserve(Bytes: Int64): Boolean;
+var
+  Ram: Int64;
+begin
+  EnterCriticalSection(BudgetLock);
+  try
+    if BudgetLimit < 0 then
+    begin
+      BudgetLimit := Int64(StrToIntDef(GetEnvironmentVariable('PARC_BUFMEM'), -1)) shl 20;
+      if BudgetLimit < 0 then
+      begin
+        {$IFDEF CPU64}BudgetLimit := Int64(1) shl 30;{$ELSE}BudgetLimit := Int64(256) shl 20;{$ENDIF}
+        Ram := PhysicalMemory;
+        if (Ram > 0) and (Ram div 4 < BudgetLimit) then BudgetLimit := Ram div 4;
+      end;
+    end;
+    Result := BudgetUsed + Bytes <= BudgetLimit;
+    if Result then Inc(BudgetUsed, Bytes);
+  finally
+    LeaveCriticalSection(BudgetLock);
+  end;
+end;
+
+procedure MemBudgetRelease(Bytes: Int64);
+begin
+  EnterCriticalSection(BudgetLock);
+  Dec(BudgetUsed, Bytes);
+  LeaveCriticalSection(BudgetLock);
 end;
 
 { TJobPool }
@@ -246,8 +294,20 @@ end;
 
 procedure TJobPool.WaitJob(Job: TParallelJob);
 begin
-  RTLEventWaitFor(Job.FDone);
+  if Job.FFinished = 0 then RTLEventWaitFor(Job.FDone);
   if Job.FErrClass <> nil then raise Job.FErrClass.Create(Job.FErrMsg);
+end;
+
+function TJobPool.WaitJobFor(Job: TParallelJob; Ms: Cardinal): Boolean;
+begin
+  if Job.FFinished = 0 then RTLEventWaitFor(Job.FDone, Ms);
+  Result := Job.FFinished <> 0;
+  if Result and (Job.FErrClass <> nil) then raise Job.FErrClass.Create(Job.FErrMsg);
+end;
+
+procedure TJobPool.WaitJobQuiet(Job: TParallelJob);
+begin
+  while Job.FFinished = 0 do RTLEventWaitFor(Job.FDone, 100);
 end;
 
 { TParallelBlockStage }
@@ -346,4 +406,8 @@ begin
   Inc(FPos, Result);
 end;
 
+initialization
+  InitCriticalSection(BudgetLock);
+finalization
+  DoneCriticalSection(BudgetLock);
 end.

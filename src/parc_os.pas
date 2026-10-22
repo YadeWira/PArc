@@ -83,6 +83,11 @@ function ReadPassword(const Prompt: string; out Pwd: string): Boolean;
 
 { Núcleos disponibles. TThread.ProcessorCount de FPC 3.2.2 devuelve siempre 1 en Linux. }
 function CpuCount: Integer;
+{ Memoria física total en bytes (0 si no se sabe). }
+function PhysicalMemory: Int64;
+{ Espacio de direcciones que puede usar el proceso (ulimit -v / RLIMIT_AS en Unix, el espacio
+  virtual de usuario en Windows: ~2 GB en win32); 0 si no hay límite o no se sabe. }
+function AddressSpaceLimit: Int64;
 
 implementation
 
@@ -140,8 +145,61 @@ end;
 {$IFDEF LINUX}
 const
   _SC_NPROCESSORS_ONLN = 84;   // glibc
+  _SC_PAGESIZE = 30;
+  _SC_PHYS_PAGES = 85;
 function sysconf(name: LongInt): PtrInt; cdecl; external 'c';
 {$ENDIF}
+{$IFDEF WINDOWS}
+type
+  TParcMemStatusEx = record
+    dwLength, dwMemoryLoad: DWORD;
+    ullTotalPhys, ullAvailPhys, ullTotalPageFile, ullAvailPageFile,
+    ullTotalVirtual, ullAvailVirtual, ullAvailExtendedVirtual: QWord;
+  end;
+function ParcGlobalMemoryStatusEx(var Buf: TParcMemStatusEx): BOOL; stdcall;
+  external 'kernel32.dll' name 'GlobalMemoryStatusEx';
+{$ENDIF}
+
+function PhysicalMemory: Int64;
+{$IFDEF WINDOWS}
+var
+  M: TParcMemStatusEx;
+{$ENDIF}
+begin
+  Result := 0;
+  {$IFDEF LINUX}
+  if (sysconf(_SC_PHYS_PAGES) > 0) and (sysconf(_SC_PAGESIZE) > 0) then
+    Result := Int64(sysconf(_SC_PHYS_PAGES)) * sysconf(_SC_PAGESIZE);
+  {$ENDIF}
+  {$IFDEF WINDOWS}
+  M := Default(TParcMemStatusEx);
+  M.dwLength := SizeOf(M);
+  if ParcGlobalMemoryStatusEx(M) then Result := Int64(M.ullTotalPhys);
+  {$ENDIF}
+end;
+
+function AddressSpaceLimit: Int64;
+{$IFDEF WINDOWS}
+var
+  M: TParcMemStatusEx;
+{$ENDIF}
+{$IFDEF UNIX}
+var
+  R: TRLimit;
+{$ENDIF}
+begin
+  Result := 0;
+  {$IFDEF UNIX}
+  // Sin límite es RLIM_INFINITY (todos los bits en 1): da negativo y queda en 0
+  if FpGetRLimit(RLIMIT_AS, @R) = 0 then Result := Int64(R.rlim_cur);
+  {$ENDIF}
+  {$IFDEF WINDOWS}
+  M := Default(TParcMemStatusEx);
+  M.dwLength := SizeOf(M);
+  if ParcGlobalMemoryStatusEx(M) then Result := Int64(M.ullTotalVirtual);
+  {$ENDIF}
+  if Result < 0 then Result := 0;
+end;
 
 function CpuCount: Integer;
 begin

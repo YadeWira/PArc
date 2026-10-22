@@ -144,6 +144,25 @@ TILIN now: `-m1` 57,76 %, `-m2` 56,39 %, `-m3` 56,26 %, `-m4` 56,06 %, `-m5` 56,
 45,54 % → 40,25 %. Linux suite passes; on a 151 MB binary corpus `-m2` is 3,3 % smaller, `-m3`
 +744 bytes, `-m5` identical.
 
+## Done — container I/O (branch perf/container-io)
+
+- Planning (FindType, gerpn sort, Reorder, update merge) and BuildDirectory without O(n^2);
+  Unix enumeration with readdir + one lstat. Archives byte-identical to 2f7f7f4.
+- Parallel compression: no `.blkN` temp files (block in turn streams into the archive; the
+  rest wait in a global budget, min(1 GB, RAM/4), `PARC_BUFMEM`); one thread writes directly.
+- Parallel extraction: workers write the files directly (no `.dec` temps, no 2 GB cap).
+- CRC-32 with PCLMULQDQ on x86-64 (CPUID dispatch, tables elsewhere).
+- Directory tag 8 (`MTIME_SUBSEC`): 6–10 % smaller directories with random ns; 0.0.2 reads
+  such archives with second-precision mtimes.
+
+Open points:
+
+- `d` without `-m` repacks the affected solid block with the default `-m4`; FreeArc reuses the
+  block's old method (10 s vs 31 s CPU on 24 MB, but 35 % larger). Decide the policy.
+- High-entropy files are not routed to storing at `-m1`/`-m5+` (FreeArc neither).
+- Thread budget: extraction/verify workers × per-block decoder threads (4x4) still nest.
+- Many-file FreeArc numbers are under Wine (file creation dominates); compare natively on win10.
+
 ## P1 — BCJ2 exact
 
 A BCJ2-style filter is present as experimental `-mbcj2`/`-mexe2`, with round-trip tests, but it is

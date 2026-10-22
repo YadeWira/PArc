@@ -47,15 +47,32 @@ the same order as the directory columns (N = number of files in the block).
 | 4 | `CTIME_NS` | 0 | N × Int64 LE | reserved (creation) |
 | 5 | `ATIME_NS` | 0 | N × Int64 LE | reserved (access) |
 | 6 | `SYMLINK` | 0 | VInt K, then K times: VInt index, CStr target, U8 to_directory | symbolic links (and Windows junctions). The entry is a zero-size file with no data, placed in the directory block. Target in UTF-8 with `/`, as it was in the link (relative or absolute) |
-| 7 | `MTIME_NS_DELTA` | 0 | N × VInt (zigzag) | like `MTIME_NS`, but each value is the signed delta from the previous file (the first one from 0). This is what PArc writes: zero precision loss and, since files in a block usually have similar dates, it takes less space. An old reader that does not know this tag falls back to the `Time` column (seconds) |
+| 7 | `MTIME_NS_DELTA` | 0 | N × VInt (zigzag) | like `MTIME_NS`, but each value is the signed delta from the previous file (the first one from 0). Zero precision loss; very small when many consecutive files share a date. An old reader that does not know this tag falls back to the `Time` column (seconds) |
+| 8 | `MTIME_SUBSEC` | 0 | U8 k, U8 W, then N × W bytes (LE) | only the sub-second part of each mtime, in units of 10^k ns (k = 0…9; 2 for NTFS's 100 ns); W = 0…4 bytes per value (0: every file has whole seconds). The seconds come from the `Time` column, so mtime = Time × 10^9 + value × 10^k ns, again with zero loss. A value × 10^k ≥ 10^9 is a damaged archive; a field whose length is not 2 + W·N, or with k > 9 or W > 4, is ignored |
 
 A reader that does not know `SYMLINK` extracts an empty file instead of the link. When
 extracting, PArc creates links at the end and does not create ones that point outside the
 destination (absolute, or with `..` escaping the root) unless `-snld` is given.
 
 `MTIME_NS`/`MTIME_NS_DELTA` cover ±292 years around 1970, so they solve the 2038 problem of
-the `Time` column (Int32) and keep NTFS (100 ns) and ext4 (1 ns) precision. PArc writes
-`MTIME_NS_DELTA`; it still reads `MTIME_NS` from archives already created.
+the `Time` column (Int32) and keep NTFS (100 ns) and ext4 (1 ns) precision. PArc still reads
+`MTIME_NS` from archives already created.
+
+What PArc writes (after 0.0.2): one of `MTIME_NS_DELTA` or `MTIME_SUBSEC` per directory block,
+whichever compresses smaller with the directory method (measured on the first 65,536 files).
+`MTIME_SUBSEC` is only a candidate when every file's seconds fit in the `Time` column
+(1901–2038); otherwise `MTIME_NS_DELTA` is written. With random nanoseconds (files copied on
+ext4/NTFS) `MTIME_SUBSEC` makes the directory 6–10 % smaller; with runs of identical dates
+(package installs) `MTIME_NS_DELTA` wins and the output is the same as before.
+
+Compatibility: PArc 0.0.2 and earlier do not know tag 8 (it is not mandatory), so they list,
+test and extract such archives normally, using the `Time` column: mtimes come out with
+second precision. If 0.0.2 *updates* such an archive, the files it keeps lose their
+sub-second part. Archives written with `MTIME_NS_DELTA` are unchanged for old readers.
+
+`WIN_ATTR`/`UNIX_MODE` stay as fixed U32 columns: the directory compressor already reduces
+them to almost nothing (removing `UNIX_MODE` entirely saved 47–124 bytes on 5,000–40,000
+files), so a compact encoding is not worth a new tag.
 
 ## 3. Rest of the container (FreeArc base)
 

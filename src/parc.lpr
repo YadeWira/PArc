@@ -352,20 +352,33 @@ var
 
 procedure CollectEntries(const Paths: TStringList; const Exclude: string; Excludes: TStrings; Recursive: Boolean;
   var Entries: TWriteEntryArray);
+var
+  Cnt: Integer;          // Entradas usadas (Entries crece al doble)
+  ExclBase: string;
 
   procedure AddEntry(const Disk, Stored: string; const Meta: TFileMeta);
   var
     n: Integer;
     H: THandle;
+    B: string;
   begin
-    if IsOwnArchiveFile(ExpandFileName(Disk), Exclude) then Exit;   // ni el archivo que se escribe ni sus volúmenes
+    // ExpandFileName (getcwd) solo si el nombre puede ser el del archivo que se escribe
+    B := ExtractFileName(Disk);
+    if (B = '') or (B = '.') or (B = '..') or (Copy(B, 1, Length(ExclBase)) = ExclBase) then
+      if IsOwnArchiveFile(ExpandFileName(Disk), Exclude) then Exit;   // ni el archivo que se escribe ni sus volúmenes
     if MatchesAny(Stored, Excludes) then Exit;     // -x<máscara>
     // Uno ilegible (sin permiso, o bloqueado por otro programa en Windows) no aborta todo el
     // trabajo: se avisa y se saltea; al actualizar queda la versión que ya estaba en el archivo.
     // (FreeArc tenía el bug opuesto: el archivo desaparecía del archivo comprimido.)
     if not Meta.IsDir and not Meta.IsLink then
     begin
+      {$IFDEF UNIX}
+      // Open+close sin el flock de FileOpen (mismo criterio: ¿se puede abrir?)
+      H := FpOpen(PChar(FsPath(Disk)), O_RDONLY);
+      if H >= 0 then FpClose(H) else H := THandle(-1);
+      {$ELSE}
       H := FileOpen(FsPath(Disk), fmOpenRead or fmShareDenyNone);
+      {$ENDIF}
       if H = THandle(-1) then
       begin
         ErrLn('Warning: cannot read ' + Disk + ' (skipped)');
@@ -373,10 +386,11 @@ procedure CollectEntries(const Paths: TStringList; const Exclude: string; Exclud
         Unreadable.Add(Disk);
         Exit;
       end;
-      FileClose(H);
+      {$IFNDEF UNIX}FileClose(H);{$ENDIF}
     end;
-    n := Length(Entries);
-    SetLength(Entries, n + 1);
+    n := Cnt;
+    if n >= Length(Entries) then SetLength(Entries, 2 * n + 64);
+    Inc(Cnt);
     Entries[n].DiskPath := Disk;
     Entries[n].StoredName := Stored;
     Entries[n].Meta := Meta;
@@ -392,16 +406,41 @@ procedure CollectEntries(const Paths: TStringList; const Exclude: string; Exclud
     Recurse: array of Boolean;
     ChildDisk, ChildStored: string;
     i: Integer;
+    {$IFDEF UNIX}
+    Dp: PDir;
+    De: PDirent;
+    Nm: string;
+    St: Stat;
+    {$ENDIF}
   begin
-    // FsPath: sin el prefijo \\?\ de Windows, un directorio de ruta larga "no existe" y todo lo
-    // que tiene adentro se perdía en silencio
-    if FindFirst(IncludeTrailingPathDelimiter(FsPath(Disk)) + '*', faAnyFile {$IFDEF UNIX}or faSymLink{$ENDIF}, SR) <> 0 then
-    begin
-      ErrLn('Warning: cannot read directory ' + Disk);
-      Exit;
-    end;
     Names := TStringList.Create;
     try
+      {$IFDEF UNIX}
+      // Readdir sin el stat por entrada que hace FindNext
+      Dp := FpOpenDir(FsPath(Disk));
+      if Dp = nil then
+      begin
+        ErrLn('Warning: cannot read directory ' + Disk);
+        Exit;
+      end;
+      try
+        repeat
+          De := FpReadDir(Dp^);
+          if De = nil then Break;
+          Nm := PChar(@De^.d_name[0]);
+          if (Nm <> '.') and (Nm <> '..') then Names.Add(Nm);
+        until False;
+      finally
+        FpCloseDir(Dp^);
+      end;
+      {$ELSE}
+      // FsPath: sin el prefijo \\?\ de Windows, un directorio de ruta larga "no existe" y todo lo
+      // que tiene adentro se perdía en silencio
+      if FindFirst(IncludeTrailingPathDelimiter(FsPath(Disk)) + '*', faAnyFile, SR) <> 0 then
+      begin
+        ErrLn('Warning: cannot read directory ' + Disk);
+        Exit;
+      end;
       try
         repeat
           if (SR.Name = '.') or (SR.Name = '..') then Continue;
@@ -410,6 +449,7 @@ procedure CollectEntries(const Paths: TStringList; const Exclude: string; Exclud
       finally
         FindClose(SR);
       end;
+      {$ENDIF}
       Names.CustomSort(@CompareEntryNames);
       SetLength(Recurse, Names.Count);
       for i := 0 to Names.Count - 1 do
@@ -419,6 +459,19 @@ procedure CollectEntries(const Paths: TStringList; const Exclude: string; Exclud
         if Stored <> '' then ChildStored := Stored + '/' + Names[i] else ChildStored := Names[i];
         // Un enlace (symlink, o junction de Windows) se guarda como enlace y no se recorre:
         // así no hay ciclos ni se archiva dos veces lo mismo
+        {$IFDEF UNIX}
+        // un solo lstat: si no es enlace, es lo mismo que daría stat
+        if (FpLStat(FsPath(ChildDisk), St) = 0) and not FpS_ISLNK(St.st_mode) then
+        begin
+          Meta := Default(TFileMeta);
+          Meta.IsDir := FpS_ISDIR(St.st_mode);
+          if not Meta.IsDir then Meta.Size := St.st_size;
+          Meta.MTimeNs := Int64(St.st_mtime) * 1000000000 + St.st_mtime_nsec;
+          Meta.HasUnixMode := True;
+          Meta.UnixMode := St.st_mode;
+        end
+        else
+        {$ENDIF}
         if not GetLinkMeta(ChildDisk, Meta) and not GetFileMeta(ChildDisk, Meta) then
         begin
           ErrLn('Warning: cannot read ' + ChildDisk);
@@ -490,6 +543,9 @@ var
   Meta: TFileMeta;
   Stored, Dir, Mask: string;
 begin
+  Cnt := Length(Entries);
+  ExclBase := ExtractFileName(Exclude);
+  try
   for i := 0 to Paths.Count - 1 do
   begin
     if HasWild(Paths[i]) then
@@ -507,6 +563,9 @@ begin
     Stored := SanitizePath(Paths[i]);
     if Stored <> '' then AddEntry(Paths[i], Stored, Meta);   // "." o "/" no se guardan a sí mismos
     if Meta.IsDir then Walk(ExcludeTrailingPathDelimiter(Paths[i]), Stored);
+  end;
+  finally
+    SetLength(Entries, Cnt);
   end;
 end;
 
@@ -630,6 +689,8 @@ var
   Blocks: TFaBlocks;
   Order: TIntegerDynArray;
   b, j, k, n, pos, g, x, y: Integer;
+  Sorted: Boolean;
+  K1, K2: array of TFaMergeKey;
 
   function DiskFile(e: Integer): TFaFile;
   begin
@@ -713,10 +774,17 @@ begin
   end;
   // merge (Utils.hs): si el viejo es mayor, va el nuevo; si no (empate incluido), el viejo
   SetLength(M, Length(L1) + Length(L2)); SetLength(EM, Length(M));
+  Sorted := FaSortEnabled(GM, MO.Solid);
+  if Sorted and (Length(L2) > 0) then
+  begin
+    SetLength(K1, Length(L1)); SetLength(K2, Length(L2));
+    for x := 0 to High(L1) do K1[x] := FaMergeKeyOf(L1[x]);
+    for y := 0 to High(L2) do K2[y] := FaMergeKeyOf(L2[y]);
+  end;
   x := 0; y := 0; n := 0;
   while (x < Length(L1)) or (y < Length(L2)) do
     if (y >= Length(L2)) or ((x < Length(L1)) and
-       not (FaSortEnabled(GM, MO.Solid) and (FaMergeCompare(L1[x], L2[y]) > 0))) then
+       not (Sorted and (FaMergeCompareKeys(K1[x], K2[y]) > 0))) then
     begin
       M[n] := L1[x]; EM[n] := E1[x]; Inc(x); Inc(n);
     end
@@ -810,11 +878,14 @@ var
   Exists, Newer: Boolean;
   Recompress: Boolean;           // d con -m explícito: FreeArc recompila todos los bloques
   Old: array of Integer;         // índice en Entries de cada archivo viejo conservado (-1 si no)
+  EntCount: Integer;
 
   function AddEntry(const E: TWriteEntry): Integer;
   begin
-    Result := Length(Entries);
-    SetLength(Entries, Result + 1);
+    // Crece al doble; se recorta antes de usarse
+    Result := EntCount;
+    if Result >= Length(Entries) then SetLength(Entries, 2 * Result + 64);
+    Inc(EntCount);
     Entries[Result] := E;
   end;
 
@@ -863,6 +934,7 @@ begin
     end;
 
     Entries := nil;
+    EntCount := 0;
     NewIdx := nil;
     Removed := 0; Replaced := 0; Added := 0;
     // Archivos viejos: cuáles se conservan
@@ -942,6 +1014,7 @@ begin
       end;
     end;
     Dec(Added, Replaced);
+    SetLength(Entries, EntCount);
     Groups := nil;
     // Cmdline.hs: con los comandos que copian (d entre ellos), un -m explícito implica
     // --recompress: los bloques viejos se rehacen con ese método en vez de copiarse.

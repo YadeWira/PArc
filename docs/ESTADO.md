@@ -110,11 +110,18 @@ What makes this possible (all inside `.parc`; the codecs are unchanged):
   decompresses much faster.
 - **Verification (`t`)** verifies independent blocks in parallel: mixed corpus ~3.5 s ->
   ~2.5 s at `-m6`, and ~48.5 s -> ~32.6 s at `-mxx`.
-- **Extraction (`x`/`e`)** decodes independent blocks in parallel to temp files, then writes
-  sequentially: mixed corpus ~3.2 s -> ~2.4 s at `-m6`, and ~48.4 s -> ~33.2 s at `-mxx`.
-  `-mx` verifies/extracts in ~2.5 s on the same corpus.
-- **Directory**: mtime in ns is stored as zigzag VInt deltas (tag 7), losslessly. Saves ~2 KB
-  per 1,300 files.
+- **Extraction (`x`/`e`)** decodes independent blocks in parallel and each worker writes its
+  files directly (no temp files, no 2 GB limit): random 2 GB 17–21 s -> 3.5–4 s, 2.2 GB of
+  already-compressed files 19 s -> 6.2–6.6 s (FreeArc 8.8 s), 35k small files 3.2 s -> 1.5 s.
+  `-mx` verifies/extracts in ~2.5 s on the mixed corpus.
+- **Container I/O**: parallel compression writes each block once (the block in turn goes
+  straight to the archive, the rest wait in a bounded memory budget); solid-block planning,
+  the update merge and the directory index are no longer quadratic (35k files `-m1`: 20 s ->
+  12 s with 1 thread, 11 s -> 4 s with 4); file enumeration does one `lstat` per entry on
+  Unix; CRC-32 uses PCLMULQDQ on x86-64 (~18 GB/s, tables ~2 GB/s).
+- **Directory**: mtime in ns is stored losslessly as zigzag VInt deltas (tag 7) or, when it
+  is smaller, as the sub-second part only on top of the `Time` column (tag 8): 6–10 % smaller
+  directories with random nanoseconds.
 - Recovery is Reed-Solomon only; the `.arc` XOR scheme is gone.
 
 ## Verified platforms (0.0.2)
@@ -139,7 +146,7 @@ bash tests/cli.sh
 bash tests/stdio.sh tests/volumes.sh
 bash tests/rs_recovery.sh tests/parc_crypt.sh tests/cm.sh tests/grzip.sh tests/bcj2.sh
 bash tests/dispack.sh tests/srep.sh tests/bcj.sh
-bash tests/run_tornado_tests.sh tests/crypto_vectors.sh
+bash tests/run_tornado_tests.sh tests/crypto_vectors.sh tests/crc.sh tests/extract_parallel.sh
 bash tests/run_lzma_tests.py build/tests/test_lzma
 # decodificador LZMA actual vs copia congelada de 0.0.2 (streams válidos, truncados y dañados)
 fpc -O2 -Fusrc -Futests/lzma_ref -FUbuild/tests/units -FEbuild/tests tests/test_lzma_diff.lpr

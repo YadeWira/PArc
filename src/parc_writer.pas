@@ -67,7 +67,7 @@ implementation
 
 uses
   parc_bytes, parc_crc, parc_stream, parc_outstream, parc_encoders, parc_methods, parc_recovery, parc_progress,
-  parc_volume, parc_parallel;
+  parc_volume, parc_parallel, parc_strmap;
 
 const
   VERSION_PARC: array[0..3] of Byte = (PARC_FORMAT_VERSION, 0, 0, 0);
@@ -222,16 +222,118 @@ begin
   else Result := (QWord(-V) shl 1) - 1;
 end;
 
+const
+  POW10: array[0..9] of LongWord = (1, 10, 100, 1000, 10000, 100000, 1000000, 10000000,
+    100000000, 1000000000);
+  SUBSEC_SAMPLE = 65536;   // archivos que se miran para elegir la codificación de las fechas
+
+{ Fechas del directorio: hay dos codificaciones sin pérdida (FORMATO-PARC.md §2).
+  - MTIME_NS_DELTA (7): cada mtime en ns como delta zigzag del anterior. Ideal cuando muchos
+    archivos seguidos tienen la misma fecha (instalaciones, copias sin ns).
+  - MTIME_SUBSEC (8): solo la fracción de segundo; los segundos ya están en la columna Time.
+    Con ns al azar (ext4, NTFS) ocupa bastante menos, y si no hay fracciones casi nada. Solo
+    vale si todos los segundos entran en la columna Time (Int32: 1901-2038).
+  Se elige la que comprimida con el método del directorio sale más chica (sobre los primeros
+  SUBSEC_SAMPLE archivos, para acotar el costo en directorios enormes). Un PArc 0.0.2 no
+  conoce el tag 8: lista y extrae con los segundos de la columna Time. }
+procedure BuildMTimeField(const Ns: array of Int64; const DirMethod: string; out Tag: Integer;
+  out Field: TByteWriter);
+var
+  f7, f8: TByteWriter;
+  i, n, k, W, Sample: Integer;
+  Sec, PrevNs: Int64;
+  Sub: array of LongWord;
+  MaxSub: LongWord;
+  AllFit: Boolean;
+  Len7, Len8: SizeInt;
+
+  procedure PutSub(var Dst: TByteWriter; v: LongWord);
+  var
+    j: Integer;
+  begin
+    for j := 0 to W - 1 do
+    begin
+      Dst.U8(Byte(v));
+      v := v shr 8;
+    end;
+  end;
+
+begin
+  n := Length(Ns);
+  Sample := n;
+  if Sample > SUBSEC_SAMPLE then Sample := SUBSEC_SAMPLE;
+  f7.Clear;
+  PrevNs := 0;
+  Len7 := 0;
+  for i := 0 to n - 1 do
+  begin
+    f7.VInt(ZigZag(Ns[i] - PrevNs));
+    PrevNs := Ns[i];
+    if i = Sample - 1 then Len7 := f7.Len;
+  end;
+  Tag := DIRTAG_MTIME_NS_DELTA;
+  Field := f7;
+  // Fracciones de segundo, si todos los segundos entran en la columna Time
+  SetLength(Sub, n);
+  AllFit := True;
+  for i := 0 to n - 1 do
+  begin
+    Sec := Ns[i] div 1000000000;
+    if (Ns[i] < 0) and (Ns[i] mod 1000000000 <> 0) then Dec(Sec);   // piso, como Time32
+    if (Sec < Low(LongInt)) or (Sec > High(LongInt)) then
+    begin
+      AllFit := False;
+      Break;
+    end;
+    Sub[i] := LongWord(Ns[i] - Sec * 1000000000);
+  end;
+  if not AllFit then Exit;
+  // Unidad común más grande (10^k ns: 100 ns en NTFS, 1 µs...) y bytes por valor
+  k := 9;
+  MaxSub := 0;
+  for i := 0 to n - 1 do
+    if Sub[i] <> 0 then
+    begin
+      while (k > 0) and (Sub[i] mod POW10[k] <> 0) do Dec(k);
+      if Sub[i] > MaxSub then MaxSub := Sub[i];
+    end;
+  if MaxSub = 0 then k := 9;
+  MaxSub := MaxSub div POW10[k];
+  W := 0;
+  while (W < 4) and (QWord(MaxSub) >= QWord(1) shl (8 * W)) do Inc(W);
+  f8.Clear;
+  f8.U8(k);
+  f8.U8(W);
+  for i := 0 to n - 1 do PutSub(f8, Sub[i] div POW10[k]);
+  if W = 0 then
+  begin
+    Tag := DIRTAG_MTIME_SUBSEC;
+    Field := f8;
+    Exit;
+  end;
+  // Comparar comprimidos (sobre una muestra del principio si es muy grande)
+  Len8 := Length(CompressMem(DirMethod, PByte(f8.Data), 2 + Sample * W));
+  Len7 := Length(CompressMem(DirMethod, PByte(f7.Data), Len7));
+  if Len8 < Len7 then
+  begin
+    Tag := DIRTAG_MTIME_SUBSEC;
+    Field := f8;
+  end;
+end;
+
 { Serializa el DIR_BLOCK (el formato base de FreeArc §6 + campos opcionales de FORMATO-PARC.md §2). }
 function BuildDirectory(const Entries: array of TWriteEntry; const Blocks: array of TDataBlock;
-  DirPos: Int64; Parc: Boolean): TBytes;
+  DirPos: Int64; Parc: Boolean; const DirMethod: string): TBytes;
 var
   w, f: TByteWriter;
   All: array of TDirFile;
-  Dirs: TStringList;
+  DirMap: TStrIntMap;
+  DirNames: array of string;
+  Parent: string;
   DirIdx: array of Integer;
   b, i, n, k: Integer;
-  PrevNs, Ns: Int64;
+  Ns: array of Int64;
+  Tag: Integer;
   AllWin, AllUnix: Boolean;
 
   procedure OptField(Tag: Integer; const Field: TByteWriter);
@@ -264,21 +366,26 @@ begin
     end;
 
   // 2. Directorios únicos, en orden de aparición (enumDirectories de ArhiveDirectory.hs)
-  Dirs := TStringList.Create;
-  try
-    Dirs.CaseSensitive := True;
-    SetLength(DirIdx, n);
-    for i := 0 to n - 1 do
+  // Mapa hash en vez de TStringList.IndexOf, que era O(archivos x directorios) con
+  // AnsiCompareStr; igualdad de bytes y el mismo orden de aparición
+  DirMap.Init(1024);
+  DirNames := nil;
+  SetLength(DirIdx, n);
+  for i := 0 to n - 1 do
+  begin
+    Parent := ParentOf(Entries[All[i].Entry].StoredName);
+    k := DirMap.Get(Parent);
+    if k < 0 then
     begin
-      k := Dirs.IndexOf(ParentOf(Entries[All[i].Entry].StoredName));
-      if k < 0 then k := Dirs.Add(ParentOf(Entries[All[i].Entry].StoredName));
-      DirIdx[i] := k;
+      k := DirMap.Count;
+      if k >= Length(DirNames) then SetLength(DirNames, 2 * k + 64);
+      DirMap.Put(Parent, k);
+      DirNames[k] := Parent;
     end;
-    w.VInt(Dirs.Count);
-    for i := 0 to Dirs.Count - 1 do w.CStr(Dirs[i]);
-  finally
-    Dirs.Free;
+    DirIdx[i] := k;
   end;
+  w.VInt(DirMap.Count);
+  for i := 0 to DirMap.Count - 1 do w.CStr(DirNames[i]);
 
   // 3. Columnas por archivo
   for i := 0 to n - 1 do w.CStr(BaseOf(Entries[All[i].Entry].StoredName));
@@ -291,17 +398,11 @@ begin
   // 4. Campos opcionales (solo .parc)
   if Parc then
   begin
-    // MTimeNs como delta zigzag desde el archivo anterior: pérdida cero y, como los
-    // archivos de un mismo bloque suelen tener fechas parecidas, ocupa mucho menos.
-    f.Clear;
-    PrevNs := 0;
-    for i := 0 to n - 1 do
-    begin
-      Ns := Entries[All[i].Entry].Meta.MTimeNs;
-      f.VInt(ZigZag(Ns - PrevNs));
-      PrevNs := Ns;
-    end;
-    OptField(DIRTAG_MTIME_NS_DELTA, f);
+    // MTimeNs sin pérdida: delta zigzag (tag 7) o fracciones de segundo (tag 8)
+    SetLength(Ns, n);
+    for i := 0 to n - 1 do Ns[i] := Entries[All[i].Entry].Meta.MTimeNs;
+    BuildMTimeField(Ns, DirMethod, Tag, f);
+    OptField(Tag, f);
     AllWin := n > 0;
     AllUnix := n > 0;
     for i := 0 to n - 1 do
@@ -580,23 +681,174 @@ begin
   Result.CompSize := S.Position - Result.Pos;
 end;
 
-{ Un bloque comprimido en un hilo, con su propio archivo temporal y estadísticas. }
+{ Salida de un bloque comprimido en un hilo. Mientras el bloque no es el siguiente a escribir,
+  lo comprimido se guarda en memoria (con el presupuesto global de parc_parallel) y, si no
+  alcanza, sigue en un temporal. Cuando le toca, el hilo principal vuelca lo guardado al archivo
+  y el resto se escribe directo ahí: el bloque en curso no pasa por memoria ni por disco dos
+  veces. Position es la lógica (bytes escritos a este bloque), que es lo que usa WriteDataBlock. }
+type
+  TBlockOut = class(TStream)
+  private
+    FLock: TRTLCriticalSection;
+    FChunks: array of TBytes;   // en memoria, en orden; el último puede estar a medio llenar
+    FCount: Integer;
+    FLastUsed: SizeInt;
+    FReserved: Int64;           // reservado del presupuesto global
+    FSpill: TFileStream;        // lo que no entró en memoria (después de lo de FChunks)
+    FSpillName: string;
+    FDirect: TStream;           // <> nil: ya es su turno, se escribe al archivo
+    FPos: Int64;
+  protected
+    function GetSize: Int64; override;
+  public
+    constructor Create(const SpillName: string);
+    destructor Destroy; override;
+    function Write(const Buffer; Count: LongInt): LongInt; override;
+    function Read(var Buffer; Count: LongInt): LongInt; override;
+    function Seek(const Offset: Int64; Origin: TSeekOrigin): Int64; override;
+    { Vuelca lo guardado en S y pasa a escribir directo ahí (hilo principal). }
+    procedure GoDirect(S: TStream);
+  end;
+
+const
+  OUT_CHUNK = 1 shl 20;
+
+constructor TBlockOut.Create(const SpillName: string);
+begin
+  inherited Create;
+  InitCriticalSection(FLock);
+  FSpillName := SpillName;
+end;
+
+destructor TBlockOut.Destroy;
+begin
+  FChunks := nil;
+  if FReserved > 0 then MemBudgetRelease(FReserved);
+  FReserved := 0;
+  if FSpill <> nil then
+  begin
+    FreeAndNil(FSpill);
+    DeleteFile(FsPath(FSpillName));
+  end;
+  DoneCriticalSection(FLock);
+  inherited Destroy;
+end;
+
+function TBlockOut.GetSize: Int64;
+begin
+  Result := FPos;
+end;
+
+function TBlockOut.Read(var Buffer; Count: LongInt): LongInt;
+begin
+  raise EStreamError.Create('TBlockOut: read not supported');
+end;
+
+function TBlockOut.Seek(const Offset: Int64; Origin: TSeekOrigin): Int64;
+begin
+  if not (((Origin = soBeginning) and (Offset = FPos)) or ((Origin <> soBeginning) and (Offset = 0))) then
+    raise EStreamError.Create('TBlockOut: seek not supported');
+  Result := FPos;
+end;
+
+function TBlockOut.Write(const Buffer; Count: LongInt): LongInt;
+var
+  P: PByte;
+  n: SizeInt;
+begin
+  Result := Count;
+  if Count <= 0 then Exit;
+  P := @Buffer;
+  EnterCriticalSection(FLock);
+  try
+    Inc(FPos, Count);
+    if FDirect <> nil then
+    begin
+      FDirect.WriteBuffer(P^, Count);
+      Exit;
+    end;
+    while (Count > 0) and (FSpill = nil) do
+    begin
+      if (FCount = 0) or (FLastUsed = Length(FChunks[FCount - 1])) then
+      begin
+        // otro pedazo, si el presupuesto lo permite (las escrituras grandes, de su tamaño)
+        if Count > OUT_CHUNK then n := Count else n := OUT_CHUNK;
+        if not MemBudgetTryReserve(n) then
+        begin
+          FSpill := TFileStream.Create(FsPath(FSpillName), fmCreate);
+          Break;
+        end;
+        Inc(FReserved, n);
+        if FCount = Length(FChunks) then SetLength(FChunks, 2 * FCount + 8);
+        SetLength(FChunks[FCount], n);
+        Inc(FCount);
+        FLastUsed := 0;
+      end;
+      n := Length(FChunks[FCount - 1]) - FLastUsed;
+      if n > Count then n := Count;
+      Move(P^, FChunks[FCount - 1][FLastUsed], n);
+      Inc(FLastUsed, n);
+      Inc(P, n);
+      Dec(Count, n);
+    end;
+    if Count > 0 then FSpill.WriteBuffer(P^, Count);
+  finally
+    LeaveCriticalSection(FLock);
+  end;
+end;
+
+procedure TBlockOut.GoDirect(S: TStream);
+var
+  i: Integer;
+begin
+  EnterCriticalSection(FLock);
+  try
+    for i := 0 to FCount - 1 do
+    begin
+      if i < FCount - 1 then S.WriteBuffer(FChunks[i][0], Length(FChunks[i]))
+      else if FLastUsed > 0 then S.WriteBuffer(FChunks[i][0], FLastUsed);
+      FChunks[i] := nil;
+    end;
+    FChunks := nil;
+    FCount := 0;
+    if FReserved > 0 then MemBudgetRelease(FReserved);
+    FReserved := 0;
+    if FSpill <> nil then
+    begin
+      FSpill.Position := 0;
+      S.CopyFrom(FSpill, FSpill.Size);
+      FreeAndNil(FSpill);
+      DeleteFile(FsPath(FSpillName));
+    end;
+    FDirect := S;
+  finally
+    LeaveCriticalSection(FLock);
+  end;
+end;
+
+{ Un bloque comprimido en un hilo, con su salida y sus estadísticas. }
 type
   TWriteBlockJob = class(TParallelJob)
   public
     Entries: TWriteEntryArray;
     Group: TSolidGroup;
     Opt: TWriteOptions;
-    TempName: string;
+    Output: TBlockOut;
     Block: TDataBlock;
     Stats: TWriteStats;
     OrigBytes: Int64;
     procedure Process; override;
+    destructor Destroy; override;
   end;
+
+destructor TWriteBlockJob.Destroy;
+begin
+  Output.Free;
+  inherited Destroy;
+end;
 
 procedure TWriteBlockJob.Process;
 var
-  F: TFileStream;
   i: Integer;
 begin
   OrigBytes := 0;
@@ -604,12 +856,7 @@ begin
     if not Entries[Group.Files[i]].Meta.IsDir then
       Inc(OrigBytes, Entries[Group.Files[i]].Meta.Size);
   Stats := Default(TWriteStats);
-  F := TFileStream.Create(FsPath(TempName), fmCreate);
-  try
-    Block := WriteDataBlock(F, Entries, Group, Opt, nil, Stats, True);
-  finally
-    F.Free;
-  end;
+  Block := WriteDataBlock(Output, Entries, Group, Opt, nil, Stats, True);
 end;
 
 function WriteArchive(const FileName: string; const Entries: TWriteEntryArray;
@@ -627,9 +874,8 @@ var
   i, n, k: Integer;
   DirData: TBytes;
   Ok, UseParallel: Boolean;
-  Total: Int64;
-  TmpBlock: string;
-  F: TFileStream;
+  Total, BlockPos: Int64;
+  Window: Integer;
 begin
   Result := Default(TWriteStats);
   if not EncoderAvailable(Opt.DirMethod) then
@@ -686,7 +932,8 @@ begin
           AllGroups[n] := Groups[i];
         end;
 
-      UseParallel := Opt.Parallel and (Length(AllGroups) > 1) and
+      // (con un solo hilo se escribe directo, sin pasar por el camino de los trabajos)
+      UseParallel := Opt.Parallel and (Length(AllGroups) > 1) and (ThreadCount(4) >= 2) and
         (Opt.DataPassword = '') and (Opt.HeadersPassword = '');
       if UseParallel then
       begin
@@ -719,37 +966,34 @@ begin
             Jobs[i].Entries := Entries;
             Jobs[i].Group := AllGroups[i];
             Jobs[i].Opt := Opt;
-            Jobs[i].TempName := FileName + '.blk' + IntToStr(i);
-            Pool.Submit(Jobs[i]);
+            Jobs[i].Output := TBlockOut.Create(FileName + '.blk' + IntToStr(i));
           end;
+          // Ventana de trabajos en vuelo: lo que no es el bloque en curso espera en memoria,
+          // así que no se arranca todo de una vez
+          Window := 2 * Pool.MaxWorkers;
+          for i := 0 to n - 1 do
+            if i < Window then Pool.Submit(Jobs[i]);
           SetLength(Blocks, n);
           for i := 0 to n - 1 do
           begin
-            Pool.WaitJob(Jobs[i]);
-            Blocks[i] := Jobs[i].Block;
             Blocks[i].Pos := S.Position;
-            F := TFileStream.Create(FsPath(Jobs[i].TempName), fmOpenRead);
-            try
-              S.CopyFrom(F, 0);
-            finally
-              F.Free;
-            end;
+            Jobs[i].Output.GoDirect(S);   // lo ya comprimido, y el resto directo al archivo
+            Pool.WaitJob(Jobs[i]);
+            if i + Window < n then Pool.Submit(Jobs[i + Window]);
+            BlockPos := Blocks[i].Pos;
+            Blocks[i] := Jobs[i].Block;
+            Blocks[i].Pos := BlockPos;
+            if S.Position - BlockPos <> Blocks[i].CompSize then
+              raise Exception.Create('parallel block size mismatch');
+            FreeAndNil(Jobs[i].Output);
             Inc(Result.Files, Jobs[i].Stats.Files);
             Inc(Result.Dirs, Jobs[i].Stats.Dirs);
             Inc(Result.Bytes, Jobs[i].Stats.Bytes);
             ProgressAdd(Jobs[i].OrigBytes);
           end;
         finally
-          for i := 0 to High(Jobs) do
-          begin
-            if Jobs[i] <> nil then
-            begin
-              TmpBlock := Jobs[i].TempName;
-              Jobs[i].Free;
-              if TmpBlock <> '' then DeleteFile(FsPath(TmpBlock));
-            end;
-          end;
-          Pool.Free;
+          Pool.Free;   // espera a los hilos antes de liberar sus trabajos (y sus temporales)
+          for i := 0 to High(Jobs) do Jobs[i].Free;
         end;
       end
       else
@@ -764,7 +1008,7 @@ begin
       CheckCancel;
 
       // Directorio (los offsets de los bloques son relativos a su posición)
-      DirData := BuildDirectory(Entries, Blocks, S.Position, True);
+      DirData := BuildDirectory(Entries, Blocks, S.Position, True, Opt.DirMethod);
       SetLength(Control, 2);
       Control[1] := WriteControlBlock(S, True, DIR_BLOCK, Opt.DirMethod, DirData, Opt.Encryption, Opt.HeadersPassword);
 

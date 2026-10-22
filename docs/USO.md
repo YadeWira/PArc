@@ -82,7 +82,10 @@ require the full preset memory.
 speed. `-mxx` uses the **context-mixing** codec (`cm`, lpaq1-style) for text and binaries: it
 produces clearly smaller archives, but decompression is roughly 5–40× slower than `-mx`.
 Independent data blocks are compressed in parallel (workers limited by `PARC_THREADS`) at every
-level; encrypted and incremental repacks stay serial.
+level; encrypted and incremental repacks stay serial. The block being written goes straight into
+the archive; blocks that finish ahead of their turn wait in memory (at most min(1 GB, RAM/4)
+in total, 256 MB on 32-bit) and only what does not fit goes to a temporary file next to the
+archive.
 
 When updating (`a`, `u`, `f`), solid blocks that remain intact are copied without recompression;
 `--recompress` forces rebuilding them. With `d` and an explicit `-m`, the whole archive is
@@ -209,10 +212,13 @@ archive has a recovery record, PArc suggests `parc r`.
 | `--no-progress` | disable the progress line |
 
 The `t` command verifies independent blocks in parallel (workers limited by `PARC_THREADS`), so
-its speed scales with the number of blocks. Extraction (`x`/`e`) decodes independent blocks in
-parallel to temporary files and then writes the files sequentially, so output order, overwrite
-prompts, links and error reporting are unchanged. Temporary space is up to the decoded size;
-archives with more than 2 GB of decoded blocks use the serial path. The progress line (phase, percentage, MB, speed,
+its speed scales with the number of blocks. Extraction (`x`/`e`) also decodes independent blocks
+in parallel, and each worker writes its files straight to the destination (no temporary
+files, no size limit); messages are still printed in archive order, a damaged block is reported
+exactly as in the serial path, and links and directory dates are set at the end. When two
+archive entries would land on the same destination name (for example with `e`), the archive
+is extracted in archive order instead (decoding in parallel to temporary files up to 2 GB).
+With one thread everything is serial. The progress line (phase, percentage, MB, speed,
 remaining time and current file) is shown on
 stderr only when it is a console; when redirected it does not appear. Ctrl-C cancels cleanly:
 when compressing, the temporary file is removed and an existing archive remains intact; when
@@ -236,6 +242,8 @@ extracting, the half-written file is deleted. A second Ctrl-C stops immediately.
 | variable | effect |
 |---|---|
 | `PARC_THREADS` | threads for parallel compressors (4x4, grzip), block compression, `t` verification and parallel block decoding for extraction; defaults to CPU cores |
+| `PARC_BUFMEM` | MB of memory for compressed blocks waiting their turn when compressing in parallel (default min(1024, RAM/4), 256 on 32-bit); the rest goes to temporary files |
+| `PARC_CRC` | `table` disables the PCLMULQDQ CRC-32 (for measurements) |
 
 ## Examples
 
