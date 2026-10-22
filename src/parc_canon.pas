@@ -200,6 +200,9 @@ begin
       begin
         L := LowerCase(Parts[J]);
         if (L <> '') and (L[1] in ['0'..'9']) then NFB := Num(L, 32)
+        { hc4/ht4 antes que "h<tamaño>" (si no, se tomaban como tamaño de hash y se perdían) }
+        else if L = 'hc4' then begin MFi := 4; MFSet := True; end
+        else if L = 'ht4' then begin MFi := 0; MFSet := True; end
         else if Copy(L,1,1) = 'h' then Hash := ParseMem(Copy(L,2,MaxInt), 0)
         { C_LZMA.cpp:623-627: los presets fijan algoritmo, fast bytes y ciclos, y el match
           finder solo si todavía no se dio uno ("max" = normal + bt4 + 128) }
@@ -212,8 +215,6 @@ begin
         else if L = 'bt2' then begin MFi := 1; MFSet := True; end
         else if L = 'bt3' then begin MFi := 2; MFSet := True; end
         else if L = 'bt4' then begin MFi := 3; MFSet := True; end
-        else if L = 'hc4' then begin MFi := 4; MFSet := True; end
-        else if L = 'ht4' then begin MFi := 0; MFSet := True; end
         else if Copy(L,1,2) = 'mc' then MC := Num(Copy(L,3,MaxInt), 0)
         else if Copy(L,1,2) = 'pb' then PB := Num(Copy(L,3,MaxInt), 2)
         else if Copy(L,1,2) = 'lc' then LC := Num(Copy(L,3,MaxInt), 3)
