@@ -1544,6 +1544,854 @@ end;
 
 {$ENDIF}
 
+{ ---- combos 5 y 6 (tor:5, tor:6): LazyMatching<Hash3<CachingMatchFinder<4>,14,10,FALSE>>
+  con el codificador aritmético o Huffman ----
+  En x86_64 cada tramo va en dos pasadas: Lazy5Span (ensamblador) hace el match finder y las
+  decisiones de LazyMatching de todas las posiciones del tramo y deja la lista de literales y
+  matches (largo, distancia); después RunFast5/RunFast6 los codifican en orden con LitA/
+  EncodeMatchA o LitH/EncodeMatchH. Es el mismo stream: las decisiones no dependen del
+  codificador, y lo que sí lo mezcla (tablas de datos) queda en los bordes de los tramos, igual
+  que la lectura y el espacio de salida. Con PARC_NOASM o en otras CPU, la plantilla. }
+
+{$IF defined(CPUX86_64) and not defined(PARC_NOASM)}
+
+const
+  LAZY_TOKENS = 4096 + 16;     // un tramo tiene a lo sumo SPAN posiciones (FastSpecial)
+
+type
+  { Estado de Lazy5Span }
+  TLazy5State = record
+    pp, lim, bs, mend: PByte;
+    ht, ht3, ht2: PLongWord;
+    hs: LongWord;
+    row2, rowup: SizeInt;
+    step: LongWord;
+    nlen: LongWord;                     // LazyMatching: largo y match ya buscados en pp
+    nq: PByte;
+    tok: PLongWord;                     // pares (largo, distancia); largo < 2 = literal
+    ntok: SizeInt;
+    plen: LongWord;                     // auxiliares
+    pq: PByte;
+    ulen: LongWord;
+  end;
+
+{ r12 pp, r13 lim, rbx buf, r8 el hash, r9 el estado, r14 la lista, edi nlen, r15 nq.
+  find(rsi = p) -> eax largo, rdx q: Hash3<CachingMatchFinder<4>,14,10>::find_matchlen
+  (conserva rbx, rdi, r8, r9, r12..r15). }
+procedure Lazy5Span(var st: TLazy5State);
+var
+  pst: Pointer;
+begin
+  pst := @st;
+  asm
+    movq    pst, %r9
+    movq    TLazy5State.ht(%r9), %r8
+    movq    TLazy5State.bs(%r9), %rbx
+    movq    TLazy5State.pp(%r9), %r12
+    movq    TLazy5State.lim(%r9), %r13
+    movq    TLazy5State.tok(%r9), %r14
+    movl    TLazy5State.nlen(%r9), %edi
+    movq    TLazy5State.nq(%r9), %r15
+  .Lz_loop:
+    cmpq    %r13, %r12
+    jae     .Lz_done
+    // prefetch de la fila de p+3 (PFD)
+    movl    TLazy5State.hs(%r9), %ecx
+    movl    3(%r12), %eax
+    imull   $123456791, %eax, %eax
+    shrl    %cl, %eax
+    imulq   TLazy5State.row2(%r9), %rax
+    prefetcht0 (%r8,%rax,4)
+    // LazyMatching::find_matchlen
+    testl   %edi, %edi
+    jnz     .Lz_have
+    movq    %r12, %rsi
+    call    .Lz_find
+    movl    %eax, %edi
+    movq    %rdx, %r15
+  .Lz_have:
+    movl    %edi, TLazy5State.plen(%r9)
+    movq    %r15, TLazy5State.pq(%r9)
+    leaq    1(%r12), %rsi
+    call    .Lz_find
+    movl    %eax, %edi                   // nlen
+    movq    %rdx, %r15                   // nq
+    // ecx plen, r10d nd = pp+1-nq, r11d pd = pp-pq
+    movl    TLazy5State.plen(%r9), %ecx
+    leaq    1(%r12), %r10
+    subq    %r15, %r10
+    movq    %r12, %r11
+    subq    TLazy5State.pq(%r9), %r11
+    // extender el match de p+1 un byte hacia atrás si es mejor que el de p
+    cmpl    $2, %edi
+    jb      .Lz_b
+    movzbl  -1(%r15), %eax
+    cmpb    (%r12), %al
+    jne     .Lz_b
+    leal    1(%rdi), %eax                // nlen+1
+    cmpl    %ecx, %eax                   // (nlen+1 >= plen) and (nd < pd)
+    jb      .Lz_a2
+    cmpl    %r11d, %r10d
+    jb      .Lz_back
+  .Lz_a2:
+    cmpl    %ecx, %edi                   // (nlen = plen) and not ChangePair(pd, nd)
+    jne     .Lz_a3
+    movl    %r10d, %eax
+    shrl    $6, %eax
+    cmpl    %r11d, %eax
+    jbe     .Lz_back
+  .Lz_a3:
+    cmpl    %ecx, %edi                   // nlen > plen
+    ja      .Lz_back
+    leal    2(%rdi), %eax                // (nlen+2 >= plen) and (plen >= 2) and ChangePair(nd, pd)
+    cmpl    %ecx, %eax
+    jb      .Lz_b
+    cmpl    $2, %ecx
+    jb      .Lz_b
+    movl    %r11d, %eax
+    shrl    $6, %eax
+    cmpl    %r10d, %eax
+    jbe     .Lz_b
+  .Lz_back:
+    leaq    -1(%r15), %rdx               // q := nq-1
+    leal    1(%rdi), %eax                // len := nlen+1
+    jmp     .Lz_got
+    // truncar el match actual si el de la próxima posición es mejor
+  .Lz_b:
+    cmpl    %ecx, %edi                   // (nlen >= plen) and (nd < pd div 4)
+    jb      .Lz_b2
+    movl    %r11d, %eax
+    shrl    $2, %eax
+    cmpl    %eax, %r10d
+    jb      .Lz_lit
+  .Lz_b2:
+    leal    1(%rcx), %eax                // (nlen = plen+1) and not ChangePair(pd, nd)
+    cmpl    %eax, %edi
+    jne     .Lz_b3
+    movl    %r10d, %edx
+    shrl    $6, %edx
+    cmpl    %r11d, %edx
+    jbe     .Lz_lit
+  .Lz_b3:
+    cmpl    %eax, %edi                   // nlen > plen+1
+    ja      .Lz_lit
+    leal    1(%rdi), %eax                // (nlen+1 >= plen) and (plen >= 2) and ChangePair(nd, pd)
+    cmpl    %ecx, %eax
+    jb      .Lz_keep
+    cmpl    $2, %ecx
+    jb      .Lz_keep
+    movl    %r11d, %eax
+    shrl    $6, %eax
+    cmpl    %r10d, %eax
+    ja      .Lz_lit
+  .Lz_keep:
+    movl    %ecx, %eax                   // len := plen
+    movq    TLazy5State.pq(%r9), %rdx
+  .Lz_got:
+    cmpl    $2, %eax
+    jae     .Lz_match
+  .Lz_lit:
+    movl    $1, (%r14)
+    addq    $8, %r14
+    incq    %r12
+    jmp     .Lz_loop
+  .Lz_match:
+    movl    %eax, (%r14)
+    movq    %r12, %rcx
+    subq    %rdx, %rcx
+    movl    %ecx, 4(%r14)                // distancia
+    addq    $8, %r14
+    movl    %eax, TLazy5State.ulen(%r9)
+    // prefetch de la fila de p+len+1 (la búsqueda siguiente)
+    movl    TLazy5State.hs(%r9), %ecx
+    movl    1(%r12,%rax), %edx
+    imull   $123456791, %edx, %edx
+    shrl    %cl, %edx
+    imulq   TLazy5State.row2(%r9), %rdx
+    prefetcht0 (%r8,%rdx,4)
+    // LazyMatching::update_hash -> Hash3::update_hash(p+1, len-1): CachingMatchFinder<4>
+    // (p+1+1, p+1+i con step, p+1+len'-1) y los hashes de 3 bytes de p+2 y p+len-1
+    decl    %eax                         // len' = len-1
+    cmpl    $1, %eax
+    jbe     .Lz_u3
+    leaq    2(%r12), %rsi
+    call    .Lz_ins
+    pushq   %rax
+    movl    $2, %eax                     // i
+  .Lz_u1:
+    movl    TLazy5State.ulen(%r9), %edx
+    subl    $2, %edx                     // len'-1
+    cmpl    %edx, %eax
+    jae     .Lz_u2
+    leaq    1(%r12,%rax), %rsi
+    call    .Lz_ins
+    addl    TLazy5State.step(%r9), %eax
+    jmp     .Lz_u1
+  .Lz_u2:
+    popq    %rax
+    cmpl    $3, %eax
+    jbe     .Lz_u25
+    leaq    (%r12,%rax), %rsi            // p+1+len'-1
+    call    .Lz_ins
+  .Lz_u25:
+    // HT3[H3Row(p+2)] := p+2  (len' > 1)
+    leaq    2(%r12), %rsi
+    call    .Lz_h3
+    cmpl    $3, %eax
+    jbe     .Lz_u3
+    leaq    (%r12,%rax), %rsi            // HT3[H3Row(p+1+len'-1)]
+    call    .Lz_h3
+  .Lz_u3:
+    movl    TLazy5State.ulen(%r9), %eax
+    addq    %rax, %r12
+    xorl    %edi, %edi                   // nlen := 0
+    jmp     .Lz_loop
+
+    // ---- subrutinas ----
+    // h3: HT3[H3Row(rsi)] := rsi - buf (usa rcx, rdx)
+  .Lz_h3:
+    movl    (%rsi), %edx
+    andl    $0xFFFFFF, %edx
+    imull   $234567913, %edx, %edx       // K3
+    shrl    $18, %edx                    // 32-14
+    movq    TLazy5State.ht3(%r9), %rcx
+    leaq    (%rcx,%rdx,4), %rdx
+    movq    %rsi, %rcx
+    subq    %rbx, %rcx
+    movl    %ecx, (%rdx)
+    ret
+    // ins: CachingMatchFinder<4>::update_hash1(rsi) (usa rcx, rdx, rsi; conserva rax)
+  .Lz_ins:
+    pushq   %rax
+    movl    TLazy5State.hs(%r9), %ecx
+    movl    (%rsi), %edx
+    imull   $123456791, %edx, %edx
+    shrl    %cl, %edx
+    imulq   TLazy5State.row2(%r9), %rdx
+    leaq    (%r8,%rdx,4), %rdx
+    movq    TLazy5State.rowup(%r9), %rcx
+    subq    $2, %rcx
+  .Lz_ins1:
+    testq   %rcx, %rcx
+    jz      .Lz_ins2
+    movq    -8(%rdx,%rcx,4), %rax
+    movq    %rax, (%rdx,%rcx,4)
+    subq    $2, %rcx
+    jmp     .Lz_ins1
+  .Lz_ins2:
+    movq    %rsi, %rax
+    subq    %rbx, %rax
+    movl    %eax, (%rdx)
+    movl    3(%rsi), %eax
+    movl    %eax, 4(%rdx)
+    popq    %rax
+    ret
+
+    // find(rsi = p) -> eax largo, rdx q
+  .Lz_find:
+    pushq   %r12
+    pushq   %r13
+    pushq   %r14
+    pushq   %r15
+    pushq   %rdi
+    movq    %rsi, %r12                   // p
+    // CachingMatchFinder<4>::find_matchlen (como Tor4Span)
+    movl    TLazy5State.hs(%r9), %ecx
+    movl    (%r12), %eax
+    imull   $123456791, %eax, %eax
+    shrl    %cl, %eax
+    imulq   TLazy5State.row2(%r9), %rax
+    leaq    (%r8,%rax,4), %rsi
+    movq    TLazy5State.row2(%r9), %rdx
+    leaq    (%rsi,%rdx,4), %rdx
+    movq    %r12, %rax
+    subq    %rbx, %rax
+    movl    3(%r12), %ecx
+    movl    %ecx, %r13d
+    movl    $255, %r10d
+    xorl    %r11d, %r11d
+    xorl    %edi, %edi
+  .Lz_scan:
+    cmpq    %rdx, %rsi
+    je      .Lz_lvl
+    movl    %eax, %r14d
+    movl    (%rsi), %eax
+    movl    %r14d, (%rsi)
+    movl    %ecx, %r15d
+    movl    4(%rsi), %ecx
+    movl    %r15d, 4(%rsi)
+    addq    $8, %rsi
+    movl    %ecx, %r14d
+    xorl    %r13d, %r14d
+    testl   %r10d, %r14d
+    jnz     .Lz_scan
+    leaq    (%rbx,%rax), %rdi
+    testl   %r14d, %r14d
+    jz      .Lz_len7
+    testl   $0xFF00, %r14d
+    jz      .Lz_s2
+    movl    $1, %r11d
+    movl    $0xFFFF, %r10d
+    jmp     .Lz_scan
+  .Lz_s2:
+    testl   $0xFF0000, %r14d
+    jz      .Lz_s3
+    movl    $2, %r11d
+    movl    $0xFFFFFF, %r10d
+    jmp     .Lz_scan
+  .Lz_s3:
+    movl    $3, %r11d
+    movl    $0xFFFFFFFF, %r10d
+    jmp     .Lz_scan
+  .Lz_lvl:
+    movl    $3, %edx
+    testl   %r11d, %r11d
+    jz      .Lz_cf
+    xorl    %edx, %edx
+    cmpq    TLazy5State.mend(%r9), %r12
+    ja      .Lz_cf
+    movl    (%r12), %eax
+    cmpl    (%rdi), %eax
+    jne     .Lz_cf
+    movq    %r12, %rax
+    subq    %rdi, %rax
+    cmpl    $1, %r11d
+    jne     .Lz_a5
+    cmpq    $49152, %rax
+    jae     .Lz_cf
+    movl    $4, %edx
+    jmp     .Lz_cf
+  .Lz_a5:
+    cmpl    $2, %r11d
+    jne     .Lz_a6
+    cmpq    $196608, %rax
+    jae     .Lz_cf
+    movzbl  4(%r12), %eax
+    cmpb    4(%rdi), %al
+    jne     .Lz_cf
+    movl    $5, %edx
+    jmp     .Lz_cf
+  .Lz_a6:
+    cmpq    $1048576, %rax
+    jae     .Lz_cf
+    movzwl  4(%r12), %eax
+    cmpw    4(%rdi), %ax
+    jne     .Lz_cf
+    movl    $6, %edx
+    jmp     .Lz_cf
+  .Lz_len7:
+    movl    $3, %r10d
+    movl    (%r12), %r14d
+    cmpl    (%rdi), %r14d
+    jne     .Lz_l7scan
+    pushq   %rdi
+    pushq   %rdx
+    movq    %rdi, %rdx
+    call    .Lz_ext
+    popq    %rdx
+    popq    %rdi
+  .Lz_l7scan:
+    cmpq    %rdx, %rsi
+    je      .Lz_l7end
+    movl    %eax, %r14d
+    movl    (%rsi), %eax
+    movl    %r14d, (%rsi)
+    movl    %ecx, %r15d
+    movl    4(%rsi), %ecx
+    movl    %r15d, 4(%rsi)
+    addq    $8, %rsi
+    cmpl    %r13d, %ecx
+    jne     .Lz_l7scan
+    leaq    (%rbx,%rax), %r15
+    movl    %r10d, %r14d
+    movzbl  (%r12,%r14), %r11d
+    cmpb    (%r15,%r14), %r11b
+    jne     .Lz_l7scan
+    movl    (%r12), %r11d
+    cmpl    (%r15), %r11d
+    jne     .Lz_l7scan
+    pushq   %r10
+    pushq   %rdx
+    movq    %r15, %rdx
+    movl    $3, %r10d
+    call    .Lz_ext
+    popq    %rdx
+    popq    %r11
+    cmpl    %r11d, %r10d
+    jbe     .Lz_l7keep
+    movq    %r15, %rdi
+    jmp     .Lz_l7scan
+  .Lz_l7keep:
+    movl    %r11d, %r10d
+    jmp     .Lz_l7scan
+  .Lz_l7end:
+    movl    %r10d, %edx
+    // edx = largo de CachingMatchFinder, rdi = su match. Hash3<14,10,FALSE>:
+  .Lz_cf:
+    cmpl    $4, %edx
+    jae     .Lz_h3up
+    // largo < 4: el de 3 bytes (a menos de 6 kb) o el de 2 (a menos de 256)
+    movl    (%r12), %eax
+    andl    $0xFFFFFF, %eax
+    imull   $234567913, %eax, %eax       // K3
+    shrl    $18, %eax
+    movq    TLazy5State.ht3(%r9), %rcx
+    leaq    (%rcx,%rax,4), %rcx
+    movl    (%rcx), %edi
+    addq    %rbx, %rdi                   // qq
+    movq    %r12, %rax
+    subq    %rbx, %rax
+    movl    %eax, (%rcx)
+    movq    %r12, %rax
+    subq    %rdi, %rax
+    cmpq    $6144, %rax
+    jge     .Lz_h2
+    leaq    3(%r12), %rax
+    cmpq    TLazy5State.mend(%r9), %rax
+    ja      .Lz_h2
+    movl    (%r12), %eax
+    xorl    (%rdi), %eax
+    testl   $0xFFFFFF, %eax
+    jnz     .Lz_h2
+    // HT2[H2Row(p)] := p; largo 3
+    movzwl  (%r12), %eax
+    imull   $123456791, %eax, %eax
+    shrl    $22, %eax                    // 32-10
+    movq    TLazy5State.ht2(%r9), %rcx
+    movq    %r12, %rsi
+    subq    %rbx, %rsi
+    movl    %esi, (%rcx,%rax,4)
+    movl    $3, %eax
+    movq    %rdi, %rdx
+    jmp     .Lz_fend
+  .Lz_h2:
+    movzwl  (%r12), %eax
+    imull   $123456791, %eax, %eax
+    shrl    $22, %eax
+    movq    TLazy5State.ht2(%r9), %rcx
+    leaq    (%rcx,%rax,4), %rcx
+    movl    (%rcx), %edi
+    addq    %rbx, %rdi                   // qq
+    movq    %r12, %rax
+    subq    %rbx, %rax
+    movl    %eax, (%rcx)
+    movq    %rdi, %rdx
+    movl    $1, %eax
+    movq    %r12, %rcx
+    subq    %rdi, %rcx
+    cmpq    $256, %rcx
+    jge     .Lz_fend
+    leaq    2(%r12), %rcx
+    cmpq    TLazy5State.mend(%r9), %rcx
+    ja      .Lz_fend
+    movzwl  (%r12), %ecx
+    cmpw    (%rdi), %cx
+    jne     .Lz_fend
+    movl    $2, %eax
+    jmp     .Lz_fend
+  .Lz_h3up:
+    // largo >= 4: HT3[H3Row(p)] := p; HT2[H2Row(p)] := p (h3 usa rcx y rdx: el largo a r10)
+    movl    %edx, %r10d
+    movq    %r12, %rsi
+    call    .Lz_h3
+    movzwl  (%r12), %eax
+    imull   $123456791, %eax, %eax
+    shrl    $22, %eax
+    movq    TLazy5State.ht2(%r9), %rcx
+    movq    %r12, %rsi
+    subq    %rbx, %rsi
+    movl    %esi, (%rcx,%rax,4)
+    movl    %r10d, %eax
+    movq    %rdi, %rdx
+  .Lz_fend:
+    popq    %rdi
+    popq    %r15
+    popq    %r14
+    popq    %r13
+    popq    %r12
+    ret
+    // ext: r10d := largo de p (r12) contra rdx desde r10d (usa r11, r14)
+  .Lz_ext:
+    movq    TLazy5State.mend(%r9), %r11
+  .Lz_ext4:
+    leaq    (%r12,%r10), %r14
+    cmpq    %r11, %r14
+    jae     .Lz_ext9
+    movl    (%r12,%r10), %r14d
+    cmpl    (%rdx,%r10), %r14d
+    jne     .Lz_ext1
+    addl    $4, %r10d
+    jmp     .Lz_ext4
+  .Lz_ext1:
+    leaq    (%r12,%r10), %r14
+    cmpq    %r11, %r14
+    jae     .Lz_ext9
+    movzbl  (%r12,%r10), %r14d
+    cmpb    (%rdx,%r10), %r14b
+    jne     .Lz_ext9
+    incl    %r10d
+    jmp     .Lz_ext1
+  .Lz_ext9:
+    ret
+
+  .Lz_done:
+    movq    %r12, TLazy5State.pp(%r9)
+    movl    %edi, TLazy5State.nlen(%r9)
+    movq    %r15, TLazy5State.nq(%r9)
+    subq    TLazy5State.tok(%r9), %r14
+    shrq    $3, %r14
+    movq    %r14, TLazy5State.ntok(%r9)
+  end ['rax', 'rbx', 'rcx', 'rdx', 'rsi', 'rdi', 'r8', 'r9', 'r10', 'r11', 'r12', 'r13', 'r14', 'r15'];
+end;
+
+{ La segunda pasada de RunLazy5 con el codificador aritmético, en ensamblador (ArithTokens):
+  LitA y EncodeMatchA de la lista de Lazy5Span con low/range y la salida en registros (en
+  Pascal cada símbolo pasaba por los campos del codificador y ShiftLow era una llamada). Para
+  después del token cuyo símbolo deja ARemainder en 0, así RunLazy5 llama a ARescale como
+  SymA. La salida tiene lugar (RunLazy5 la reserva para el tramo, más Help). }
+type
+  TArithState = record
+    co: TTorCoder;
+    op, pp: PByte;
+    low: Int64;
+    rng: LongWord;
+    tok, tokend: PLongWord;
+    dcc, l2c: PByte;
+    dce, dcb, l2e, l2b: PLongWord;
+    lval, lbits, dval, dbits: LongWord;
+  end;
+
+{ r15 el codificador, r14 salida, r13 low, r12d range, r11 token, r10 fin de la lista,
+  rbx pp, r9 el estado }
+procedure ArithTokens(var st: TArithState);
+var
+  pst: Pointer;
+begin
+  pst := @st;
+  asm
+    movq    pst, %r9
+    movq    TArithState.co(%r9), %r15
+    movq    TArithState.op(%r9), %r14
+    movq    TArithState.low(%r9), %r13
+    movl    TArithState.rng(%r9), %r12d
+    movq    TArithState.tok(%r9), %r11
+    movq    TArithState.tokend(%r9), %r10
+    movq    TArithState.pp(%r9), %rbx
+  .Lat_loop:
+    cmpq    %r10, %r11
+    jae     .Lat_done
+    movl    (%r11), %edx                 // largo
+    cmpl    $2, %edx
+    jae     .Lat_match
+    // ---- LitA ----
+    movzbl  (%rbx), %eax
+    movslq  TTorCoder.PrevDist0(%r15), %rdx
+    testq   %rdx, %rdx
+    js      .Lat_lit1
+    notq    %rdx
+    movzbl  (%rbx,%rdx), %edx
+    cmpl    %eax, %edx
+    jne     .Lat_lit1
+    movl    $833, %eax                   // REPCHAR
+  .Lat_lit1:
+    call    .Lat_sym
+    incq    %rbx
+    addq    $8, %r11
+    cmpl    $0, TTorCoder.ARemainder(%r15)
+    jne     .Lat_loop
+    jmp     .Lat_done
+    // ---- EncodeMatchA(len-2, dist-1) ----
+  .Lat_match:
+    pushq   %rdx                         // largo
+    movl    4(%r11), %eax
+    decl    %eax                         // dist
+    movl    $0, TArithState.dbits(%r9)
+    movl    TTorCoder.PrevDist0(%r15), %ecx
+    movl    %eax, TTorCoder.PrevDist0(%r15)
+    xorl    %esi, %esi                   // dcode
+    cmpl    %ecx, %eax
+    je      .Lat_dc
+    movl    TTorCoder.PrevDist1(%r15), %edx
+    movl    %ecx, TTorCoder.PrevDist1(%r15)
+    incl    %esi
+    cmpl    %edx, %eax
+    je      .Lat_dc
+    movl    TTorCoder.PrevDist2(%r15), %ecx
+    movl    %edx, TTorCoder.PrevDist2(%r15)
+    incl    %esi
+    cmpl    %ecx, %eax
+    je      .Lat_dc
+    movl    TTorCoder.PrevDist3(%r15), %edx
+    movl    %ecx, TTorCoder.PrevDist3(%r15)
+    incl    %esi
+    cmpl    %edx, %eax
+    je      .Lat_dc
+    movq    TArithState.dcc(%r9), %rdx
+    cmpl    $512, %eax
+    jae     .Lat_d1
+    movzbl  (%rdx,%rax), %esi
+    jmp     .Lat_d3
+  .Lat_d1:
+    cmpl    $131072, %eax
+    jae     .Lat_d2
+    movl    %eax, %ecx
+    shrl    $8, %ecx
+    movzbl  512(%rdx,%rcx), %esi
+    jmp     .Lat_d3
+  .Lat_d2:
+    movl    %eax, %ecx
+    shrl    $16, %ecx
+    movzbl  1024(%rdx,%rcx), %esi
+  .Lat_d3:
+    movq    TArithState.dce(%r9), %rdx
+    movl    (%rdx,%rsi,4), %ecx
+    movl    %ecx, TArithState.dbits(%r9)
+    movq    TArithState.dcb(%r9), %rdx
+    subl    (%rdx,%rsi,4), %eax
+    movl    %eax, TArithState.dval(%r9)
+    addl    $4, %esi
+  .Lat_dc:
+    movl    (%rsp), %edx
+    subl    $2, %edx                     // L
+    cmpl    $100, %edx
+    jbe     .Lat_l0
+    addl    $4, %edx
+  .Lat_l0:
+    movl    $15, %ecx
+    cmpl    $600, %edx
+    ja      .Lat_l1
+    movq    TArithState.l2c(%r9), %rax
+    movzbl  (%rax,%rdx), %ecx
+  .Lat_l1:
+    movq    TArithState.l2e(%r9), %rax
+    movl    (%rax,%rcx,4), %eax
+    movl    %eax, TArithState.lbits(%r9)
+    movq    TArithState.l2b(%r9), %rax
+    subl    (%rax,%rcx,4), %edx
+    movl    %edx, TArithState.lval(%r9)
+    movl    %esi, %eax
+    shll    $4, %eax
+    addl    %ecx, %eax
+    addl    $256, %eax
+    call    .Lat_sym
+    movl    TArithState.lbits(%r9), %esi
+    movl    TArithState.lval(%r9), %eax
+    call    .Lat_bits
+    movl    TArithState.dbits(%r9), %esi
+    movl    TArithState.dval(%r9), %eax
+    call    .Lat_bits
+    popq    %rdx
+    addq    %rdx, %rbx
+    addq    $8, %r11
+    cmpl    $0, TTorCoder.ARemainder(%r15)
+    jne     .Lat_loop
+    jmp     .Lat_done
+
+    // ---- subrutinas ----
+    // sym: SymA(eax) sin ARescale (usa rax, rcx, rdx)
+  .Lat_sym:
+    movl    %r12d, %ecx
+    shrl    $14, %ecx                    // RANGE_BITS
+    movl    TTorCoder.ACum(%r15,%rax,4), %edx
+    imull   %ecx, %edx
+    addq    %rdx, %r13
+    movl    TTorCoder.ACnt(%r15,%rax,4), %edx
+    imull   %ecx, %edx
+    movl    %edx, %r12d
+    incl    TTorCoder.ALive(%r15,%rax,4)
+    decl    TTorCoder.ARemainder(%r15)
+    jmp     .Lat_norm
+    // bits: los bits extra (esi = n, eax = x): BitsA(n) o, con n > 24, BitsA(15) y
+    // BitsA(n-15) (usa rax, rcx, rdx, rsi)
+  .Lat_bits:
+    testl   %esi, %esi
+    jz      .Lat_ret
+    cmpl    $24, %esi
+    jbe     .Lat_bits1
+    pushq   %rax
+    pushq   %rsi
+    movl    $15, %esi
+    call    .Lat_bits1
+    popq    %rsi
+    popq    %rax
+    shrl    $15, %eax
+    subl    $15, %esi
+  .Lat_bits1:
+    movl    %esi, %ecx
+    movl    $1, %edx
+    shll    %cl, %edx
+    decl    %edx
+    andl    %edx, %eax                   // Mask(x, n)
+    shrl    %cl, %r12d                   // r := range shr n
+    imull   %r12d, %eax
+    addq    %rax, %r13
+    // normalización: while range < 2^24: range shl 8 + ShiftLow
+  .Lat_norm:
+    cmpl    $0x1000000, %r12d
+    jae     .Lat_ret
+    shll    $8, %r12d
+    // ShiftLow
+    movl    $0xFF000000, %ecx
+    movq    %r13, %rdx
+    xorq    %rcx, %rdx
+    cmpq    $0x1000000, %rdx
+    jb      .Lat_sl2
+    movq    %r13, %rdx
+    shrq    $32, %rdx                    // c
+    movl    TTorCoder.RBuffer(%r15), %ecx
+    addl    %edx, %ecx
+    movb    %cl, (%r14)
+    incq    %r14
+    addl    $255, %edx
+    movl    TTorCoder.Help(%r15), %ecx
+    testl   %ecx, %ecx
+    jz      .Lat_sl1
+  .Lat_sl0:
+    movb    %dl, (%r14)
+    incq    %r14
+    decl    %ecx
+    jnz     .Lat_sl0
+    movl    $0, TTorCoder.Help(%r15)
+  .Lat_sl1:
+    movl    %r13d, %ecx
+    shrl    $24, %ecx
+    movl    %ecx, TTorCoder.RBuffer(%r15)
+    jmp     .Lat_sl3
+  .Lat_sl2:
+    incl    TTorCoder.Help(%r15)
+  .Lat_sl3:
+    shll    $8, %r13d                    // low := LongWord(low) shl 8
+    jmp     .Lat_norm
+  .Lat_ret:
+    ret
+
+  .Lat_done:
+    movq    %r14, TArithState.op(%r9)
+    movq    %r13, TArithState.low(%r9)
+    movl    %r12d, TArithState.rng(%r9)
+    movq    %r11, TArithState.tok(%r9)
+    movq    %rbx, TArithState.pp(%r9)
+  end ['rax', 'rbx', 'rcx', 'rdx', 'rsi', 'rdi', 'r8', 'r9', 'r10', 'r11', 'r12', 'r13', 'r14', 'r15'];
+end;
+
+{ RunFast5 (aritmético) y RunFast6 (Huffman): el lazo de la plantilla con Lazy5Span }
+procedure TTorEngine.RunLazy5(Resuming, Arith: Boolean);
+var
+  F: TFastMF;
+  Co: TTorCoder;
+  pp, special, tend, lim, pe: PByte;
+  LZ: TLazyMF;
+  nlen: LongWord;
+  nq: PByte;
+  SkipRead: Boolean;
+  st: TLazy5State;
+  ast: TArithState;
+  tok: array[0..LAZY_TOKENS * 2 - 1] of LongWord;
+  i: SizeInt;
+  len: LongWord;
+begin
+  FastSetup(F);
+  Co := C;
+  SkipRead := False;
+  if Resuming then
+  begin
+    ReadPart2;
+    if not (P < BufEnd) then
+    begin
+      FinishStream;
+      Exit;
+    end;
+    SkipRead := True;
+  end;
+  pp := P;
+  special := pp;
+  if UseTables then tend := TableEnd else tend := Buf + M.Buffer + LOOKAHEAD;
+  LZ := TLazyMF(MF);
+  nlen := LZ.NextLen;
+  nq := LZ.NextQ;
+  st.bs := Buf; st.mend := MatchEnd; st.ht := F.HT; st.ht3 := F.HT3; st.ht2 := F.HT2;
+  st.hs := F.HShift; st.row2 := F.Row2; st.rowup := F.RowUp; st.step := M.UpdateStep;
+  st.tok := @tok[0];
+  ast.co := Co;
+  ast.dcc := @Dc.Code[0]; ast.dce := @Dc.Extra[0]; ast.dcb := @Dc.Base[0];
+  ast.l2c := @Lc2.Code[0]; ast.l2e := @Lc2.Extra[0]; ast.l2b := @Lc2.Base[0];
+  while True do
+  begin
+    if pp >= special then
+    begin
+      LZ.NextLen := nlen;
+      LZ.NextQ := nq;
+      special := FastSpecial(pp, SkipRead);
+      if special = nil then Exit;
+      // el arrastre del aritmético puede vaciar Help bytes de una vez
+      Co.EnsureOut((special - pp) * 32 + SizeInt(Co.Help) + 4096);
+    end;
+    if pp > tend then
+    begin
+      LZ.NextLen := nlen;
+      if FastTables(pp) then nlen := LZ.NextLen;    // invalidate_match
+      tend := TableEnd;
+    end;
+    if tend < pp then lim := pp + 1
+    else if tend < special then lim := tend + 1
+    else lim := special;
+    if lim > special then lim := special;
+    // 1) match finder y decisiones
+    st.pp := pp; st.lim := lim; st.nlen := nlen; st.nq := nq;
+    Lazy5Span(st);
+    nlen := st.nlen;
+    nq := st.nq;
+    // 2) codificación, en orden
+    pe := pp;
+    i := 0;
+    if Arith then
+    begin
+      ast.op := @Co.Out[0] + Co.O;
+      ast.pp := pp;
+      ast.low := Co.Low;
+      ast.rng := Co.Range;
+      ast.tok := @tok[0];
+      ast.tokend := @tok[st.ntok * 2];
+      repeat
+        ArithTokens(ast);
+        if Co.ARemainder = 0 then Co.ARescale;   // como SymA
+      until ast.tok >= ast.tokend;
+      Co.O := ast.op - @Co.Out[0];
+      Co.Low := ast.low;
+      Co.Range := ast.rng;
+    end
+    else
+      while i < st.ntok do
+      begin
+        len := tok[i * 2];
+        if len < 2 then
+        begin
+          Co.LitH(pe);
+          Inc(pe);
+        end
+        else
+        begin
+          Co.EncodeMatchH(LongInt(len) - 2, LongInt(tok[i * 2 + 1]) - 1);
+          Inc(pe, len);
+        end;
+        Inc(i);
+      end;
+    pp := st.pp;
+  end;
+end;
+
+procedure TTorEngine.RunFast5(Resuming: Boolean);
+begin
+  RunLazy5(Resuming, True);
+end;
+
+procedure TTorEngine.RunFast6(Resuming: Boolean);
+begin
+  RunLazy5(Resuming, False);
+end;
+
+{$ENDIF}
+
 { ---- combos 1 y 2 (tor:1, tor:2): MatchFinder (una entrada por fila, sin update_hash) con
   LZ77_ByteCoder o LZ77_BitCoder, greedy ----
   El lazo de cada tramo (hasta la próxima posición especial) no llama a nada: el hash, la
@@ -2186,9 +3034,10 @@ end;
 {$I parc_torrun.inc}
 {$ENDIF}
 
+{$define TF_LAZY}
+{$IF not defined(CPUX86_64) or defined(PARC_NOASM)}
 { combo 5: LazyMatching<Hash3<CachingMatchFinder<4>,14,10,FALSE>> + aritmético }
 {$define TF_NAME := RunFast5}
-{$define TF_LAZY}
 {$define TF_FIND := H3Find}
 {$define TF_UPDATE := H3Update}
 {$define TF_ARITH}
@@ -2198,6 +3047,7 @@ end;
 { combo 6: lo mismo con Huffman }
 {$define TF_NAME := RunFast6}
 {$I parc_torrun.inc}
+{$ENDIF}
 
 { combo 7: LazyMatching<Hash3<CombineMF<CycledCachingMatchFinder<5>,ExactMatchFinder<4>>,
   16,12,TRUE>>, con el codificador del método (aritmético o Huffman; c1/c2 van por Run) }

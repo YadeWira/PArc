@@ -2671,6 +2671,9 @@ type
     procedure RunFast1(Resuming: Boolean);
     procedure RunFast2(Resuming: Boolean);
     procedure RunFast4(Resuming: Boolean);
+{$IF defined(CPUX86_64) and not defined(PARC_NOASM)}
+    procedure RunLazy5(Resuming, Arith: Boolean);
+{$ENDIF}
     procedure RunFast5(Resuming: Boolean);
     procedure RunFast6(Resuming: Boolean);
     procedure RunFast7H(Resuming: Boolean);
