@@ -263,7 +263,7 @@ begin
 end;
 
 const
-  AllMethods: array[0..14] of string = (
+  AllMethods: array[0..18] of string = (
     'lzma:64kb:normal:bt4',
     'lzma:64kb:fast:hc4',
     'lzma:64kb:bt2:a1:fb16',
@@ -278,10 +278,16 @@ const
     'lzma:d20:bt2:a0:fb64',
     'lzma:64mb:normal:bt4',
     'lzma:64mb:max',
-    'lzma:64mb:fast'
+    'lzma:64mb:fast',
+    // ht4 (tabla hash de FreeArc): filas de 1 entrada, mc grande (tope de fila) y a1
+    'lzma:64kb:fast:ht4:mc1',
+    'lzma:64kb:ht4:mc100000:fb273',
+    'lzma:1mb:normal:ht4:mc64:lc0:lp4:pb4',
+    'lzma:4mb:a1:ht4:fb5:mc3'
   );
-  QuickMethods: array[0..4] of string = (
-    'lzma:64kb:normal:bt4', 'lzma:64kb:fast:hc4', 'lzma:1mb:max', 'lzma:1mb:bt3:lc0:lp2:pb0', 'lzma:64mb:fastest');
+  QuickMethods: array[0..5] of string = (
+    'lzma:64kb:normal:bt4', 'lzma:64kb:fast:hc4', 'lzma:1mb:max', 'lzma:1mb:bt3:lc0:lp2:pb0', 'lzma:64mb:fastest',
+    'lzma:64kb:ht4:mc100000');
 
 procedure RunSet(const Name: string; const Data: TBytes; const OrigPath: string);
 var
