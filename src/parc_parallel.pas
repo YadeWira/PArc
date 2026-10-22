@@ -126,6 +126,8 @@ procedure TParallelJob.ResetForReuse;
 begin
   FErrClass := nil;
   FErrMsg := '';
+  // Sin esto, WaitJob de un trabajo reusado (los de hashing de REP) volvía sin esperar
+  InterlockedExchange(FFinished, 0);
   RTLEventResetEvent(FDone);
 end;
 
