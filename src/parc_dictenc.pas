@@ -288,6 +288,8 @@ var
   n, r, counter: Integer;
   SH: PScanSlot;
   Tick: LongWord;
+  B: PByte;                        { PARC: Buf y CC en locales (FPC releía Self en cada byte) }
+  Cnt: ^TDictCharCounts;
 label
   found2, lend, search_max, found_max, search_less, lfound;
 
@@ -308,12 +310,14 @@ begin
     Inc(i0, 65536);
   end;
   SH := @ScanHash[0];
+  B := Buf;
+  Cnt := CC;
 
   p := 0;
   EndBuf := BufSize - WORD_STEP - 1;
   repeat
     p0 := p;
-    c1 := Buf[p]; Inc(p); c := Buf[p];
+    c1 := B[p]; Inc(p); c := B[p];
     if CharClass(c1) <> CharClass(c) then goto lend;
     Inc(p);
     hash0 := (c1 shl 8) + c + 16;
@@ -338,7 +342,7 @@ begin
       i := 0;
       while i < WORD_STEP do
       begin
-        c1 := c; c := Buf[p + i];
+        c1 := c; c := B[p + i];
         if CharClass(c1) <> CharClass(c) then goto search_max;
         hash1 := hash;
         hash := UpdateHash(hash, c);
@@ -386,7 +390,7 @@ begin
       i := 1;
       while i < maxi do
       begin
-        cb := Buf[p]; Inc(p);
+        cb := B[p]; Inc(p);
         h1 := UpdateHash(h0, cb);
         h2 := h1;
         r := SearchSH(SH, Mask, h2, h0, cb);
@@ -416,7 +420,7 @@ begin
   lend:
     while p0 < p do
     begin
-      Inc(CC^[Buf[p0]]);
+      Inc(Cnt^[B[p0]]);
       Inc(p0);
     end;
     // Cancelación: phase1 de un bloque de 128 MB son segundos sin emitir nada
@@ -426,7 +430,7 @@ begin
 
   while p < BufSize do
   begin
-    Inc(CC^[Buf[p]]);
+    Inc(Cnt^[B[p]]);
     Inc(p);
   end;
   Result := 0;
@@ -758,23 +762,57 @@ begin
   Result := 0;
 end;
 
-{ phase7 + FindWord: codificar el texto. }
-function TDictEnc.Phase7(var Out: TBytes; DictLen: SizeInt; out DataLen: SizeInt;
-  OutLimit: SizeInt): Integer;
+type
+  PCodeWord = ^TCodeWord;
+
+{ FindWord de phase7: la palabra del diccionario que empieza en p (nil si no hay).
+  PARC: función suelta y no método, para que FPC deje B/q/hash/HB/HM en registros (dentro
+  de Phase7 los volcaba a la pila en cada vuelta). Misma lógica que antes. }
+function DictFindWord(B: PByte; p, BufSize: SizeInt; HB: PWord; CWs: PCodeWord;
+  HS, HM: LongWord): PCodeWord;
 var
-  p, p0, q, op, len: SizeInt;
+  q, len: SizeInt;
   hash0, hash: LongWord;
   h: Word;
   c: Byte;
   n: Integer;
-  found: Boolean;
-  cw: ^TCodeWord;
+begin
+  q := p;
+  hash0 := HS + B[q]; Inc(q);
+  if q = BufSize then Exit(nil);
+  repeat
+    c := B[q]; Inc(q);
+    hash := UpdateHash(hash0, c);
+    n := 13;
+    repeat
+      h := HB[hash and HM];
+      if (h = 0) or (h = Word(hash0)) then Break;
+      hash := Rehash(hash, c);
+      Dec(n);
+    until n = 0;
+    if (h = 0) or (h <> Word(hash0)) then Break;   { vacío o cadena agotada: no está }
+    hash0 := hash;
+  until not (q < BufSize);
+  Dec(q);
+  Result := @CWs[hash0 and HM];
+  len := Result^.Len;
+  // Como el C: el largo se compara con endbuf-p (p = fin del match, no p0)
+  if (len = 0) or (len > BufSize - q) then Exit(nil);
+  if CompareByte(B[p], B[SizeInt(Result^.Ofs)], len) <> 0 then Result := nil;
+end;
+
+{ phase7 + FindWord: codificar el texto. }
+function TDictEnc.Phase7(var Out: TBytes; DictLen: SizeInt; out DataLen: SizeInt;
+  OutLimit: SizeInt): Integer;
+var
+  p, op: SizeInt;
+  c: Byte;
+  cw: PCodeWord;
   B, O: PByte;
   HB: PWord;
-  CWs: ^TCodeWord;
+  CWs: PCodeWord;
   Cnt: ^TDictCharCounts;
   HS, HM: LongWord;
-  k: SizeInt;
   Tick: LongWord;
 begin
   Tick := 0;
@@ -785,38 +823,7 @@ begin
   op := DictLen;
   p := 0;
   repeat
-    // FindWord(p, endbuf)
-    p0 := p;
-    cw := nil;
-    q := p0;
-    hash0 := HS + B[q]; Inc(q);
-    if q <> BufSize then
-    begin
-      repeat
-        c := B[q]; Inc(q);
-        hash := UpdateHash(hash0, c);
-        n := 13;
-        found := False;
-        repeat
-          h := HB[hash and HM];
-          if h = 0 then Break;
-          if h = Word(hash0) then begin found := True; Break; end;
-          hash := Rehash(hash, c);
-          Dec(n);
-        until n = 0;
-        if not found then Break;
-        hash0 := hash;
-      until not (q < BufSize);
-      Dec(q);
-      cw := @CWs[hash0 and HM];
-      len := cw^.Len;
-      // Como el C: el largo se compara con endbuf-p (p = fin del match, no p0)
-      if (len = 0) or (len > BufSize - q) then cw := nil
-      else
-        for k := 0 to len - 1 do
-          if B[p0 + k] <> B[SizeInt(cw^.Ofs) + k] then begin cw := nil; Break; end;
-    end;
-
+    cw := DictFindWord(B, p, BufSize, HB, CWs, HS, HM);
     if cw <> nil then
     begin
       O[op] := cw^.Chr; Inc(op);
