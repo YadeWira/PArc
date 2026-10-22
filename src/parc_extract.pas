@@ -45,7 +45,8 @@ function MatchesAny(const Name: string; Masks: TStrings): Boolean;
 implementation
 
 uses
-  DateUtils, parc_os, parc_bytes, parc_crc, parc_stream, parc_methods, parc_progress, parc_parallel, parc_volume;
+  DateUtils, parc_os, parc_bytes, parc_crc, parc_stream, parc_methods, parc_progress, parc_parallel, parc_volume,
+  parc_strmap;
 
 const
   COPY_BUF = 1 shl 20;
@@ -527,6 +528,383 @@ begin
   end;
 end;
 
+{ Extracción paralela directa: cada hilo descomprime un bloque y escribe sus archivos en el
+  destino, sin el temporal intermedio (que escribía y releía todo dos veces y solo se usaba
+  hasta 2 GB). Cada bloque hace lo mismo que el camino serial (mismos mensajes, mismo manejo de
+  bloques dañados y de archivos a medias); los mensajes se guardan y se emiten en orden de
+  bloque. Solo se usa cuando el resultado no depende del orden entre bloques: sin nombres de
+  destino repetidos, sin preguntas de sobrescritura y sin -so/t. }
+type
+  { Lo compartido por los trabajos de una extracción. }
+  TExtractShared = class
+  public
+    DirLock: TRTLCriticalSection;
+    Dirs: TStrIntMap;      // directorios de destino ya creados
+    Abort: LongInt;        // 1: otro trabajo falló sin remedio, los demás cortan
+    constructor Create;
+    destructor Destroy; override;
+    procedure EnsureDir(const Dir: string);
+  end;
+
+  EExtractAborted = class(Exception);
+
+  TExtractBlockJob = class(TParallelJob)
+  public
+    A: TArchive;
+    BlockIndex: Integer;
+    Opt: TExtractOptions;
+    Mode: TOverwriteMode;
+    Shared: TExtractShared;
+    Stats: TExtractStats;
+    Messages: TStringList;
+    Damaged: Boolean;
+    Orig: Int64;           // bytes que se descomprimen (para el progreso)
+    DoneKB: LongInt;       // progreso, en KB (lo lee el hilo principal)
+    CurFile: LongInt;      // índice del archivo en curso (-1: ninguno)
+    constructor Create;
+    destructor Destroy; override;
+    procedure Process; override;
+  end;
+
+constructor TExtractShared.Create;
+begin
+  inherited Create;
+  InitCriticalSection(DirLock);
+  Dirs.Init(256);
+end;
+
+destructor TExtractShared.Destroy;
+begin
+  DoneCriticalSection(DirLock);
+  inherited Destroy;
+end;
+
+procedure TExtractShared.EnsureDir(const Dir: string);
+begin
+  EnterCriticalSection(DirLock);
+  try
+    if Dirs.Get(Dir) < 0 then
+    begin
+      MakeDirs(Dir);
+      Dirs.Put(Dir, 1);
+    end;
+  finally
+    LeaveCriticalSection(DirLock);
+  end;
+end;
+
+constructor TExtractBlockJob.Create;
+begin
+  inherited Create;
+  Messages := TStringList.Create;
+  CurFile := -1;
+end;
+
+destructor TExtractBlockJob.Destroy;
+begin
+  Messages.Free;
+  inherited Destroy;
+end;
+
+procedure TExtractBlockJob.Process;
+var
+  Blk: TArcBlock;
+  Stream: TStream;
+  Chain: TInStage;
+  Buf: TBytes;
+  i, Cur, LastWanted: Integer;
+  n: SizeInt;
+  F: TArcFileEntry;
+  ActualCrc: LongWord;
+  Remaining, Pending: Int64;
+  OutF: TFileStream;
+  OutName: string;
+  DoWrite, Opened, CurWriting: Boolean;
+
+  // Progreso (en KB, que el hilo principal suma) y corte si se canceló o si otro trabajo falló
+  procedure Advance(Bytes: Int64);
+  begin
+    Inc(Pending, Bytes);
+    if Pending >= 1024 then
+    begin
+      InterlockedExchangeAdd(DoneKB, LongInt(Pending shr 10));
+      Pending := Pending and 1023;
+    end;
+    CheckCancel;
+    if Shared.Abort <> 0 then raise EExtractAborted.Create('aborted');
+  end;
+
+  procedure Skip(Count: Int64);
+  begin
+    while Count > 0 do
+    begin
+      if Count > Length(Buf) then n := Length(Buf) else n := Count;
+      Chain.ReadExact(@Buf[0], n);
+      Advance(n);
+      Dec(Count, n);
+    end;
+  end;
+
+  procedure MarkRemaining;
+  var
+    k: Integer;
+  begin
+    Damaged := True;
+    for k := Cur to LastWanted do
+      if not A.Files[k].IsDir and not A.Files[k].IsLink and Wanted(Opt, A.Files[k].Name) then
+      begin
+        if (k = Cur) and CurWriting then
+          Messages.Add('ERROR: ' + A.Files[k].Name + ' is incomplete (whatever could be recovered was kept)')
+        else
+          Messages.Add('ERROR: ' + A.Files[k].Name + ' could not be extracted');
+        Inc(Stats.Errors);
+      end;
+  end;
+
+begin
+  Stats := Default(TExtractStats);
+  Damaged := False;
+  Pending := 0;
+  Blk := A.DataBlocks[BlockIndex];
+  LastWanted := -1;
+  for i := Blk.FirstFile to Blk.FirstFile + Blk.FileCount - 1 do
+    if not A.Files[i].IsDir and not A.Files[i].IsLink and Wanted(Opt, A.Files[i].Name) then LastWanted := i;
+  Orig := 0;
+  for i := Blk.FirstFile to LastWanted do
+    if not A.Files[i].IsDir then Inc(Orig, A.Files[i].Size);
+  if LastWanted < 0 then Exit;
+  SetLength(Buf, COPY_BUF);
+  Cur := Blk.FirstFile;
+  CurWriting := False;
+  Stream := OpenArchiveStream(A.FileName);
+  try
+    try
+      Chain := CreateDecoderChain(Blk.Method, TFileSliceStage.Create(Stream, Blk.Pos, Blk.CompSize));
+      try
+        for i := Blk.FirstFile to LastWanted do
+        begin
+          Cur := i;
+          CurWriting := False;
+          F := A.Files[i];
+          if F.IsDir or F.IsLink then Continue;   // los enlaces se crean al final
+          if not Wanted(Opt, F.Name) then
+          begin
+            Skip(F.Size);
+            Continue;
+          end;
+          CurFile := i;
+          OutName := DiskName(Opt, F.Name);
+          OutF := nil;
+          DoWrite := True;
+          // (como en el camino serial: más de 4 GB no entra en FAT/FAT32)
+          if (F.Size > High(LongWord)) and IsFatVolume(ExtractFileDir(ExpandFileName(OutName))) then
+          begin
+            Messages.Add(Format('ERROR: %s is %d bytes and the destination is FAT/FAT32 (4 GB per-file maximum): not extracted',
+              [F.Name, F.Size]));
+            Inc(Stats.Errors);
+            Skip(F.Size);
+            Continue;
+          end;
+          // Sin preguntas acá (con owAsk solo se llega si no existe ninguno): owAll
+          // sobrescribe, lo demás saltea
+          if FileExists(FsPath(OutName)) and (Mode <> owAll) then
+          begin
+            Messages.Add('Skipped (already exists): ' + OutName);
+            Inc(Stats.Skipped);
+            DoWrite := False;
+          end
+          else
+          begin
+            Shared.EnsureDir(ExtractFileDir(ExpandFileName(OutName)));
+            OutF := TFileStream.Create(FsPath(OutName), fmCreate);
+          end;
+          Opened := OutF <> nil;
+          CurWriting := Opened;
+          try
+            try
+              ActualCrc := CRC_INIT;
+              Remaining := F.Size;
+              while Remaining > 0 do
+              begin
+                if Remaining > Length(Buf) then n := Length(Buf) else n := Remaining;
+                Chain.ReadExact(@Buf[0], n);
+                ActualCrc := UpdateCRC(ActualCrc, @Buf[0], n);
+                if OutF <> nil then OutF.WriteBuffer(Buf[0], n);
+                Advance(n);
+                Dec(Remaining, n);
+              end;
+            finally
+              OutF.Free;
+            end;
+          except
+            // Cancelado (o cortado porque otro bloque falló): no dejarlo a medias
+            on EOperationCancelled do
+            begin
+              if Opened then DeleteFile(FsPath(OutName));
+              raise;
+            end;
+            on EExtractAborted do
+            begin
+              if Opened then DeleteFile(FsPath(OutName));
+              raise;
+            end;
+            on E: EStreamError do
+            begin
+              if Opened then
+              begin
+                DeleteFile(FsPath(OutName));
+                raise EInOutError.CreateFmt('could not write %s (%s): disk full or permission denied?',
+                  [OutName, E.Message]);
+              end;
+              raise;
+            end;
+          end;
+          ActualCrc := ActualCrc xor CRC_INIT;
+          CurWriting := False;
+          Cur := i + 1;
+          if Opened then RestoreMeta(OutName, F);
+          if ActualCrc <> F.Crc then
+          begin
+            Messages.Add(Format('CRC ERROR: %s (expected %.8x, got %.8x)', [F.Name, F.Crc, ActualCrc]));
+            Inc(Stats.Errors);
+          end
+          else if DoWrite then
+          begin
+            Messages.Add('Extracted ' + F.Name);
+            Inc(Stats.Files);
+            Inc(Stats.Bytes, F.Size);
+          end;
+        end;
+      finally
+        Chain.Free;
+      end;
+    except
+      on E: EUnsupportedMethod do
+      begin
+        Stats.Unsupported := True;
+        Messages.Add(Format('ERROR: %s (block at %d, %d file(s))', [E.Message, Blk.Pos, Blk.FileCount]));
+        MarkRemaining;
+      end;
+      on E: EArcCorrupt do
+      begin
+        Messages.Add(Format('ERROR: %s (block at %d)', [E.Message, Blk.Pos]));
+        MarkRemaining;
+      end;
+    end;
+  finally
+    Stream.Free;
+  end;
+end;
+
+{ Intenta la extracción paralela directa. False (sin haber tocado nada) si no corresponde. }
+function TryExtractParallel(A: TArchive; const Opt: TExtractOptions; Mode: TOverwriteMode;
+  Log: TLogProc; var Stats: TExtractStats; var Damaged: Boolean): Boolean;
+var
+  b, i, k, Count, LastWanted, Threads: Integer;
+  Jobs: array of TExtractBlockJob;
+  Pool: TJobPool;
+  Names: TStrIntMap;
+  Name: string;
+  Shared: TExtractShared;
+  Reported: array of Int64;
+  Done: Int64;
+  Finished: Boolean;
+begin
+  Result := False;
+  if Opt.TestOnly or Opt.ToStdout then Exit;
+  Threads := ThreadCount(4);
+  if Threads < 2 then Exit;
+  Count := 0;
+  for b := 0 to High(A.DataBlocks) do
+  begin
+    LastWanted := -1;
+    for i := A.DataBlocks[b].FirstFile to A.DataBlocks[b].FirstFile + A.DataBlocks[b].FileCount - 1 do
+      if not A.Files[i].IsDir and not A.Files[i].IsLink and Wanted(Opt, A.Files[i].Name) then LastWanted := i;
+    if LastWanted >= 0 then Inc(Count);
+  end;
+  if Count < 2 then Exit;
+  // Nombres de destino repetidos (el orden decidiría cuál queda), nombres inválidos (el camino
+  // serial los informa en su bloque) o preguntas de sobrescritura: no
+  Names.Init(Length(A.Files));
+  try
+    for i := 0 to High(A.Files) do
+      if not A.Files[i].IsDir and Wanted(Opt, A.Files[i].Name) then
+      begin
+        Name := DiskName(Opt, A.Files[i].Name);
+        if (Mode = owAsk) and not A.Files[i].IsLink and FileExists(FsPath(Name)) then Exit;
+        {$IFDEF WINDOWS}Name := UTF8Encode(WideLowerCase(UTF8Decode(Name)));{$ENDIF}
+        if Names.Get(Name) >= 0 then Exit;
+        Names.Put(Name, i);
+      end;
+  except
+    on EArcCorrupt do Exit;
+  end;
+
+  SetLength(Jobs, Count);
+  SetLength(Reported, Count);
+  Shared := TExtractShared.Create;
+  try
+    k := 0;
+    for b := 0 to High(A.DataBlocks) do
+    begin
+      LastWanted := -1;
+      for i := A.DataBlocks[b].FirstFile to A.DataBlocks[b].FirstFile + A.DataBlocks[b].FileCount - 1 do
+        if not A.Files[i].IsDir and not A.Files[i].IsLink and Wanted(Opt, A.Files[i].Name) then LastWanted := i;
+      if LastWanted < 0 then Continue;
+      Jobs[k] := TExtractBlockJob.Create;
+      Jobs[k].A := A;
+      Jobs[k].BlockIndex := b;
+      Jobs[k].Opt := Opt;
+      Jobs[k].Mode := Mode;
+      Jobs[k].Shared := Shared;
+      Reported[k] := 0;
+      Inc(k);
+    end;
+    Pool := TJobPool.Create(Threads, Count);
+    try
+      try
+        for i := 0 to Count - 1 do Pool.Submit(Jobs[i]);
+        // En orden de bloque: mensajes y estadísticas cuando termina cada uno; mientras tanto,
+        // el progreso de todos (el progreso solo se informa desde este hilo)
+        for i := 0 to Count - 1 do
+        begin
+          repeat
+            Finished := Pool.WaitJobFor(Jobs[i], PROGRESS_INTERVAL);
+            for k := i to Count - 1 do
+            begin
+              Done := Int64(Jobs[k].DoneKB) shl 10;
+              if Done > Reported[k] then
+              begin
+                ProgressAdd(Done - Reported[k]);
+                Reported[k] := Done;
+              end;
+            end;
+            if not Finished and (Jobs[i].CurFile >= 0) then ProgressFile(A.Files[Jobs[i].CurFile].Name);
+          until Finished;
+          for k := 0 to Jobs[i].Messages.Count - 1 do Log(Jobs[i].Messages[k]);
+          Inc(Stats.Files, Jobs[i].Stats.Files);
+          Inc(Stats.Errors, Jobs[i].Stats.Errors);
+          Inc(Stats.Skipped, Jobs[i].Stats.Skipped);
+          Inc(Stats.Bytes, Jobs[i].Stats.Bytes);
+          if Jobs[i].Stats.Unsupported then Stats.Unsupported := True;
+          if Jobs[i].Damaged then Damaged := True;
+          if Jobs[i].Orig > Reported[i] then ProgressAdd(Jobs[i].Orig - Reported[i]);
+          Reported[i] := Jobs[i].Orig;
+        end;
+      except
+        InterlockedExchange(Shared.Abort, 1);   // los demás cortan en su próximo pedazo
+        raise;
+      end;
+    finally
+      Pool.Free;
+    end;
+  finally
+    for i := 0 to Count - 1 do Jobs[i].Free;
+    Shared.Free;
+  end;
+  Result := True;
+end;
+
 function ExtractArchive(A: TArchive; const Opt: TExtractOptions; Log: TLogProc): TExtractStats;
 var
   b, i, LastWanted: Integer;
@@ -543,7 +921,7 @@ var
   DoWrite, Opened: Boolean;
   Temps: TDecodeTemps;
   TempStream: TFileStream;
-  DecodedParallel: Boolean;
+  DecodedParallel, DirectParallel: Boolean;
   StdOutS: TStream;        // -so
   Cur: Integer;            // el archivo que se está procesando en el bloque (-1: ninguno)
   CurWriting: Boolean;     //   y si ya se estaba escribiendo en el disco
@@ -596,7 +974,7 @@ begin
   SetLength(Buf, COPY_BUF);
   Mode := Opt.Overwrite;
   Temps := nil;
-  DecodedParallel := TryDecodeBlocksParallel(A, Opt, Temps);
+  DecodedParallel := False;
 
   // Total para el progreso: lo que se descomprime, incluidos los archivos no pedidos que hay
   // que atravesar dentro de un bloque sólido
@@ -618,6 +996,13 @@ begin
       Inc(Result.Dirs);
     end;
 
+  DirectParallel := TryExtractParallel(A, Opt, Mode, Log, Result, BlockDamaged);
+  // Si no (nombres repetidos, preguntas pendientes), decodificar en paralelo a temporales y
+  // escribir en orden; con un solo hilo eso solo agregaría una escritura y una lectura de todo
+  if not DirectParallel and (ThreadCount(4) >= 2) then
+    DecodedParallel := TryDecodeBlocksParallel(A, Opt, Temps);
+
+  if not DirectParallel then
   for b := 0 to High(A.DataBlocks) do
   begin
     Blk := A.DataBlocks[b];

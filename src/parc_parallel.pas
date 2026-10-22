@@ -19,6 +19,7 @@ type
   TParallelJob = class
   private
     FDone: PRTLEvent;
+    FFinished: LongInt;    // 1 cuando terminó (el evento se puede haber consumido en una espera con tope)
     FErrClass: ExceptClass;
     FErrMsg: string;
     procedure Run;
@@ -57,6 +58,8 @@ type
     destructor Destroy; override;   // espera que los hilos terminen su trabajo actual
     procedure Submit(Job: TParallelJob);
     procedure WaitJob(Job: TParallelJob);   // relanza la excepción del trabajo, si la hubo
+    { Como WaitJob pero espera como mucho Ms: False si el trabajo todavía no terminó. }
+    function WaitJobFor(Job: TParallelJob; Ms: Cardinal): Boolean;
     property MaxWorkers: Integer read FMaxWorkers;
   end;
 
@@ -124,6 +127,7 @@ begin
       FErrMsg := E.Message;
     end;
   end;
+  InterlockedExchange(FFinished, 1);
   RTLEventSetEvent(FDone);
 end;
 
@@ -276,8 +280,15 @@ end;
 
 procedure TJobPool.WaitJob(Job: TParallelJob);
 begin
-  RTLEventWaitFor(Job.FDone);
+  if Job.FFinished = 0 then RTLEventWaitFor(Job.FDone);
   if Job.FErrClass <> nil then raise Job.FErrClass.Create(Job.FErrMsg);
+end;
+
+function TJobPool.WaitJobFor(Job: TParallelJob; Ms: Cardinal): Boolean;
+begin
+  if Job.FFinished = 0 then RTLEventWaitFor(Job.FDone, Ms);
+  Result := Job.FFinished <> 0;
+  if Result and (Job.FErrClass <> nil) then raise Job.FErrClass.Create(Job.FErrMsg);
 end;
 
 { TParallelBlockStage }
