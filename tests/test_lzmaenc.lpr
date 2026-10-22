@@ -4,6 +4,8 @@
   - Cada entrada se comprime con TLzmaEncStage entregándola en pedazos de tamaño aleatorio, se
     descomprime con TLzmaStage (sobre TMemStage) y se compara byte a byte. También se prueba
     LzmaEncodeMem y parámetros inválidos.
+  - Match finder multihilo (bt4): con 2 y 3 hilos (NumThreads y la concesión LzmaEncThreadGrant)
+    la salida tiene que ser idéntica a la de un hilo, también normalizando las posiciones.
   - Con -dump DIR escribe DIR/NNNN.lz y DIR/manifest.txt ("NNNN.lz <orig> dict lc lp pb") para
     validar los streams con liblzma (Python lzma, FORMAT_RAW + FILTER_LZMA1).
   Sale con 0 si todo coincide. }
@@ -12,6 +14,7 @@ program test_lzmaenc;
 {$mode objfpc}{$H+}
 
 uses
+  {$IFDEF UNIX}cthreads,{$ENDIF}
   SysUtils, Classes, parc_outstream, parc_stream, parc_lzma, parc_lzmaenc;
 
 var
@@ -231,6 +234,81 @@ begin
   end;
 end;
 
+{ Multihilo: misma salida que con un hilo, con NumThreads = 2/3 y con la concesión del hilo
+  (NumThreads = 0); los hilos tienen que arrancar de verdad (LzmaMtStarts). }
+procedure CheckMt(const Name: string; const Data: TBytes; const Method: string; NormLimit: LongWord);
+var
+  P: TLzmaEncParams;
+  ref, comp, back: TBytes;
+  msg: string;
+  k, starts: Integer;
+begin
+  P := ParseLzmaEncParams(SplitMethod(Method));
+  P.NumThreads := 1;
+  ref := EncodeStage(Data, P);
+  LzmaMtNormLimit := NormLimit;
+  try
+    for k := 0 to 2 do
+    begin
+      msg := '';
+      starts := LzmaMtStarts;
+      case k of
+        0: P.NumThreads := 2;
+        1: P.NumThreads := 3;
+        2: begin P.NumThreads := 0; LzmaEncThreadGrant := 2; end;
+      end;
+      try
+        comp := EncodeStage(Data, P);
+      finally
+        LzmaEncThreadGrant := 0;
+      end;
+      if (Length(Data) >= 4096) and (LzmaMtStarts = starts) then msg := 'no arrancó el multihilo'
+      else if (Length(comp) <> Length(ref)) or ((Length(ref) > 0) and not CompareMem(@comp[0], @ref[0], Length(ref))) then
+        msg := Format('salida distinta de 1 hilo (%d vs %d)', [Length(comp), Length(ref)])
+      else
+      begin
+        back := DecodeStage(comp, P, Length(Data), msg);
+        if (msg = '') and (Length(Data) > 0) and not CompareMem(@back[0], @Data[0], Length(Data)) then
+          msg := 'contenido distinto';
+      end;
+      if msg = '' then
+      begin
+        Inc(Passes);
+        WriteLn(Format('  ok   mt%d %-18s %-30s norm=%-10d %10d -> %10d', [k, Name, Method, NormLimit, Length(Data), Length(comp)]));
+      end
+      else
+      begin
+        Inc(Fails);
+        WriteLn(Format('  FAIL mt%d %-18s %-30s norm=%d: %s', [k, Name, Method, NormLimit, msg]));
+      end;
+    end;
+  finally
+    LzmaMtNormLimit := $FFFFFFFF;
+  end;
+end;
+
+procedure ExpectThreads(const Method: string; NumThreads, Grant, Want: Integer);
+var
+  P: TLzmaEncParams;
+  got: Integer;
+begin
+  P := ParseLzmaEncParams(SplitMethod(Method));
+  P.NumThreads := NumThreads;
+  LzmaEncThreadGrant := Grant;
+  got := LzmaEncThreadsFor(P);
+  LzmaEncThreadGrant := 0;
+  if got = Want then
+  begin
+    Inc(Passes);
+    WriteLn(Format('  ok   hilos %s NumThreads=%d concesión=%d -> %d', [Method, NumThreads, Grant, got]));
+  end
+  else
+  begin
+    Inc(Fails);
+    WriteLn(Format('  FAIL hilos %s NumThreads=%d concesión=%d -> %d (esperado %d)', [Method, NumThreads, Grant, got, Want]));
+  end;
+end;
+
 function GenRandom(n: SizeInt): TBytes;
 var
   i: SizeInt;
@@ -362,6 +440,25 @@ begin
   SaveTmp('lejos64k', d, path); RunSet('repite a 65536', d, path);
   d := GenFarRepeat(6 shl 20, (1 shl 20) - 1);
   SaveTmp('lejos1m', d, path); RunSet('repite a 1MB-1', d, path);
+
+  WriteLn('== hilos del match finder');
+  ExpectThreads('lzma:max', 0, 0, 1);       // sin concesión: un hilo
+  ExpectThreads('lzma:max', 0, 2, 2);
+  ExpectThreads('lzma:max', 0, 8, 3);       // más de 3 no le sirven
+  ExpectThreads('lzma:max', 2, 0, 2);
+  ExpectThreads('lzma:normal', 0, 4, 1);    // ht4: un hilo
+  ExpectThreads('lzma:fast:bt4', 3, 0, 1);  // fast: un hilo
+  ExpectThreads('lzma:normal:bt4', 0, 3, 3);
+  WriteLn('== multihilo (bt4)');
+  d := GenFarRepeat(6 shl 20, (1 shl 20) - 1);
+  CheckMt('repite a 1MB-1', d, 'lzma:1mb:max', $FFFFFFFF);
+  CheckMt('repite a 1MB-1', d, 'lzma:1mb:normal:bt4:mc8', (1 shl 20) + (3 shl 19));
+  d := GenRandom(3 shl 20);
+  CheckMt('aleatorio 3MB', d, 'lzma:256kb:ultra', (1 shl 18) + (1 shl 19) + 7);
+  SetLength(d, 5 shl 20); FillChar(d[0], Length(d), 0);
+  CheckMt('ceros 5MB', d, 'lzma:4mb:max', $FFFFFFFF);
+  SetLength(d, 100); FillChar(d[0], Length(d), 7);
+  CheckMt('100 bytes', d, 'lzma:4mb:max', $FFFFFFFF);
 
   if files.Count > 0 then
   begin

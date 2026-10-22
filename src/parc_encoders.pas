@@ -161,7 +161,7 @@ end;
 
 procedure T4x4EncJob.Process;
 begin
-  LzmaSingleThreadHere := True;   // 4x4 ya reparte los bloques entre hilos
+  LzmaEncThreadGrant := 0;   // 4x4 ya reparte los bloques entre hilos: un hilo por bloque
   // Como _4x4MTCompressor::Process: un bloque de >= 32 KB casi aleatorio (order-0 >= r%) ni
   // se intenta; y si no comprime, va guardado tal cual
   if (MinOrder0Ratio <> 0) and (InLen >= 32 * 1024) and

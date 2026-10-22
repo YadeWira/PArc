@@ -94,6 +94,21 @@ What makes this possible (all inside `.parc`; the codecs are unchanged):
   Pascal fallback (i386, or `-dPARC_NOASM`). The stream tail and truncated/corrupt input take
   the old path, and `tests/test_lzma_diff` checks that both decoders give identical output and
   errors on valid, truncated and corrupted streams.
+- **LZMA encoder (`normal`/`max`)**: the bt tree walk and the literal coder are x86-64
+  assembler (Pascal fallback), the bt4/ht4 match finders prefetch two or three positions ahead
+  (hash head, first tree node, its children), and the optimal parser drops two SDK 18+ speed
+  shortcuts that cost ratio (it always prices the literal, tries the short rep like SDK 9.x) and
+  refreshes prices every 32 matches. `normal` and `max` are now smaller than FreeArc's.
+- **LZMA multi-thread match finder** (port of LzFindMt, bt4 in `normal`/`max` only, same output
+  as one thread). It is off unless the caller grants threads, so it fits the global thread
+  budget: `TLzmaEncParams.NumThreads` = 1 (one thread), 2 (compressing thread + a BT thread
+  that also hashes) or 3 (+ a separate hash thread, like the SDK; the hash thread is light);
+  0 = take the per-thread grant `LzmaEncThreadGrant` (threadvar in `parc_lzmaenc`, default 0 =
+  one thread). Stages built from method strings (`CreateStage`) use 0, so a block writer that
+  wants to give a single `lzma:...:max` block 2–3 threads sets `LzmaEncThreadGrant` in the
+  thread that creates the encoder chain, before creating it, and resets it afterwards.
+  `LzmaEncMaxThreads(P)` tells how many threads a stream can use (3 or 1) and
+  `LzmaEncThreadsFor(P)` how many it would take now. 4x4 jobs always use one.
 - **Automatic solid blocks**: without `-s`, 64 MB for `-m1`…`-m3` and 32 MB for `-m4`…`-m9`/`-mx`. On Silesia this improved compression time and ratio at every level; small archives still use one block. `-mxx` keeps a single block for ratio.
 - **GRZip adaptive LZP**: BWT blocks of 4 MB or more use `l64/h22` (fewer, longer matches); small blocks keep the fast LZP parameters. The choice is stored in each block's mode, so old decoders remain compatible. This makes `-m4` 1.2–1.4% smaller on text and many small files.
 - **Stronger and faster presets** than FreeArc's at the same level:

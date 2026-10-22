@@ -48,9 +48,12 @@ type
     NumFastBytes: Integer;      // se recorta a 5..273 como LzmaEnc_SetProps
     MatchFinderCycles: Integer; // 0 = automático (fórmula de LzmaEncProps_Normalize de FreeArc)
     MatchFinder: TLzmaMatchFinder;
-    { Hilos (no va en el string del método): 0 = automático (ThreadCount: PARC_THREADS o los
-      núcleos), 1 = un hilo, >= 2 = match finder multihilo. Como FreeArc (mtMode = numThreads > 1
-      y no fast), pero acá solo para bt4: los demás match finders siguen con un hilo. }
+    { Hilos ocupados que puede usar el stream (no va en el string del método; la salida es la
+      misma con cualquier valor): 0 = los que el llamador concedió al hilo que crea la etapa
+      (LzmaEncThreadGrant; sin concesión, 1); 1 = un hilo; 2 = match finder multihilo con un
+      hilo BT además del que comprime (el BT calcula también el hash); >= 3 = además un hilo
+      hash aparte, como LzFindMt del SDK y FreeArc (el hash es liviano: ~10 % de un núcleo).
+      Solo bt4 en :normal/:max usa más de uno (LzmaEncMaxThreads). }
     NumThreads: Integer;
   end;
 
@@ -100,10 +103,21 @@ var
   { Solo para pruebas: cuántas veces arrancó el match finder multihilo. }
   LzmaMtStarts: LongInt = 0;
 
+{ Presupuesto de hilos (para el planificador global):
+  - LzmaEncMaxThreads(P): cuántos hilos ocupados le sirven a un stream con estos parámetros
+    (3 para bt4 en :normal/:max, 1 para el resto). Más que eso no se usa.
+  - LzmaEncThreadGrant (por hilo): cuántos hilos concede el llamador a las etapas lzma que se
+    creen en este hilo con NumThreads = 0 (las de CreateStage, desde el string del método).
+    0 o 1 = uno (el valor por defecto: sin concesión no se abren hilos). Para dar 2 o 3 a un
+    bloque: fijarlo antes de crear la cadena de codificadores, en el hilo que la crea, y
+    volverlo a 0 después; el stream los toma al crearse y los devuelve al destruirse.
+  - LzmaEncThreadsFor(P): los hilos que usará de verdad una etapa creada ahora (aplica
+    NumThreads o la concesión, y LzmaEncMaxThreads). }
+function LzmaEncMaxThreads(const P: TLzmaEncParams): Integer;
+function LzmaEncThreadsFor(const P: TLzmaEncParams): Integer;
+
 threadvar
-  { En un hilo que ya es parte de una compresión paralela (los trabajos de 4x4), el modo
-    automático usa un hilo: sin esto, cada bloque abriría 2 hilos y hasta 64 MB más. }
-  LzmaSingleThreadHere: Boolean;
+  LzmaEncThreadGrant: Integer;
 
 implementation
 
@@ -1656,6 +1670,10 @@ type
     btNumBlocks: LongWord;       // potencia de 2
     started, failed: Boolean;
     initOk: Boolean;
+    { Sin hilo hash (2 hilos en total: LZ + BT): el hilo BT calcula él mismo cada bloque de
+      cabezas hash cuando lo necesita (MtHashFill), en hashInlineIdx. }
+    inlineHash: Boolean;
+    hashInlineIdx: LongWord;
     pad0: array[0..kMtCacheLine - 1] of Byte;
     btSync: TMtSync;
     pad1: array[0..kMtCacheLine - 1] of Byte;
@@ -1770,72 +1788,95 @@ begin
   end;
 end;
 
-function MtHashThreadFunc(param: Pointer): PtrInt;
+{ Mueve el bloque de la ventana si hace falta (con los "buffer lock" de los consumidores:
+  btSync.cs del LZ y, si hay hilo hash, hashSync.cs del hilo BT; sin hilo hash quien llama es
+  el hilo BT y ya tiene hashSync.cs). }
+procedure MtHashMoveIfNeeded(mt: PMtState);
 var
-  mt: PMtState;
   mf: PMatchFinder;
-  blockIndex, num, subValue: LongWord;
-  heads: PLongWord;
   before: PByte;
   offset: PtrInt;
 begin
+  mf := @mt^.hmf;
+  while MfNeedMove(mf) do
+  begin
+    EnterCriticalSection(mt^.btSync.cs);
+    if not mt^.inlineHash then EnterCriticalSection(mt^.hashSync.cs);
+    before := mf^.buffer;
+    MfMoveBlock(mf);
+    offset := before - mf^.buffer;
+    mt^.lz^.buffer := mt^.lz^.buffer - offset;
+    mt^.buffer := mt^.buffer - offset;
+    if not mt^.inlineHash then LeaveCriticalSection(mt^.hashSync.cs);
+    LeaveCriticalSection(mt^.btSync.cs);
+  end;
+end;
+
+{ Llena el bloque blockIndex de cabezas hash: [2 + n, avail, n distancias]. }
+procedure MtHashFill(mt: PMtState; blockIndex: LongWord);
+var
+  mf: PMatchFinder;
+  num, subValue: LongWord;
+  heads: PLongWord;
+begin
+  mf := @mt^.hmf;
+  // MatchFinder_ReadIfRequired
+  if mf^.keepSizeAfter >= MfAvail(mf) then
+    try
+      MfReadBlock(mf);
+    except
+      // No debería pasar (ReadIn no falla en multihilo): se corta el stream y el hilo LZ
+      // lanza el error al tomar el próximo bloque
+      mt^.failed := True;
+      mf^.streamEndWasReached := True;
+    end;
+  heads := mt^.hashBuf + (blockIndex and (kMtHashNumBlocks - 1)) * kMtHashBlockSize;
+  num := MfAvail(mf);
+  heads[0] := 2;
+  heads[1] := num;
+  { heads[1] < numHashBytes: fin del stream; el hilo BT avanza esos bytes sin hash y los
+    bloques siguientes son (2, 0) }
+  if num >= mf^.numHashBytes then
+  begin
+    num := num - mf^.numHashBytes + 1;
+    if num > kMtHashBlockSize - 2 then num := kMtHashBlockSize - 2;
+    if mf^.pos > LzmaMtNormLimit - num then
+    begin
+      subValue := LongWord(mf^.pos - mf^.historySize - 1);
+      mf^.pos := LongWord(mf^.pos - subValue);
+      mf^.streamPos := LongWord(mf^.streamPos - subValue);
+      MfNormalize3(subValue, mf^.hash + mf^.fixedHashSize, PtrUInt(mf^.hashMask) + 1);
+    end;
+    heads[0] := 2 + num;
+    MtGetHeads4(mf^.buffer, mf^.pos, mf^.hash + mf^.fixedHashSize, mf^.hashMask, heads + 2,
+      num, @mf^.crc[0]);
+  end;
+  mf^.pos := LongWord(mf^.pos + num);
+  Inc(mf^.buffer, num);
+end;
+
+{ MatchFinder_Init_HighHash (la baja la inicializa el hilo LZ) }
+procedure MtHashInit(mt: PMtState);
+begin
+  FillDWord((mt^.hmf.hash + mt^.hmf.fixedHashSize)^, SizeInt(mt^.hmf.hashMask) + 1, 0);
+end;
+
+function MtHashThreadFunc(param: Pointer): PtrInt;
+var
+  mt: PMtState;
+  blockIndex: LongWord;
+begin
   Result := 0;
   mt := PMtState(param);
-  mf := @mt^.hmf;
-  // MatchFinder_Init_HighHash (la baja la inicializa el hilo LZ)
-  FillDWord((mf^.hash + mf^.fixedHashSize)^, SizeInt(mf^.hashMask) + 1, 0);
+  MtHashInit(mt);
   blockIndex := 0;
   while True do
   begin
-    if MfNeedMove(mf) then
-    begin
-      EnterCriticalSection(mt^.btSync.cs);
-      EnterCriticalSection(mt^.hashSync.cs);
-      before := mf^.buffer;
-      MfMoveBlock(mf);
-      offset := before - mf^.buffer;
-      mt^.lz^.buffer := mt^.lz^.buffer - offset;
-      mt^.buffer := mt^.buffer - offset;
-      LeaveCriticalSection(mt^.hashSync.cs);
-      LeaveCriticalSection(mt^.btSync.cs);
-      Continue;
-    end;
+    MtHashMoveIfNeeded(mt);
     MtSemWait(mt^.hashSync.freeSem);
     if mt^.hashSync.stopWriting then Break;
-    // MatchFinder_ReadIfRequired
-    if mf^.keepSizeAfter >= MfAvail(mf) then
-      try
-        MfReadBlock(mf);
-      except
-        // No debería pasar (ReadIn no falla en multihilo): se corta el stream y el hilo LZ
-        // lanza el error al tomar el próximo bloque
-        mt^.failed := True;
-        mf^.streamEndWasReached := True;
-      end;
-    heads := mt^.hashBuf + (blockIndex and (kMtHashNumBlocks - 1)) * kMtHashBlockSize;
+    MtHashFill(mt, blockIndex);
     Inc(blockIndex);
-    num := MfAvail(mf);
-    heads[0] := 2;
-    heads[1] := num;
-    { heads[1] < numHashBytes: fin del stream; el hilo BT avanza esos bytes sin hash y los
-      bloques siguientes son (2, 0) }
-    if num >= mf^.numHashBytes then
-    begin
-      num := num - mf^.numHashBytes + 1;
-      if num > kMtHashBlockSize - 2 then num := kMtHashBlockSize - 2;
-      if mf^.pos > LzmaMtNormLimit - num then
-      begin
-        subValue := LongWord(mf^.pos - mf^.historySize - 1);
-        mf^.pos := LongWord(mf^.pos - subValue);
-        mf^.streamPos := LongWord(mf^.streamPos - subValue);
-        MfNormalize3(subValue, mf^.hash + mf^.fixedHashSize, PtrUInt(mf^.hashMask) + 1);
-      end;
-      heads[0] := 2 + num;
-      MtGetHeads4(mf^.buffer, mf^.pos, mf^.hash + mf^.fixedHashSize, mf^.hashMask, heads + 2,
-        num, @mf^.crc[0]);
-    end;
-    mf^.pos := LongWord(mf^.pos + num);
-    Inc(mf^.buffer, num);
     MtSemRelease(mt^.hashSync.filledSem);
   end;
 end;
@@ -1871,7 +1912,16 @@ begin
   begin
     if mt^.hashBufPos = mt^.hashBufPosLimit then
     begin
-      bi := MtSyncGetNextBlock(mt^.hashSync, mt^.hashBufPosLimit = 0);
+      if mt^.inlineHash then
+      begin
+        // sin hilo hash: el bloque se calcula acá (este hilo ya tiene hashSync.cs)
+        MtHashMoveIfNeeded(mt);
+        bi := mt^.hashInlineIdx;
+        Inc(mt^.hashInlineIdx);
+        MtHashFill(mt, bi);
+      end
+      else
+        bi := MtSyncGetNextBlock(mt^.hashSync, mt^.hashBufPosLimit = 0);
       k := (bi and (kMtHashNumBlocks - 1)) * kMtHashBlockSize;
       h := mt^.hashBuf + k;
       avail := h[1];
@@ -1962,6 +2012,7 @@ var
 begin
   Result := 0;
   mt := PMtState(param);
+  if mt^.inlineHash then MtHashInit(mt);
   blockIndex := 0;
   while True do
   begin
@@ -2002,12 +2053,14 @@ begin
     Result := Result * 2;
 end;
 
-{ MatchFinderMt_Create (después de MfCreate con los keep ampliados). Lanza EOutOfMemory. }
-function MtCreate(lz: PMatchFinder; btNumBlocks: LongWord): PMtState;
+{ MatchFinderMt_Create (después de MfCreate con los keep ampliados). inlineHash: sin hilo
+  hash (el hilo BT calcula las cabezas). Lanza EOutOfMemory. }
+function MtCreate(lz: PMatchFinder; btNumBlocks: LongWord; inlineHash: Boolean): PMtState;
 begin
   Result := AllocMem(SizeOf(TMtState));
   try
     Result^.btNumBlocks := btNumBlocks;
+    Result^.inlineHash := inlineHash;
     Result^.hashBuf := GetMem(SizeInt(kMtHashBufferSize + btNumBlocks * kMtBtBlockSize) * SizeOf(LongWord));
     Result^.btBuf := Result^.hashBuf + kMtHashBufferSize;
     MtSyncInit(Result^.hashSync, kMtHashNumBlocks);
@@ -2082,6 +2135,7 @@ begin
   mt^.hashBufPos := 0;
   mt^.hashBufPosLimit := 0;
   mt^.hashNumAvail := 0;
+  mt^.hashInlineIdx := 0;
   mt^.son := mf^.son;
   mt^.matchMaxLen := mf^.matchMaxLen;
   mt^.pos := 1;
@@ -2097,9 +2151,12 @@ var
 begin
   mt^.started := True;
   InterLockedIncrement(LzmaMtStarts);
-  mt^.hashSync.thread := BeginThread(@MtHashThreadFunc, mt, tid);
-  if mt^.hashSync.thread = TThreadID(0) then raise Exception.Create('lzma: could not create a thread');
-  mt^.hashSync.created := True;
+  if not mt^.inlineHash then
+  begin
+    mt^.hashSync.thread := BeginThread(@MtHashThreadFunc, mt, tid);
+    if mt^.hashSync.thread = TThreadID(0) then raise Exception.Create('lzma: could not create a thread');
+    mt^.hashSync.created := True;
+  end;
   mt^.btSync.thread := BeginThread(@MtBtThreadFunc, mt, tid);
   if mt^.btSync.thread = TThreadID(0) then raise Exception.Create('lzma: could not create a thread');
   mt^.btSync.created := True;
@@ -3871,11 +3928,10 @@ begin
   if (d = (QWord(2) shl 30)) or (d = (QWord(3) shl 30)) then Dec(d);
   // Multihilo como FreeArc (mtMode = numThreads > 1 y no fast), solo para bt4. En memoria,
   // solo si el bloque lo justifica (crear los hilos y 5 MB de buffers cuesta ~ms). La salida
-  // es la misma con o sin hilos.
-  nt := P.NumThreads;
-  if nt = 0 then
-    if LzmaSingleThreadHere then nt := 1 else nt := ThreadCount(2);
-  useMt := (nt >= 2) and (P.MatchFinder = mfBT4) and not fastMode
+  // es la misma con o sin hilos. Hilos: los de P, o (0) los que el llamador concedió a este
+  // hilo (LzmaEncThreadGrant; sin concesión, uno).
+  nt := LzmaEncThreadsFor(P);
+  useMt := (nt >= 2)
     and ((DirectSrc = nil) or (DirectLen >= kMtMinMemSize)) and MtThreadsAvailable;
   if useMt then
     try
@@ -3884,7 +3940,7 @@ begin
       nb := MtBtNumBlocks(LongWord(d));
       MfCreate(@mf, LongWord(d), kNumOpts + kMtHashBufferSize + nb * kMtBtBlockSize, numFastBytes,
         LZMA_MATCH_LEN_MAX + 1 + kMtHashBlockSize);
-      FMt := MtCreate(@mf, nb);
+      FMt := MtCreate(@mf, nb, nt = 2);
       GetMatchesF := @MtBt4GetMatches;
       SkipF := @MtBt4Skip;
     except
@@ -4156,6 +4212,20 @@ end;
 { ====================================================================== }
 { Parámetros (parse_LZMA de C_LZMA.cpp)                                    }
 { ====================================================================== }
+
+function LzmaEncMaxThreads(const P: TLzmaEncParams): Integer;
+begin
+  if (P.MatchFinder = mfBT4) and (P.Algorithm <> 0) and MtThreadsAvailable then Result := 3
+  else Result := 1;
+end;
+
+function LzmaEncThreadsFor(const P: TLzmaEncParams): Integer;
+begin
+  Result := P.NumThreads;
+  if Result = 0 then Result := LzmaEncThreadGrant;
+  if Result < 1 then Result := 1;
+  if Result > LzmaEncMaxThreads(P) then Result := LzmaEncMaxThreads(P);
+end;
 
 function DefaultLzmaEncParams: TLzmaEncParams;
 begin
