@@ -70,6 +70,7 @@ type
     FHead, FCount: Integer;
     FFree: array of TBytes;     // buffers de entrada ya escritos, para reciclar (sin ceros ni faltas de página)
     FNumFree: Integer;
+    FTorCache: TObject;         // motores de tor reusados entre bloques (TTorEncCache)
     procedure SubmitBlock;
     procedure WriteOldest;
   protected
@@ -140,6 +141,7 @@ type
     OrigSize: SizeInt;
     Stored: Boolean;
     MinOrder0Ratio: Double;
+    TorCache: TObject;      // TTorEncCache de la etapa (nil si el método interno no es tor)
     procedure Process; override;
   end;
 
@@ -172,7 +174,7 @@ begin
     Stored := not Lz4EncodeMem(Inner.Split([':']), PByte(InBuf), InLen, OutBuf)
   else if StageName(Inner) = 'tor' then
     // TORNADO_METHOD::DeCompressMem con compress_all_at_once=1; OutputSize = InSize
-    Stored := not TorEncodeMem(Inner.Split([':']), PByte(InBuf), InLen, InLen, OutBuf)
+    Stored := not TorEncodeMem(Inner.Split([':']), PByte(InBuf), InLen, InLen, OutBuf, TorCache)
   else
   begin
     OutBuf := CompressMem(Inner, PByte(InBuf), InLen);
@@ -198,6 +200,7 @@ begin
   Threads := ThreadCount(16);
   SetLength(FQueue, Threads + 1);
   FPool := TJobPool.Create(Threads, Threads + 1);
+  if StageName(AInner) = 'tor' then FTorCache := TTorEncCache.Create;
   EmitU32(0);   // versión del formato 4x4 (se escribe aunque no haya datos, como el C)
 end;
 
@@ -207,6 +210,7 @@ var
 begin
   FPool.Free;
   for i := 0 to FCount - 1 do FQueue[(FHead + i) mod Length(FQueue)].Free;
+  FTorCache.Free;      // después del pool: ningún trabajo usa ya sus motores
   inherited Destroy;
 end;
 
@@ -254,6 +258,7 @@ begin
     FFree[FNumFree] := nil;
   end;
   Job.MinOrder0Ratio := MinOrder0Ratio;
+  Job.TorCache := FTorCache;
   FQueue[(FHead + FCount) mod Length(FQueue)] := Job;
   Inc(FCount);
   TJobPool(FPool).Submit(Job);

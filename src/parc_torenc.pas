@@ -71,7 +71,24 @@ function TorDictionary(const Params: TStringArray): Int64;
   ETorEncoder si los parámetros no son válidos o si SrcLen supera el buffer (el C solo
   comprimiría los primeros m.buffer bytes). }
 function TorEncodeMem(const Params: TStringArray; Src: PByte; SrcLen: SizeInt; DstCap: SizeInt;
-  out Dst: TBytes): Boolean;
+  out Dst: TBytes; Cache: TObject = nil): Boolean;
+
+type
+  { Motores de TorEncodeMem que se reusan entre bloques (4x4:tor): la memoria del buffer, las
+    tablas del match finder y la salida ya están reservadas y en la caché (sin faltas de página
+    ni ceros de más por bloque). Cada motor lo usa un hilo a la vez; se liberan con la caché. }
+  TTorEncCache = class
+  private
+    FLock: TRTLCriticalSection;
+    FItems: array of TObject;
+    FKeys: array of string;
+    FCount: Integer;
+    function Take(const Key: string): TObject;
+    procedure Put(const Key: string; E: TObject);
+  public
+    constructor Create;
+    destructor Destroy; override;
+  end;
 
 implementation
 
@@ -1756,7 +1773,7 @@ type
     // LZ77_Coder
     PrevDist0, PrevDist1, PrevDist2, PrevDist3: LongInt;
 
-    constructor Create(AKind: Integer; InitCap: SizeInt);
+    constructor Create(AKind: Integer; InitCap: SizeInt; const AOut: TBytes = nil);
     procedure EnsureOut(n: SizeInt); inline;
     procedure Grow(n: SizeInt);
     procedure Put8(c: LongWord); inline;
@@ -1813,7 +1830,7 @@ begin
   Result := x and ((LongWord(1) shl n) - 1);
 end;
 
-constructor TTorCoder.Create(AKind: Integer; InitCap: SizeInt);
+constructor TTorCoder.Create(AKind: Integer; InitCap: SizeInt; const AOut: TBytes);
 var
   s: Integer;
 begin
@@ -1822,7 +1839,9 @@ begin
   SupportTables := Kind >= 3;
   SupportRepdist := Kind >= 3;
   if InitCap < 64 * kb then InitCap := 64 * kb;
-  SetLength(Out, InitCap);
+  // AOut: la salida de un codificador anterior (motor reusado); su contenido no importa
+  Out := AOut;
+  if Length(Out) < InitCap then SetLength(Out, InitCap);
   O := 0;
   Anchor := -1;
   // LZ77_ByteCoder: flags=0, flagbit=0 (el primer encode abre la palabra de banderas)
@@ -2630,8 +2649,10 @@ type
     BaseP, LastP, EndBuf, Silence: PByte;
     Matches: array of LongWord;
 
+    LastLen: SizeInt;       // bytes del último bloque en Buf (motor reusado)
     constructor Create(const AM: TTorMethod; ACombo: Integer; AAllAtOnce: Boolean; OutCap: SizeInt);
     destructor Destroy; override;
+    procedure Reuse(OutCap: SizeInt);
     procedure Resume;               // la lectura pendiente terminó con ReadGot bytes
     procedure Start;
     procedure Run(Resuming: Boolean);
@@ -2775,6 +2796,32 @@ begin
   // después de la primera lectura; el estado es el mismo salvo las claves de
   // CachingMatchFinder::clear_hash (key(buf+1)), que Start recalcula.
   MF := BuildMF(M, Combo, Buf, Mem + BufAlloc);
+  State := esFirst;
+  ReadDst := Buf;
+  ReadWant := Chunk;
+  ReadGot := 0;
+end;
+
+{ Deja un motor (AllAtOnce) como recién creado para comprimir otro bloque: codificador nuevo
+  (con la misma salida), las tablas del match finder como las deja el constructor (las de
+  CachingMatchFinder las borra Start igual que siempre) y el estado de lectura. El llamador pone
+  los datos en Buf y deja en cero lo que sigue (ver TorEncodeMem). }
+procedure TTorEngine.Reuse(OutCap: SizeInt);
+var
+  i, j: Integer;
+  OldOut: TBytes;
+begin
+  OldOut := C.Out;
+  C.Out := nil;
+  FreeAndNil(C);
+  C := TTorCoder.Create(CoderKind(Combo, M.EncodingMethod), OutCap, OldOut);
+  OldOut := nil;
+  C.CanFlush := not AllAtOnce;
+  if Optimal then C.SupportTables := False;
+  UseTables := C.SupportTables and M.FindTables;
+  for i := 0 to MAX_TABLE_ROW - 1 do
+    for j := 0 to MAX_TABLE_ROW - 1 do LastChecked[i, j] := Buf;
+  if not (Combo in [4, 5, 6, 9, 10, 11]) then MF.ClearHash(Buf);
   State := esFirst;
   ReadDst := Buf;
   ReadWant := Chunk;
@@ -3506,23 +3553,102 @@ end;
 { ---------------------------------------------------------------------------------------- }
 
 function TorEncodeMem(const Params: TStringArray; Src: PByte; SrcLen: SizeInt; DstCap: SizeInt;
-  out Dst: TBytes): Boolean;
+  out Dst: TBytes; Cache: TObject): Boolean;
 var
   E: TTorEngine;
+  Key: string;
+  Cap: SizeInt;
+  Ok: Boolean;
 begin
   Dst := nil;
-  E := CreateEngine(Params, True, SrcLen + SrcLen div 4 + 4096);
+  Cap := SrcLen + SrcLen div 4 + 4096;
+  E := nil;
+  Key := '';
+  if Cache <> nil then
+  begin
+    Key := string.Join(':', Params);
+    E := TTorEngine(TTorEncCache(Cache).Take(Key));
+  end;
+  if E = nil then
+    E := CreateEngine(Params, True, Cap)
+  else
+  begin
+    E.Reuse(Cap);
+    // Lo que quedó del bloque anterior después de este vuelve a cero (como un buffer nuevo)
+    if E.LastLen > SrcLen then FillChar((E.Buf + SrcLen)^, E.LastLen - SrcLen, 0);
+  end;
+  Ok := False;
   try
     if SrcLen > SizeInt(E.M.Buffer) then
       raise ETorEncoder.CreateFmt('tor: block of %d bytes larger than the buffer (%d)', [SrcLen, E.M.Buffer]);
     if SrcLen > 0 then Move(Src^, E.Buf^, SrcLen);
+    E.LastLen := SrcLen;
     E.ReadGot := SrcLen;
     E.Resume;
     if E.State <> esDone then raise ETorEncoder.Create('tor: estado interno inesperado');
     Result := E.C.O <= DstCap;
     if Result then Dst := Copy(E.C.Out, 0, E.C.O);
+    Ok := True;
   finally
-    E.Free;
+    if Ok and (Cache <> nil) then TTorEncCache(Cache).Put(Key, E)
+    else E.Free;
+  end;
+end;
+
+{ TTorEncCache }
+
+constructor TTorEncCache.Create;
+begin
+  inherited Create;
+  InitCriticalSection(FLock);
+end;
+
+destructor TTorEncCache.Destroy;
+var
+  i: Integer;
+begin
+  for i := 0 to FCount - 1 do FItems[i].Free;
+  DoneCriticalSection(FLock);
+  inherited Destroy;
+end;
+
+function TTorEncCache.Take(const Key: string): TObject;
+var
+  i: Integer;
+begin
+  Result := nil;
+  EnterCriticalSection(FLock);
+  try
+    for i := FCount - 1 downto 0 do
+      if FKeys[i] = Key then
+      begin
+        Result := FItems[i];
+        Dec(FCount);
+        FItems[i] := FItems[FCount];
+        FKeys[i] := FKeys[FCount];
+        FItems[FCount] := nil;
+        FKeys[FCount] := '';
+        Break;
+      end;
+  finally
+    LeaveCriticalSection(FLock);
+  end;
+end;
+
+procedure TTorEncCache.Put(const Key: string; E: TObject);
+begin
+  EnterCriticalSection(FLock);
+  try
+    if FCount = Length(FItems) then
+    begin
+      SetLength(FItems, FCount + 4);
+      SetLength(FKeys, FCount + 4);
+    end;
+    FItems[FCount] := E;
+    FKeys[FCount] := Key;
+    Inc(FCount);
+  finally
+    LeaveCriticalSection(FLock);
   end;
 end;
 
