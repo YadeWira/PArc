@@ -195,6 +195,7 @@ type
       los altos (tagMask). normLimit: posición en que se normaliza (0 = al dar la vuelta). }
     htMode: Boolean;
     matchMask, tagMask, normLimit: LongWord;
+    pfPos, pfHv1, pfHv2: LongWord;  // bt4: hash de pos+1 y pos+2 calculados en pfPos - 1
     Read: TMfRead;
     mt: Pointer;                // PMtState con el match finder multihilo (si no, nil)
   end;
@@ -1098,6 +1099,65 @@ begin
   prefetch(p^.hash[kFix4HashSize + hv]);
 end;
 
+{ bt4, en dos etapas: la cabeza hash de la posición +2, y el primer nodo del árbol (par en
+  son y datos) de la posición +1, cuya cabeza ya se trajo en la posición anterior. Solo
+  prefetch: no cambia la salida. Necesita lenLimit >= 6. }
+function H4Hash(p: PMatchFinder; cur: PByte): LongWord; inline;
+var
+  temp: LongWord;
+begin
+  temp := p^.crc[cur[0]] xor cur[1];
+  temp := temp xor (LongWord(cur[2]) shl 8);
+  Result := (temp xor LongWord(p^.crc[cur[3]] shl kLzHash_CrcShift_1)) and p^.hashMask;
+end;
+
+{ Prefetch del nodo m del árbol (par en son y datos) visto desde la posición pos + ofs. }
+procedure BtPrefetchNode(p: PMatchFinder; cur: PByte; m, ofs: LongWord); inline;
+var
+  delta, cbp: LongWord;
+begin
+  delta := LongWord(p^.pos + ofs - m);
+  if delta < p^.cyclicBufferSize then
+  begin
+    cbp := p^.cyclicBufferPos + ofs;
+    if cbp >= delta then cbp := cbp - delta else cbp := cbp - delta + p^.cyclicBufferSize;
+    prefetch(p^.son[PtrUInt(cbp) * 2]);
+    prefetch((cur + ofs - delta)^);
+  end;
+end;
+
+{ bt4: prefetch en tres etapas, para que el recorrido del árbol no espere a la memoria:
+  posición +3 la cabeza hash; +2 el primer nodo (su cabeza se trajo en la llamada anterior);
+  +1 los dos hijos del primer nodo (traído hace una llamada). Los hash de +1 y +2 se guardan
+  de la llamada anterior (pfPos). Solo prefetch: no cambia la salida. lenLimit >= 7. }
+procedure Bt4PrefetchNext(p: PMatchFinder; cur: PByte); inline;
+var
+  h1, h2, h3, cbp, delta: LongWord;
+  pair: PLongWord;
+begin
+  if p^.pfPos = p^.pos then
+  begin
+    h1 := p^.pfHv1; h2 := p^.pfHv2;
+  end
+  else
+  begin
+    h1 := H4Hash(p, cur + 1); h2 := H4Hash(p, cur + 2);
+  end;
+  h3 := H4Hash(p, cur + 3);
+  p^.pfPos := LongWord(p^.pos + 1); p^.pfHv1 := h2; p^.pfHv2 := h3;
+  prefetch(p^.hash[kFix4HashSize + h3]);
+  BtPrefetchNode(p, cur, p^.hash[kFix4HashSize + h2], 2);
+  delta := LongWord(p^.pos + 1 - p^.hash[kFix4HashSize + h1]);
+  if delta < p^.cyclicBufferSize then
+  begin
+    cbp := p^.cyclicBufferPos + 1;
+    if cbp >= delta then cbp := cbp - delta else cbp := cbp - delta + p^.cyclicBufferSize;
+    pair := p^.son + PtrUInt(cbp) * 2;
+    BtPrefetchNode(p, cur, pair[0], 1);
+    BtPrefetchNode(p, cur, pair[1], 1);
+  end;
+end;
+
 { Bt4_MatchFinder_GetMatches y Hc4_MatchFinder_GetMatches comparten la cabecera. }
 function Bt4GetMatches(p: PMatchFinder; distances: PLongWord): PLongWord;
 var
@@ -1121,7 +1181,7 @@ begin
   hash[h2] := pos;
   hash[kFix3HashSize + h3] := pos;
   hash[kFix4HashSize + hv] := pos;
-  if lenLimit >= 5 then H4PrefetchNext(p, cur);
+  if lenLimit >= 7 then Bt4PrefetchNext(p, cur) else if lenLimit >= 5 then H4PrefetchNext(p, cur);
   mmm := p^.cyclicBufferSize;
   if pos < mmm then mmm := pos;
   maxLen := 3;
@@ -1247,6 +1307,35 @@ begin
   prefetch((p^.hash + kFix4HashSize + PtrUInt(hv) * p^.cutValue)^);
 end;
 
+{ HT4 en dos etapas (como Bt4PrefetchNext): la fila de la posición +2, y para la +1 (cuya
+  fila se trajo en la llamada anterior) los datos de los candidatos de hash2/hash3 y de las
+  entradas de la fila con la misma etiqueta: son las lecturas de la ventana que va a hacer
+  Ht4GetMatches. Solo prefetch: no cambia la salida. Necesita lenLimit >= 6. }
+procedure Ht4PrefetchNext2(p: PMatchFinder; cur: PByte);
+var
+  temp, h1, h2, d, tag, mmm, pos1, e: LongWord;
+  row, rowEnd: PLongWord;
+  c1: PByte;
+begin
+  if p^.pfPos = p^.pos then
+    h1 := p^.pfHv1
+  else
+    h1 := H4Hash(p, cur + 1);
+  h2 := H4Hash(p, cur + 2);
+  p^.pfPos := LongWord(p^.pos + 1); p^.pfHv1 := h2;
+  prefetch((p^.hash + kFix4HashSize + PtrUInt(h2) * p^.cutValue)^);
+  c1 := cur + 1;
+  pos1 := LongWord(p^.pos + 1);
+  mmm := p^.cyclicBufferSize;
+  if pos1 < mmm then mmm := pos1;
+  temp := p^.crc[c1[0]] xor c1[1];
+  d := LongWord(pos1 - p^.hash[temp and (kHash2Size - 1)]);
+  if d < mmm then prefetch((c1 - d)^);
+  temp := temp xor (LongWord(c1[2]) shl 8);
+  d := LongWord(pos1 - p^.hash[kFix3HashSize + (temp and (kHash3Size - 1))]);
+  if d < mmm then prefetch((c1 - d)^);
+end;
+
 function Ht4GetMatches(p: PMatchFinder; distances: PLongWord): PLongWord;
 var
   hv, h2, h3, d2, d3, pos, mmm, maxLen, lenLimit, temp, tag, prevMatch, curMatch, delta, len: LongWord;
@@ -1268,7 +1357,7 @@ begin
   d3 := LongWord(pos - hash[kFix3HashSize + h3]);
   hash[h2] := pos;
   hash[kFix3HashSize + h3] := pos;
-  if lenLimit >= 5 then Ht4PrefetchNext(p, cur);
+  if lenLimit >= 6 then Ht4PrefetchNext2(p, cur) else if lenLimit >= 5 then Ht4PrefetchNext(p, cur);
   mmm := p^.cyclicBufferSize;
   if pos < mmm then mmm := pos;
   maxLen := 1;
@@ -1442,7 +1531,7 @@ begin
       hash[h2] := p^.pos;
       hash[kFix3HashSize + h3] := p^.pos;
       hash[kFix4HashSize + hv] := p^.pos;
-      if p^.lenLimit >= 5 then H4PrefetchNext(p, cur);
+      if p^.lenLimit >= 7 then Bt4PrefetchNext(p, cur) else if p^.lenLimit >= 5 then H4PrefetchNext(p, cur);
       BtSkipMatchesSpec(p^.lenLimit, curMatch, p^.pos, p^.buffer, p^.son,
         p^.cyclicBufferPos, p^.cyclicBufferSize, p^.cutValue);
       MfMovePos(p);
@@ -1753,6 +1842,18 @@ end;
 
 { ---------- hilo BT ---------- }
 
+{ Prefetch del nodo a distancia delta de la posición actual + ofs (par en son y datos). }
+procedure MtPrefetchNode(mt: PMtState; cur: PByte; cyc, delta, ofs: LongWord); inline;
+begin
+  if delta < mt^.cyclicBufferSize then
+  begin
+    cyc := cyc + ofs;
+    if cyc >= delta then cyc := cyc - delta else cyc := cyc - delta + mt^.cyclicBufferSize;
+    prefetch(mt^.son[PtrUInt(cyc) * 2]);
+    prefetch((cur + ofs - delta)^);
+  end;
+end;
+
 { BtGetMatches (versión por posición, sin GetMatchesSpecN_2). Con hashSync.cs tomada. }
 procedure MtBtGetMatches(mt: PMtState; d: PLongWord);
 var
@@ -1813,6 +1914,21 @@ begin
     processed := 0;
     while (curPos < limit) and (size <> 0) do
     begin
+      // prefetch como Bt4PrefetchNext: primer nodo de +2 e hijos del de +1 (las distancias
+      // ya están en hashBuf); no cambia la salida
+      if mt^.hashBufPos + 2 < mt^.hashBufPosLimit then
+      begin
+        MtPrefetchNode(mt, cur, cyc, mt^.hashBuf[mt^.hashBufPos + 2], 2);
+        delta := mt^.hashBuf[mt^.hashBufPos + 1];
+        if (delta < cycSize) and (delta < pos + 1) then
+        begin
+          k := cyc + 1;
+          if k >= delta then k := k - delta else k := k - delta + cycSize;
+          h := mt^.son + PtrUInt(k) * 2;
+          MtPrefetchNode(mt, cur, cyc, LongWord(pos + 1 - h[0]), 1);
+          MtPrefetchNode(mt, cur, cyc, LongWord(pos + 1 - h[1]), 1);
+        end;
+      end;
       delta := mt^.hashBuf[mt^.hashBufPos];
       Inc(mt^.hashBufPos);
       // distancia fuera de la ventana (o entrada vacía / normalizada): sin candidato, como
@@ -2533,13 +2649,13 @@ function TLzmaEnc.LitPrice(probs: PProb; sym: LongWord): LongWord;
 var
   bit: LongWord;
 begin
+  // sin ramas: el bit invierte la probabilidad con un xor por máscara
   Result := 0;
   sym := sym or $100;
   repeat
     bit := sym and 1;
     sym := sym shr 1;
-    if bit = 0 then Inc(Result, ProbPrices[probs[sym] shr 4])
-    else Inc(Result, ProbPrices[(probs[sym] xor (kBitModelTotal - 1)) shr 4]);
+    Inc(Result, ProbPrices[(probs[sym] xor ((0 - bit) and (kBitModelTotal - 1))) shr kNumMoveReducingBits]);
   until sym < 2;
 end;
 
@@ -2554,8 +2670,7 @@ begin
   repeat
     matchByte := matchByte shl 1;
     prob := probs[offs + (matchByte and offs) + (sym shr 8)];
-    if ((sym shr 7) and 1) = 0 then Inc(Result, ProbPrices[prob shr 4])
-    else Inc(Result, ProbPrices[(prob xor (kBitModelTotal - 1)) shr 4]);
+    Inc(Result, ProbPrices[(prob xor ((0 - ((sym shr 7) and 1)) and (kBitModelTotal - 1))) shr kNumMoveReducingBits]);
     sym := sym shl 1;
     offs := offs and not (matchByte xor sym);
   until sym >= $10000;
@@ -2774,6 +2889,47 @@ begin
 end;
 
 { GetOptimum: parseo óptimo }
+{ Bucles por largo de GetOptimum como rutinas hoja (pocas variables, todas en registros; en
+  el cuerpo enorme de GetOptimum FPC las deja en la pila). o = @opt[cur], lp = precios por
+  largo (índice largo - 2). Misma salida que los bucles del SDK. }
+
+{ REP: largos len..2 con precio pr + lp[largo - 2] }
+procedure OptRepLens(o: POptimal; lp: PLongWord; pr, len, repIndex: LongWord);
+var
+  pr2: LongWord;
+begin
+  repeat
+    pr2 := pr + lp[len - LZMA_MATCH_LEN_MIN];
+    if pr2 < o[len].price then
+    begin
+      o[len].price := pr2;
+      o[len].len := len;
+      o[len].dist := repIndex;
+      o[len].extra := 0;
+    end;
+    Dec(len);
+  until len < 2;
+end;
+
+{ MATCH: largos len..endLen - 1 (todos con lenToPosState = 3) con precio base + lp[largo - 2] }
+procedure OptMatchLens(o: POptimal; lp: PLongWord; base, len, endLen, dist: LongWord);
+var
+  pr: LongWord;
+begin
+  while len < endLen do
+  begin
+    pr := base + lp[len - LZMA_MATCH_LEN_MIN];
+    if pr < o[len].price then
+    begin
+      o[len].price := pr;
+      o[len].len := len;
+      o[len].dist := dist;
+      o[len].extra := 0;
+    end;
+    Inc(len);
+  end;
+end;
+
 function TLzmaEnc.GetOptimum(position: LongWord): LongWord;
 var
   last, cur: LongWord;
@@ -3147,20 +3303,8 @@ begin
       len := MatchLen(data2, data, len, numAvail);
       offset := cur + len;
       if last < offset then last := offset;
-      len2 := len;
       pr := repMatchPrice + PricePureRep(repIndex, state, posState);
-      repeat
-        pr2 := pr + repLenEnc.prices[posState][len2 - LZMA_MATCH_LEN_MIN];
-        o := @opt[cur + len2];
-        if pr2 < o^.price then
-        begin
-          o^.price := pr2;
-          o^.len := len2;
-          o^.dist := repIndex;
-          o^.extra := 0;
-        end;
-        Dec(len2);
-      until len2 < 2;
+      OptRepLens(@opt[cur], @repLenEnc.prices[posState][0], pr, len, repIndex);
 
       if repIndex = 0 then startLen := len + 1;
 
@@ -3218,18 +3362,24 @@ begin
       lenPr := @lenEnc.prices[posState][0];
       while True do
       begin
-        { Precios de la distancia para los 4 lenToPosState (el SDK los suma en cada largo):
-          después el bucle por largo es una suma y una comparación. Misma salida. }
+        { Precio de la distancia para cada lenToPosState que toca [len, endLen] (el SDK lo
+          suma en cada largo): después el bucle por largo es una suma y una comparación. }
+        endLen := matches[offs];
+        lenNorm := len - 2;
+        if lenNorm > kNumLenToPosStates - 1 then lenNorm := kNumLenToPosStates - 1;
+        j := endLen - 2;
+        if j > kNumLenToPosStates - 1 then j := kNumLenToPosStates - 1;
+        i := lenNorm;
         if dist < kNumFullDistances then
-          for lenNorm := 0 to kNumLenToPosStates - 1 do
+          for lenNorm := i to j do
             distPr[lenNorm] := normalMatchPrice + distancesPrices[lenNorm][dist and (kNumFullDistances - 1)]
         else
         begin
           posSlot := CalcPosSlot2(dist);
-          for lenNorm := 0 to kNumLenToPosStates - 1 do
-            distPr[lenNorm] := normalMatchPrice + posSlotPrices[lenNorm][posSlot] + alignPrices[dist and kAlignMask];
+          temp := normalMatchPrice + alignPrices[dist and kAlignMask];
+          for lenNorm := i to j do
+            distPr[lenNorm] := temp + posSlotPrices[lenNorm][posSlot];
         end;
-        endLen := matches[offs];
         o := @opt[cur];
         // largos 2..4: lenToPosState = len - 2
         while (len < kNumLenToPosStates + 1) and (len < endLen) do
@@ -3245,18 +3395,10 @@ begin
           Inc(len);
         end;
         // el resto hasta endLen (sin incluirlo): lenToPosState = 3
-        pr2 := distPr[kNumLenToPosStates - 1];
-        while len < endLen do
+        if len < endLen then
         begin
-          pr := pr2 + lenPr[len - LZMA_MATCH_LEN_MIN];
-          if pr < o[len].price then
-          begin
-            o[len].price := pr;
-            o[len].len := len;
-            o[len].dist := dist + LZMA_NUM_REPS;
-            o[len].extra := 0;
-          end;
-          Inc(len);
+          OptMatchLens(o, lenPr, distPr[kNumLenToPosStates - 1], len, endLen, dist + LZMA_NUM_REPS);
+          len := endLen;
         end;
         // len = endLen
         lenNorm := len - 2;
