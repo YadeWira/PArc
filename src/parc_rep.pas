@@ -43,6 +43,11 @@ implementation
 uses
   parc_bytes;
 
+const
+  { Desde esta distancia la copia de un match va por tramos con Move; por debajo, los tramos
+    serían tan cortos que conviene el byte a byte. }
+  REP_MOVE_MINDIST = 32;
+
 function TRepStage.Tab(Base, i: SizeInt): LongInt;
 var
   p: SizeInt;
@@ -110,7 +115,7 @@ end;
 
 function TRepStage.Read(Buf: PByte; Count: SizeInt): SizeInt;
 var
-  n, Src, k: SizeInt;
+  n, Src, k, c: SizeInt;
 begin
   Result := 0;
   while Result < Count do
@@ -154,12 +159,31 @@ begin
     begin
       Src := FWPos - FMatchDist;
       if Src < 0 then Inc(Src, FWinSize);
-      // Byte a byte en orden creciente: si la distancia es menor que el largo, se replican datos
-      for k := 0 to n - 1 do
+      if FMatchDist < REP_MOVE_MINDIST then
+        // Distancia corta: byte a byte en orden creciente (si la distancia es menor que el
+        // largo, se replican datos)
+        for k := 0 to n - 1 do
+        begin
+          FWin[FWPos + k] := FWin[Src];
+          Inc(Src);
+          if Src = FWinSize then Src := 0;
+        end
+      else
       begin
-        FWin[FWPos + k] := FWin[Src];
-        Inc(Src);
-        if Src = FWinSize then Src := 0;
+        // Por tramos con Move: cada tramo mide a lo sumo FMatchDist bytes (no lee lo que escribe
+        // el mismo tramo) y no cruza el fin de la ventana. Si el origen dio la vuelta, está por
+        // delante del destino y Move (memmove) lee los datos viejos, como el byte a byte.
+        k := 0;
+        while k < n do
+        begin
+          c := n - k;
+          if c > FMatchDist then c := FMatchDist;
+          if c > FWinSize - Src then c := FWinSize - Src;
+          Move(FWin[Src], FWin[FWPos + k], c);
+          Inc(k, c);
+          Inc(Src, c);
+          if Src = FWinSize then Src := 0;
+        end;
       end;
     end;
     Move(FWin[FWPos], Buf[Result], n);
