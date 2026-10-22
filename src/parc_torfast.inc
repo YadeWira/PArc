@@ -1701,3 +1701,101 @@ end;
 {$undef TF_LAZY}
 
 {$macro off}
+
+{ ---- Parser óptimo, combinaciones 9..11 (tor:11..tor:15): parc_toropt.inc ---- }
+
+{ El recorrido de una fila de CachingMatchFinder (next_pair del C): desde table hasta tabend
+  corre cada par un lugar (x1/v1 son el par que se arrastra) y para en el primero cuya clave
+  coincide con k en los bits de mask. Devuelve la posición siguiente a ese par (x1/v1 = el par)
+  o nil si llegó a tabend. Aparte y sin llamadas para que FPC deje todo en registros. }
+function CScan(table, tabend: PLongWord; var ax1, av1: LongWord; k, mask: LongWord): PLongWord;
+var
+  x0, x1, v0, v1: LongWord;
+begin
+  x1 := ax1; v1 := av1;
+  Result := nil;
+  while table <> tabend do
+  begin
+    x0 := x1; x1 := table[0]; table[0] := x0;
+    v0 := v1; v1 := table[1]; table[1] := v0;
+    Inc(table, 2);
+    if ((v1 xor k) and mask) = 0 then
+    begin
+      Result := table;
+      Break;
+    end;
+  end;
+  ax1 := x1; av1 := v1;
+end;
+
+procedure TTorEngine.OptSetup(out F: TOptMF);
+var
+  CM: TCachingMF;
+  H3: THash3MF;
+  AX: TBaseMF;
+begin
+  FillChar(F, SizeOf(F), 0);
+  CM := TCachingMF(TCombineMF(MF).MF1);
+  H3 := THash3MF(TCombineMF(MF).MF2);
+  AX := TBaseMF(H3.MF);
+  F.Bs := Buf;
+  F.HT := CM.HT;
+  F.HShift := CM.HashShift;
+  F.Row2 := CM.Row2;
+  F.XHT := AX.HT;
+  F.XShift := AX.HashShift;
+  F.XMask := AX.HashMask;
+  F.XRow := AX.RowWidth;
+  F.HT3 := H3.HT3;
+  F.HT2 := H3.HT2;
+  F.N6 := Combo <> 9;
+end;
+
+{ Pide a la caché lo que va a leer la búsqueda en p: la fila de CachingMatchFinder<N> (5 o 6),
+  la del auxiliar y las de Hash3 }
+procedure TTorEngine.OptPrefetch(const F: TOptMF; pa: PByte);
+var
+  t, e: PByte;
+begin
+  if F.N6 then
+  begin
+    t := PByte(F.HT + SizeInt((LongWord(Mul32(V32(pa), K1) + Mul32(V32(pa + 2), K2)) shr F.HShift)) * F.Row2);
+    prefetch(F.HT3[Mul32(V24(pa), K3) shr (32 - 16)]);
+  end
+  else
+  begin
+    t := PByte(F.HT + SizeInt((LongWord(Mul32(V32(pa), K1) + Mul32(V32(pa + 1), K2)) shr F.HShift)) * F.Row2);
+    prefetch(F.HT3[Mul32(V24(pa), K3) shr (32 - 14)]);
+  end;
+  e := t + F.Row2 * SizeOf(LongWord);
+  while t < e do
+  begin
+    prefetch(t^);
+    Inc(t, 64);
+  end;
+  prefetch(F.XHT[(Mul32(V32(pa), K1) shr F.XShift) and F.XMask]);
+end;
+
+{$macro on}
+{ combo 9: CachingMatchFinder<5> + Hash3<ExactMatchFinder<4>,14,10>, aritmético }
+{$define OP_NAME := Opt5A}
+{$define OP_FINDALL := OptFind5}
+{$define OP_N := 5}
+{$define OP_L3 := 14}
+{$define OP_L2 := 10}
+{$define OP_ARITH}
+{$I parc_toropt.inc}
+{ combos 10/11: CachingMatchFinder<6> + Hash3<MatchFinderN<4>,16,12>, aritmético y Huffman }
+{$define OP_NAME := Opt6A}
+{$define OP_FINDALL := OptFind6}
+{$define OP_N := 6}
+{$define OP_L3 := 16}
+{$define OP_L2 := 12}
+{$define OP_MFN}
+{$I parc_toropt.inc}
+{$undef OP_ARITH}
+{$define OP_NAME := Opt6H}
+{$define OP_FINDALL := OptFind6H}
+{$I parc_toropt.inc}
+{$undef OP_MFN}
+{$macro off}

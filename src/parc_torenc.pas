@@ -106,6 +106,7 @@ const
   OPT_MIN_LEN = 2;                  // OPTIMAL_PARSER_MIN_MATCH_LEN
   MAX_PRICE = High(LongWord);
   PAD_AFTER = 64 * kb;              // ceros extra tras buf+buffer+LOOKAHEAD (ver TBTMF)
+  OPT_PFD = 2;                      // anticipación del prefetch del parser óptimo (parc_toropt)
 
   // enum de Tornado.cpp
   GREEDY = 1; LAZY = 2; OPTIMAL = 4;
@@ -260,7 +261,7 @@ begin
 end;
 
 { accept_optimal_match }
-function AcceptOptimalMatch(len: LongWord; p, q, bufend: PByte): Boolean;
+function AcceptOptimalMatch(len: LongWord; p, q, bufend: PByte): Boolean; inline;
 begin
   Result := (p <= bufend) and (V32(p) = V32(q));
   if not Result then Exit;
@@ -306,6 +307,9 @@ type
     procedure ClearHash(buf: PByte); virtual; abstract;
     procedure ShiftHash(buf: PByte; shift: LongWord); virtual; abstract;
     procedure InvalidateMatch; virtual;
+    { prefetch_hash: pide a la caché lo que va a leer la búsqueda en p (el parser óptimo lo
+      llama con p+1 antes de evaluar p) }
+    procedure PrefetchHash(p: PByte); virtual;
   end;
 
   { BaseMatchFinder }
@@ -361,6 +365,7 @@ type
     constructor Create(buf: PByte; AHashSize: LongWord; row: Integer; AN: LongWord);
     destructor Destroy; override;
     function Key(p: PByte): LongWord; inline;
+    procedure PrefetchHash(p: PByte); override;
     function FindAllMatches(p, bufend: PByte; m: PLongWord): PLongWord; override;
     function FindMatchLen(p, bufend: PByte; prevlen: LongWord): LongWord; override;
     procedure UpdateHash1(p: PByte); override;
@@ -443,6 +448,7 @@ type
     MF1, MF2: TMF;
     constructor Create(A1, A2: TMF);
     destructor Destroy; override;
+    procedure PrefetchHash(p: PByte); override;
     function FindAllMatches(p, bufend: PByte; m: PLongWord): PLongWord; override;
     function FindMatchLen(p, bufend: PByte; prevlen: LongWord): LongWord; override;
     procedure UpdateHash1(p: PByte); override;
@@ -490,6 +496,10 @@ begin
 end;
 
 procedure TMF.InvalidateMatch;
+begin
+end;
+
+procedure TMF.PrefetchHash(p: PByte);
 begin
 end;
 
@@ -823,6 +833,20 @@ destructor TCachingMF.Destroy;
 begin
   FreeMem(HTMem);
   inherited Destroy;
+end;
+
+{ CachingMatchFinder::prefetch_hash: la fila de p, de a una línea de caché }
+procedure TCachingMF.PrefetchHash(p: PByte);
+var
+  t, e: PByte;
+begin
+  t := PByte(HT + HashX(N, p, HashShift, $FFFFFFFF) * LongWord(Row2));
+  e := t + Row2 * SizeOf(LongWord);
+  while t < e do
+  begin
+    prefetch(t^);
+    Inc(t, 64);
+  end;
 end;
 
 function TCachingMF.Key(p: PByte): LongWord;
@@ -1606,6 +1630,11 @@ begin
 end;
 
 { TCombineMF }
+
+procedure TCombineMF.PrefetchHash(p: PByte);
+begin
+  MF1.PrefetchHash(p);
+end;
 
 constructor TCombineMF.Create(A1, A2: TMF);
 begin
@@ -2547,6 +2576,20 @@ type
   TEngState = (esFirst, esRead, esDone);
 
   { Parámetros del match finder para los caminos rápidos (parc_torfast.inc) }
+  { Match finder de las combinaciones 9..11 del parser óptimo (parc_toropt.inc):
+    CachingMatchFinder<N> (HT, HShift, Row2) y Hash3 con su auxiliar de 4 bytes (XHT...) }
+  TOptMF = record
+    Bs: PByte;
+    HT: PLongWord;
+    HShift: LongWord;
+    Row2: SizeInt;
+    XHT: PLongWord;
+    XShift, XMask: LongWord;
+    XRow: SizeInt;
+    HT3, HT2: PLongWord;
+    N6: Boolean;          // CachingMatchFinder<6> (si no, <5>)
+  end;
+
   TFastMF = record
     HT: PLongWord;          // tabla del match finder principal
     Row2, RowUp: SizeInt;   // CachingMatchFinder: largo de fila en LongWords y hash_row_width_up
@@ -2599,6 +2642,11 @@ type
     procedure FastSetup(out F: TFastMF);
     function FastSpecial(pp: PByte; var SkipRead: Boolean): PByte;
     procedure RunFast3(Resuming: Boolean);
+    procedure OptSetup(out F: TOptMF);
+    procedure OptPrefetch(const F: TOptMF; pa: PByte);
+    function Opt5A(const F: TOptMF; pp: PByte): LongInt;
+    function Opt6A(const F: TOptMF; pp: PByte): LongInt;
+    function Opt6H(const F: TOptMF; pp: PByte): LongInt;
     procedure RunFast1(Resuming: Boolean);
     procedure RunFast2(Resuming: Boolean);
     procedure RunFast4(Resuming: Boolean);
@@ -3012,6 +3060,7 @@ end;
 
 procedure TTorEngine.EncodeBlock(EndP: PByte);
 var
+  Co: TTorCoder;
   sp, i: SizeInt;
   pp: PByte;
   len: LongInt;
@@ -3027,12 +3076,23 @@ begin
     Dec(i, X[i].len);
   end;
   pp := BaseP;
+  Co := C;
   while sp > 0 do
   begin
     Dec(sp); len := LongInt(Stack[sp]);
     Dec(sp); dist := Stack[sp];
-    if C.O + 4096 > Length(C.Out) then C.Grow(4096);
-    C.Encode(len, pp, dist, OPT_MIN_LEN);
+    if Co.O + 4096 > Length(Co.Out) then Co.Grow(4096);
+    // Encode(len, pp, dist, OPT_MIN_LEN) con el codificador fijo (mismo stream)
+    case Co.Kind of
+      4:
+        if len < OPT_MIN_LEN then Co.LitA(pp)
+        else Co.EncodeMatchA(len - OPT_MIN_LEN, LongInt(dist) - 1);
+      3:
+        if len < OPT_MIN_LEN then Co.LitH(pp)
+        else Co.EncodeMatchH(len - OPT_MIN_LEN, LongInt(dist) - 1);
+    else
+      Co.Encode(len, pp, dist, OPT_MIN_LEN);
+    end;
     Inc(pp, len);
   end;
 end;
@@ -3131,7 +3191,14 @@ var
   len: LongInt;
   me: PLongWord;
   SkipRead: Boolean;
+  F: TOptMF;
+  Fast: Integer;          // 0 = genérico; si no, el paso especializado (parc_toropt.inc)
 begin
+  Fast := 0;
+  if (Combo = 9) and (C.Kind = 4) then Fast := 1
+  else if (Combo in [10, 11]) and (C.Kind = 4) then Fast := 2
+  else if (Combo = 11) and (C.Kind = 3) then Fast := 3;
+  if Fast <> 0 then OptSetup(F);
   SkipRead := False;
   if Resuming then
   begin
@@ -3157,11 +3224,21 @@ begin
     end;
     if P >= Silence then
     begin
-      len := EvalLitRep(P);
-      if len <= M.FastBytes then
-      begin
-        me := MF.FindAllMatches(P, MatchEnd, @Matches[0]);
-        len := EvalMatches(P, len, @Matches[0], me);
+      if Fast = 0 then MF.PrefetchHash(P + 1)   // como el C: mejora 5-20 % (OptimalParsing.cpp)
+      else OptPrefetch(F, P + OPT_PFD);
+      case Fast of
+        1: len := Opt5A(F, P);
+        2: len := Opt6A(F, P);
+        3: len := Opt6H(F, P);
+      else
+        begin
+          len := EvalLitRep(P);
+          if len <= M.FastBytes then
+          begin
+            me := MF.FindAllMatches(P, MatchEnd, @Matches[0]);
+            len := EvalMatches(P, len, @Matches[0], me);
+          end;
+        end;
       end;
       if len > M.FastBytes then Silence := P + len - 1;
     end;
