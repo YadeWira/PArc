@@ -85,6 +85,15 @@ What makes this possible (all inside `.parc`; the codecs are unchanged):
 - **LZMA `fast`**: FreeArc's additions to `GetOptimumFast` were ported (main-match pruning by
   length/distance and relaxed rep-match acceptance). `-m3` used to lose 0.8% on binaries; now
   it wins.
+- **LZMA `ht4`**: FreeArc's hash-table match finder (rows of `mc` positions with a hash tag in
+  the high bits, no `son` array) is ported; 0.0.2 mapped `ht4` to `hc4`. `fast`/`normal` (the
+  `ht4` profiles) compress the same as FreeArc and faster. The next position's hash row/head is
+  prefetched in `ht4` and `bt4`. Streams are standard LZMA: 0.0.2 decodes them.
+- **LZMA decoder fast path**: whole symbols are decoded without input checks while 20 or more
+  input bytes remain (LzmaDec style); the literal and match symbols are x86-64 assembler with a
+  Pascal fallback (i386, or `-dPARC_NOASM`). The stream tail and truncated/corrupt input take
+  the old path, and `tests/test_lzma_diff` checks that both decoders give identical output and
+  errors on valid, truncated and corrupted streams.
 - **Automatic solid blocks**: without `-s`, 64 MB for `-m1`…`-m3` and 32 MB for `-m4`…`-m9`/`-mx`. On Silesia this improved compression time and ratio at every level; small archives still use one block. `-mxx` keeps a single block for ratio.
 - **GRZip adaptive LZP**: BWT blocks of 4 MB or more use `l64/h22` (fewer, longer matches); small blocks keep the fast LZP parameters. The choice is stored in each block's mode, so old decoders remain compatible. This makes `-m4` 1.2–1.4% smaller on text and many small files.
 - **Stronger and faster presets** than FreeArc's at the same level:
@@ -132,6 +141,9 @@ bash tests/rs_recovery.sh tests/parc_crypt.sh tests/cm.sh tests/grzip.sh tests/b
 bash tests/dispack.sh tests/srep.sh tests/bcj.sh
 bash tests/run_tornado_tests.sh tests/crypto_vectors.sh
 bash tests/run_lzma_tests.py build/tests/test_lzma
+# decodificador LZMA actual vs copia congelada de 0.0.2 (streams válidos, truncados y dañados)
+fpc -O2 -Fusrc -Futests/lzma_ref -FUbuild/tests/units -FEbuild/tests tests/test_lzma_diff.lpr
+build/tests/test_lzma_diff 2000
 sudo bash tests/fixes.sh          # patterns, links, full disk, FAT32
 python3 tests/fuzz.py build/linux64/parc 100 build/linux64/parc
 ```
