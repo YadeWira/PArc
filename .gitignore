@@ -3,3 +3,4 @@ __pycache__/
 
 # Large local test corpus (not part of the release)
 /TILIN.tar
+.claude/worktrees/
