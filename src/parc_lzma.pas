@@ -1602,7 +1602,7 @@ begin
         Result := 1;
         Break;
       end;
-      if (QWord(Rep0) >= total) or (SizeInt(Rep0) >= dicSz) then
+      if (QWord(Rep0) >= total) or (QWord(Rep0) >= QWord(dicSz)) then
       begin
         Result := 2;
         Break;
@@ -1768,7 +1768,7 @@ begin
         if FOverrun then Exit(lsInputEof);
         Exit(lsEndMark);
       end;
-      if (QWord(Rep0) >= TotalPos) or (SizeInt(Rep0) >= DictSize) then Exit(lsError);
+      if (QWord(Rep0) >= TotalPos) or (QWord(Rep0) >= QWord(DictSize)) then Exit(lsError);
     end;
     RemainLen := Len + kMatchMinLen;
     CopyMatch(Limit);
