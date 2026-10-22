@@ -67,6 +67,14 @@ function FaSolidBlocks(const Files: array of TFaFile; const GM: TGroupMethods;
   (key_func "gerpn": grupo, extensión, directorio, nombre; la r es una constante). }
 function FaSortFiles(const Files: array of TFaFile): TIntegerDynArray;
 function FaMergeCompare(const A, B: TFaFile): Integer;
+{ La misma comparación con las claves calculadas una vez por archivo. }
+type
+  TFaMergeKey = record
+    Group: Integer;
+    LcExt, Dir, Base: string;
+  end;
+function FaMergeKeyOf(const F: TFaFile): TFaMergeKey;
+function FaMergeCompareKeys(const A, B: TFaMergeKey): Integer;
 { ¿Ordena FreeArc con estos criterios y métodos? (no con -s- ni con storing o VeryFast) }
 function FaSortEnabled(const GM: TGroupMethods; const Crits: TFaCrits): Boolean;
 
@@ -81,7 +89,7 @@ function FaCompareNames(const A, B: string): Integer;
 implementation
 
 uses
-  Classes, Math, parc_os, parc_methods, parc_filetype, parc_mmdet, parc_torenc;
+  Classes, Math, parc_os, parc_methods, parc_filetype, parc_mmdet, parc_torenc, parc_strmap;
 
 const
   KB = 1024;
@@ -97,6 +105,10 @@ var
   GLines: TStringArray;        // arc.groups en minúsculas (las máscaras)
   GLineType: TStringArray;     // nombre de tipo de cada línea ($binary, $text, ...), más el $default del final
   GDefaultGroup: Integer;      // índice de la línea "$default"
+  // Las líneas "*.ext" con ext ASCII literal se comparan sin glob ni
+  // UTF8Decode; GLitOk[i] dice si la línea i tiene ese camino rápido y GLit su extensión
+  GLitOk: array of Boolean;
+  GLit: TStringArray;
 
 { ---------------------------------------------------------------------------------------- }
 { Nombres                                                                                 }
@@ -206,6 +218,25 @@ begin
     Result := GlobU(Line, LowerCase(Name));
 end;
 
+{ ¿Solo bytes ASCII? (con otros, UTF8Decode podría unir secuencias y el glob no es la igualdad
+  de bytes: ese caso va por el camino general) }
+function AsciiOnly(const S: string): Boolean; inline;
+var
+  i: Integer;
+begin
+  for i := 1 to Length(S) do
+    if Ord(S[i]) >= 128 then Exit(False);
+  Result := True;
+end;
+
+{ MatchLine de la línea i, con el camino rápido de las "*.ext" literales (mismo resultado:
+  un glob sin comodines sobre ASCII es la igualdad de bytes). }
+function MatchLineIdx(i: Integer; const Name, LcExt: string): Boolean; inline;
+begin
+  if GLitOk[i] and AsciiOnly(LcExt) then Result := LcExt = GLit[i]
+  else Result := MatchLine(GLines[i], Name, LcExt);
+end;
+
 function FaGroupIndex(const Name: string): Integer;
 var
   i: Integer;
@@ -213,7 +244,7 @@ var
 begin
   Ext := FaLCExtension(Name);
   for i := 0 to High(GLines) do
-    if MatchLine(GLines[i], Name, Ext) then Exit(i);
+    if MatchLineIdx(i, Name, Ext) then Exit(i);
   Result := GDefaultGroup;
 end;
 
@@ -246,8 +277,25 @@ begin
   Ext := FaLCExtension(Name);
   for t := 1 to MaxT do
     for i := 0 to High(GLines) do   // (el $default agregado al final no tiene máscara)
-      if (LineT[i] = t) and MatchLine(GLines[i], Name, Ext) then Exit(t);
+      if (LineT[i] = t) and MatchLineIdx(i, Name, Ext) then Exit(t);
   Result := 0;
+end;
+
+{ FindType con los tipos de línea ya calculados (una vez por lista, no por archivo) y una sola
+  pasada: el menor tipo >= 1 entre las líneas que coinciden es lo mismo que probar t = 1, 2... }
+function FindTypeFast(const Name: string; const LineT: TIntArray): Integer;
+var
+  i: Integer;
+  Ext: string;
+begin
+  Ext := FaLCExtension(Name);
+  Result := 0;
+  for i := 0 to High(GLines) do
+    if (LineT[i] >= 1) and ((Result = 0) or (LineT[i] < Result)) and MatchLineIdx(i, Name, Ext) then
+    begin
+      Result := LineT[i];
+      if Result = 1 then Exit;
+    end;
 end;
 
 { ---------------------------------------------------------------------------------------- }
@@ -256,6 +304,9 @@ end;
 
 var
   SortFiles: array of TFaFile;   // (para las comparaciones)
+  // Claves de cada archivo de SortFiles, calculadas una vez en vez de en
+  // cada comparación (extensión en minúsculas, directorio, nombre base)
+  KExt, KDir, KBase: TStringArray;
 
 { Orden estable de Idx por una comparación (merge sort: sortBy de Haskell es estable). }
 type
@@ -306,13 +357,13 @@ end;
 
 function CmpExt(a, b: Integer): Integer;
 begin
-  Result := CmpStr(FaLCExtension(SortFiles[a].Name), FaLCExtension(SortFiles[b].Name));
+  Result := CmpStr(KExt[a], KExt[b]);
 end;
 
 function CmpDirName(a, b: Integer): Integer;
 begin
-  Result := CmpStr(DirName(SortFiles[a].Name), DirName(SortFiles[b].Name));
-  if Result = 0 then Result := CmpStr(BaseName(SortFiles[a].Name), BaseName(SortFiles[b].Name));
+  Result := CmpStr(KDir[a], KDir[b]);
+  if Result = 0 then Result := CmpStr(KBase[a], KBase[b]);
 end;
 
 var
@@ -323,56 +374,75 @@ begin
   // ordering (num, size, basename, directory)
   Result := CompareValue(ReNum[a], ReNum[b]);
   if Result = 0 then Result := CompareValue(SortFiles[a].Size, SortFiles[b].Size);
-  if Result = 0 then Result := CmpStr(BaseName(SortFiles[a].Name), BaseName(SortFiles[b].Name));
-  if Result = 0 then Result := CmpStr(DirName(SortFiles[a].Name), DirName(SortFiles[b].Name));
+  if Result = 0 then Result := CmpStr(KBase[a], KBase[b]);
+  if Result = 0 then Result := CmpStr(KDir[a], KDir[b]);
 end;
 
 { reorder (ArhiveFileList.hs): cada archivo > 1 KB toma el número de uno ya visto con la misma
   extensión y tamaño (si > 16 KB), o con el mismo nombre y tamaño parecido (igual si <= 16 KB,
   entre la mitad y el doble si no); si no, el suyo. Las tablas devuelven lo más reciente. }
 procedure Reorder(var Idx: TIntArray);
-type
-  TEntry = record Key: string; Size: Int64; Num: Integer; end;
 var
-  H1, H2: array of TEntry;
-  i, k, Num: Integer;
+  // H1: (extensión, tamaño) -> el número más reciente (la búsqueda original iba del último
+  // hacia atrás y tomaba el primero igual: es el último guardado con esa clave).
+  // H2: por nombre base sin mayúsculas ASCII (FaCompareNames = 0): con tamaño <= 16 KB hace
+  // falta el mismo tamaño (mapa nombre+tamaño); si no, se recorre hacia atrás solo la lista
+  // de ese nombre. Mismo resultado que las búsquedas lineales, sin el costo cuadrático.
+  H1, H2Exact, H2Name: TStrIntMap;
+  H2Size: array of array of Int64;
+  H2Num: array of array of Integer;
+  i, k, g, n, Num: Integer;
   F: TFaFile;
-  Ext, Base: string;
+  Ext, Base, LBase: string;
   Found: Boolean;
-
-  function NearSize(S1, S2: Int64): Boolean;
-  begin
-    if S1 <= 16 * KB then Result := S1 = S2
-    else Result := (S1 >= S2 div 2) and (S1 <= S2 * 2);
-  end;
-
 begin
-  H1 := nil; H2 := nil;
+  H1.Init(Length(Idx)); H2Exact.Init(Length(Idx)); H2Name.Init(64);
+  H2Size := nil; H2Num := nil;
   for i := 0 to High(Idx) do
   begin
     F := SortFiles[Idx[i]];
     Num := i;
     if F.Size > 1024 then
     begin
-      Ext := FaLCExtension(F.Name);
-      Base := BaseName(F.Name);
+      Ext := KExt[Idx[i]];
+      Base := KBase[Idx[i]];
+      LBase := LowerCase(Base);
       Found := False;
       if F.Size > 16 * KB then
-        for k := High(H1) downto 0 do
-          if (H1[k].Key = Ext) and (H1[k].Size = F.Size) then
-          begin
-            Num := H1[k].Num; Found := True; Break;
-          end;
+      begin
+        k := H1.Get(Ext + #0 + IntToStr(F.Size));
+        if k >= 0 then begin Num := k; Found := True; end;
+      end;
       if not Found then
-        for k := High(H2) downto 0 do
-          if (FaCompareNames(H2[k].Key, Base) = 0) and NearSize(F.Size, H2[k].Size) then
-          begin
-            Num := H2[k].Num; Found := True; Break;
-          end;
-      SetLength(H1, Length(H1) + 1);
-      H1[High(H1)].Key := Ext; H1[High(H1)].Size := F.Size; H1[High(H1)].Num := Num;
-      SetLength(H2, Length(H2) + 1);
-      H2[High(H2)].Key := Base; H2[High(H2)].Size := F.Size; H2[High(H2)].Num := Num;
+      begin
+        if F.Size <= 16 * KB then
+        begin
+          k := H2Exact.Get(LBase + #0 + IntToStr(F.Size));
+          if k >= 0 then begin Num := k; Found := True; end;
+        end
+        else
+        begin
+          g := H2Name.Get(LBase);
+          if g >= 0 then
+            for k := High(H2Size[g]) downto 0 do
+              if (F.Size >= H2Size[g][k] div 2) and (F.Size <= H2Size[g][k] * 2) then
+              begin
+                Num := H2Num[g][k]; Found := True; Break;
+              end;
+        end;
+      end;
+      H1.Put(Ext + #0 + IntToStr(F.Size), Num);
+      H2Exact.Put(LBase + #0 + IntToStr(F.Size), Num);
+      g := H2Name.Get(LBase);
+      if g < 0 then
+      begin
+        g := Length(H2Size);
+        SetLength(H2Size, g + 1); SetLength(H2Num, g + 1);
+        H2Name.Put(LBase, g);
+      end;
+      n := Length(H2Size[g]);
+      SetLength(H2Size[g], n + 1); SetLength(H2Num[g], n + 1);
+      H2Size[g][n] := F.Size; H2Num[g][n] := Num;
     end;
     ReNum[Idx[i]] := Num;
   end;
@@ -387,7 +457,14 @@ var
   Grp, Run: TIntArray;
 begin
   SetLength(SortFiles, Length(Files));
-  for i := 0 to High(Files) do SortFiles[i] := Files[i];
+  SetLength(KExt, Length(Files)); SetLength(KDir, Length(Files)); SetLength(KBase, Length(Files));
+  for i := 0 to High(Files) do
+  begin
+    SortFiles[i] := Files[i];
+    KExt[i] := FaLCExtension(Files[i].Name);
+    KDir[i] := DirName(Files[i].Name);
+    KBase[i] := BaseName(Files[i].Name);
+  end;
   SetLength(ReNum, Length(Files));
   // g: partitionList por el índice de línea (conserva el orden)
   SetLength(Buckets, Length(GLines) + 1);
@@ -1111,6 +1188,22 @@ begin
   if Result = 0 then Result := FaCompareNames(BaseName(A.Name), BaseName(B.Name));
 end;
 
+function FaMergeKeyOf(const F: TFaFile): TFaMergeKey;
+begin
+  Result.Group := FaGroupIndex(F.Name);
+  Result.LcExt := FaLCExtension(F.Name);
+  Result.Dir := DirName(F.Name);
+  Result.Base := BaseName(F.Name);
+end;
+
+function FaMergeCompareKeys(const A, B: TFaMergeKey): Integer;
+begin
+  Result := CompareValue(A.Group, B.Group);
+  if Result = 0 then Result := CompareStr(A.LcExt, B.LcExt);
+  if Result = 0 then Result := FaCompareNames(A.Dir, B.Dir);
+  if Result = 0 then Result := FaCompareNames(A.Base, B.Base);
+end;
+
 function FaSolidBlocks(const Files: array of TFaFile; const GM: TGroupMethods;
   const Crits: TFaCrits; DetectLevel: Integer; Presorted: Boolean;
   AllowCopyOld: Boolean): TFaBlocks;
@@ -1121,7 +1214,8 @@ var
   Meth: TStringArray;
   Idx: TIntArray;
   NoSort: Boolean;
-  L: TIntArray;
+  L, LineT: TIntArray;
+  MaxT: Integer;
 begin
   Result := nil;
   if Length(Files) = 0 then Exit;
@@ -1131,10 +1225,21 @@ begin
   SetLength(CurFiles, Length(Files));
   SetLength(CurType, Length(Files));
   TypesCount := 1;
+  // FindType: los tipos de línea dependen solo de GM, se calculan una vez
+  SetLength(LineT, Length(GLineType));
+  MaxT := 0;
+  for i := 0 to High(GLineType) do
+  begin
+    LineT[i] := 0;
+    for j := 0 to High(GM) do
+      if GM[j].Group = GLineType[i] then begin LineT[i] := j; Break; end;
+    if LineT[i] > MaxT then MaxT := LineT[i];
+  end;
+  TypesCount := MaxT + 1;
   for i := 0 to High(Files) do
   begin
     CurFiles[i] := Files[i];
-    CurType[i] := FindType(Files[i].Name, GM, TypesCount);
+    CurType[i] := FindTypeFast(Files[i].Name, LineT);
   end;
   // Sin orden con -s- (solo GroupNone) o si el método principal es storing o muy rápido;
   // ni cuando la lista ya viene en su orden (la de join_lists al actualizar)
@@ -1278,7 +1383,7 @@ end;
 procedure LoadLines;
 var
   Raw: TStringArray;
-  i: Integer;
+  i, j: Integer;
   Cur, L: string;
 begin
   Raw := ArcGroupLines;
@@ -1296,6 +1401,20 @@ begin
   end;
   GLineType[High(GLineType)] := Cur;   // el "$default" que FreeArc agrega al final
   if GDefaultGroup < 0 then GDefaultGroup := Length(Raw);
+  SetLength(GLitOk, Length(GLines));
+  SetLength(GLit, Length(GLines));
+  for i := 0 to High(GLines) do
+  begin
+    L := GLines[i];
+    GLitOk[i] := (Length(L) >= 2) and (L[1] = '*') and (L[2] = '.');
+    if GLitOk[i] then
+    begin
+      GLit[i] := Copy(L, 3, MaxInt);
+      for j := 1 to Length(GLit[i]) do
+        if (GLit[i][j] in ['*', '?', '/', '.']) or (Ord(GLit[i][j]) >= 128) then GLitOk[i] := False;
+    end;
+    if not GLitOk[i] then GLit[i] := '';
+  end;
 end;
 
 initialization

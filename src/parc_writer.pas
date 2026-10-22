@@ -67,7 +67,7 @@ implementation
 
 uses
   parc_bytes, parc_crc, parc_stream, parc_outstream, parc_encoders, parc_methods, parc_recovery, parc_progress,
-  parc_volume, parc_parallel;
+  parc_volume, parc_parallel, parc_strmap;
 
 const
   VERSION_PARC: array[0..3] of Byte = (PARC_FORMAT_VERSION, 0, 0, 0);
@@ -228,7 +228,9 @@ function BuildDirectory(const Entries: array of TWriteEntry; const Blocks: array
 var
   w, f: TByteWriter;
   All: array of TDirFile;
-  Dirs: TStringList;
+  DirMap: TStrIntMap;
+  DirNames: array of string;
+  Parent: string;
   DirIdx: array of Integer;
   b, i, n, k: Integer;
   PrevNs, Ns: Int64;
@@ -264,21 +266,26 @@ begin
     end;
 
   // 2. Directorios únicos, en orden de aparición (enumDirectories de ArhiveDirectory.hs)
-  Dirs := TStringList.Create;
-  try
-    Dirs.CaseSensitive := True;
-    SetLength(DirIdx, n);
-    for i := 0 to n - 1 do
+  // Mapa hash en vez de TStringList.IndexOf, que era O(archivos x directorios) con
+  // AnsiCompareStr; igualdad de bytes y el mismo orden de aparición
+  DirMap.Init(1024);
+  DirNames := nil;
+  SetLength(DirIdx, n);
+  for i := 0 to n - 1 do
+  begin
+    Parent := ParentOf(Entries[All[i].Entry].StoredName);
+    k := DirMap.Get(Parent);
+    if k < 0 then
     begin
-      k := Dirs.IndexOf(ParentOf(Entries[All[i].Entry].StoredName));
-      if k < 0 then k := Dirs.Add(ParentOf(Entries[All[i].Entry].StoredName));
-      DirIdx[i] := k;
+      k := DirMap.Count;
+      if k >= Length(DirNames) then SetLength(DirNames, 2 * k + 64);
+      DirMap.Put(Parent, k);
+      DirNames[k] := Parent;
     end;
-    w.VInt(Dirs.Count);
-    for i := 0 to Dirs.Count - 1 do w.CStr(Dirs[i]);
-  finally
-    Dirs.Free;
+    DirIdx[i] := k;
   end;
+  w.VInt(DirMap.Count);
+  for i := 0 to DirMap.Count - 1 do w.CStr(DirNames[i]);
 
   // 3. Columnas por archivo
   for i := 0 to n - 1 do w.CStr(BaseOf(Entries[All[i].Entry].StoredName));
