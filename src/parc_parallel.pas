@@ -60,6 +60,8 @@ type
     procedure WaitJob(Job: TParallelJob);   // relanza la excepción del trabajo, si la hubo
     { Como WaitJob pero espera como mucho Ms: False si el trabajo todavía no terminó. }
     function WaitJobFor(Job: TParallelJob; Ms: Cardinal): Boolean;
+    { Espera que termine sin relanzar su error (que queda para WaitJob/WaitJobFor). }
+    procedure WaitJobQuiet(Job: TParallelJob);
     property MaxWorkers: Integer read FMaxWorkers;
   end;
 
@@ -289,6 +291,11 @@ begin
   if Job.FFinished = 0 then RTLEventWaitFor(Job.FDone, Ms);
   Result := Job.FFinished <> 0;
   if Result and (Job.FErrClass <> nil) then raise Job.FErrClass.Create(Job.FErrMsg);
+end;
+
+procedure TJobPool.WaitJobQuiet(Job: TParallelJob);
+begin
+  while Job.FFinished = 0 do RTLEventWaitFor(Job.FDone, 100);
 end;
 
 { TParallelBlockStage }

@@ -137,7 +137,7 @@ bash tests/cli.sh
 bash tests/stdio.sh tests/volumes.sh
 bash tests/rs_recovery.sh tests/parc_crypt.sh tests/cm.sh tests/grzip.sh tests/bcj2.sh
 bash tests/dispack.sh tests/srep.sh tests/bcj.sh
-bash tests/run_tornado_tests.sh tests/crypto_vectors.sh tests/crc.sh
+bash tests/run_tornado_tests.sh tests/crypto_vectors.sh tests/crc.sh tests/extract_parallel.sh
 bash tests/run_lzma_tests.py build/tests/test_lzma
 sudo bash tests/fixes.sh          # patterns, links, full disk, FAT32
 python3 tests/fuzz.py build/linux64/parc 100 build/linux64/parc
