@@ -222,9 +222,108 @@ begin
   else Result := (QWord(-V) shl 1) - 1;
 end;
 
+const
+  POW10: array[0..9] of LongWord = (1, 10, 100, 1000, 10000, 100000, 1000000, 10000000,
+    100000000, 1000000000);
+  SUBSEC_SAMPLE = 65536;   // archivos que se miran para elegir la codificación de las fechas
+
+{ Fechas del directorio: hay dos codificaciones sin pérdida (FORMATO-PARC.md §2).
+  - MTIME_NS_DELTA (7): cada mtime en ns como delta zigzag del anterior. Ideal cuando muchos
+    archivos seguidos tienen la misma fecha (instalaciones, copias sin ns).
+  - MTIME_SUBSEC (8): solo la fracción de segundo; los segundos ya están en la columna Time.
+    Con ns al azar (ext4, NTFS) ocupa bastante menos, y si no hay fracciones casi nada. Solo
+    vale si todos los segundos entran en la columna Time (Int32: 1901-2038).
+  Se elige la que comprimida con el método del directorio sale más chica (sobre los primeros
+  SUBSEC_SAMPLE archivos, para acotar el costo en directorios enormes). Un PArc 0.0.2 no
+  conoce el tag 8: lista y extrae con los segundos de la columna Time. }
+procedure BuildMTimeField(const Ns: array of Int64; const DirMethod: string; out Tag: Integer;
+  out Field: TByteWriter);
+var
+  f7, f8: TByteWriter;
+  i, n, k, W, Sample: Integer;
+  Sec, PrevNs: Int64;
+  Sub: array of LongWord;
+  MaxSub: LongWord;
+  AllFit: Boolean;
+  Len7, Len8: SizeInt;
+
+  procedure PutSub(var Dst: TByteWriter; v: LongWord);
+  var
+    j: Integer;
+  begin
+    for j := 0 to W - 1 do
+    begin
+      Dst.U8(Byte(v));
+      v := v shr 8;
+    end;
+  end;
+
+begin
+  n := Length(Ns);
+  Sample := n;
+  if Sample > SUBSEC_SAMPLE then Sample := SUBSEC_SAMPLE;
+  f7.Clear;
+  PrevNs := 0;
+  Len7 := 0;
+  for i := 0 to n - 1 do
+  begin
+    f7.VInt(ZigZag(Ns[i] - PrevNs));
+    PrevNs := Ns[i];
+    if i = Sample - 1 then Len7 := f7.Len;
+  end;
+  Tag := DIRTAG_MTIME_NS_DELTA;
+  Field := f7;
+  // Fracciones de segundo, si todos los segundos entran en la columna Time
+  SetLength(Sub, n);
+  AllFit := True;
+  for i := 0 to n - 1 do
+  begin
+    Sec := Ns[i] div 1000000000;
+    if (Ns[i] < 0) and (Ns[i] mod 1000000000 <> 0) then Dec(Sec);   // piso, como Time32
+    if (Sec < Low(LongInt)) or (Sec > High(LongInt)) then
+    begin
+      AllFit := False;
+      Break;
+    end;
+    Sub[i] := LongWord(Ns[i] - Sec * 1000000000);
+  end;
+  if not AllFit then Exit;
+  // Unidad común más grande (10^k ns: 100 ns en NTFS, 1 µs...) y bytes por valor
+  k := 9;
+  MaxSub := 0;
+  for i := 0 to n - 1 do
+    if Sub[i] <> 0 then
+    begin
+      while (k > 0) and (Sub[i] mod POW10[k] <> 0) do Dec(k);
+      if Sub[i] > MaxSub then MaxSub := Sub[i];
+    end;
+  if MaxSub = 0 then k := 9;
+  MaxSub := MaxSub div POW10[k];
+  W := 0;
+  while (W < 4) and (QWord(MaxSub) >= QWord(1) shl (8 * W)) do Inc(W);
+  f8.Clear;
+  f8.U8(k);
+  f8.U8(W);
+  for i := 0 to n - 1 do PutSub(f8, Sub[i] div POW10[k]);
+  if W = 0 then
+  begin
+    Tag := DIRTAG_MTIME_SUBSEC;
+    Field := f8;
+    Exit;
+  end;
+  // Comparar comprimidos (sobre una muestra del principio si es muy grande)
+  Len8 := Length(CompressMem(DirMethod, PByte(f8.Data), 2 + Sample * W));
+  Len7 := Length(CompressMem(DirMethod, PByte(f7.Data), Len7));
+  if Len8 < Len7 then
+  begin
+    Tag := DIRTAG_MTIME_SUBSEC;
+    Field := f8;
+  end;
+end;
+
 { Serializa el DIR_BLOCK (el formato base de FreeArc §6 + campos opcionales de FORMATO-PARC.md §2). }
 function BuildDirectory(const Entries: array of TWriteEntry; const Blocks: array of TDataBlock;
-  DirPos: Int64; Parc: Boolean): TBytes;
+  DirPos: Int64; Parc: Boolean; const DirMethod: string): TBytes;
 var
   w, f: TByteWriter;
   All: array of TDirFile;
@@ -233,7 +332,8 @@ var
   Parent: string;
   DirIdx: array of Integer;
   b, i, n, k: Integer;
-  PrevNs, Ns: Int64;
+  Ns: array of Int64;
+  Tag: Integer;
   AllWin, AllUnix: Boolean;
 
   procedure OptField(Tag: Integer; const Field: TByteWriter);
@@ -298,17 +398,11 @@ begin
   // 4. Campos opcionales (solo .parc)
   if Parc then
   begin
-    // MTimeNs como delta zigzag desde el archivo anterior: pérdida cero y, como los
-    // archivos de un mismo bloque suelen tener fechas parecidas, ocupa mucho menos.
-    f.Clear;
-    PrevNs := 0;
-    for i := 0 to n - 1 do
-    begin
-      Ns := Entries[All[i].Entry].Meta.MTimeNs;
-      f.VInt(ZigZag(Ns - PrevNs));
-      PrevNs := Ns;
-    end;
-    OptField(DIRTAG_MTIME_NS_DELTA, f);
+    // MTimeNs sin pérdida: delta zigzag (tag 7) o fracciones de segundo (tag 8)
+    SetLength(Ns, n);
+    for i := 0 to n - 1 do Ns[i] := Entries[All[i].Entry].Meta.MTimeNs;
+    BuildMTimeField(Ns, DirMethod, Tag, f);
+    OptField(Tag, f);
     AllWin := n > 0;
     AllUnix := n > 0;
     for i := 0 to n - 1 do
@@ -914,7 +1008,7 @@ begin
       CheckCancel;
 
       // Directorio (los offsets de los bloques son relativos a su posición)
-      DirData := BuildDirectory(Entries, Blocks, S.Position, True);
+      DirData := BuildDirectory(Entries, Blocks, S.Position, True, Opt.DirMethod);
       SetLength(Control, 2);
       Control[1] := WriteControlBlock(S, True, DIR_BLOCK, Opt.DirMethod, DirData, Opt.Encryption, Opt.HeadersPassword);
 

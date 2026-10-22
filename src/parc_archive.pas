@@ -21,6 +21,7 @@ const
   DIRTAG_UNIX_MODE = 3;
   DIRTAG_SYMLINK   = 6;   // enlaces: cantidad, y por cada uno índice, destino (CStr) y si apunta a un directorio
   DIRTAG_MTIME_NS_DELTA = 7;  // como MTIME_NS pero delta zigzag VInt (pérdida cero)
+  DIRTAG_MTIME_SUBSEC = 8;    // fracción de segundo de cada mtime; los segundos, de la columna Time
   SCAN_MAX = 4096;             // el descriptor del FOOTER empieza dentro de los últimos 4096 bytes
 
   DESCR_BLOCK    = 0;
@@ -326,6 +327,11 @@ var
   LinkCount, LinkIdx: Int64;
   PrevNs, Delta: Int64;
   ZZ: QWord;
+  SubUnit, SubW, j: Integer;
+  Sub: QWord;
+const
+  POW10: array[0..9] of Int64 = (1, 10, 100, 1000, 10000, 100000, 1000000, 10000000,
+    100000000, 1000000000);
 begin
   Data := ReadControlBlock(DirBlock);
   r.Init(PByte(Data), Length(Data));
@@ -412,6 +418,23 @@ begin
             Files[FirstFile + i].MTimeNs := PrevNs;
             Files[FirstFile + i].HasMTimeNs := True;
           end;
+        end;
+      DIRTAG_MTIME_SUBSEC:
+        // U8 k (unidad 10^k ns), U8 W (bytes por valor, 0..4), N valores de W bytes LE
+        if FieldLen >= 2 then
+        begin
+          SubUnit := r.U8;
+          SubW := r.U8;
+          if (SubUnit <= 9) and (SubW <= 4) and (FieldLen = 2 + Int64(SubW) * Total) then
+            for i := 0 to Total - 1 do
+            begin
+              Sub := 0;
+              for j := 0 to SubW - 1 do Sub := Sub or (QWord(r.U8) shl (8 * j));
+              Sub := Sub * QWord(POW10[SubUnit]);
+              if Sub >= 1000000000 then Corrupt('invalid sub-second time in directory');
+              Files[FirstFile + i].MTimeNs := Files[FirstFile + i].Time * 1000000000 + Int64(Sub);
+              Files[FirstFile + i].HasMTimeNs := True;
+            end;
         end;
       DIRTAG_WIN_ATTR:
         if FieldLen = 4 * Total then
