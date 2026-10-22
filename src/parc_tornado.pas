@@ -107,6 +107,8 @@ type
     procedure RunHuf;
     procedure RunArith;
     function RunHufFast: Integer;
+    function RunByteFast: Integer;
+    function RunBitFast: Integer;
     function RunHufFastPas: Integer;
     function RunArithFast: Integer;
     function RunArithFastPas: Integer;
@@ -1142,12 +1144,19 @@ begin
   end;
 end;
 
+const
+  TD_MARGIN = 32;     // bytes de entrada: más de lo que puede leer un símbolo con largo y distancia
+  // Resultado del lazo rápido
+  TDR_SLOW = 0; TDR_SPECIAL = 1; TDR_WRITE = 2; TDR_BADCODE = 3; TDR_BADARITH = 4; TDR_BADBLOCK = 5;
+
 { Decodifica hasta que haga falta escribir (FPending) o termine el stream. Un bucle por
   codificador (en el C, una instancia del template tor_decompress0 por cada uno). }
 procedure TTornadoStage.Run;
 var
   len, dist: LongWord;
   o, we: SizeInt;
+  r: Integer;
+  lit: Boolean;
 begin
   // Continuar un match lento cortado por una escritura
   if FMatchLeft > 0 then
@@ -1160,12 +1169,25 @@ begin
   o := FOutput;
   we := FWriteEnd;
   case FMethod of
-    1:
+    1, 2:
       repeat
-        if NextByte(len, dist) then
+        // El lazo rápido mientras se pueda; cuando no, un símbolo por el camino general
+        if FMethod = 1 then r := RunByteFast else r := RunBitFast;
+        if r = TDR_SPECIAL then
+        begin
+          o := FOutput;
+          if Special(FPendLen, FPendDist, o) then Exit;
+          FOutput := o;
+          Continue;
+        end;
+        o := FOutput;
+        if r = TDR_WRITE then Break;
+        if FMethod = 1 then lit := NextByte(len, dist) else lit := NextBit(len, dist);
+        if lit then
         begin
           FOut[o] := Byte(len);
           Inc(o);
+          FOutput := o;
           if o >= we then Break;
         end
         // Match simple (>99% de los casos): `output-outbuf>=dist && write_end-output>len`
@@ -1173,23 +1195,10 @@ begin
         begin
           CopyMatch(FOut + o, dist, len);
           Inc(o, len);
+          FOutput := o;
         end
-        else if Special(len, dist, o) then Exit;
-      until False;
-    2:
-      repeat
-        if NextBit(len, dist) then
-        begin
-          FOut[o] := Byte(len);
-          Inc(o);
-          if o >= we then Break;
-        end
-        else if (SizeInt(dist) <= o) and (we - o > SizeInt(len)) and (dist <> 0) then
-        begin
-          CopyMatch(FOut + o, dist, len);
-          Inc(o, len);
-        end
-        else if Special(len, dist, o) then Exit;
+        else if Special(len, dist, o) then Exit
+        else FOutput := o;
       until False;
     3:
       begin
@@ -1209,10 +1218,198 @@ begin
   StartWrite;
 end;
 
-const
-  TD_MARGIN = 32;     // bytes de entrada: más de lo que puede leer un símbolo con largo y distancia
-  // Resultado del lazo rápido
-  TDR_SLOW = 0; TDR_SPECIAL = 1; TDR_WRITE = 2; TDR_BADCODE = 3; TDR_BADARITH = 4; TDR_BADBLOCK = 5;
+{ Lazos rápidos de LZ77_ByteDecoder (c1) y LZ77_BitDecoder (c2), como los de Huffman y
+  aritmético (parc_tordec.inc): sin llamadas, con la entrada, la salida y las banderas o el
+  flujo de bits en variables locales, y solo mientras queden TD_MARGIN bytes de entrada antes
+  de FInLim y el match sea simple. Lo demás va por NextByte/NextBit y Special, el camino de
+  siempre: mismos resultados y mismos errores con datos corruptos. }
+function TTornadoStage.RunByteFast: Integer;
+var
+  op, oend, ip, ilsafe, src: PByte;
+  flags, x, l, d, len, dist: LongWord;
+  fpos: LongInt;
+  k: SizeInt;
+begin
+  Result := TDR_SLOW;
+  op := FOut + FOutput;
+  oend := FOut + FWriteEnd;
+  ip := PByte(FIn) + FInPos;
+  ilsafe := PByte(FIn) + FInLim - TD_MARGIN;
+  flags := FFlags;
+  fpos := FFlagPos;
+  repeat
+    if ip > ilsafe then Break;
+    Dec(fpos);
+    if fpos <> 0 then flags := flags shr 2
+    else
+    begin
+      fpos := 16;
+      flags := PLongWord(ip)^;
+      Inc(ip, 4);
+    end;
+    case flags and 3 of
+      0:
+        begin
+          op^ := ip^;
+          Inc(ip);
+          Inc(op);
+          if op >= oend then begin Result := TDR_WRITE; Break; end;
+          Continue;
+        end;
+      1:
+        begin
+          x := PWord(ip)^;
+          Inc(ip, 2);
+          l := x shr 12;
+          d := x and $FFF;
+        end;
+      2:
+        begin
+          x := PLongWord(ip)^ and $FFFFFF;
+          Inc(ip, 3);
+          l := x shr 18;
+          d := x and $3FFFF;
+        end;
+    else
+      begin
+        l := ip^;
+        Inc(ip);
+        if l = 255 then
+        begin
+          d := LongWord(ip[0]) shl 24;
+          l := ip[1];
+          Inc(ip, 2);
+        end
+        else
+          d := 0;
+        if l = 254 then
+        begin
+          l := ((PLongWord(ip)^ and $FFFFFF) shl 8) + ip[3];
+          Inc(ip, 4);
+        end;
+        d := d + (PLongWord(ip)^ and $FFFFFF);
+        Inc(ip, 3);
+      end;
+    end;
+    len := FMinLen + l;
+    dist := d;
+    if (SizeInt(dist) <= op - FOut) and (oend - op > SizeInt(len)) and (dist <> 0) then
+    begin
+      src := op - dist;
+      k := 0;
+      if dist >= 8 then
+        while k + 8 <= SizeInt(len) do
+        begin
+          PQWord(op + k)^ := PQWord(src + k)^;
+          Inc(k, 8);
+        end;
+      while k < SizeInt(len) do
+      begin
+        op[k] := src[k];
+        Inc(k);
+      end;
+      Inc(op, len);
+    end
+    else
+    begin
+      FPendLen := len;
+      FPendDist := dist;
+      Result := TDR_SPECIAL;
+      Break;
+    end;
+  until False;
+  FOutput := op - FOut;
+  FInPos := ip - PByte(FIn);
+  FFlags := flags;
+  FFlagPos := fpos;
+end;
+
+function TTornadoStage.RunBitFast: Integer;
+var
+  op, oend, ip, ilsafe, src: PByte;
+  bb: QWord;
+  bc: LongInt;
+  x, n, len, dist, lcode: LongWord;
+  k: SizeInt;
+begin
+  Result := TDR_SLOW;
+  op := FOut + FOutput;
+  oend := FOut + FWriteEnd;
+  ip := PByte(FIn) + FInPos;
+  ilsafe := PByte(FIn) + FInLim - TD_MARGIN;
+  bb := FBitBuf;
+  bc := FBitCount;
+  repeat
+    if ip > ilsafe then Break;
+    // getbits(9)
+    if bc <= 32 then
+    begin
+      bb := bb or (QWord(PLongWord(ip)^) shl bc);
+      Inc(ip, 4);
+      Inc(bc, 32);
+    end;
+    x := LongWord(bb) and 511;
+    bb := bb shr 9;
+    Dec(bc, 9);
+    if x < 256 then
+    begin
+      op^ := Byte(x);
+      Inc(op);
+      if op >= oend then begin Result := TDR_WRITE; Break; end;
+      Continue;
+    end;
+    lcode := (x shr 5) - 8;
+    n := extra_lbits[lcode];
+    if bc <= 32 then
+    begin
+      bb := bb or (QWord(PLongWord(ip)^) shl bc);
+      Inc(ip, 4);
+      Inc(bc, 32);
+    end;
+    len := FMinLen + lc_base[lcode] + (LongWord(bb) and ((LongWord(1) shl n) - 1));
+    bb := bb shr n;
+    Dec(bc, n);
+    x := x and 31;
+    n := extra_dbits[x];
+    if bc <= 32 then
+    begin
+      bb := bb or (QWord(PLongWord(ip)^) shl bc);
+      Inc(ip, 4);
+      Inc(bc, 32);
+    end;
+    dist := dc_base[x] + (LongWord(bb) and ((LongWord(1) shl n) - 1));
+    bb := bb shr n;
+    Dec(bc, n);
+    if (SizeInt(dist) <= op - FOut) and (oend - op > SizeInt(len)) and (dist <> 0) then
+    begin
+      src := op - dist;
+      k := 0;
+      if dist >= 8 then
+        while k + 8 <= SizeInt(len) do
+        begin
+          PQWord(op + k)^ := PQWord(src + k)^;
+          Inc(k, 8);
+        end;
+      while k < SizeInt(len) do
+      begin
+        op[k] := src[k];
+        Inc(k);
+      end;
+      Inc(op, len);
+    end
+    else
+    begin
+      FPendLen := len;
+      FPendDist := dist;
+      Result := TDR_SPECIAL;
+      Break;
+    end;
+  until False;
+  FOutput := op - FOut;
+  FInPos := ip - PByte(FIn);
+  FBitBuf := bb;
+  FBitCount := bc;
+end;
 
 {$macro on}
 {$define TD_NAME := RunHuf}

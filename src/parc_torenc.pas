@@ -1715,7 +1715,8 @@ type
     HufCode: array[0..MAXHUF - 1] of LongWord;
     HufN, HufRemainder: Integer;
     // Nodos del árbol (HuffmanTree::build_tree): contador, hijos, bits y código
-    NCnt, NLeft, NRight, NBits, NCode: array[0..2 * MAXHUF + 3] of LongWord;
+    NCnt, NLeft, NRight: array[0..2 * MAXHUF + 3] of LongWord;
+    NBC: array[0..2 * MAXHUF + 3] of QWord;
     Rest: array[0..MAXHUF - 1] of LongWord;     // code[] reusado como temporal en el C
     // TRangeCoder
     Low: Int64;
@@ -1872,8 +1873,9 @@ begin
 end;
 
 { HuffmanTree::build_tree, solo la parte del codificador. Los nodos van en arreglos separados
-  (NCnt/NLeft/NRight/NBits/NCode) y los lazos con punteros: se reconstruye cada HUFBLOCKSIZE
-  símbolos y con FPC era ~15 % del tiempo de -m tor:3/tor:4. Mismo árbol que el C. }
+  (NCnt/NLeft/NRight y NBC = bits y código juntos) y los lazos son while con punteros (con for
+  FPC dejaba el índice en la pila): se reconstruye cada HUFBLOCKSIZE símbolos y era ~11 % del
+  tiempo de tor:3 en TILIN. Mismo árbol que el C. }
 procedure TTorCoder.HufBuildTree(RescaleMode: Integer);
 const
   CHUNKS = 250;
@@ -1881,9 +1883,13 @@ const
 var
   places: array[0..CHUNKS] of LongInt;
   b, i, j, k, p1, p2, p3, nr: SizeInt;
-  c, c1, c2, tmp, bb, code, factor: LongWord;
-  cnt, pcnt, rs: PLongWord;
+  c, c1, c2, tmp, factor, d: LongWord;
+  cnt, pcnt, rs, pe: PLongWord;
   plf, prt: PLongWord;
+  pn: PQWord;
+  v: QWord;
+  hb: PByte;
+  hc: PLongWord;
 begin
   b := HufN;
   cnt := @HufCounter[0];
@@ -1892,14 +1898,24 @@ begin
   prt := @NRight[0];
   rs := @Rest[0];
   FillChar(places, SizeOf(places), 0);
-  for i := 0 to b - 1 do
+  pe := cnt + b;
+  rs := cnt;
+  while rs < pe do
   begin
-    c := cnt[i];
+    c := rs^;
     if c < CHUNKS then Inc(places[c + 1]);
+    Inc(rs);
   end;
-  for i := 0 to CHUNKS - 1 do Inc(places[i + 1], places[i]);
+  k := 0;
+  for i := 1 to CHUNKS do
+  begin
+    Inc(k, places[i]);
+    places[i] := k;
+  end;
+  rs := @Rest[0];
   nr := 0;
-  for i := 0 to b - 1 do
+  i := 0;
+  while i < b do
   begin
     c := cnt[i];
     if c < CHUNKS then
@@ -1914,6 +1930,7 @@ begin
       rs[nr] := c * MAXHUF + LongWord(i);   // make_node
       Inc(nr);
     end;
+    Inc(i);
   end;
   // Orden estable por (contador, índice): las claves son distintas, cualquier sort sirve
   for i := 1 to nr - 1 do
@@ -1934,17 +1951,19 @@ begin
     plf[k + i] := rs[i] mod MAXHUF;
   end;
   for i := 0 to b + 3 do pcnt[b + i] := FENCE;
+  // Las dos colas (hojas ordenadas desde p1, nodos internos desde p2) del C
   p1 := 0; p2 := b + 2; p3 := b + 2;
+  c1 := pcnt[0];
+  c2 := pcnt[p2];
   while not ((p1 = b) and (p3 - p2 = 1)) do
   begin
-    c1 := pcnt[p1];
-    c2 := pcnt[p2];
     if pcnt[p1 + 1] < c2 then
     begin
       pcnt[p3] := c1 + pcnt[p1 + 1];
       plf[p3] := p1;
       prt[p3] := p1 + 1;
       Inc(p1, 2);
+      c1 := pcnt[p1];
     end
     else if c1 > pcnt[p2 + 1] then
     begin
@@ -1959,27 +1978,35 @@ begin
       plf[p3] := p1;
       prt[p3] := p2;
       Inc(p1); Inc(p2);
+      c1 := pcnt[p1];
     end;
     Inc(p3);
+    c2 := pcnt[p2];     // puede ser el nodo recién creado (p2 = p3-1)
   end;
-  NBits[p2] := 0;
-  NCode[p2] := 0;
-  for i := p2 downto b + 2 do
+  // Bits (32 altos) y código (32 bajos) de cada nodo, de la raíz hacia las hojas
+  pn := @NBC[0];
+  pn[p2] := 0;
+  i := p2;
+  while i >= b + 2 do
   begin
-    bb := NBits[i];
-    code := NCode[i];
-    NBits[plf[i]] := bb + 1;
-    NCode[plf[i]] := code;
-    NBits[prt[i]] := bb + 1;
-    NCode[prt[i]] := code + (LongWord(1) shl bb);
+    v := pn[i] + (QWord(1) shl 32);
+    pn[plf[i]] := v;
+    pn[prt[i]] := v + (LongWord(1) shl LongWord(v shr 32 - 1));
+    Dec(i);
   end;
-  for i := 0 to b - 1 do
+  hb := @HufBits[0];
+  hc := @HufCode[0];
+  i := 0;
+  while i < b do
   begin
     k := plf[i];
-    HufBits[k] := NBits[i];
-    HufCode[k] := NCode[i];
+    v := pn[i];
+    hb[k] := Byte(v shr 32);
+    hc[k] := LongWord(v);
+    Inc(i);
   end;
-  // rescale(FACTOR); el 6 (rescale_mode 3) es el de todos los bloques salvo el primero
+  // rescale(FACTOR); el 6 (rescale_mode 3) es el de todos los bloques salvo el primero.
+  // c - c div 6, salvo 2..5 que pierden 1 (sin salto: 2..5 son los contadores más comunes)
   case RescaleMode of
     0: factor := 2;
     1: factor := 3;
@@ -1992,19 +2019,23 @@ begin
   else
     factor := 0;
   end;
+  rs := cnt;
   if factor = 6 then
-    for i := 0 to b - 1 do
+    while rs < pe do
     begin
-      c := cnt[i];
-      if (c > 1) and (c < 6) then cnt[i] := c - 1
-      else cnt[i] := c - c div 6;
+      c := rs^;
+      d := c div 6;
+      if d = 0 then d := Ord(c > 1);
+      rs^ := c - d;
+      Inc(rs);
     end
   else if factor <> 0 then
-    for i := 0 to b - 1 do
+    while rs < pe do
     begin
-      c := cnt[i];
-      if (c > 1) and (c < factor) then cnt[i] := c - 1
-      else cnt[i] := c - c div factor;
+      c := rs^;
+      if (c > 1) and (c < factor) then rs^ := c - 1
+      else rs^ := c - c div factor;
+      Inc(rs);
     end;
 end;
 
@@ -2568,6 +2599,8 @@ type
     procedure FastSetup(out F: TFastMF);
     function FastSpecial(pp: PByte; var SkipRead: Boolean): PByte;
     procedure RunFast3(Resuming: Boolean);
+    procedure RunFast1(Resuming: Boolean);
+    procedure RunFast2(Resuming: Boolean);
     procedure RunFast4(Resuming: Boolean);
     procedure RunFast5(Resuming: Boolean);
     procedure RunFast6(Resuming: Boolean);
@@ -3147,6 +3180,8 @@ end;
 procedure TTorEngine.RunAny(Resuming: Boolean);
 begin
   case Combo of
+    1: RunFast1(Resuming);
+    2: RunFast2(Resuming);
     3: RunFast3(Resuming);
     4: RunFast4(Resuming);
     5: RunFast5(Resuming);
