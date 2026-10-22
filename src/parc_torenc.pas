@@ -354,6 +354,7 @@ type
     N, HashShift, HashSize: LongWord;
     RowWidth, Row2, RowUp: Integer;
     HT: PLongWord;
+    HTMem: Pointer;
     constructor Create(buf: PByte; AHashSize: LongWord; row: Integer; AN: LongWord);
     destructor Destroy; override;
     function Key(p: PByte): LongWord; inline;
@@ -370,6 +371,7 @@ type
     N, HashShift, HashSize, HeadSize: LongWord;
     RowWidth: Integer;
     HT: PLongWord;
+    HTMem: Pointer;
     Head: PByte;
     constructor Create(buf: PByte; AHashSize: LongWord; row: Integer; AN: LongWord);
     destructor Destroy; override;
@@ -456,6 +458,20 @@ begin
   if n > Lim div SizeOf(LongWord) then OutOfMemoryError;
   Result := GetMem(SizeInt(n * SizeOf(LongWord)));
   if Result = nil then OutOfMemoryError;
+end;
+
+{ Como AllocTable pero alineada a 64 bytes (una línea de caché): las filas de los match finders
+  con caché (32 o 64 bytes en tor:5/tor:6) no quedan partidas en dos líneas. Mem es lo que hay
+  que liberar. }
+function AllocTableAligned(n: QWord; out Mem: Pointer): PLongWord;
+var
+  Lim: QWord;
+begin
+  Lim := High(SizeInt);
+  if n > (Lim - 64) div SizeOf(LongWord) then OutOfMemoryError;
+  Mem := GetMem(SizeInt(n * SizeOf(LongWord)) + 64);
+  if Mem = nil then OutOfMemoryError;
+  Result := PLongWord((PtrUInt(Mem) + 63) and not PtrUInt(63));
 end;
 
 { TMF }
@@ -795,14 +811,14 @@ begin
   RowUp := RowWidth + (RowWidth mod 2);
   rows := LongWord(1) shl lb(AHashSize div LongWord(SizeOf(LongWord) * Row2));
   HashSize := rows * LongWord(Row2);
-  HT := AllocTable(HashSize);
+  HT := AllocTableAligned(HashSize, HTMem);
   HashShift := 32 - lb(rows);
   ClearHash(buf);
 end;
 
 destructor TCachingMF.Destroy;
 begin
-  FreeMem(HT);
+  FreeMem(HTMem);
   inherited Destroy;
 end;
 
@@ -1078,14 +1094,14 @@ begin
   Head := GetMem(HeadSize);
   if Head = nil then OutOfMemoryError;
   HashSize := HeadSize * LongWord(RowWidth) * 2;
-  HT := AllocTable(HashSize);
+  HT := AllocTableAligned(HashSize, HTMem);
   HashShift := 32 - lb(HeadSize);
   ClearHash(buf);
 end;
 
 destructor TCycledMF.Destroy;
 begin
-  FreeMem(HT);
+  FreeMem(HTMem);
   FreeMem(Head);
   inherited Destroy;
 end;
@@ -1675,12 +1691,6 @@ end;
 type
   TTorEmit = procedure(P: PByte; N: SizeInt) of object;
 
-  THufNode = record
-    Cnt, Code: LongWord;
-    Left, Right: Word;
-    Bits: Byte;
-  end;
-
   TTorCoder = class
   public
     Kind: Integer;
@@ -1701,7 +1711,8 @@ type
     HufBits: array[0..MAXHUF - 1] of Byte;
     HufCode: array[0..MAXHUF - 1] of LongWord;
     HufN, HufRemainder: Integer;
-    Nodes: array[0..2 * MAXHUF + 3] of THufNode;
+    // Nodos del árbol (HuffmanTree::build_tree): contador, hijos, bits y código
+    NCnt, NLeft, NRight, NBits, NCode: array[0..2 * MAXHUF + 3] of LongWord;
     Rest: array[0..MAXHUF - 1] of LongWord;     // code[] reusado como temporal en el C
     // TRangeCoder
     Low: Int64;
@@ -1729,6 +1740,15 @@ type
     procedure Sym(x: LongWord); inline;
     procedure SymLowerBits(n: Integer; x: LongWord); inline;
     procedure EncodeMatch(len, dist: LongInt);
+    // Caminos rápidos (parc_torfast.inc): el codificador fijo, sin elegir Kind por símbolo
+    procedure HufNewBlock;
+    procedure SymH(x: LongWord); inline;
+    procedure SymA(x: LongWord); inline;
+    procedure BitsA(n: Integer; x: LongWord); inline;
+    procedure LitH(Cur: PByte);
+    procedure LitA(Cur: PByte);
+    procedure EncodeMatchH(len, dist: LongInt);
+    procedure EncodeMatchA(len, dist: LongInt);
     { encode(len, current, match, MINLEN); Dist = current-match. True = match codificado. }
     function Encode(Len: LongInt; Cur: PByte; Dist: LongWord; MinLen: LongInt): Boolean;
     procedure EncodeTable(Typ, Len: Integer);
@@ -1848,103 +1868,115 @@ begin
   end;
 end;
 
-{ HuffmanTree::build_tree, solo la parte del codificador }
+{ HuffmanTree::build_tree, solo la parte del codificador. Los nodos van en arreglos separados
+  (NCnt/NLeft/NRight/NBits/NCode) y los lazos con punteros: se reconstruye cada HUFBLOCKSIZE
+  símbolos y con FPC era ~15 % del tiempo de -m tor:3/tor:4. Mismo árbol que el C. }
 procedure TTorCoder.HufBuildTree(RescaleMode: Integer);
 const
   CHUNKS = 250;
   FENCE = $7FFFFFFF;   // INT_MAX
 var
-  places: array[0..CHUNKS] of Integer;
-  b, i, j, p, p1, p2, p3, nr: Integer;
-  s: LongWord;
-  factor: LongWord;
-  tmp: LongWord;
+  places: array[0..CHUNKS] of LongInt;
+  b, i, j, k, p1, p2, p3, nr: SizeInt;
+  c, c1, c2, tmp, bb, code, factor: LongWord;
+  cnt, pcnt, rs: PLongWord;
+  plf, prt: PLongWord;
 begin
-  b := 0;
-  for i := 0 to CHUNKS do places[i] := 0;
-  for i := 0 to HufN - 1 do
+  b := HufN;
+  cnt := @HufCounter[0];
+  pcnt := @NCnt[0];
+  plf := @NLeft[0];
+  prt := @NRight[0];
+  rs := @Rest[0];
+  FillChar(places, SizeOf(places), 0);
+  for i := 0 to b - 1 do
   begin
-    if HufCounter[i] < CHUNKS then Inc(places[HufCounter[i] + 1]);
-    Inc(b);
+    c := cnt[i];
+    if c < CHUNKS then Inc(places[c + 1]);
   end;
   for i := 0 to CHUNKS - 1 do Inc(places[i + 1], places[i]);
   nr := 0;
-  for i := 0 to HufN - 1 do
-    if HufCounter[i] < CHUNKS then
+  for i := 0 to b - 1 do
+  begin
+    c := cnt[i];
+    if c < CHUNKS then
     begin
-      p := places[HufCounter[i]];
-      Inc(places[HufCounter[i]]);
-      Nodes[p].Cnt := HufCounter[i];
-      Nodes[p].Left := i;
+      k := places[c];
+      places[c] := k + 1;
+      pcnt[k] := c;
+      plf[k] := i;
     end
     else
     begin
-      rest[nr] := HufCounter[i] * MAXHUF + LongWord(i);   // make_node
+      rs[nr] := c * MAXHUF + LongWord(i);   // make_node
       Inc(nr);
     end;
+  end;
   // Orden estable por (contador, índice): las claves son distintas, cualquier sort sirve
   for i := 1 to nr - 1 do
   begin
-    tmp := rest[i];
+    tmp := rs[i];
     j := i - 1;
-    while (j >= 0) and (rest[j] > tmp) do
+    while (j >= 0) and (rs[j] > tmp) do
     begin
-      rest[j + 1] := rest[j];
+      rs[j + 1] := rs[j];
       Dec(j);
     end;
-    rest[j + 1] := tmp;
+    rs[j + 1] := tmp;
   end;
+  k := places[CHUNKS];
   for i := 0 to nr - 1 do
   begin
-    p := i + places[CHUNKS];
-    Nodes[p].Cnt := rest[i] div MAXHUF;
-    Nodes[p].Left := rest[i] mod MAXHUF;
+    pcnt[k + i] := rs[i] div MAXHUF;
+    plf[k + i] := rs[i] mod MAXHUF;
   end;
-  for i := 0 to b + 3 do Nodes[b + i].Cnt := FENCE;
+  for i := 0 to b + 3 do pcnt[b + i] := FENCE;
   p1 := 0; p2 := b + 2; p3 := b + 2;
   while not ((p1 = b) and (p3 - p2 = 1)) do
   begin
-    if Nodes[p1 + 1].Cnt < Nodes[p2].Cnt then
+    c1 := pcnt[p1];
+    c2 := pcnt[p2];
+    if pcnt[p1 + 1] < c2 then
     begin
-      Nodes[p3].Cnt := Nodes[p1].Cnt + Nodes[p1 + 1].Cnt;
-      Nodes[p3].Left := p1;
-      Nodes[p3].Right := p1 + 1;
+      pcnt[p3] := c1 + pcnt[p1 + 1];
+      plf[p3] := p1;
+      prt[p3] := p1 + 1;
       Inc(p1, 2);
     end
-    else if Nodes[p1].Cnt > Nodes[p2 + 1].Cnt then
+    else if c1 > pcnt[p2 + 1] then
     begin
-      Nodes[p3].Cnt := Nodes[p2].Cnt + Nodes[p2 + 1].Cnt;
-      Nodes[p3].Left := p2;
-      Nodes[p3].Right := p2 + 1;
+      pcnt[p3] := c2 + pcnt[p2 + 1];
+      plf[p3] := p2;
+      prt[p3] := p2 + 1;
       Inc(p2, 2);
     end
     else
     begin
-      Nodes[p3].Cnt := Nodes[p1].Cnt + Nodes[p2].Cnt;
-      Nodes[p3].Left := p1;
-      Nodes[p3].Right := p2;
+      pcnt[p3] := c1 + c2;
+      plf[p3] := p1;
+      prt[p3] := p2;
       Inc(p1); Inc(p2);
     end;
     Inc(p3);
   end;
-  Nodes[p2].Bits := 0;
-  Nodes[p2].Code := 0;
-  i := p2;
-  while i >= b + 2 do
+  NBits[p2] := 0;
+  NCode[p2] := 0;
+  for i := p2 downto b + 2 do
   begin
-    Nodes[Nodes[i].Left].Bits := Nodes[i].Bits + 1;
-    Nodes[Nodes[i].Left].Code := Nodes[i].Code;
-    Nodes[Nodes[i].Right].Bits := Nodes[i].Bits + 1;
-    Nodes[Nodes[i].Right].Code := Nodes[i].Code + (LongWord(1) shl Nodes[i].Bits);
-    Dec(i);
+    bb := NBits[i];
+    code := NCode[i];
+    NBits[plf[i]] := bb + 1;
+    NCode[plf[i]] := code;
+    NBits[prt[i]] := bb + 1;
+    NCode[prt[i]] := code + (LongWord(1) shl bb);
   end;
   for i := 0 to b - 1 do
   begin
-    s := Nodes[i].Left;
-    HufBits[s] := Nodes[i].Bits;
-    HufCode[s] := Nodes[i].Code;
+    k := plf[i];
+    HufBits[k] := NBits[i];
+    HufCode[k] := NCode[i];
   end;
-  // rescale(FACTOR)
+  // rescale(FACTOR); el 6 (rescale_mode 3) es el de todos los bloques salvo el primero
   case RescaleMode of
     0: factor := 2;
     1: factor := 3;
@@ -1957,10 +1989,20 @@ begin
   else
     factor := 0;
   end;
-  if factor <> 0 then
-    for i := 0 to HufN - 1 do
-      if (HufCounter[i] > 1) and (HufCounter[i] < factor) then Dec(HufCounter[i])
-      else Dec(HufCounter[i], HufCounter[i] div factor);
+  if factor = 6 then
+    for i := 0 to b - 1 do
+    begin
+      c := cnt[i];
+      if (c > 1) and (c < 6) then cnt[i] := c - 1
+      else cnt[i] := c - c div 6;
+    end
+  else if factor <> 0 then
+    for i := 0 to b - 1 do
+    begin
+      c := cnt[i];
+      if (c > 1) and (c < factor) then cnt[i] := c - 1
+      else cnt[i] := c - c div factor;
+    end;
 end;
 
 { HuffmanEncoder::encode }
@@ -2109,6 +2151,166 @@ begin
   Sym(256 + dcode * 16 + lcode);
   SymLowerBits(lbits, LongWord(len) - lbase);
   SymLowerBits(dbits, LongWord(dist) - dbase);
+end;
+
+{ ---- Caminos rápidos: el mismo stream que Sym/SymLowerBits/EncodeMatch con el codificador
+  fijo (H = Huffman, A = aritmético). SymLowerBits con n=0 no cambia nada en ninguno de los
+  dos, por eso se saltea. ---- }
+
+procedure TTorCoder.HufNewBlock;
+begin
+  PutBits(HufBits[EOB_CODE], HufCode[EOB_CODE]);
+  PutBits(3, 3);                  // rescale_mode = 3
+  HufBuildTree(3);
+  HufRemainder := HUFBLOCKSIZE;
+end;
+
+{ HufEncode con PutBits expandido }
+procedure TTorCoder.SymH(x: LongWord);
+var
+  n: Integer;
+  c: QWord;
+begin
+  Dec(HufRemainder);
+  if HufRemainder = 0 then HufNewBlock;
+  Inc(HufCounter[x]);
+  n := HufBits[x];
+  c := HufCode[x];
+  BitBuf := BitBuf or (c shl BitCount);
+  Inc(BitCount, n);
+  if BitCount >= 64 then
+  begin
+    PQWord(@Out[O])^ := BitBuf;
+    Inc(O, 8);
+    Dec(BitCount, 64);
+    BitBuf := c shr (n - BitCount);
+  end;
+end;
+
+{ AriEncode con RcEncode expandido }
+procedure TTorCoder.SymA(x: LongWord);
+var
+  r: LongWord;
+begin
+  r := Range shr RANGE_BITS;
+  Low := Low + Int64(LongWord(ACum[x] * r));
+  Range := r * ACnt[x];
+  while Range < (1 shl 24) do
+  begin
+    Range := Range shl 8;
+    ShiftLow;
+  end;
+  Inc(ALive[x]);
+  Dec(ARemainder);
+  if ARemainder = 0 then ARescale;
+end;
+
+{ RcEncode(Mask(x,n), 1, n), n <= 24 }
+procedure TTorCoder.BitsA(n: Integer; x: LongWord);
+var
+  r: LongWord;
+begin
+  r := Range shr n;
+  Low := Low + Int64(LongWord(Mask(x, n) * r));
+  Range := r;
+  while Range < (1 shl 24) do
+  begin
+    Range := Range shl 8;
+    ShiftLow;
+  end;
+end;
+
+{ El literal de LZ77_Coder::encode (REPCHAR si repite el byte de la última distancia) }
+procedure TTorCoder.LitH(Cur: PByte);
+var
+  x: LongWord;
+begin
+  if (PrevDist0 >= 0) and (Cur^ = Cur[-PrevDist0 - 1]) then x := REPCHAR else x := Cur^;
+  SymH(x);
+end;
+
+procedure TTorCoder.LitA(Cur: PByte);
+var
+  x: LongWord;
+begin
+  if (PrevDist0 >= 0) and (Cur^ = Cur[-PrevDist0 - 1]) then x := REPCHAR else x := Cur^;
+  SymA(x);
+end;
+
+{ EncodeMatch: código del par (largo, distancia) y bits extra. Devuelve el símbolo. }
+function MatchCodes(C: TTorCoder; var len: LongInt; dist: LongInt; out lbits, lval, dbits, dval: LongWord): LongWord; inline;
+var
+  dcode, dbase, x, y, lcode: LongWord;
+begin
+  dbase := 0;
+  with C do
+  begin
+    x := LongWord(PrevDist0); PrevDist0 := dist;
+    if LongWord(dist) = x then begin dcode := 0; dbits := 0; end
+    else
+    begin
+      y := LongWord(PrevDist1); PrevDist1 := LongInt(x);
+      if LongWord(dist) = y then begin dcode := 1; dbits := 0; end
+      else
+      begin
+        x := LongWord(PrevDist2); PrevDist2 := LongInt(y);
+        if LongWord(dist) = x then begin dcode := 2; dbits := 0; end
+        else
+        begin
+          y := LongWord(PrevDist3); PrevDist3 := LongInt(x);
+          if LongWord(dist) = y then begin dcode := 3; dbits := 0; end
+          else
+          begin
+            if LongWord(dist) < 512 then dcode := Dc.Code[dist]
+            else if LongWord(dist) < 512 * 256 then dcode := Dc.Code[512 + (LongWord(dist) shr 8)]
+            else dcode := Dc.Code[1024 + (LongWord(dist) shr 16)];
+            dbits := Dc.Extra[dcode];
+            dbase := Dc.Base[dcode];
+            Inc(dcode, REPDIST_CODES);
+          end;
+        end;
+      end;
+    end;
+    if len > 100 then
+    begin
+      if len > IMPOSSIBLE_LEN then
+      begin
+        PrevDist0 := -1;
+        if len <= IMPOSSIBLE_LEN + 4 then len := len - (IMPOSSIBLE_LEN - 100);
+      end
+      else
+        len := len + 4;
+    end;
+  end;
+  if LongWord(len) > 600 then lcode := 15 else lcode := Lc2.Code[len];
+  lbits := Lc2.Extra[lcode];
+  lval := LongWord(len) - Lc2.Base[lcode];
+  dval := LongWord(dist) - dbase;
+  Result := 256 + dcode * 16 + lcode;
+end;
+
+procedure TTorCoder.EncodeMatchH(len, dist: LongInt);
+var
+  s, lbits, lval, dbits, dval: LongWord;
+begin
+  s := MatchCodes(Self, len, dist, lbits, lval, dbits, dval);
+  SymH(s);
+  if lbits <> 0 then PutBits(lbits, Mask(lval, lbits));
+  if dbits <> 0 then PutBits(dbits, Mask(dval, dbits));
+end;
+
+procedure TTorCoder.EncodeMatchA(len, dist: LongInt);
+var
+  s, lbits, lval, dbits, dval: LongWord;
+begin
+  s := MatchCodes(Self, len, dist, lbits, lval, dbits, dval);
+  SymA(s);
+  if lbits <> 0 then
+    if lbits <= 24 then BitsA(lbits, lval)
+    else begin BitsA(15, lval); BitsA(lbits - 15, lval shr 15); end;
+  if dbits <> 0 then
+    if dbits <= 24 then BitsA(dbits, dval)
+    else begin BitsA(15, dval); BitsA(dbits - 15, dval shr 15); end;
 end;
 
 function TTorCoder.Encode(Len: LongInt; Cur: PByte; Dist: LongWord; MinLen: LongInt): Boolean;
@@ -2310,6 +2512,21 @@ type
 
   TEngState = (esFirst, esRead, esDone);
 
+  { Parámetros del match finder para los caminos rápidos (parc_torfast.inc) }
+  TFastMF = record
+    HT: PLongWord;          // tabla del match finder principal
+    Row2, RowUp: SizeInt;   // CachingMatchFinder: largo de fila en LongWords y hash_row_width_up
+    HShift, HMask: LongWord;
+    Bs: PByte;              // buf: las tablas guardan offsets desde acá
+    HT3, HT2: PLongWord;    // Hash3<14,10> (o <16,12> en la combinación 7)
+    // combinación 7: CycledCachingMatchFinder<5> (HT, HShift) y ExactMatchFinder<4>
+    Head: PByte;
+    YRow: SizeInt;
+    XHT: PLongWord;
+    XShift, XMask: LongWord;
+    XRow: SizeInt;
+  end;
+
   TTorEngine = class
   public
     M: TTorMethod;
@@ -2342,6 +2559,17 @@ type
     procedure Start;
     procedure Run(Resuming: Boolean);
     procedure RunOptimal(Resuming: Boolean);
+    procedure RunAny(Resuming: Boolean);
+    // Caminos rápidos (parc_torfast.inc)
+    function FastTables(pp: PByte): Boolean;
+    procedure FastSetup(out F: TFastMF);
+    function FastSpecial(pp: PByte; var SkipRead: Boolean): PByte;
+    procedure RunFast3(Resuming: Boolean);
+    procedure RunFast4(Resuming: Boolean);
+    procedure RunFast5(Resuming: Boolean);
+    procedure RunFast6(Resuming: Boolean);
+    procedure RunFast7H(Resuming: Boolean);
+    procedure RunFast7A(Resuming: Boolean);
     function ReadPart1: Boolean;    // True = hay que esperar datos
     procedure ReadPart2;
     procedure FinishStream;
@@ -2481,8 +2709,7 @@ procedure TTorEngine.Resume;
 begin
   case State of
     esFirst: Start;
-    esRead:
-      if Optimal then RunOptimal(True) else Run(True);
+    esRead: RunAny(True);
   end;
 end;
 
@@ -2513,10 +2740,8 @@ begin
   begin
     StartBlock(P);
     Silence := Buf;
-    RunOptimal(False);
-  end
-  else
-    Run(False);
+  end;
+  RunAny(False);
   Exit;
 finished:
   FinishStream;
@@ -2911,6 +3136,31 @@ blockend:
 finished:
   FinishStream;
 end;
+
+{ ---------------------------------------------------------------------------------------- }
+{ Caminos rápidos                                                                           }
+{ ---------------------------------------------------------------------------------------- }
+
+procedure TTorEngine.RunAny(Resuming: Boolean);
+begin
+  case Combo of
+    3: RunFast3(Resuming);
+    4: RunFast4(Resuming);
+    5: RunFast5(Resuming);
+    6: RunFast6(Resuming);
+    7:
+      case C.Kind of
+        3: RunFast7H(Resuming);
+        4: RunFast7A(Resuming);
+      else
+        Run(Resuming);
+      end;
+  else
+    if Optimal then RunOptimal(Resuming) else Run(Resuming);
+  end;
+end;
+
+{$I parc_torfast.inc}
 
 { ---------------------------------------------------------------------------------------- }
 { Parámetros                                                                                }
