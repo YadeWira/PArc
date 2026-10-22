@@ -138,4 +138,28 @@ for c in 1 2 3 4; do
   done
 done
 
+# Opciones de tor por el archivador: el texto canónico del método conserva todas las opciones
+# (antes -mtor:5:x14:p2:s1:c4:l16 tomaba "x14" como buffer 0x14 y ShowMem recursaba sin fin:
+# rc=139), y un fuzz de combinaciones aleatorias tor:N:... comprime, verifica y extrae igual.
+echo; echo "== opciones tor en parc"
+PARC=$REPO/build/linux64/parc
+if [ -x "$PARC" ]; then
+  head -c 300000 "$CORPUS/empearth.exe" > "$WORK/opt.bin"
+  for m in tor:5:x14:p2:s1:c4:l16 tor:x14 tor:5:l16 tor:7:ah1mb:al8 4x4:b64kb:tor:5:l8:u1; do
+    rm -f "$WORK/opt.parc"
+    if "$PARC" a -m$m "$WORK/opt.parc" "$WORK/opt.bin" --no-progress >/dev/null 2>&1 &&
+       "$PARC" t "$WORK/opt.parc" --no-progress >/dev/null 2>&1 &&
+       "$PARC" lb "$WORK/opt.parc" 2>/dev/null | grep -q "tor"; then echo "  ok   $m"
+    else echo "  FAIL $m"; nf=$((nf+1)); fi
+  done
+  # l16 tiene que llegar al codificador (antes se perdía y daba lo mismo que tor:5)
+  "$PARC" a -mtor:5 "$WORK/o5.parc" "$WORK/opt.bin" --no-progress >/dev/null 2>&1
+  "$PARC" a -mtor:5:l16 "$WORK/o16.parc" "$WORK/opt.bin" --no-progress >/dev/null 2>&1
+  if "$PARC" lb "$WORK/o16.parc" 2>/dev/null | grep -q "tor:.*:l16"; then echo "  ok   l16 en el método guardado"
+  else echo "  FAIL l16 no quedó en el método guardado"; nf=$((nf+1)); fi
+  if python3 tests/tor_optfuzz.py "$PARC" "${TOR_OPTFUZZ_N:-150}" 1; then :; else nf=$((nf+1)); fi
+else
+  echo "  (sin $PARC: se saltea)"
+fi
+
 [ "$nf" -eq 0 ]

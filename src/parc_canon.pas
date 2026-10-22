@@ -21,7 +21,7 @@ function LimitAndCanonize(const Method: string; BlockSize: Int64): string;
 
 implementation
 
-uses SysUtils, Math, parc_methods;
+uses SysUtils, Math, parc_methods, parc_torenc;
 
 const
   KB = 1024; MB = 1024*1024; GB = Int64(1024)*1024*1024;
@@ -36,8 +36,12 @@ function ShowMem(Mem: Int64): string;
   begin
     if (Mem mod Val = 0) or (NextVal > 0) and (Mem div NextVal >= 4096) then
       Result := IntToStr((Mem + Val div 2) div Val) + Str
+    else if Val > KB then
+      Result := Fmt(KB, 0, 'kb')
+    else if Val = KB then
+      Result := Fmt(1, 0, 'b')   // ni kb exactos: en bytes (antes recursión infinita)
     else
-      Result := Fmt(KB, 0, 'kb');
+      Result := IntToStr(Mem) + 'b';
   end;
 begin
   if Mem = 0 then Exit('0b');
@@ -145,6 +149,7 @@ var
     LZP, A, C3, Ext: Boolean;
     Interno: string;
     I: Integer;
+    TM, TD: TTorMethod;
 
     function Pr(N: Integer): string;
     begin
@@ -328,38 +333,35 @@ begin
       Exit;
     end;
 
-    { --- tornado (C_Tornado.cpp). Defaults = std_Tornado_method[5]; el número
-          se imprime sólo si <> de default_Tornado_method (5).
-          SetDictionary: si mem < buffer, hashsize = 4*min(hs/4, roundup2(mem)). }
+    { --- tornado (C_Tornado.cpp): TORNADO_METHOD::ShowCompressionMethod, con todos los
+          parámetros que difieren de std_Tornado_method[m.number] (antes acá solo quedaban
+          número, buffer, h y c: el resto -l, p, s, x, u, t, ah, al, fb- se perdía, y una opción
+          desconocida se tomaba como buffer). El número se imprime sólo si <> 5.
+          SetDictionary: si mem < buffer, hashsize = 4*min(hs/4, roundup2(mem)).
+          Si los parámetros no son válidos queda igual (el codificador da el error). }
     if Name = 'tor' then
     begin
-      Num9 := 5; BS := StdBuf[5]; HS := StdHS[5]; Enc := 4;
-      C3 := False;
-      for J := 1 to High(Parts) do
+      if not TorParseWithDefaults(Parts, TM, TD) then Exit(S);
+      BS := TM.Buffer; HS := TM.HashSize;
+      if BS > Limit then
       begin
-        L := LowerCase(Parts[J]);
-        if (L <> '') and (L[1] in ['0'..'9']) then
-          if Num(L, -1) = StrToInt64Def(L, -2) then
-          begin Num9 := Num(L, 5); BS := StdBuf[Num9]; HS := StdHS[Num9]; Enc := StdEnc[Num9]; end
-          else BS := ParseMem(L, BS)
-        else if Copy(L,1,1) = 'c' then begin Enc := Num(Copy(L,2,MaxInt), Enc); C3 := True end
-        else if Copy(L,1,1) = 'h' then HS := ParseMem(Copy(L,2,MaxInt), HS)
-        else if BS = StdBuf[Num9] then BS := ParseMem(L, BS);
-      end;
-      if Num9 > High(StdBuf) then Num9 := High(StdBuf);
-      if BS = 0 then BS := StdBuf[Num9];
-      if HS = 0 then HS := StdHS[Num9];
-      if (BS > Limit) then
-      begin
-        if Limit < BS then
-          HS := 4 * Min(Int64(HS div 4), RoundUpPow2(Limit));  { PtrVal=4, 32-bit }
+        HS := 4 * Min(Int64(HS div 4), RoundUpPow2(Limit));  { PtrVal=4, 32-bit }
         BS := Limit;
       end;
       Result := 'tor';
-      if Num9 <> default_Tornado_method then Result := Result + (':' + IntToStr(Num9));
+      if TM.Number <> default_Tornado_method then Result := Result + (':' + IntToStr(TM.Number));
       Result := Result + (':' + ShowMem(BS));
-      if HS <> StdHS[Num9] then Result := Result + (':h' + ShowMem(HS));
-      if C3 and (Enc <> StdEnc[Num9]) then Result := Result + (':c' + IntToStr(Enc));
+      if HS <> TD.HashSize then Result := Result + (':h' + ShowMem(HS));
+      if TM.HashRowWidth <> TD.HashRowWidth then Result := Result + (':l' + IntToStr(TM.HashRowWidth));
+      if TM.EncodingMethod <> TD.EncodingMethod then Result := Result + (':c' + IntToStr(TM.EncodingMethod));
+      if TM.MatchParser <> TD.MatchParser then Result := Result + (':p' + IntToStr(TM.MatchParser));
+      if TM.MatchFinder <> TD.MatchFinder then Result := Result + (':x' + IntToStr(TM.MatchFinder));
+      if TM.UpdateStep <> TD.UpdateStep then Result := Result + (':u' + IntToStr(TM.UpdateStep));
+      if TM.FindTables <> TD.FindTables then Result := Result + (':t' + IntToStr(Ord(TM.FindTables)));
+      if TM.AuxHashSize <> TD.AuxHashSize then Result := Result + (':ah' + ShowMem(TM.AuxHashSize));
+      if TM.AuxHashRowWidth <> TD.AuxHashRowWidth then Result := Result + (':al' + IntToStr(TM.AuxHashRowWidth));
+      if TM.Hash3 <> TD.Hash3 then Result := Result + (':s' + IntToStr(TM.Hash3));
+      if TM.FastBytes <> TD.FastBytes then Result := Result + (':fb' + IntToStr(TM.FastBytes));
       Exit;
     end;
 

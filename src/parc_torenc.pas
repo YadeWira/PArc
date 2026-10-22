@@ -57,6 +57,9 @@ type
   soportado (M queda como lo dejó parse_TORNADO, antes de los ajustes de tor_compress0),
   o el motivo del rechazo. }
 function ParseTorEncParams(const Params: TStringArray; out M: TTorMethod): string;
+{ Para el texto canónico de la etapa: M = el método parseado (ParseTorEncParams), Def = los
+  valores por defecto de su número (std_Tornado_method[m.number]). False si no es válido. }
+function TorParseWithDefaults(const Params: TStringArray; out M, Def: TTorMethod): Boolean;
 { True si la etapa ("tor:..") se puede comprimir. }
 function TorEncAvailable(const Stage: string): Boolean;
 { TORNADO_METHOD::GetDictionary: m.buffer tal como se parseó (es el BlockSize que usa 4x4
@@ -3296,6 +3299,13 @@ begin
     if not ok then Exit('invalid parameter "' + p + '"');
   end;
   Result := ValidateMethod(M, Combo);
+end;
+
+function TorParseWithDefaults(const Params: TStringArray; out M, Def: TTorMethod): Boolean;
+begin
+  Result := ParseTorEncParams(Params, M) = '';
+  if Result and (M.Number >= 0) and (M.Number <= High(StdMethods)) then Def := StdMethods[M.Number]
+  else Def := StdMethods[DEFAULT_METHOD];
 end;
 
 function TorEncAvailable(const Stage: string): Boolean;
