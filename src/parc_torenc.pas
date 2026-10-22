@@ -2621,6 +2621,12 @@ type
     XHT: PLongWord;
     XShift, XMask: LongWord;
     XRow: SizeInt;
+    YN: LongWord;           // N del CycledCachingMatchFinder principal (5, o 7 en la 8)
+    // combinación 8: el auxiliar es CycledCachingMatchFinder<4>
+    ZHT: PLongWord;
+    ZHead: PByte;
+    ZShift: LongWord;
+    ZRow: SizeInt;
   end;
 
   TTorEngine = class
@@ -2678,6 +2684,8 @@ type
     procedure RunFast6(Resuming: Boolean);
     procedure RunFast7H(Resuming: Boolean);
     procedure RunFast7A(Resuming: Boolean);
+    procedure RunFast8H(Resuming: Boolean);
+    procedure RunFast8A(Resuming: Boolean);
     function ReadPart1: Boolean;    // True = hay que esperar datos
     procedure ReadPart2;
     procedure FinishStream;
@@ -3317,6 +3325,13 @@ begin
       case C.Kind of
         3: RunFast7H(Resuming);
         4: RunFast7A(Resuming);
+      else
+        Run(Resuming);
+      end;
+    8:
+      case C.Kind of
+        3: RunFast8H(Resuming);
+        4: RunFast8A(Resuming);
       else
         Run(Resuming);
       end;
