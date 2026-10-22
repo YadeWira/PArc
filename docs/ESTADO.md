@@ -94,6 +94,16 @@ What makes this possible (all inside `.parc`; the codecs are unchanged):
   Pascal fallback (i386, or `-dPARC_NOASM`). The stream tail and truncated/corrupt input take
   the old path, and `tests/test_lzma_diff` checks that both decoders give identical output and
   errors on valid, truncated and corrupted streams.
+- **Tornado encoder**: every `tor:1`…`tor:16` combination runs a loop specialized for its
+  match finder and coder (no virtual calls), with the same stream as FreeArc. On x86-64,
+  `tor:1`…`tor:4` spans are assembler, `tor:5`/`tor:6` split match finding and arithmetic
+  coding into two assembler passes, the cycled match finders (`tor:7`…`tor:10`) scan their
+  rows with SSE2, and the optimal parser (`tor:11`…`tor:16`) prefetches like FreeArc;
+  `-dPARC_NOASM`/i386 use Pascal loops. `4x4:tor` reuses its engines between blocks, and the
+  decoder has fast loops for `c1`/`c2` too. All `tor:` options (`l`, `p`, `s`, `x`, `u`, `t`,
+  `ah`, `al`, `fb`) now reach the encoder (they used to be dropped from the stored method).
+  512 MB of TILIN, one thread, compress CPU: `tor:1` 5.4 → 1.8 s (FreeArc 2.7), `tor:3`
+  6.4 → 5.0 s (6.5), `tor:5` 18.4 → 14.4 s (23.4), `tor:6` 23.9 → 20.4 s (40.4).
 - **Automatic solid blocks**: without `-s`, 64 MB for `-m1`…`-m3` and 32 MB for `-m4`…`-m9`/`-mx`. On Silesia this improved compression time and ratio at every level; small archives still use one block. `-mxx` keeps a single block for ratio.
 - **GRZip adaptive LZP**: BWT blocks of 4 MB or more use `l64/h22` (fewer, longer matches); small blocks keep the fast LZP parameters. The choice is stored in each block's mode, so old decoders remain compatible. This makes `-m4` 1.2–1.4% smaller on text and many small files.
 - **Stronger and faster presets** than FreeArc's at the same level:
