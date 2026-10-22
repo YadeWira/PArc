@@ -333,12 +333,18 @@ begin
   end;
 end;
 
+const
+  { Trabajos de 4x4 entregados que se guardan para reusar sus buffers: en régimen se entrega
+    uno y se lee el siguiente, así que alcanzan pocos. }
+  T4X4_MAXFREE = 4;
+
 type
   { Un bloque de 4x4: se descomprime entero en memoria con el método interno. }
   T4x4Job = class(TParallelJob)
   public
     Inner: string;
     InBuf: TBytes;
+    InLen: SizeInt;         // bytes válidos de InBuf (un buffer reciclado puede ser más largo)
     Stored: Boolean;
     procedure Process; override;
   end;
@@ -350,10 +356,14 @@ type
   private
     FInner: string;
     FStarted: Boolean;
+    FFreeJobs: array of TParallelJob;   // trabajos ya entregados, con buffers para reciclar
+    FNumFree: Integer;
   protected
     function ReadJob: TParallelJob; override;
+    procedure ReleaseJob(Job: TParallelJob); override;
   public
     constructor Create(ASource: TInStage; const AInner: string);
+    destructor Destroy; override;
   end;
 
 var
@@ -365,22 +375,47 @@ begin
     OutBuf := InBuf
   else
   begin
-    SetLength(OutBuf, OutSize);
+    // Buffer reciclado: solo se rehace si no alcanza (SetLength llenaría de ceros lo nuevo)
+    if Length(OutBuf) < OutSize then
+    begin
+      OutBuf := nil;
+      SetLength(OutBuf, OutSize);
+    end;
     // Los bloques de 4x4 son independientes: si uno está dañado, se entregan ceros de su
     // tamaño original (su CRC fallará aparte) y los demás salen bien (como FreeArc, que
     // descomprime cada bloque con su propio DeCompressMem)
     try
-      DecompressBlockMem(Inner, PByte(InBuf), Length(InBuf), PByte(OutBuf), OutSize);
+      DecompressBlockMem(Inner, PByte(InBuf), InLen, PByte(OutBuf), OutSize);
     except
       on E: EArcCorrupt do
       begin
-        FillChar(OutBuf[0], OutSize, 0);
+        if OutSize > 0 then FillChar(OutBuf[0], OutSize, 0);
         if InterlockedExchange(FourBlockWarned, 1) = 0 then
           ErrLn('Warning: damaged 4x4 block (' + E.Message + '); zeros are returned and the remaining blocks continue');
       end;
     end;
   end;
-  InBuf := nil;
+end;
+
+destructor T4x4Stage.Destroy;
+var
+  i: Integer;
+begin
+  inherited Destroy;
+  for i := 0 to FNumFree - 1 do FFreeJobs[i].Free;
+end;
+
+{ Un bloque ya entregado se guarda (hasta uno por trabajo en vuelo) para reusar sus buffers. }
+procedure T4x4Stage.ReleaseJob(Job: TParallelJob);
+begin
+  if T4x4Job(Job).Stored or (FNumFree >= T4X4_MAXFREE) then
+  begin
+    Job.Free;
+    Exit;
+  end;
+  if FNumFree >= Length(FFreeJobs) then SetLength(FFreeJobs, FNumFree + 8);
+  FFreeJobs[FNumFree] := Job;
+  Inc(FNumFree);
 end;
 
 constructor T4x4Stage.Create(ASource: TInStage; const AInner: string);
@@ -409,12 +444,33 @@ begin
   OutSize := LongInt(LongWord(Hdr[0]) or (LongWord(Hdr[1]) shl 8) or (LongWord(Hdr[2]) shl 16) or (LongWord(Hdr[3]) shl 24));
   InSize := Source.ReadU32;
   if (InSize > $7FFFFFFF) or (OutSize < -1) then Corrupt('4x4: invalid block size');
-  Job := T4x4Job.Create;
+  if FNumFree > 0 then
+  begin
+    Dec(FNumFree);
+    Job := T4x4Job(FFreeJobs[FNumFree]);
+    FFreeJobs[FNumFree] := nil;
+    Job.ResetForReuse;
+  end
+  else
+    Job := T4x4Job.Create;
   try
     Job.Inner := FInner;
     Job.Stored := OutSize = -1;
-    if Job.Stored then Job.OutSize := InSize else Job.OutSize := OutSize;
-    SetLength(Job.InBuf, InSize);
+    if Job.Stored then
+    begin
+      // Guardado: InBuf se entrega tal cual como OutBuf; no comparte nada con el uso anterior
+      Job.OutSize := InSize;
+      Job.OutBuf := nil;
+      Job.InBuf := nil;
+    end
+    else
+      Job.OutSize := OutSize;
+    if SizeInt(Length(Job.InBuf)) < SizeInt(InSize) then
+    begin
+      Job.InBuf := nil;
+      SetLength(Job.InBuf, InSize);
+    end;
+    Job.InLen := InSize;
     if InSize > 0 then Source.ReadExact(@Job.InBuf[0], InSize);
   except
     Job.Free;

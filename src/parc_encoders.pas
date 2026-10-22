@@ -68,6 +68,8 @@ type
     FPool: TObject;         // TJobPool
     FQueue: array of TObject;   // trabajos en vuelo, en orden
     FHead, FCount: Integer;
+    FFree: array of TBytes;     // buffers de entrada ya escritos, para reciclar (sin ceros ni faltas de página)
+    FNumFree: Integer;
     procedure SubmitBlock;
     procedure WriteOldest;
   protected
@@ -133,7 +135,8 @@ type
   T4x4EncJob = class(TParallelJob)
   public
     Inner: string;
-    InBuf: TBytes;
+    InBuf: TBytes;          // el bloque del escritor (se le devuelve para reciclarlo)
+    InLen: SizeInt;         // bytes válidos de InBuf (un buffer reciclado puede ser más largo)
     OrigSize: SizeInt;
     Stored: Boolean;
     MinOrder0Ratio: Double;
@@ -161,23 +164,22 @@ begin
   LzmaSingleThreadHere := True;   // 4x4 ya reparte los bloques entre hilos
   // Como _4x4MTCompressor::Process: un bloque de >= 32 KB casi aleatorio (order-0 >= r%) ni
   // se intenta; y si no comprime, va guardado tal cual
-  if (MinOrder0Ratio <> 0) and (Length(InBuf) >= 32 * 1024) and
-     (Order0Ratio(PByte(InBuf), Length(InBuf)) >= MinOrder0Ratio) then
+  if (MinOrder0Ratio <> 0) and (InLen >= 32 * 1024) and
+     (Order0Ratio(PByte(InBuf), InLen) >= MinOrder0Ratio) then
     Stored := True
   else if StageName(Inner) = 'lz4' then
     // LZ4_METHOD::DeCompressMem: versión + un solo bloque LZ4 (no el stream por bloques)
-    Stored := not Lz4EncodeMem(Inner.Split([':']), PByte(InBuf), Length(InBuf), OutBuf)
+    Stored := not Lz4EncodeMem(Inner.Split([':']), PByte(InBuf), InLen, OutBuf)
   else if StageName(Inner) = 'tor' then
     // TORNADO_METHOD::DeCompressMem con compress_all_at_once=1; OutputSize = InSize
-    Stored := not TorEncodeMem(Inner.Split([':']), PByte(InBuf), Length(InBuf), Length(InBuf), OutBuf)
+    Stored := not TorEncodeMem(Inner.Split([':']), PByte(InBuf), InLen, InLen, OutBuf)
   else
   begin
-    OutBuf := CompressMem(Inner, PByte(InBuf), Length(InBuf));
-    Stored := Length(OutBuf) >= Length(InBuf);
+    OutBuf := CompressMem(Inner, PByte(InBuf), InLen);
+    Stored := Length(OutBuf) >= InLen;
   end;
-  if Stored then OutBuf := InBuf;
-  OutSize := Length(OutBuf);
-  InBuf := nil;
+  // Guardado: se escribe InBuf tal cual (OutBuf no se usa)
+  if Stored then OutSize := InLen else OutSize := Length(OutBuf);
 end;
 
 { T4x4EncStage }
@@ -220,7 +222,13 @@ begin
     // Encabezado del bloque: tamaño original (-1 = guardado) y largo de los datos
     if Job.Stored then EmitU32($FFFFFFFF) else EmitU32(LongWord(Job.OrigSize));
     EmitU32(LongWord(Job.OutSize));
-    Emit(PByte(Job.OutBuf), Job.OutSize);
+    if Job.Stored then Emit(PByte(Job.InBuf), Job.OutSize)
+    else Emit(PByte(Job.OutBuf), Job.OutSize);
+    // Ya escrito: el buffer de entrada vuelve al escritor para el próximo bloque
+    if FNumFree >= Length(FFree) then SetLength(FFree, FNumFree + 4);
+    FFree[FNumFree] := Job.InBuf;
+    Inc(FNumFree);
+    Job.InBuf := nil;
   finally
     Job.Free;
   end;
@@ -234,8 +242,17 @@ begin
   if FCount = Length(FQueue) then WriteOldest;
   Job := T4x4EncJob.Create;
   Job.Inner := FInner;
-  Job.InBuf := Copy(FCur, 0, FLen);
+  // Sin copiar: el bloque lleno pasa al trabajo y se sigue llenando un buffer reciclado
+  Job.InBuf := FCur;
+  Job.InLen := FLen;
   Job.OrigSize := FLen;
+  FCur := nil;
+  if FNumFree > 0 then
+  begin
+    Dec(FNumFree);
+    FCur := FFree[FNumFree];
+    FFree[FNumFree] := nil;
+  end;
   Job.MinOrder0Ratio := MinOrder0Ratio;
   FQueue[(FHead + FCount) mod Length(FQueue)] := Job;
   Inc(FCount);
@@ -247,9 +264,9 @@ procedure T4x4EncStage.DoWrite(Buf: PByte; Count: SizeInt);
 var
   n: SizeInt;
 begin
-  if Length(FCur) = 0 then SetLength(FCur, FBlockSize);
   while Count > 0 do
   begin
+    if Length(FCur) = 0 then SetLength(FCur, FBlockSize);
     n := FBlockSize - FLen;
     if n > Count then n := Count;
     Move(Buf^, FCur[FLen], n);
