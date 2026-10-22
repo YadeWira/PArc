@@ -1031,6 +1031,519 @@ end;
 
 {$ENDIF}
 
+{ ---- combo 4 (tor:4): CachingMatchFinder<4> + Huffman, greedy ----
+  Como tor:3: en x86_64 cada tramo va entero en ensamblador (Tor4Span), con el mismo
+  codificador que Tor3Span y CFind4/CUpdate4 en lugar de MatchFinder2. La búsqueda usa casi
+  todos los registros: el estado del codificador se guarda en el registro de estado mientras
+  tanto. La posición que cierra un bloque de Huffman va por el camino Pascal; con PARC_NOASM o
+  en otras CPU, la plantilla de siempre. Mismo stream. }
+
+{$IF defined(CPUX86_64) and not defined(PARC_NOASM)}
+
+type
+  { Estado del tramo de RunFast4 (Tor4Span) }
+  TTor4State = record
+    pp, lim, op, bs, mend: PByte;
+    ht: PLongWord;
+    co: TTorCoder;
+    bb: QWord;
+    bc, rem: LongInt;
+    hs: LongWord;
+    row2, rowup: SizeInt;               // largo de fila en LongWords y hash_row_width_up
+    step: LongWord;                     // update_step
+    dcc, l2c: PByte;
+    dce, dcb, l2e, l2b: PLongWord;
+    len, dist, dbits, dval: LongWord;
+    q: PByte;
+  end;
+
+{ r15 el codificador, r14 salida, r13 lim, r12 pp, rbx buf, r11 bitbuf, r10d bitcount,
+  r9 el estado, r8 el hash, edi HufRemainder. }
+procedure Tor4Span(var st: TTor4State);
+var
+  pst: Pointer;
+begin
+  pst := @st;
+  asm
+    movq    pst, %r9
+    movq    TTor4State.ht(%r9), %r8
+    movq    TTor4State.bs(%r9), %rbx
+    movq    TTor4State.pp(%r9), %r12
+  .Lt4_reload:
+    movq    TTor4State.co(%r9), %r15
+    movq    TTor4State.op(%r9), %r14
+    movq    TTor4State.lim(%r9), %r13
+    movq    TTor4State.bb(%r9), %r11
+    movl    TTor4State.bc(%r9), %r10d
+    movl    TTor4State.rem(%r9), %edi
+  .Lt4_loop:
+    cmpq    %r13, %r12
+    jae     .Lt4_done
+    cmpl    $1, %edi
+    je      .Lt4_done
+    // el codificador al registro de estado mientras dura la búsqueda
+    movq    %r14, TTor4State.op(%r9)
+    movq    %r11, TTor4State.bb(%r9)
+    movl    %r10d, TTor4State.bc(%r9)
+    movl    %edi, TTor4State.rem(%r9)
+    // prefetch de la fila de p+1
+    movl    TTor4State.hs(%r9), %ecx
+    movl    1(%r12), %eax
+    imull   $123456791, %eax, %eax
+    shrl    %cl, %eax
+    imulq   TTor4State.row2(%r9), %rax
+    prefetcht0 (%r8,%rax,4)
+    // ---- CachingMatchFinder<4>::find_matchlen ----
+    // rsi fila, rdx fin de fila, eax x1, ecx v1, r13d clave, r10d máscara, r11d nivel,
+    // rdi qq, r14/r15 auxiliares
+    movl    (%r12), %eax
+    imull   $123456791, %eax, %eax
+    shrl    %cl, %eax
+    imulq   TTor4State.row2(%r9), %rax
+    leaq    (%r8,%rax,4), %rsi
+    movq    TTor4State.row2(%r9), %rdx
+    leaq    (%rsi,%rdx,4), %rdx
+    movq    %r12, %rax
+    subq    %rbx, %rax
+    movl    3(%r12), %ecx
+    movl    %ecx, %r13d
+    movl    $255, %r10d
+    xorl    %r11d, %r11d
+    xorl    %edi, %edi
+  .Lt4_scan:
+    cmpq    %rdx, %rsi
+    je      .Lt4_lvl
+    movl    %eax, %r14d
+    movl    (%rsi), %eax
+    movl    %r14d, (%rsi)
+    movl    %ecx, %r15d
+    movl    4(%rsi), %ecx
+    movl    %r15d, 4(%rsi)
+    addq    $8, %rsi
+    movl    %ecx, %r14d
+    xorl    %r13d, %r14d                 // t
+    testl   %r10d, %r14d
+    jnz     .Lt4_scan
+    leaq    (%rbx,%rax), %rdi            // qq
+    testl   %r14d, %r14d
+    jz      .Lt4_len7
+    testl   $0xFF00, %r14d
+    jz      .Lt4_s2
+    movl    $1, %r11d
+    movl    $0xFFFF, %r10d
+    jmp     .Lt4_scan
+  .Lt4_s2:
+    testl   $0xFF0000, %r14d
+    jz      .Lt4_s3
+    movl    $2, %r11d
+    movl    $0xFFFFFF, %r10d
+    jmp     .Lt4_scan
+  .Lt4_s3:
+    movl    $3, %r11d
+    movl    $0xFFFFFFFF, %r10d
+    jmp     .Lt4_scan
+    // accept_match(4..6): edx = largo (0 si no se acepta)
+  .Lt4_lvl:
+    movl    $3, %edx
+    testl   %r11d, %r11d
+    jz      .Lt4_found
+    xorl    %edx, %edx
+    cmpq    TTor4State.mend(%r9), %r12
+    ja      .Lt4_found
+    movl    (%r12), %eax
+    cmpl    (%rdi), %eax
+    jne     .Lt4_found
+    movq    %r12, %rax
+    subq    %rdi, %rax                   // p - qq
+    cmpl    $1, %r11d
+    jne     .Lt4_a5
+    cmpq    $49152, %rax                 // 48 kb
+    jae     .Lt4_found
+    movl    $4, %edx
+    jmp     .Lt4_found
+  .Lt4_a5:
+    cmpl    $2, %r11d
+    jne     .Lt4_a6
+    cmpq    $196608, %rax                // 192 kb
+    jae     .Lt4_found
+    movzbl  4(%r12), %eax
+    cmpb    4(%rdi), %al
+    jne     .Lt4_found
+    movl    $5, %edx
+    jmp     .Lt4_found
+  .Lt4_a6:
+    cmpq    $1048576, %rax               // 1 mb
+    jae     .Lt4_found
+    movzwl  4(%r12), %eax
+    cmpw    4(%rdi), %ax
+    jne     .Lt4_found
+    movl    $6, %edx
+    jmp     .Lt4_found
+    // len7: el match más largo del resto de la fila (r10d = len, rdi = q)
+  .Lt4_len7:
+    movl    $3, %r10d
+    movl    (%r12), %r14d
+    cmpl    (%rdi), %r14d
+    jne     .Lt4_l7scan
+    pushq   %rdi
+    pushq   %rdx
+    movq    %rdi, %rdx
+    call    .Lt4_ext                     // r10d := largo contra rdx
+    popq    %rdx
+    popq    %rdi
+  .Lt4_l7scan:
+    cmpq    %rdx, %rsi
+    je      .Lt4_l7end
+    movl    %eax, %r14d
+    movl    (%rsi), %eax
+    movl    %r14d, (%rsi)
+    movl    %ecx, %r15d
+    movl    4(%rsi), %ecx
+    movl    %r15d, 4(%rsi)
+    addq    $8, %rsi
+    cmpl    %r13d, %ecx
+    jne     .Lt4_l7scan
+    leaq    (%rbx,%rax), %r15            // q1
+    movl    %r10d, %r14d
+    movzbl  (%r12,%r14), %r11d
+    cmpb    (%r15,%r14), %r11b
+    jne     .Lt4_l7scan
+    movl    (%r12), %r11d
+    cmpl    (%r15), %r11d
+    jne     .Lt4_l7scan
+    pushq   %r10
+    pushq   %rdx
+    movq    %r15, %rdx
+    movl    $3, %r10d
+    call    .Lt4_ext                     // len1
+    popq    %rdx
+    popq    %r11                         // len
+    cmpl    %r11d, %r10d
+    jbe     .Lt4_l7keep
+    movq    %r15, %rdi                   // len1 > len: q := q1
+    jmp     .Lt4_l7scan
+  .Lt4_l7keep:
+    movl    %r11d, %r10d
+    jmp     .Lt4_l7scan
+  .Lt4_l7end:
+    movl    %r10d, %edx
+  .Lt4_found:
+    movq    %rdi, TTor4State.q(%r9)
+    movl    %edx, TTor4State.len(%r9)
+    // el codificador vuelve a los registros
+    movq    TTor4State.co(%r9), %r15
+    movq    TTor4State.op(%r9), %r14
+    movq    TTor4State.lim(%r9), %r13
+    movq    TTor4State.bb(%r9), %r11
+    movl    TTor4State.bc(%r9), %r10d
+    movl    TTor4State.rem(%r9), %edi
+    cmpl    $4, %edx
+    jae     .Lt4_match
+
+    // ---- literal (REPCHAR si repite el byte de la última distancia) ----
+    movzbl  (%r12), %eax
+    movslq  TTorCoder.PrevDist0(%r15), %rdx
+    testq   %rdx, %rdx
+    js      .Lt4_lit1
+    notq    %rdx                         // -(PrevDist0+1)
+    movzbl  (%r12,%rdx), %edx
+    cmpl    %eax, %edx
+    jne     .Lt4_lit1
+    movl    $833, %eax                   // REPCHAR
+  .Lt4_lit1:
+    call    .Lt4_sym
+    incq    %r12
+    jmp     .Lt4_loop
+
+    // ---- match: LZ77_Coder::encode_match(len-4, pp-q-1) ----
+  .Lt4_match:
+    // prefetch de la fila de p+len (la próxima búsqueda)
+    movl    (%r12,%rdx), %eax
+    imull   $123456791, %eax, %eax
+    movl    TTor4State.hs(%r9), %ecx
+    shrl    %cl, %eax
+    imulq   TTor4State.row2(%r9), %rax
+    prefetcht0 (%r8,%rax,4)
+    movq    %r12, %rax
+    subq    TTor4State.q(%r9), %rax
+    decl    %eax
+    movl    %eax, TTor4State.dist(%r9)
+    movl    $0, TTor4State.dbits(%r9)
+    movl    TTorCoder.PrevDist0(%r15), %ecx
+    movl    %eax, TTorCoder.PrevDist0(%r15)
+    xorl    %esi, %esi                   // dcode
+    cmpl    %ecx, %eax
+    je      .Lt4_dc
+    movl    TTorCoder.PrevDist1(%r15), %edx
+    movl    %ecx, TTorCoder.PrevDist1(%r15)
+    incl    %esi
+    cmpl    %edx, %eax
+    je      .Lt4_dc
+    movl    TTorCoder.PrevDist2(%r15), %ecx
+    movl    %edx, TTorCoder.PrevDist2(%r15)
+    incl    %esi
+    cmpl    %ecx, %eax
+    je      .Lt4_dc
+    movl    TTorCoder.PrevDist3(%r15), %edx
+    movl    %ecx, TTorCoder.PrevDist3(%r15)
+    incl    %esi
+    cmpl    %edx, %eax
+    je      .Lt4_dc
+    movq    TTor4State.dcc(%r9), %rdx
+    cmpl    $512, %eax
+    jae     .Lt4_d1
+    movzbl  (%rdx,%rax), %esi
+    jmp     .Lt4_d3
+  .Lt4_d1:
+    cmpl    $131072, %eax
+    jae     .Lt4_d2
+    movl    %eax, %ecx
+    shrl    $8, %ecx
+    movzbl  512(%rdx,%rcx), %esi
+    jmp     .Lt4_d3
+  .Lt4_d2:
+    movl    %eax, %ecx
+    shrl    $16, %ecx
+    movzbl  1024(%rdx,%rcx), %esi
+  .Lt4_d3:
+    movq    TTor4State.dce(%r9), %rdx
+    movl    (%rdx,%rsi,4), %ecx
+    movl    %ecx, TTor4State.dbits(%r9)
+    movq    TTor4State.dcb(%r9), %rdx
+    subl    (%rdx,%rsi,4), %eax
+    movl    %eax, TTor4State.dval(%r9)
+    addl    $4, %esi
+  .Lt4_dc:
+    movl    TTor4State.len(%r9), %edx
+    subl    $4, %edx
+    cmpl    $100, %edx
+    jbe     .Lt4_l0
+    addl    $4, %edx
+  .Lt4_l0:
+    movl    $15, %ecx
+    cmpl    $600, %edx
+    ja      .Lt4_l1
+    movq    TTor4State.l2c(%r9), %rax
+    movzbl  (%rax,%rdx), %ecx
+  .Lt4_l1:
+    pushq   %rcx
+    pushq   %rdx
+    movl    %esi, %eax
+    shll    $4, %eax
+    addl    %ecx, %eax
+    addl    $256, %eax
+    call    .Lt4_sym
+    popq    %rdx
+    popq    %rcx
+    movq    TTor4State.l2e(%r9), %rax
+    movl    (%rax,%rcx,4), %esi
+    testl   %esi, %esi
+    jz      .Lt4_l2
+    movq    TTor4State.l2b(%r9), %rax
+    subl    (%rax,%rcx,4), %edx
+    movl    %esi, %ecx
+    movl    $1, %eax
+    shll    %cl, %eax
+    decl    %eax
+    andl    %edx, %eax
+    call    .Lt4_put
+  .Lt4_l2:
+    movl    TTor4State.dbits(%r9), %esi
+    testl   %esi, %esi
+    jz      .Lt4_upd
+    movl    %esi, %ecx
+    movl    $1, %eax
+    shll    %cl, %eax
+    decl    %eax
+    andl    TTor4State.dval(%r9), %eax
+    call    .Lt4_put
+    // ---- CachingMatchFinder<4>::update_hash(p, len, step) ----
+  .Lt4_upd:
+    movl    TTor4State.len(%r9), %eax
+    leaq    1(%r12), %rsi
+    call    .Lt4_ins                     // len > 1 siempre
+    pushq   %rax
+    movl    $2, %eax                     // i
+  .Lt4_u1:
+    movl    TTor4State.len(%r9), %edx
+    decl    %edx
+    cmpl    %edx, %eax
+    jae     .Lt4_u2
+    leaq    (%r12,%rax), %rsi
+    call    .Lt4_ins
+    addl    TTor4State.step(%r9), %eax
+    jmp     .Lt4_u1
+  .Lt4_u2:
+    popq    %rax
+    cmpl    $3, %eax
+    jbe     .Lt4_u3
+    leaq    -1(%r12,%rax), %rsi
+    call    .Lt4_ins
+  .Lt4_u3:
+    addq    %rax, %r12
+    jmp     .Lt4_loop
+
+    // ---- subrutinas ----
+    // ins: CachingMatchFinder<4>::update_hash1(rsi) (usa rcx, rdx, rsi; conserva rax)
+  .Lt4_ins:
+    pushq   %rax
+    movl    TTor4State.hs(%r9), %ecx
+    movl    (%rsi), %edx
+    imull   $123456791, %edx, %edx
+    shrl    %cl, %edx
+    imulq   TTor4State.row2(%r9), %rdx
+    leaq    (%r8,%rdx,4), %rdx           // fila
+    movq    TTor4State.rowup(%r9), %rcx
+    subq    $2, %rcx
+  .Lt4_ins1:
+    testq   %rcx, %rcx
+    jz      .Lt4_ins2
+    movq    -8(%rdx,%rcx,4), %rax        // el par j-2 (8 bytes) al par j
+    movq    %rax, (%rdx,%rcx,4)
+    subq    $2, %rcx
+    jmp     .Lt4_ins1
+  .Lt4_ins2:
+    movq    %rsi, %rax
+    subq    %rbx, %rax
+    movl    %eax, (%rdx)
+    movl    3(%rsi), %eax
+    movl    %eax, 4(%rdx)
+    popq    %rax
+    ret
+    // ext: r10d := largo de p contra rdx desde r10d, de a 4 y después de a 1, sin pasar de
+    // matchend (como CFind4; usa r11)
+  .Lt4_ext:
+    movq    TTor4State.mend(%r9), %r11
+  .Lt4_ext4:
+    leaq    (%r12,%r10), %r14
+    cmpq    %r11, %r14
+    jae     .Lt4_ext9
+    movl    (%r12,%r10), %r14d
+    cmpl    (%rdx,%r10), %r14d
+    jne     .Lt4_ext1
+    addl    $4, %r10d
+    jmp     .Lt4_ext4
+  .Lt4_ext1:
+    leaq    (%r12,%r10), %r14
+    cmpq    %r11, %r14
+    jae     .Lt4_ext9
+    movzbl  (%r12,%r10), %r14d
+    cmpb    (%rdx,%r10), %r14b
+    jne     .Lt4_ext9
+    incl    %r10d
+    jmp     .Lt4_ext1
+  .Lt4_ext9:
+    ret
+    // sym: HuffmanEncoder::encode(eax) sin el cierre de bloque (usa rax, rcx, rdx, rsi)
+  .Lt4_sym:
+    decl    %edi
+    incl    TTorCoder.HufCounter(%r15,%rax,4)
+    movzbl  TTorCoder.HufBits(%r15,%rax), %esi
+    movl    TTorCoder.HufCode(%r15,%rax,4), %eax
+    // put: putbits(esi, rax) (usa rcx, rdx)
+  .Lt4_put:
+    movl    %r10d, %ecx
+    movq    %rax, %rdx
+    shlq    %cl, %rdx
+    orq     %rdx, %r11
+    addl    %esi, %r10d
+    cmpl    $64, %r10d
+    jb      .Lt4_put1
+    movq    %r11, (%r14)
+    addq    $8, %r14
+    subl    $64, %r10d
+    movl    %esi, %ecx
+    subl    %r10d, %ecx
+    shrq    %cl, %rax
+    movq    %rax, %r11
+  .Lt4_put1:
+    ret
+
+  .Lt4_done:
+    movq    %r12, TTor4State.pp(%r9)
+    movq    %r14, TTor4State.op(%r9)
+    movq    %r11, TTor4State.bb(%r9)
+    movl    %r10d, TTor4State.bc(%r9)
+    movl    %edi, TTor4State.rem(%r9)
+  end ['rax', 'rbx', 'rcx', 'rdx', 'rsi', 'rdi', 'r8', 'r9', 'r10', 'r11', 'r12', 'r13', 'r14', 'r15'];
+end;
+
+procedure TTorEngine.RunFast4(Resuming: Boolean);
+var
+  F: TFastMF;
+  Co: TTorCoder;
+  pp, mend, special, tend, q, lim: PByte;
+  len: LongWord;
+  SkipRead: Boolean;
+  st: TTor4State;
+begin
+  FastSetup(F);
+  Co := C;
+  SkipRead := False;
+  if Resuming then
+  begin
+    ReadPart2;
+    if not (P < BufEnd) then
+    begin
+      FinishStream;
+      Exit;
+    end;
+    SkipRead := True;      // tras leer, el C codifica al menos un elemento antes de volver a mirar
+  end;
+  pp := P;
+  mend := MatchEnd;
+  special := pp;
+  if UseTables then tend := TableEnd else tend := Buf + M.Buffer + LOOKAHEAD;
+  st.bs := Buf; st.mend := mend; st.ht := F.HT; st.co := Co; st.hs := F.HShift;
+  st.row2 := F.Row2; st.rowup := F.RowUp; st.step := M.UpdateStep;
+  st.dcc := @Dc.Code[0]; st.dce := @Dc.Extra[0]; st.dcb := @Dc.Base[0];
+  st.l2c := @Lc2.Code[0]; st.l2e := @Lc2.Extra[0]; st.l2b := @Lc2.Base[0];
+  while True do
+  begin
+    if pp >= special then
+    begin
+      special := FastSpecial(pp, SkipRead);
+      if special = nil then Exit;
+    end;
+    if pp > tend then
+    begin
+      FastTables(pp);
+      tend := TableEnd;
+    end;
+    if tend < pp then lim := pp + 1
+    else if tend < special then lim := tend + 1
+    else lim := special;
+    if lim > special then lim := special;
+    if Co.HufRemainder > 1 then
+    begin
+      st.pp := pp; st.lim := lim;
+      st.op := @Co.Out[0] + Co.O;
+      st.bb := Co.BitBuf; st.bc := Co.BitCount; st.rem := Co.HufRemainder;
+      Tor4Span(st);
+      pp := st.pp;
+      Co.O := st.op - @Co.Out[0];
+      Co.BitBuf := st.bb; Co.BitCount := st.bc; Co.HufRemainder := st.rem;
+      if pp >= lim then Continue;
+    end;
+    // La posición que cierra el bloque de Huffman, por el camino de siempre
+    prefetch(F.HT[CRow4(pp + 1, F.HShift) * F.Row2]);
+    len := CFind4(F, pp, mend, q);
+    if len < 4 then
+    begin
+      Co.LitH(pp);
+      Inc(pp);
+    end
+    else
+    begin
+      Co.EncodeMatchH(LongInt(len) - 4, LongInt(LongWord(pp - q)) - 1);
+      CUpdate4(F, pp, len, M.UpdateStep);
+      Inc(pp, len);
+    end;
+  end;
+end;
+
+{$ENDIF}
+
 { ---- combos 1 y 2 (tor:1, tor:2): MatchFinder (una entrada por fila, sin update_hash) con
   LZ77_ByteCoder o LZ77_BitCoder, greedy ----
   El lazo de cada tramo (hasta la próxima posición especial) no llama a nada: el hash, la
@@ -1667,9 +2180,11 @@ end;
 {$ENDIF}
 
 
+{$IF not defined(CPUX86_64) or defined(PARC_NOASM)}
 { combo 4: CachingMatchFinder<4> + Huffman, greedy }
 {$define TF_NAME := RunFast4}
 {$I parc_torrun.inc}
+{$ENDIF}
 
 { combo 5: LazyMatching<Hash3<CachingMatchFinder<4>,14,10,FALSE>> + aritmético }
 {$define TF_NAME := RunFast5}
