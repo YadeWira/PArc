@@ -10,6 +10,7 @@
     OP_N        N de CachingMatchFinder (5 o 6)
     OP_L3/OP_L2 bits de Hash3
     OP_MFN      el auxiliar es MatchFinderN<4> (si no, ExactMatchFinder<4>)
+    OP_BT       el principal es BinaryTreeMatchFinder<5> (tor:16) en lugar de CachingMF<N>
     OP_ARITH    precios del codificador aritmético (si no, Huffman) }
 
 function OP_FINDALL(const F: TOptMF; p, bufend: PByte; m: PLongWord): PLongWord;
@@ -90,6 +91,10 @@ begin
     Inc(j);
     x0 := x1;
   end;
+{$ENDIF}
+{$IFDEF OP_BT}
+  // ---- BinaryTreeMatchFinder<5>::find_all_matches (aparte: ver BTFindAll) ----
+  Exit(BTFindAll(F, p, bufend, m));
 {$ENDIF}
   // ---- CachingMatchFinder<N>::find_all_matches ----
 {$IF OP_N = 5}

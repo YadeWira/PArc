@@ -2607,6 +2607,10 @@ type
     XRow: SizeInt;
     HT3, HT2: PLongWord;
     N6: Boolean;          // CachingMatchFinder<6> (si no, <5>)
+    // combinación 12: BinaryTreeMatchFinder<5> (HT y HShift son los suyos)
+    BT: PLongWord;
+    BTDepth: Integer;
+    AllocEnd: PByte;
   end;
 
   TFastMF = record
@@ -2674,6 +2678,7 @@ type
     function Opt5A(const F: TOptMF; pp: PByte): LongInt;
     function Opt6A(const F: TOptMF; pp: PByte): LongInt;
     function Opt6H(const F: TOptMF; pp: PByte): LongInt;
+    function OptBA(const F: TOptMF; pp: PByte): LongInt;
     procedure RunFast1(Resuming: Boolean);
     procedure RunFast2(Resuming: Boolean);
     procedure RunFast4(Resuming: Boolean);
@@ -3255,7 +3260,8 @@ begin
   Fast := 0;
   if (Combo = 9) and (C.Kind = 4) then Fast := 1
   else if (Combo in [10, 11]) and (C.Kind = 4) then Fast := 2
-  else if (Combo = 11) and (C.Kind = 3) then Fast := 3;
+  else if (Combo = 11) and (C.Kind = 3) then Fast := 3
+  else if (Combo = 12) and (C.Kind = 4) then Fast := 4;
   if Fast <> 0 then OptSetup(F);
   SkipRead := False;
   if Resuming then
@@ -3288,6 +3294,7 @@ begin
         1: len := Opt5A(F, P);
         2: len := Opt6A(F, P);
         3: len := Opt6H(F, P);
+        4: len := OptBA(F, P);
       else
         begin
           len := EvalLitRep(P);

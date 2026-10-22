@@ -3460,24 +3460,37 @@ end;
 procedure TTorEngine.OptSetup(out F: TOptMF);
 var
   CM: TCachingMF;
+  BTM: TBTMF;
   H3: THash3MF;
   AX: TBaseMF;
 begin
   FillChar(F, SizeOf(F), 0);
-  CM := TCachingMF(TCombineMF(MF).MF1);
   H3 := THash3MF(TCombineMF(MF).MF2);
   AX := TBaseMF(H3.MF);
   F.Bs := Buf;
-  F.HT := CM.HT;
-  F.HShift := CM.HashShift;
-  F.Row2 := CM.Row2;
+  if Combo = 12 then
+  begin
+    BTM := TBTMF(TCombineMF(MF).MF1);
+    F.HT := BTM.HT;
+    F.HShift := BTM.HashShift;
+    F.BT := BTM.BT;
+    F.BTDepth := BTM.MaxDepth;
+    F.AllocEnd := BTM.AllocEnd;
+  end
+  else
+  begin
+    CM := TCachingMF(TCombineMF(MF).MF1);
+    F.HT := CM.HT;
+    F.HShift := CM.HashShift;
+    F.Row2 := CM.Row2;
+  end;
   F.XHT := AX.HT;
   F.XShift := AX.HashShift;
   F.XMask := AX.HashMask;
   F.XRow := AX.RowWidth;
   F.HT3 := H3.HT3;
   F.HT2 := H3.HT2;
-  F.N6 := Combo <> 9;
+  F.N6 := Combo in [10, 11];
 end;
 
 { Pide a la caché lo que va a leer la búsqueda en p: la fila de CachingMatchFinder<N> (5 o 6),
@@ -3486,6 +3499,15 @@ procedure TTorEngine.OptPrefetch(const F: TOptMF; pa: PByte);
 var
   t, e: PByte;
 begin
+  if F.BT <> nil then
+  begin
+    // árbol binario: la cabeza en el hash (el par lo pide la búsqueda) y las filas de Hash3 y
+    // del auxiliar
+    prefetch(F.HT[LongWord(Mul32(V32(pa), K1) + Mul32(V32(pa + 1), K2)) shr F.HShift]);
+    prefetch(F.HT3[Mul32(V24(pa), K3) shr (32 - 16)]);
+    prefetch(F.XHT[(Mul32(V32(pa), K1) shr F.XShift) and F.XMask]);
+    Exit;
+  end;
   if F.N6 then
   begin
     t := PByte(F.HT + SizeInt((LongWord(Mul32(V32(pa), K1) + Mul32(V32(pa + 2), K2)) shr F.HShift)) * F.Row2);
@@ -3503,6 +3525,75 @@ begin
     Inc(t, 64);
   end;
   prefetch(F.XHT[(Mul32(V32(pa), K1) shr F.XShift) and F.XMask]);
+end;
+
+{ BinaryTreeMatchFinder<5>::find_all_matches (TBTMF.FindAllMatches) sobre las tablas de la
+  clase, para el paso del parser óptimo de tor:16: con el prefetch del par que hace el C y la
+  comparación de los largos de a 8 bytes (el mismo largo que de a uno, con los mismos topes). }
+function BTFindAll(const F: TOptMF; p, bufend: PByte; m: PLongWord): PLongWord;
+var
+  depth: Integer;
+  maxLen, h, nn, len0, len1, len, lim, lmin, lenLimit, safe: LongWord;
+  ptr0, ptr1, pair: PLongWord;
+  bs, qq: PByte;
+begin
+  bs := F.Bs;
+  depth := F.BTDepth;
+  maxLen := 4;
+  h := LongWord(Mul32(V32(p), K1) + Mul32(V32(p + 1), K2)) shr F.HShift;
+  nn := F.HT[h];
+  F.HT[h] := p - bs;
+  ptr1 := F.BT + SizeInt(p - bs) * 2;
+  ptr0 := ptr1 + 1;
+  len0 := 0; len1 := 0;
+  lenLimit := LongWord(bufend - p);
+  safe := LongWord(F.AllocEnd - p);
+  if lenLimit < safe then lmin := lenLimit else lmin := safe;
+  while True do
+  begin
+    if (depth = 0) or (nn = 0) then
+    begin
+      ptr0^ := 0; ptr1^ := 0;
+      Break;
+    end;
+    Dec(depth);
+    pair := F.BT + SizeInt(nn) * 2;
+    prefetch(pair^);
+    qq := bs + nn;
+    if len0 < len1 then len := len0 else len := len1;
+    if qq[len] = p[len] then
+    begin
+      Inc(len);
+      if (len <> lenLimit) and (len < safe) and (qq[len] = p[len]) then
+      begin
+        // el C para cuando len llega justo a lenLimit, o en safe; si ya lo pasó (cerca del
+        // final), solo en safe
+        Inc(len);
+        if len <= lenLimit then lim := lmin else lim := safe;
+        while (len + 8 <= lim) and (PQWord(qq + len)^ = PQWord(p + len)^) do Inc(len, 8);
+        while (len < lim) and (qq[len] = p[len]) do Inc(len);
+      end;
+      if len > maxLen then
+      begin
+        maxLen := len;
+        m^ := len; Inc(m); m^ := p - qq; Inc(m);
+        if len = lenLimit then
+        begin
+          ptr1^ := pair[0]; ptr0^ := pair[1];
+          Break;
+        end;
+      end;
+    end;
+    if qq[len] < p[len] then
+    begin
+      ptr1^ := nn; ptr1 := pair + 1; nn := ptr1^; len1 := len;
+    end
+    else
+    begin
+      ptr0^ := nn; ptr0 := pair; nn := ptr0^; len0 := len;
+    end;
+  end;
+  Result := m;
 end;
 
 {$macro on}
@@ -3527,4 +3618,13 @@ end;
 {$define OP_FINDALL := OptFind6H}
 {$I parc_toropt.inc}
 {$undef OP_MFN}
+{ combo 12 (tor:16): BinaryTreeMatchFinder<5> + Hash3<ExactMatchFinder<4>,16,12>, aritmético }
+{$define OP_NAME := OptBA}
+{$define OP_FINDALL := OptFindBT}
+{$define OP_N := 5}
+{$define OP_BT}
+{$define OP_ARITH}
+{$I parc_toropt.inc}
+{$undef OP_ARITH}
+{$undef OP_BT}
 {$macro off}
