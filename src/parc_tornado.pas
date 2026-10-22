@@ -25,12 +25,6 @@ type
     Len: SizeInt;       // cantidad de filas
   end;
 
-  THufNode = record
-    Cnt, Code: LongWord;
-    Left, Right: Word;
-    Bits: Byte;
-  end;
-
   TTornadoStage = class(TInStage)
   private
     FAllAtOnce, FInit, FPending, FAtEnd, FDone: Boolean;
@@ -52,8 +46,9 @@ type
     FHufFast: array[0..2047] of SmallInt;        // 1 shl FAST_BITS
     FHufIndex: array of Word;
     FHufMaxBits, FHufMaxSoFar: Integer;
+    FHufMask: LongWord;          // (1 shl FHufMaxBits) - 1
     FHufBlock: SizeInt;          // símbolos desde el último EOB (validación extra)
-    FNodes: array[0..2 * 2048 + 3] of THufNode;
+    FNCnt, FNLeft, FNRight, FNBits, FNCode: array[0..2 * 2048 + 3] of LongWord;   // nodos del árbol
     FRest: array[0..2047] of QWord;
     // --- TRangeDecoder + TCounter ---
     FRange, FCode: LongWord;
@@ -72,6 +67,7 @@ type
     FOffsetOverflow: Boolean;
     FMatchLeft: LongWord;        // match lento cortado por una escritura
     FMatchSrc: SizeInt;
+    FPendLen, FPendDist: LongWord;   // match que el lazo rápido deja para Special
     // --- Tramo pendiente de entregar ---
     FChunk: PByte;
     FChunkLen: SizeInt;
@@ -105,8 +101,15 @@ type
     procedure TabShift(OldPos: SizeInt);
     procedure StartWrite;
     procedure EndWrite;
+    function SlowCopy(var o: SizeInt; p: SizeInt): Boolean;
     function Special(len, dist: LongWord; var o: SizeInt): Boolean;
     procedure Run;
+    procedure RunHuf;
+    procedure RunArith;
+    function RunHufFast: Integer;
+    function RunHufFastPas: Integer;
+    function RunArithFast: Integer;
+    function RunArithFastPas: Integer;
   public
     constructor Create(ASource: TInStage; AllAtOnce: Boolean = False);
     destructor Destroy; override;
@@ -316,37 +319,51 @@ end;
 
 { HuffmanTree::build_tree, rama Decoder. Diferencias (solo afectan datos corruptos):
   maxbits es el máximo real de bits (el C toma bits del símbolo menos frecuente, que en un árbol
-  de Huffman válido es lo mismo) y se exige <= 30; las claves de orden van en 64 bits. }
+  de Huffman válido es lo mismo) y se exige <= 30; las claves de orden van en 64 bits.
+  Los nodos van en arreglos separados (FNCnt/FNLeft/FNRight/FNBits/FNCode) y los lazos con
+  punteros: se reconstruye cada HUFBLOCKSIZE símbolos. }
 procedure TTornadoStage.HufBuildTree(RescaleMode: Integer);
 var
-  places: array[0..HUF_CHUNKS] of Integer;
-  b, i, j, p, p1, p2, p3, r, n, s, sbits, maxbits, factor: Integer;
-  scode: LongWord;
+  places: array[0..HUF_CHUNKS] of LongInt;
+  b, i, j, k, p1, p2, p3, r, n, sbits, maxbits, factor: SizeInt;
+  c, c1, c2, bb, code, scode, step: LongWord;
   key: QWord;
+  cnt, pcnt, plf, prt, pbits, pcode: PLongWord;
+  fast: PSmallInt;
+  idx: PWord;
 begin
   n := CODES;
-  b := 0;
-  for i := 0 to HUF_CHUNKS do places[i] := 0;
+  b := n;
+  cnt := @FHufCounter[0];
+  pcnt := @FNCnt[0];
+  plf := @FNLeft[0];
+  prt := @FNRight[0];
+  pbits := @FNBits[0];
+  pcode := @FNCode[0];
+  FillChar(places, SizeOf(places), 0);
   for i := 0 to n - 1 do
   begin
-    if FHufCounter[i] < HUF_CHUNKS then Inc(places[FHufCounter[i] + 1]);
-    Inc(b);
+    c := cnt[i];
+    if c < HUF_CHUNKS then Inc(places[c + 1]);
   end;
   for i := 0 to HUF_CHUNKS - 1 do Inc(places[i + 1], places[i]);
   r := 0;
   for i := 0 to n - 1 do
-    if FHufCounter[i] < HUF_CHUNKS then
+  begin
+    c := cnt[i];
+    if c < HUF_CHUNKS then
     begin
-      p := places[FHufCounter[i]];
-      Inc(places[FHufCounter[i]]);
-      FNodes[p].Cnt := FHufCounter[i];
-      FNodes[p].Left := i;
+      k := places[c];
+      places[c] := k + 1;
+      pcnt[k] := c;
+      plf[k] := i;
     end
     else
     begin
-      FRest[r] := QWord(FHufCounter[i]) * MAXHUF + QWord(i);
+      FRest[r] := QWord(c) * MAXHUF + QWord(i);
       Inc(r);
     end;
+  end;
   // Orden por (contador, índice): claves únicas, así que cualquier orden da lo mismo que qsort
   for i := 1 to r - 1 do
   begin
@@ -359,89 +376,113 @@ begin
     end;
     FRest[j + 1] := key;
   end;
+  k := places[HUF_CHUNKS];
   for i := 0 to r - 1 do
   begin
-    p := i + places[HUF_CHUNKS];
-    FNodes[p].Cnt := LongWord(FRest[i] div MAXHUF);
-    FNodes[p].Left := FRest[i] mod MAXHUF;
+    pcnt[k + i] := LongWord(FRest[i] div MAXHUF);
+    plf[k + i] := FRest[i] mod MAXHUF;
   end;
 
-  for i := 0 to b + 3 do FNodes[b + i].Cnt := High(LongInt);   // centinelas INT_MAX
+  for i := 0 to b + 3 do pcnt[b + i] := High(LongInt);   // centinelas INT_MAX
   p1 := 0; p2 := b + 2; p3 := b + 2;
   while not ((p1 = b) and (p3 - p2 = 1)) do
   begin
-    if FNodes[p1 + 1].Cnt < FNodes[p2].Cnt then
+    c1 := pcnt[p1];
+    c2 := pcnt[p2];
+    if pcnt[p1 + 1] < c2 then
     begin
-      FNodes[p3].Cnt := FNodes[p1].Cnt + FNodes[p1 + 1].Cnt;
-      FNodes[p3].Left := p1; FNodes[p3].Right := p1 + 1;
+      pcnt[p3] := c1 + pcnt[p1 + 1];
+      plf[p3] := p1; prt[p3] := p1 + 1;
       Inc(p1, 2);
     end
-    else if FNodes[p1].Cnt > FNodes[p2 + 1].Cnt then
+    else if c1 > pcnt[p2 + 1] then
     begin
-      FNodes[p3].Cnt := FNodes[p2].Cnt + FNodes[p2 + 1].Cnt;
-      FNodes[p3].Left := p2; FNodes[p3].Right := p2 + 1;
+      pcnt[p3] := c2 + pcnt[p2 + 1];
+      plf[p3] := p2; prt[p3] := p2 + 1;
       Inc(p2, 2);
     end
     else
     begin
-      FNodes[p3].Cnt := FNodes[p1].Cnt + FNodes[p2].Cnt;
-      FNodes[p3].Left := p1; FNodes[p3].Right := p2;
+      pcnt[p3] := c1 + c2;
+      plf[p3] := p1; prt[p3] := p2;
       Inc(p1); Inc(p2);
     end;
     Inc(p3);
   end;
 
-  FNodes[p2].Bits := 0;
-  FNodes[p2].Code := 0;
+  pbits[p2] := 0;
+  pcode[p2] := 0;
   maxbits := 0;
   for i := p2 downto b + 2 do
   begin
-    if FNodes[i].Bits >= 31 then Corrupt('tor: huffman tree too deep');
-    FNodes[FNodes[i].Left].Bits := FNodes[i].Bits + 1;
-    FNodes[FNodes[i].Left].Code := FNodes[i].Code;
-    FNodes[FNodes[i].Right].Bits := FNodes[i].Bits + 1;
-    FNodes[FNodes[i].Right].Code := FNodes[i].Code + (LongWord(1) shl FNodes[i].Bits);
+    bb := pbits[i];
+    if bb >= 31 then Corrupt('tor: huffman tree too deep');
+    code := pcode[i];
+    pbits[plf[i]] := bb + 1;
+    pcode[plf[i]] := code;
+    pbits[prt[i]] := bb + 1;
+    pcode[prt[i]] := code + (LongWord(1) shl bb);
   end;
   for i := 0 to b - 1 do
-    if FNodes[i].Bits > maxbits then maxbits := FNodes[i].Bits;
+    if SizeInt(pbits[i]) > maxbits then maxbits := pbits[i];
   // Un stream válido no pasa de ~23 bits (contadores acotados por HUFBLOCKSIZE y el rescale);
   // el tope limita la tabla index[] a 128MB con datos corruptos
   if maxbits > 26 then Corrupt('tor: huffman tree too deep');
   FHufMaxBits := maxbits;
+  FHufMask := (LongWord(1) shl maxbits) - 1;
   if maxbits > FHufMaxSoFar then
   begin
     FHufMaxSoFar := maxbits;
     SetLength(FHufIndex, 1 shl maxbits);
   end;
+  fast := @FHufFast[0];
+  idx := @FHufIndex[0];
   for i := 0 to b - 1 do
   begin
-    s := FNodes[i].Left;
-    sbits := FNodes[i].Bits;
-    scode := FNodes[i].Code;
-    FHufBits[s] := sbits;
+    k := plf[i];
+    sbits := pbits[i];
+    scode := pcode[i];
+    FHufBits[k] := sbits;
+    step := LongWord(1) shl sbits;
     if sbits <= FAST_BITS then
     begin
-      for j := 0 to (1 shl (FAST_BITS - sbits)) - 1 do
-        FHufFast[scode + (LongWord(j) shl sbits)] := s;
+      while scode < (1 shl FAST_BITS) do
+      begin
+        fast[scode] := k;
+        Inc(scode, step);
+      end;
     end
     else
     begin
-      FHufFast[scode and ((1 shl FAST_BITS) - 1)] := -1;
-      for j := 0 to (1 shl (maxbits - sbits)) - 1 do
-        FHufIndex[scode + (LongWord(j) shl sbits)] := s;
+      fast[scode and ((1 shl FAST_BITS) - 1)] := -1;
+      while scode < (LongWord(1) shl maxbits) do
+      begin
+        idx[scode] := k;
+        Inc(scode, step);
+      end;
     end;
   end;
-  // rescale(FACTOR)
+  // rescale(FACTOR); el 6 (rescale_mode 3) es el de todos los bloques salvo el primero
   case RescaleMode of
     0: factor := 2;  1: factor := 3;  2: factor := 4;  3: factor := 6;
     4: factor := 8;  5: factor := 10; 6: factor := 12; 7: factor := 16;
   else
     factor := 0;
   end;
-  if factor > 0 then
-    for s := 0 to n - 1 do
-      if (FHufCounter[s] > 1) and (FHufCounter[s] < LongWord(factor)) then Dec(FHufCounter[s])
-      else Dec(FHufCounter[s], FHufCounter[s] div LongWord(factor));
+  if factor = 6 then
+    for i := 0 to n - 1 do
+    begin
+      c := cnt[i];
+      if (c > 1) and (c < 6) then cnt[i] := c - 1
+      else cnt[i] := c - c div 6;
+    end
+  else if factor > 0 then
+    for i := 0 to n - 1 do
+    begin
+      c := cnt[i];
+      if (c > 1) and (c < LongWord(factor)) then cnt[i] := c - 1
+      else cnt[i] := c - c div LongWord(factor);
+    end;
 end;
 
 { HuffmanDecoder::decode }
@@ -1029,6 +1070,36 @@ begin
     for i := 0 to len - 1 do d[i] := s[i];
 end;
 
+{ Copia de un match lento (en el C, byte a byte): FMatchLeft bytes desde p, que da la vuelta al
+  buffer circular, sin pasar de write_end. Va por tramos con Move, cortados donde el origen da la
+  vuelta, en write_end y, si el origen está detrás y se solapa, cada `distancia` bytes: el
+  resultado es el mismo que byte a byte. True si llegó a write_end (quedó un tramo pendiente). }
+function TTornadoStage.SlowCopy(var o: SizeInt; p: SizeInt): Boolean;
+var
+  n, lim: SizeInt;
+begin
+  repeat
+    n := FMatchLeft;
+    lim := FWriteEnd - o;
+    if lim < 1 then lim := 1;
+    if n > lim then n := lim;
+    if n > FBufSize - p then n := FBufSize - p;
+    if (p < o) and (o - p < n) then n := o - p;
+    Move(FOut[p], FOut[o], n);
+    Inc(o, n);
+    Inc(p, n);
+    if p = FBufSize then p := 0;
+    Dec(FMatchLeft, n);
+    if o >= FWriteEnd then
+    begin
+      FOutput := o; FMatchSrc := p;
+      StartWrite;
+      Exit(True);
+    end;
+  until FMatchLeft = 0;
+  Result := False;
+end;
+
 { Resto de la rama "match" de tor_decompress0: match lento, fin de datos o tabla.
   True si hay que salir de Run (quedó un tramo pendiente de escritura). }
 function TTornadoStage.Special(len, dist: LongWord; var o: SizeInt): Boolean;
@@ -1045,18 +1116,7 @@ begin
     // Match lento: origen antes del inicio del buffer, que da la vuelta, o que cruza write_end
     if o >= SizeInt(dist) then p := o - SizeInt(dist) else p := o - SizeInt(dist) + FBufSize;
     FMatchLeft := len;
-    repeat
-      FOut[o] := FOut[p];
-      Inc(o); Inc(p);
-      if p = FBufSize then p := 0;
-      Dec(FMatchLeft);
-      if o >= FWriteEnd then
-      begin
-        FOutput := o; FMatchSrc := p;
-        StartWrite;
-        Exit(True);
-      end;
-    until FMatchLeft = 0;
+    if SlowCopy(o, p) then Exit(True);
   end
   else if (len = IMPOSSIBLE_LEN) and (dist = IMPOSSIBLE_DIST) then
   begin
@@ -1086,25 +1146,14 @@ end;
   codificador (en el C, una instancia del template tor_decompress0 por cada uno). }
 procedure TTornadoStage.Run;
 var
-  len, dist, x: LongWord;
-  o, we, p: SizeInt;
+  len, dist: LongWord;
+  o, we: SizeInt;
 begin
   // Continuar un match lento cortado por una escritura
   if FMatchLeft > 0 then
   begin
-    o := FOutput; p := FMatchSrc;
-    repeat
-      FOut[o] := FOut[p];
-      Inc(o); Inc(p);
-      if p = FBufSize then p := 0;
-      Dec(FMatchLeft);
-      if o >= FWriteEnd then
-      begin
-        FOutput := o; FMatchSrc := p;
-        StartWrite;
-        Exit;
-      end;
-    until FMatchLeft = 0;
+    o := FOutput;
+    if SlowCopy(o, FMatchSrc) then Exit;
     FOutput := o;
   end;
 
@@ -1143,46 +1192,641 @@ begin
         else if Special(len, dist, o) then Exit;
       until False;
     3:
-      repeat
-        x := HufDecode;
-        if x < 256 then
-        begin
-          FOut[o] := Byte(x);
-          Inc(o);
-          if o >= we then Break;
-          Continue;
-        end;
-        LZMatch(x, len, dist);
-        if (SizeInt(dist) <= o) and (we - o > SizeInt(len)) and (dist <> 0) then
-        begin
-          CopyMatch(FOut + o, dist, len);
-          Inc(o, len);
-        end
-        else if Special(len, dist, o) then Exit;
-      until False;
-  else
-    repeat
-      x := ArithDecode;
-      if x < 256 then
       begin
-        FOut[o] := Byte(x);
-        Inc(o);
-        if o >= we then Break;
-        Continue;
+        FOutput := o;
+        RunHuf;
+        Exit;
       end;
-      LZMatch(x, len, dist);
-      if (SizeInt(dist) <= o) and (we - o > SizeInt(len)) and (dist <> 0) then
-      begin
-        CopyMatch(FOut + o, dist, len);
-        Inc(o, len);
-      end
-      else if Special(len, dist, o) then Exit;
-    until False;
+  else
+    begin
+      FOutput := o;
+      RunArith;
+      Exit;
+    end;
   end;
   // Un literal llegó a write_end
   FOutput := o;
   StartWrite;
 end;
+
+const
+  TD_MARGIN = 32;     // bytes de entrada: más de lo que puede leer un símbolo con largo y distancia
+  // Resultado del lazo rápido
+  TDR_SLOW = 0; TDR_SPECIAL = 1; TDR_WRITE = 2; TDR_BADCODE = 3; TDR_BADARITH = 4; TDR_BADBLOCK = 5;
+
+{$macro on}
+{$define TD_NAME := RunHuf}
+{$define TD_FAST := RunHufFast}
+{$define TD_FASTPAS := RunHufFastPas}
+{$I parc_tordec.inc}
+{$define TD_NAME := RunArith}
+{$define TD_FAST := RunArithFast}
+{$define TD_FASTPAS := RunArithFastPas}
+{$define TD_ARITH}
+{$I parc_tordec.inc}
+{$undef TD_ARITH}
+{$macro off}
+
+{ Lazo rápido del codificador aritmético. En x86_64 va en ensamblador: es el mismo algoritmo que
+  RunArithFastPas (parc_tordec.inc), pero con range/code, la entrada y la salida en registros
+  (FPC las deja en la pila, y en este lazo cada símbolo depende del anterior). Mismas condiciones
+  para hacer un símbolo acá y mismos resultados (TDR_*). Con PARC_NOASM, o en otras CPU, va la
+  versión en Pascal. Registros: r15 Self, r14 salida, r13 write_end, r12 entrada, rbx límite de
+  la entrada, r11d range, r10d code, r9 outbuf. }
+function TTornadoStage.RunArithFast: Integer;
+{$IF defined(CPUX86_64) and not defined(PARC_NOASM)}
+var
+  me: TTornadoStage;
+  op, oend, ip, ilsafe, outb: PByte;
+  plb, pxl, pdb, pxd: Pointer;
+  rng, cod, sym, lval, dco, pendlen, penddist: LongWord;
+  res: LongInt;
+begin
+  me := Self;
+  outb := FOut;
+  op := FOut + FOutput;
+  oend := FOut + FWriteEnd;
+  ip := PByte(FIn) + FInPos;
+  ilsafe := PByte(FIn) + FInLim - TD_MARGIN;
+  rng := FRange;
+  cod := FCode;
+  plb := @lc2_base[0];
+  pxl := @extra_lbits2[0];
+  pdb := @dc_base[0];
+  pxd := @extra_dbits[0];
+  res := TDR_SLOW;
+  sym := 0; lval := 0; dco := 0; pendlen := 0; penddist := 0;
+  asm
+    movq    me, %r15
+    movq    op, %r14
+    movq    oend, %r13
+    movq    ip, %r12
+    movq    ilsafe, %rbx
+    movl    rng, %r11d
+    movl    cod, %r10d
+    movq    outb, %r9
+  .Lta_loop:
+    cmpq    %rbx, %r12
+    ja      .Lta_slow
+    cmpl    $1, TTornadoStage.FARemainder(%r15)
+    jbe     .Lta_slow
+    // ---- ArithDecode ----
+    shrl    $14, %r11d                  // range >>= RANGE_BITS
+    movl    %r10d, %eax
+    xorl    %edx, %edx
+    divl    %r11d                       // count = code / range
+    cmpl    $16384, %eax                // count >= RANGE
+    jae     .Lta_badarith
+    movl    %eax, %ecx
+    shrl    $3, %ecx                    // count div (RANGE div INDEXES)
+    movzwl  TTornadoStage.FAIndex(%r15,%rcx,2), %esi
+  .Lta_srch:
+    movl    TTornadoStage.FACum(%r15,%rsi,4), %ecx
+    movl    TTornadoStage.FACnt(%r15,%rsi,4), %edi
+    leal    -1(%ecx,%edi), %edx
+    cmpl    %eax, %edx
+    jae     .Lta_found
+    incl    %esi
+    jmp     .Lta_srch
+  .Lta_found:
+    imull   %r11d, %ecx
+    subl    %ecx, %r10d                 // code -= cum*range
+    imull   %edi, %r11d                 // range *= cnt
+  .Lta_n1:
+    cmpl    $0x1000000, %r11d
+    jae     .Lta_n1d
+    shll    $8, %r11d
+    shll    $8, %r10d
+    movzbl  (%r12), %ecx
+    addl    %ecx, %r10d
+    incq    %r12
+    jmp     .Lta_n1
+  .Lta_n1d:
+    incl    TTornadoStage.FALive(%r15,%rsi,4)
+    decl    TTornadoStage.FARemainder(%r15)
+    cmpl    $256, %esi
+    jae     .Lta_match
+    // ---- literal ----
+    movb    %sil, (%r14)
+    incq    %r14
+    cmpq    %r13, %r14
+    jb      .Lta_loop
+    movl    $2, res                     // TDR_WRITE
+    jmp     .Lta_save
+
+    // ---- getbits(n): ecx = n (0..30) -> eax; edx = 0 bien, 1 error. Toca eax, ecx, edx ----
+  .Lta_getbits:
+    testl   %ecx, %ecx
+    jnz     .Lta_gb1
+    xorl    %eax, %eax
+    xorl    %edx, %edx
+    cmpl    %r11d, %r10d                // n=0: solo el control code < range
+    setae   %dl
+    ret
+  .Lta_gb1:
+    cmpl    $24, %ecx
+    ja      .Lta_gb2
+    shrl    %cl, %r11d
+    movl    %r10d, %eax
+    xorl    %edx, %edx
+    divl    %r11d
+    movl    $1, %edx
+    shll    %cl, %edx
+    cmpl    %edx, %eax
+    jae     .Lta_gberr
+    movl    %eax, %edx
+    imull   %r11d, %edx
+    subl    %edx, %r10d
+  .Lta_gbn:
+    cmpl    $0x1000000, %r11d
+    jae     .Lta_gbok
+    shll    $8, %r11d
+    shll    $8, %r10d
+    movzbl  (%r12), %edx
+    addl    %edx, %r10d
+    incq    %r12
+    jmp     .Lta_gbn
+  .Lta_gbok:
+    xorl    %edx, %edx
+    ret
+  .Lta_gberr:
+    movl    $1, %edx
+    ret
+  .Lta_gb2:
+    // n > 24: 15 bits y después n-15 (ArithGetBits)
+    pushq   %rcx
+    movl    $15, %ecx
+    call    .Lta_gb1
+    popq    %rcx
+    testl   %edx, %edx
+    jnz     .Lta_gberr
+    pushq   %rax
+    subl    $15, %ecx
+    call    .Lta_gb1
+    popq    %rcx
+    testl   %edx, %edx
+    jnz     .Lta_gberr
+    shll    $15, %eax
+    addl    %ecx, %eax
+    xorl    %edx, %edx
+    ret
+
+    // ---- LZMatch ----
+  .Lta_match:
+    movl    %esi, sym
+    cmpl    $833, %esi                  // REPCHAR
+    jne     .Lta_nrep
+    movl    $1, %edi                    // len = 1, dist = prevdists[prev-1]
+    movslq  TTornadoStage.FPrev(%r15), %rcx
+    decq    %rcx
+    leaq    TTornadoStage.FPrevDists(%r15), %rdx
+    movl    (%rdx,%rcx,4), %r8d
+    jmp     .Lta_copy
+  .Lta_nrep:
+    cmpl    $832, %esi                  // >= EOB_CODE
+    jae     .Lta_badcode
+    // getlen
+    movl    %esi, %eax
+    andl    $15, %eax                   // lcode
+    movq    pxl, %rdx
+    movzbl  (%rdx,%rax), %ecx           // extra_lbits2[lcode]
+    movq    plb, %rdx
+    movl    (%rdx,%rax,4), %eax
+    movl    %eax, lval                  // lc2_base[lcode]
+    call    .Lta_getbits
+    testl   %edx, %edx
+    jnz     .Lta_badarith
+    addl    lval, %eax                  // l
+    cmpl    $100, %eax
+    jbe     .Lta_l1
+    cmpl    $104, %eax
+    ja      .Lta_l2
+    addl    $1073741723, %eax           // l - 100 + IMPOSSIBLE_LEN
+    jmp     .Lta_lset
+  .Lta_l2:
+    subl    $4, %eax
+  .Lta_l1:
+    addl    TTornadoStage.FMinLen(%r15), %eax
+  .Lta_lset:
+    movl    %eax, %edi                  // len
+    // getdist
+    movl    sym, %eax
+    shrl    $4, %eax
+    subl    $20, %eax                   // dcode = (x-256) div 16 - REPDIST_CODES
+    js      .Lta_rep
+    movl    %eax, dco
+    movq    pxd, %rdx
+    movzbl  (%rdx,%rax), %ecx           // extra_dbits[dcode]
+    call    .Lta_getbits
+    testl   %edx, %edx
+    jnz     .Lta_badarith
+    movl    dco, %ecx
+    movq    pdb, %rdx
+    addl    (%rdx,%rcx,4), %eax
+    incl    %eax                        // d = dc_base[dcode] + bits + 1
+    movl    %eax, %r8d
+    leaq    TTornadoStage.FPrevDists(%r15), %rdx
+    movslq  TTornadoStage.FPrev(%r15), %rcx
+    cmpq    $128, %rcx                  // Length(FPrevDists)
+    jne     .Lta_pd1
+    movl    500(%rdx), %eax
+    movl    %eax, (%rdx)
+    movl    504(%rdx), %eax
+    movl    %eax, 4(%rdx)
+    movl    508(%rdx), %eax
+    movl    %eax, 8(%rdx)
+    movl    $3, %ecx                    // REPDIST_CODES-1
+  .Lta_pd1:
+    movl    %r8d, (%rdx,%rcx,4)
+    incl    %ecx
+    movl    %ecx, TTornadoStage.FPrev(%r15)
+    jmp     .Lta_copy
+  .Lta_rep:
+    // dcode -4..-1: d = prevdists[prev-1-j] (j = dcode+4) y rotar hasta el final
+    addl    $4, %eax
+    leaq    TTornadoStage.FPrevDists(%r15), %rdx
+    movslq  TTornadoStage.FPrev(%r15), %rsi
+    decq    %rsi                        // prev-1
+    movq    %rsi, %rcx
+    subq    %rax, %rcx                  // prev-1-j
+    movl    (%rdx,%rcx,4), %r8d
+  .Lta_rot:
+    cmpq    %rsi, %rcx
+    jae     .Lta_rotd
+    movl    4(%rdx,%rcx,4), %eax
+    movl    %eax, (%rdx,%rcx,4)
+    incq    %rcx
+    jmp     .Lta_rot
+  .Lta_rotd:
+    movl    %r8d, (%rdx,%rsi,4)
+
+    // ---- copia: edi = len, r8d = dist ----
+  .Lta_copy:
+    testl   %r8d, %r8d
+    jz      .Lta_spec
+    movq    %r14, %rax
+    subq    %r9, %rax                   // output - outbuf
+    movl    %r8d, %ecx
+    cmpq    %rax, %rcx
+    ja      .Lta_spec
+    movq    %r13, %rax
+    subq    %r14, %rax                  // write_end - output
+    movl    %edi, %edx
+    cmpq    %rdx, %rax
+    jle     .Lta_spec
+    movq    %r14, %rsi
+    subq    %rcx, %rsi                  // origen
+    movq    %rdx, %rax                  // bytes que faltan
+    cmpq    $16, %rcx
+    jb      .Lta_c8
+  .Lta_c16:
+    cmpq    $16, %rax
+    jb      .Lta_c8
+    movdqu  (%rsi), %xmm0
+    movdqu  %xmm0, (%r14)
+    addq    $16, %rsi
+    addq    $16, %r14
+    subq    $16, %rax
+    jmp     .Lta_c16
+  .Lta_c8:
+    cmpq    $8, %rcx
+    jb      .Lta_c1
+  .Lta_c8l:
+    cmpq    $8, %rax
+    jb      .Lta_c1
+    movq    (%rsi), %rdx
+    movq    %rdx, (%r14)
+    addq    $8, %rsi
+    addq    $8, %r14
+    subq    $8, %rax
+    jmp     .Lta_c8l
+  .Lta_c1:
+    testq   %rax, %rax
+    jz      .Lta_loop
+  .Lta_c1l:
+    movb    (%rsi), %dl
+    movb    %dl, (%r14)
+    incq    %rsi
+    incq    %r14
+    decq    %rax
+    jnz     .Lta_c1l
+    jmp     .Lta_loop
+
+  .Lta_spec:
+    movl    %edi, pendlen
+    movl    %r8d, penddist
+    movl    $1, res                     // TDR_SPECIAL
+    jmp     .Lta_save
+  .Lta_slow:
+    movl    $0, res                     // TDR_SLOW
+  .Lta_save:
+    movq    %r14, op
+    movq    %r12, ip
+    movl    %r11d, rng
+    movl    %r10d, cod
+    jmp     .Lta_end
+  .Lta_badarith:
+    movl    $4, res                     // TDR_BADARITH
+    jmp     .Lta_end
+  .Lta_badcode:
+    movl    $3, res                     // TDR_BADCODE
+  .Lta_end:
+  end ['rax', 'rbx', 'rcx', 'rdx', 'rsi', 'rdi', 'r8', 'r9', 'r10', 'r11', 'r12', 'r13', 'r14', 'r15', 'xmm0'];
+  Result := res;
+  if res <= TDR_WRITE then
+  begin
+    FOutput := op - FOut;
+    FInPos := ip - PByte(FIn);
+    FRange := rng;
+    FCode := cod;
+    if res = TDR_SPECIAL then
+    begin
+      FPendLen := pendlen;
+      FPendDist := penddist;
+    end;
+  end;
+end;
+{$ELSE}
+begin
+  Result := RunArithFastPas;
+end;
+{$ENDIF}
+
+{ Lazo rápido del codificador Huffman, igual que RunArithFast: en x86_64 en ensamblador (mismo
+  algoritmo que RunHufFastPas, con el bitbuf, la entrada y la salida en registros), si no la
+  versión en Pascal. Registros: r15 Self, r14 salida, r13 write_end, r12 entrada, rbx límite de
+  la entrada, r11 bitbuf, r10d bitcount, r9 outbuf. }
+function TTornadoStage.RunHufFast: Integer;
+{$IF defined(CPUX86_64) and not defined(PARC_NOASM)}
+var
+  me: TTornadoStage;
+  op, oend, ip, ilsafe, outb: PByte;
+  plb, pxl, pdb, pxd: Pointer;
+  bb: QWord;
+  bc: LongInt;
+  sym, pendlen, penddist: LongWord;
+  res: LongInt;
+  hidx: Pointer;
+begin
+  me := Self;
+  hidx := Pointer(FHufIndex);     // HufBuildTree no corre dentro de este lazo
+  outb := FOut;
+  op := FOut + FOutput;
+  oend := FOut + FWriteEnd;
+  ip := PByte(FIn) + FInPos;
+  ilsafe := PByte(FIn) + FInLim - TD_MARGIN;
+  bb := FBitBuf;
+  bc := FBitCount;
+  plb := @lc2_base[0];
+  pxl := @extra_lbits2[0];
+  pdb := @dc_base[0];
+  pxd := @extra_dbits[0];
+  res := TDR_SLOW;
+  sym := 0; pendlen := 0; penddist := 0;
+  asm
+    movq    me, %r15
+    movq    op, %r14
+    movq    oend, %r13
+    movq    ip, %r12
+    movq    ilsafe, %rbx
+    movq    bb, %r11
+    movl    bc, %r10d
+    movq    outb, %r9
+  .Lth_loop:
+    cmpq    %rbx, %r12
+    ja      .Lth_slow
+    // ---- HufDecode (needbits; el EOB no se consume: va por el camino general) ----
+    cmpl    $32, %r10d
+    jg      .Lth_nb1
+    movl    (%r12), %eax
+    movl    %r10d, %ecx
+    shlq    %cl, %rax
+    orq     %rax, %r11
+    addq    $4, %r12
+    addl    $32, %r10d
+  .Lth_nb1:
+    movl    %r11d, %eax
+    andl    TTornadoStage.FHufMask(%r15), %eax
+    movl    %eax, %ecx
+    andl    $2047, %ecx                 // (1 shl FAST_BITS) - 1
+    movswl  TTornadoStage.FHufFast(%r15,%rcx,2), %esi
+    testl   %esi, %esi
+    jns     .Lth_got
+    movq    hidx, %rdx
+    movzwl  (%rdx,%rax,2), %esi
+  .Lth_got:
+    cmpl    $832, %esi                  // EOB_CODE
+    je      .Lth_slow
+    movzbl  TTornadoStage.FHufBits(%r15,%rsi), %ecx
+    shrq    %cl, %r11
+    subl    %ecx, %r10d
+    incl    TTornadoStage.FHufCounter(%r15,%rsi,4)
+    incq    TTornadoStage.FHufBlock(%r15)
+    cmpq    $10000, TTornadoStage.FHufBlock(%r15)   // 2*HUFBLOCKSIZE
+    jg      .Lth_badblock
+    cmpl    $256, %esi
+    jae     .Lth_match
+    // ---- literal ----
+    movb    %sil, (%r14)
+    incq    %r14
+    cmpq    %r13, %r14
+    jb      .Lth_loop
+    movl    $2, res                     // TDR_WRITE
+    jmp     .Lth_save
+
+    // ---- getbits(n): ecx = n (0..30) -> eax. Toca eax, ecx, edx ----
+  .Lth_getbits:
+    cmpl    $32, %r10d
+    jg      .Lth_gb1
+    movl    %ecx, %edx
+    movl    (%r12), %eax
+    movl    %r10d, %ecx
+    shlq    %cl, %rax
+    orq     %rax, %r11
+    addq    $4, %r12
+    addl    $32, %r10d
+    movl    %edx, %ecx
+  .Lth_gb1:
+    movl    $1, %eax
+    shll    %cl, %eax
+    decl    %eax
+    andl    %r11d, %eax
+    shrq    %cl, %r11
+    subl    %ecx, %r10d
+    ret
+
+    // ---- LZMatch ----
+  .Lth_match:
+    movl    %esi, sym
+    cmpl    $833, %esi                  // REPCHAR
+    jne     .Lth_nrep
+    movl    $1, %edi                    // len = 1, dist = prevdists[prev-1]
+    movslq  TTornadoStage.FPrev(%r15), %rcx
+    decq    %rcx
+    leaq    TTornadoStage.FPrevDists(%r15), %rdx
+    movl    (%rdx,%rcx,4), %r8d
+    jmp     .Lth_copy
+  .Lth_nrep:
+    cmpl    $832, %esi                  // >= EOB_CODE
+    jae     .Lth_badcode
+    // getlen
+    movl    %esi, %edi
+    andl    $15, %edi                   // lcode
+    movq    pxl, %rdx
+    movzbl  (%rdx,%rdi), %ecx           // extra_lbits2[lcode]
+    call    .Lth_getbits
+    movq    plb, %rdx
+    addl    (%rdx,%rdi,4), %eax         // l = lc2_base[lcode] + bits
+    cmpl    $100, %eax
+    jbe     .Lth_l1
+    cmpl    $104, %eax
+    ja      .Lth_l2
+    addl    $1073741723, %eax           // l - 100 + IMPOSSIBLE_LEN
+    jmp     .Lth_lset
+  .Lth_l2:
+    subl    $4, %eax
+  .Lth_l1:
+    addl    TTornadoStage.FMinLen(%r15), %eax
+  .Lth_lset:
+    movl    %eax, %edi                  // len
+    // getdist
+    movl    sym, %esi
+    shrl    $4, %esi
+    subl    $20, %esi                   // dcode = (x-256) div 16 - REPDIST_CODES
+    js      .Lth_rep
+    movq    pxd, %rdx
+    movzbl  (%rdx,%rsi), %ecx           // extra_dbits[dcode]
+    call    .Lth_getbits
+    movq    pdb, %rdx
+    addl    (%rdx,%rsi,4), %eax
+    incl    %eax                        // d = dc_base[dcode] + bits + 1
+    movl    %eax, %r8d
+    leaq    TTornadoStage.FPrevDists(%r15), %rdx
+    movslq  TTornadoStage.FPrev(%r15), %rcx
+    cmpq    $128, %rcx                  // Length(FPrevDists)
+    jne     .Lth_pd1
+    movl    500(%rdx), %eax
+    movl    %eax, (%rdx)
+    movl    504(%rdx), %eax
+    movl    %eax, 4(%rdx)
+    movl    508(%rdx), %eax
+    movl    %eax, 8(%rdx)
+    movl    $3, %ecx                    // REPDIST_CODES-1
+  .Lth_pd1:
+    movl    %r8d, (%rdx,%rcx,4)
+    incl    %ecx
+    movl    %ecx, TTornadoStage.FPrev(%r15)
+    jmp     .Lth_copy
+  .Lth_rep:
+    // dcode -4..-1: d = prevdists[prev-1-j] (j = dcode+4) y rotar hasta el final
+    addl    $4, %esi
+    leaq    TTornadoStage.FPrevDists(%r15), %rdx
+    movslq  TTornadoStage.FPrev(%r15), %rax
+    decq    %rax                        // prev-1
+    movq    %rax, %rcx
+    subq    %rsi, %rcx                  // prev-1-j
+    movl    (%rdx,%rcx,4), %r8d
+  .Lth_rot:
+    cmpq    %rax, %rcx
+    jae     .Lth_rotd
+    movl    4(%rdx,%rcx,4), %esi
+    movl    %esi, (%rdx,%rcx,4)
+    incq    %rcx
+    jmp     .Lth_rot
+  .Lth_rotd:
+    movl    %r8d, (%rdx,%rax,4)
+
+    // ---- copia: edi = len, r8d = dist ----
+  .Lth_copy:
+    testl   %r8d, %r8d
+    jz      .Lth_spec
+    movq    %r14, %rax
+    subq    %r9, %rax                   // output - outbuf
+    movl    %r8d, %ecx
+    cmpq    %rax, %rcx
+    ja      .Lth_spec
+    movq    %r13, %rax
+    subq    %r14, %rax                  // write_end - output
+    movl    %edi, %edx
+    cmpq    %rdx, %rax
+    jle     .Lth_spec
+    movq    %r14, %rsi
+    subq    %rcx, %rsi                  // origen
+    movq    %rdx, %rax                  // bytes que faltan
+    cmpq    $16, %rcx
+    jb      .Lth_c8
+  .Lth_c16:
+    cmpq    $16, %rax
+    jb      .Lth_c8
+    movdqu  (%rsi), %xmm0
+    movdqu  %xmm0, (%r14)
+    addq    $16, %rsi
+    addq    $16, %r14
+    subq    $16, %rax
+    jmp     .Lth_c16
+  .Lth_c8:
+    cmpq    $8, %rcx
+    jb      .Lth_c1
+  .Lth_c8l:
+    cmpq    $8, %rax
+    jb      .Lth_c1
+    movq    (%rsi), %rdx
+    movq    %rdx, (%r14)
+    addq    $8, %rsi
+    addq    $8, %r14
+    subq    $8, %rax
+    jmp     .Lth_c8l
+  .Lth_c1:
+    testq   %rax, %rax
+    jz      .Lth_loop
+  .Lth_c1l:
+    movb    (%rsi), %dl
+    movb    %dl, (%r14)
+    incq    %rsi
+    incq    %r14
+    decq    %rax
+    jnz     .Lth_c1l
+    jmp     .Lth_loop
+
+  .Lth_spec:
+    movl    %edi, pendlen
+    movl    %r8d, penddist
+    movl    $1, res                     // TDR_SPECIAL
+    jmp     .Lth_save
+  .Lth_slow:
+    movl    $0, res                     // TDR_SLOW
+  .Lth_save:
+    movq    %r14, op
+    movq    %r12, ip
+    movq    %r11, bb
+    movl    %r10d, bc
+    jmp     .Lth_end
+  .Lth_badblock:
+    movl    $5, res                     // TDR_BADBLOCK
+    jmp     .Lth_end
+  .Lth_badcode:
+    movl    $3, res                     // TDR_BADCODE
+  .Lth_end:
+  end ['rax', 'rbx', 'rcx', 'rdx', 'rsi', 'rdi', 'r8', 'r9', 'r10', 'r11', 'r12', 'r13', 'r14', 'r15', 'xmm0'];
+  Result := res;
+  if res <= TDR_WRITE then
+  begin
+    FOutput := op - FOut;
+    FInPos := ip - PByte(FIn);
+    FBitBuf := bb;
+    FBitCount := bc;
+    if res = TDR_SPECIAL then
+    begin
+      FPendLen := pendlen;
+      FPendDist := penddist;
+    end;
+  end;
+end;
+{$ELSE}
+begin
+  Result := RunHufFastPas;
+end;
+{$ENDIF}
 
 function TTornadoStage.NextChunk(out P: PByte; out Len: SizeInt): Boolean;
 begin
