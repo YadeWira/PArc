@@ -21,7 +21,7 @@ function LimitAndCanonize(const Method: string; BlockSize: Int64): string;
 
 implementation
 
-uses SysUtils, Math, parc_methods;
+uses SysUtils, Math, parc_methods, parc_lzmaenc;
 
 const
   KB = 1024; MB = 1024*1024; GB = Int64(1024)*1024*1024;
@@ -127,6 +127,40 @@ end;
 { ================================================================================ }
 { Canoniza una cadena de etapas con un límite de diccionario ya calculado          }
 
+{$IFDEF CPU32}
+const
+  { 32 bits: el codificador lzma (ventana + hash + árbol) no pasa de 2 GB y sus piezas, más
+    kLzmaEnc32Headroom para el resto del proceso, se tienen que poder reservar de verdad (el
+    límite real es el espacio de direcciones fragmentado de 2 a 4 GB, no la RAM). Sin esto,
+    lzma:1gb fallaba con "Out of memory". }
+  kLzmaEnc32MaxMem = Int64(2) shl 30;
+  kLzmaEnc32Headroom = Int64(256) shl 20;
+
+{ Diccionario lzma que entra en la memoria de 32 bits (LzmaFitDictionary); MFi como en
+  CanonStage. }
+function FitLzma32(BS, MFi, Alg, NFB, MC, LC, LP: Int64): Int64;
+var
+  P: TLzmaEncParams;
+begin
+  P := DefaultLzmaEncParams;
+  P.DictSize := BS;
+  P.Algorithm := Alg;
+  P.NumFastBytes := NFB;
+  P.MatchFinderCycles := MC;
+  P.lc := LC;
+  P.lp := LP;
+  case MFi of
+    1: P.MatchFinder := mfBT2;
+    2: P.MatchFinder := mfBT3;
+    3: P.MatchFinder := mfBT4;
+    4: P.MatchFinder := mfHC4;
+  else
+    P.MatchFinder := mfHT4;
+  end;
+  Result := LzmaFitDictionary(P, kLzmaEnc32MaxMem, kLzmaEnc32Headroom);
+end;
+{$ENDIF}
+
 function CanonChain(const Method: string; Limit: Int64): string;
 var
   Stages: TStringArray;
@@ -220,6 +254,9 @@ begin
         else if Copy(L,1,2) = 'lc' then LC := Num(Copy(L,3,MaxInt), 3)
         else if Copy(L,1,2) = 'lp' then LP := Num(Copy(L,3,MaxInt), 0);
       end;
+      {$IFDEF CPU32}
+      BS := FitLzma32(BS, MFi, Alg, NFB, MC, LC, LP);
+      {$ENDIF}
       Result := 'lzma:' + ShowMem(BS);
       if Hash <> 0 then Result := Result + (':h' + ShowMem(Hash));
       if MFi = 0 then

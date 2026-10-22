@@ -116,6 +116,18 @@ var
 function LzmaEncMaxThreads(const P: TLzmaEncParams): Integer;
 function LzmaEncThreadsFor(const P: TLzmaEncParams): Integer;
 
+{ Memoria que reserva un codificador con estos parámetros (ventana + hash + árbol, un hilo),
+  en bytes; High(QWord) si el diccionario no se puede usar. }
+function LzmaEncMemory(const P: TLzmaEncParams): QWord;
+{ El diccionario más grande <= P.DictSize (de la forma m * 2^k, m = 8..15, mínimo 1 MB) con
+  el que LzmaEncMemory no pasa de MaxMem y, si Headroom > 0 y pasa de 256 MB, las piezas que
+  reserva el codificador (ventana, hash, árbol) más Headroom bytes se pueden reservar de
+  verdad ahora (se prueban y se liberan: en 32 bits lo que falla es el bloque contiguo más
+  grande). En
+  32 bits el método se ajusta con esto antes de comprimir (parc_canon), como FreeArc achica el
+  diccionario a la memoria disponible; así el decodificador también lo puede reservar. }
+function LzmaFitDictionary(const P: TLzmaEncParams; MaxMem, Headroom: QWord): QWord;
+
 threadvar
   LzmaEncThreadGrant: Integer;
 
@@ -4225,6 +4237,119 @@ begin
   if Result = 0 then Result := LzmaEncThreadGrant;
   if Result < 1 then Result := 1;
   if Result > LzmaEncMaxThreads(P) then Result := LzmaEncMaxThreads(P);
+end;
+
+{ Tamaños de las reservas de un codificador de un hilo (los mismos que MfCreate(d, kNumOpts,
+  fb, LZMA_MATCH_LEN_MAX + 1) más litProbs y el objeto). False si el diccionario no sirve. }
+function LzmaEncPieces(const P: TLzmaEncParams; out Win, Hash, Son, Rest: QWord): Boolean;
+var
+  m: TMatchFinder;
+  d, fb, mc, hs, rows: QWord;
+begin
+  Win := 0; Hash := 0; Son := 0; Rest := 0;
+  d := P.DictSize;
+  if d > kLzmaMaxHistorySize then d := kLzmaMaxHistorySize;
+  if (d = (QWord(2) shl 30)) or (d = (QWord(3) shl 30)) then Dec(d);
+  fb := P.NumFastBytes;
+  if fb < 5 then fb := 5 else if fb > LZMA_MATCH_LEN_MAX then fb := LZMA_MATCH_LEN_MAX;
+  FillChar(m, SizeOf(m), 0);
+  m.numHashBytes := 4;
+  case P.MatchFinder of
+    mfBT2: m.numHashBytes := 2;
+    mfBT3: m.numHashBytes := 3;
+  end;
+  m.keepSizeBefore := LongWord(d) + kNumOpts + 1;
+  m.keepSizeAfter := LZMA_MATCH_LEN_MAX + 1 + LongWord(fb);
+  Win := MfGetBlockSize(@m, LongWord(d));
+  if Win = 0 then Exit(False);
+  if P.MatchFinder = mfHT4 then
+  begin
+    mc := P.MatchFinderCycles;
+    if mc = 0 then mc := QWord(P.NumFastBytes) div 2;
+    if mc = 0 then mc := 1;
+    if mc > kHtMaxCutValue then mc := kHtMaxCutValue;
+    hs := d div 4 div mc;
+    rows := kHtMinRows;
+    while rows * 2 <= hs do rows := rows * 2;
+    Hash := 4 * (rows * mc + kFix4HashSize);
+  end
+  else
+  begin
+    hs := QWord(MfGetHashMask(@m, LongWord(d))) + 1;
+    if m.numHashBytes > 2 then Inc(hs, kHash2Size);
+    if m.numHashBytes > 3 then Inc(hs, kHash3Size);
+    Hash := 4 * hs;
+    if P.MatchFinder = mfHC4 then Son := 4 * (d + 1) else Son := 8 * (d + 1);
+  end;
+  // probabilidades de los literales y el resto del codificador (opt, precios, buffers)
+  Rest := (QWord($300) * SizeOf(TProb)) shl (P.lc + P.lp) + (1 shl 20);
+  Result := True;
+end;
+
+function LzmaEncMemory(const P: TLzmaEncParams): QWord;
+var
+  w, h, so, r: QWord;
+begin
+  if not LzmaEncPieces(P, w, h, so, r) then Exit(High(QWord));
+  Result := w + h + so + r;
+end;
+
+{ ¿Se pueden reservar ahora todas las piezas juntas, más Headroom? }
+function LzmaCanReserve(const P: TLzmaEncParams; Headroom: QWord): Boolean;
+var
+  sz: array[0..3] of QWord;
+  pt: array[0..3] of Pointer;
+  r: QWord;
+  i: Integer;
+begin
+  if not LzmaEncPieces(P, sz[0], sz[1], sz[2], r) then Exit(False);
+  sz[3] := Headroom + r;
+  for i := 0 to 3 do
+    if sz[i] > QWord(High(SizeInt)) then Exit(False);
+  FillChar(pt, SizeOf(pt), 0);
+  Result := True;
+  try
+    try
+      for i := 0 to 3 do
+        if sz[i] > 0 then pt[i] := GetMem(SizeInt(sz[i]));
+    except
+      on EOutOfMemory do Result := False;
+    end;
+  finally
+    for i := 0 to 3 do
+      if pt[i] <> nil then FreeMem(pt[i]);
+  end;
+end;
+
+function LzmaFitDictionary(const P: TLzmaEncParams; MaxMem, Headroom: QWord): QWord;
+
+  function Fits(const Q: TLzmaEncParams): Boolean;
+  var
+    mem: QWord;
+  begin
+    // hasta 256 MB no se prueba: el resultado no depende de cómo esté la memoria en ese momento
+    mem := LzmaEncMemory(Q);
+    Result := (mem <= MaxMem) and ((Headroom = 0) or (mem <= (256 shl 20)) or LzmaCanReserve(Q, Headroom));
+  end;
+
+var
+  Q: TLzmaEncParams;
+  k, m: Integer;
+  c: QWord;
+begin
+  Q := P;
+  Result := P.DictSize;
+  if Fits(Q) then Exit;
+  // candidatos m * 2^k decrecientes por debajo de DictSize: 15/16, 14/16 ... de cada potencia
+  for k := 40 downto 20 do
+    for m := 15 downto 8 do
+    begin
+      c := QWord(m) shl (k - 3);
+      if (c >= P.DictSize) or (c < (1 shl 20)) then Continue;
+      Q.DictSize := c;
+      if Fits(Q) then Exit(c);
+    end;
+  Result := 1 shl 20;
 end;
 
 function DefaultLzmaEncParams: TLzmaEncParams;
