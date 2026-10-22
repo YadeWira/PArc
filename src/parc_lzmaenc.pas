@@ -9,8 +9,11 @@
   de FreeArc 0.67 (tabla hash con filas de mc posiciones y etiqueta en los bits altos, sin
   "son"), portado aparte (Ht4GetMatches/Ht4Skip). PArc 0.0.2 lo mapeaba a hc4; los streams de
   los dos son LZMA estándar (el decodificador no cambia), solo cambian razón y velocidad.
-  Con los mismos parámetros la salida es idéntica byte a byte a la del SDK 26.03 (LzmaEnc_Encode
-  y LzmaEnc_MemEncode). Diferencias con FreeArc 0.67 (SDK 9.x modificado):
+  El parser óptimo (GetOptimum) se aparta del SDK 26.03 en dos atajos de velocidad del SDK 18+
+  que costaban razón (siempre cotiza el literal; short rep como el SDK 9.x) y actualiza los
+  precios cada 32 matches en vez de 64: 0.1-0.4 % más chico, ~1 % más lento, y queda igual o
+  más chico que FreeArc en :normal y :max. GetOptimumFast (:fast) sigue idéntico al SDK.
+  Los streams son LZMA estándar. Diferencias con FreeArc 0.67 (SDK 9.x modificado):
   - mc = 0 usa la fórmula de FreeArc (bt: 16+fb/2, hc4: 16+fb/4, ht4: fb/2). En ht4 mc es el
     largo de la fila de la tabla hash y se limita a kHtMaxCutValue (memoria acotada).
   - "h" (tamaño del hash) se acepta y se ignora: el SDK 26.03 lo deriva del diccionario.
@@ -119,6 +122,7 @@ const
   kNumBitPriceShiftBits = 4;
   REP_LEN_COUNT = 64;
   kNumOpts = 1 shl 11;
+  kPriceUpdateMatches = 32;     // matches entre actualizaciones de precios (SDK 26.03: 64)
   kNumLenToPosStates = 4;
   kNumPosSlotBits = 6;
   kDicLogSizeMax = 32;
@@ -3060,9 +3064,9 @@ begin
     nextOpt := @opt[cur + 1];
     nextIsLit := False;
 
-    if ((nextOpt^.price < kInfinityPrice) and (matchByte = curByte)) or (litPr > nextOpt^.price) then
-      litPr := 0
-    else
+    // El SDK 18+ no cotiza el literal si ya hay un precio y matchByte = curByte, o si el
+    // match solo ya cuesta más: acá se cotiza siempre (como el SDK 9.x de FreeArc): 0.1-0.4 %
+    // más chico por ~1 % de tiempo.
     begin
       probs := LitProbsPtr(position, (data - 1)^);
       if not IsLitState(state) then
@@ -3086,11 +3090,12 @@ begin
     if numAvailFull > temp then numAvailFull := temp;
 
     // ---------- SHORT_REP ----------
-    if IsLitState(state) and (matchByte = curByte) and (repMatchPrice < nextOpt^.price)
-      and ((nextOpt^.len < 2) or (nextOpt^.dist <> 0)) then
+    // Como el SDK 9.x: en cualquier estado (el SDK 18+ solo después de un literal y si
+    // repMatchPrice ya es menor) y con <= (a igual precio gana el short rep).
+    if (matchByte = curByte) and ((nextOpt^.len < 2) or (nextOpt^.dist <> 0)) then
     begin
       shortRepPrice := repMatchPrice + PriceShortRep(state, posState);
-      if shortRepPrice < nextOpt^.price then
+      if shortRepPrice <= nextOpt^.price then
       begin
         nextOpt^.price := shortRepPrice;
         nextOpt^.len := 1;
@@ -3979,7 +3984,8 @@ begin
       begin
         if not fastMode then
         begin
-          if matchPriceCount >= 64 then
+          // Cada 32 matches (el SDK 26.03: 64): precios más al día, ~0.03 % más chico
+          if matchPriceCount >= kPriceUpdateMatches then
           begin
             FillAlignPrices;
             FillDistancesPrices;
