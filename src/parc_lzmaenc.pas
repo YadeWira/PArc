@@ -22,6 +22,10 @@ unit parc_lzmaenc;
 {$R-}{$Q-}
 {$pointermath on}
 {$inline on}
+{$macro on}
+{ El recorrido del árbol binario (bt2/bt3/bt4) va en ensamblador x86-64 (SysV y Win64); en
+  i386, o compilando con -dPARC_NOASM, es Pascal. Misma salida. }
+{$IFDEF CPUX86_64}{$IFNDEF PARC_NOASM}{$DEFINE LZMA_ENC_ASM}{$ENDIF}{$ENDIF}
 
 interface
 
@@ -707,7 +711,7 @@ begin
   Result := len;
 end;
 
-function BtGetMatchesSpec(lenLimit, curMatch, pos: LongWord; cur: PByte; son: PLongWord;
+function BtGetMatchesSpecPas(lenLimit, curMatch, pos: LongWord; cur: PByte; son: PLongWord;
   cyclicBufferPos, cyclicBufferSize, cutValue: LongWord; d: PLongWord; maxLen: LongWord): PLongWord;
 var
   ptr0, ptr1, pair: PLongWord;
@@ -770,7 +774,7 @@ begin
 end;
 
 { SkipMatchesSpec }
-procedure BtSkipMatchesSpec(lenLimit, curMatch, pos: LongWord; cur: PByte; son: PLongWord;
+procedure BtSkipMatchesSpecPas(lenLimit, curMatch, pos: LongWord; cur: PByte; son: PLongWord;
   cyclicBufferPos, cyclicBufferSize, cutValue: LongWord);
 var
   ptr0, ptr1, pair: PLongWord;
@@ -818,6 +822,200 @@ begin
   ptr0^ := 0;
   ptr1^ := 0;
 end;
+
+{$IFDEF LZMA_ENC_ASM}
+type
+  { Parámetros y estado de BtWalkAsm. }
+  TBtArgs = record
+    lenLimit, curMatch, pos, cbp, cbs, cutValue, maxLen, skip: LongWord;
+    cur: PByte;
+    son, d: PLongWord;
+    sv: array[0..7] of QWord;     // registros preservados (la rutina no usa la pila)
+  end;
+  PBtArgs = ^TBtArgs;
+
+{ GetMatchesSpec1 (skip = 0) y SkipMatchesSpec (skip = 1) en ensamblador: FPC deja en la pila
+  casi todas las variables del bucle. Rutina hoja sin pila: los registros preservados (SysV y
+  Win64) se guardan en a.sv. Registros: rdi a, r14 cur, r15 son, ecx cutValue, edx lenLimit,
+  r13d curMatch, r12d cmCheck, r8 ptr0, r9 ptr1, r10d len0, r11d len1, rbx pair, rbp pb,
+  esi len. maxLen y d quedan en a (cambian poco). }
+{$asmmode intel}
+procedure BtWalkAsm(a: PBtArgs); assembler; nostackframe;
+asm
+{$IFDEF WIN64}
+  mov rax, rcx
+{$ELSE}
+  mov rax, rdi
+{$ENDIF}
+  mov [rax + TBtArgs.sv + 0], rbx
+  mov [rax + TBtArgs.sv + 8], rbp
+  mov [rax + TBtArgs.sv + 16], r12
+  mov [rax + TBtArgs.sv + 24], r13
+  mov [rax + TBtArgs.sv + 32], r14
+  mov [rax + TBtArgs.sv + 40], r15
+  mov [rax + TBtArgs.sv + 48], rdi
+  mov [rax + TBtArgs.sv + 56], rsi
+  mov rdi, rax
+  mov r14, [rdi + TBtArgs.cur]
+  mov r15, [rdi + TBtArgs.son]
+  mov ecx, [rdi + TBtArgs.cutValue]
+  mov edx, [rdi + TBtArgs.lenLimit]
+  mov r13d, [rdi + TBtArgs.curMatch]
+  mov eax, [rdi + TBtArgs.cbp]
+  lea r9, [r15 + rax*8]                 // ptr1 = son + 2*cbp
+  lea r8, [r9 + 4]                      // ptr0 = ptr1 + 1
+  xor r10d, r10d
+  xor r11d, r11d
+  // cmCheck = pos - cbs (0 si pos < cbs)
+  xor r12d, r12d
+  mov eax, [rdi + TBtArgs.pos]
+  sub eax, [rdi + TBtArgs.cbs]
+  cmovae r12d, eax
+  cmp r12d, r13d
+  jae @zero
+@loop:
+  // delta = pos - curMatch; pair = son + 2*(cbp - delta (+ cbs si delta > cbp))
+  mov eax, [rdi + TBtArgs.pos]
+  sub eax, r13d
+  mov ebx, [rdi + TBtArgs.cbp]
+  sub ebx, eax
+  jae @noWrap
+  add ebx, [rdi + TBtArgs.cbs]
+@noWrap:
+  lea rbx, [r15 + rbx*8]
+  mov rbp, r14
+  sub rbp, rax                          // pb = cur - delta
+  // len = min(len0, len1)
+  mov esi, r10d
+  cmp r11d, esi
+  cmovb esi, r11d
+  movzx eax, byte ptr [rbp + rsi]
+  cmp al, byte ptr [r14 + rsi]
+  jne @branch
+  inc esi
+  // MatchLen(pb, cur, len, lenLimit): de a 8 bytes y después de a uno
+@ml8:
+  lea eax, [esi + 8]
+  cmp eax, edx
+  ja @ml1
+  mov rax, [rbp + rsi]
+  xor rax, [r14 + rsi]
+  jnz @mlDiff
+  add esi, 8
+  jmp @ml8
+@mlDiff:
+  bsf rax, rax
+  shr eax, 3
+  add esi, eax
+  jmp @mlEnd
+@ml1:
+  cmp esi, edx
+  jae @mlEnd
+  movzx eax, byte ptr [rbp + rsi]
+  cmp al, byte ptr [r14 + rsi]
+  jne @mlEnd
+  inc esi
+  jmp @ml1
+@mlEnd:
+  cmp dword ptr [rdi + TBtArgs.skip], 0
+  jne @skipChk
+  // GetMatches: if maxLen < len -> par (len, delta - 1)
+  cmp esi, [rdi + TBtArgs.maxLen]
+  jbe @branch
+  mov [rdi + TBtArgs.maxLen], esi
+  mov [rdi + TBtArgs.cutValue], ecx     // ecx de temporal
+  mov rcx, [rdi + TBtArgs.d]
+  mov [rcx], esi
+  mov rax, r14
+  sub rax, rbp
+  dec eax                               // delta - 1
+  mov [rcx + 4], eax
+  add rcx, 8
+  mov [rdi + TBtArgs.d], rcx
+  mov ecx, [rdi + TBtArgs.cutValue]
+@skipChk:
+  cmp esi, edx
+  jne @branch
+  // len = lenLimit: el nodo actual hereda los hijos de pair
+  mov eax, [rbx]
+  mov [r9], eax
+  mov eax, [rbx + 4]
+  mov [r8], eax
+  jmp @ret
+@branch:
+  movzx eax, byte ptr [rbp + rsi]
+  cmp al, byte ptr [r14 + rsi]
+  jae @right
+  mov [r9], r13d                        // pb[len] < cur[len]: ptr1^ := curMatch
+  mov r13d, [rbx + 4]
+  lea r9, [rbx + 4]
+  mov r11d, esi
+  dec ecx
+  jz @zero
+  cmp r12d, r13d
+  jb @loop
+  jmp @zero
+@right:
+  mov [r8], r13d                        // ptr0^ := curMatch
+  mov r13d, [rbx]
+  mov r8, rbx
+  mov r10d, esi
+  dec ecx
+  jz @zero
+  cmp r12d, r13d
+  jb @loop
+@zero:
+  mov dword ptr [r8], 0
+  mov dword ptr [r9], 0
+@ret:
+  mov rax, rdi
+  mov rbx, [rax + TBtArgs.sv + 0]
+  mov rbp, [rax + TBtArgs.sv + 8]
+  mov r12, [rax + TBtArgs.sv + 16]
+  mov r13, [rax + TBtArgs.sv + 24]
+  mov r14, [rax + TBtArgs.sv + 32]
+  mov r15, [rax + TBtArgs.sv + 40]
+  mov rdi, [rax + TBtArgs.sv + 48]
+  mov rsi, [rax + TBtArgs.sv + 56]
+end;
+{$asmmode default}
+{$ENDIF}
+
+function BtGetMatchesSpec(lenLimit, curMatch, pos: LongWord; cur: PByte; son: PLongWord;
+  cyclicBufferPos, cyclicBufferSize, cutValue: LongWord; d: PLongWord; maxLen: LongWord): PLongWord; inline;
+{$IFDEF LZMA_ENC_ASM}
+var
+  a: TBtArgs;
+begin
+  a.lenLimit := lenLimit; a.curMatch := curMatch; a.pos := pos; a.cbp := cyclicBufferPos;
+  a.cbs := cyclicBufferSize; a.cutValue := cutValue; a.maxLen := maxLen; a.skip := 0;
+  a.cur := cur; a.son := son; a.d := d;
+  BtWalkAsm(@a);
+  Result := a.d;
+end;
+{$ELSE}
+begin
+  Result := BtGetMatchesSpecPas(lenLimit, curMatch, pos, cur, son, cyclicBufferPos,
+    cyclicBufferSize, cutValue, d, maxLen);
+end;
+{$ENDIF}
+
+procedure BtSkipMatchesSpec(lenLimit, curMatch, pos: LongWord; cur: PByte; son: PLongWord;
+  cyclicBufferPos, cyclicBufferSize, cutValue: LongWord); inline;
+{$IFDEF LZMA_ENC_ASM}
+var
+  a: TBtArgs;
+begin
+  a.lenLimit := lenLimit; a.curMatch := curMatch; a.pos := pos; a.cbp := cyclicBufferPos;
+  a.cbs := cyclicBufferSize; a.cutValue := cutValue; a.maxLen := 0; a.skip := 1;
+  a.cur := cur; a.son := son; a.d := nil;
+  BtWalkAsm(@a);
+end;
+{$ELSE}
+begin
+  BtSkipMatchesSpecPas(lenLimit, curMatch, pos, cur, son, cyclicBufferPos, cyclicBufferSize, cutValue);
+end;
+{$ENDIF}
 
 { UPDATE_maxLen }
 function UpdateMaxLen(cur: PByte; d2, maxLen, lenLimit: LongWord): LongWord; inline;
@@ -2019,6 +2217,215 @@ begin
   end;
 end;
 
+{$IFDEF LZMA_ENC_ASM}
+type
+  { Estado de LitBitsAsm / LitBitsMatchedAsm. }
+  TRcLit = record
+    rng: LongWord;
+    sym: LongWord;
+    lo: QWord;
+    probs: PProb;
+    matchByte, offs: LongWord;
+    sv: array[0..7] of QWord;     // registros preservados (la rutina no usa la pila)
+  end;
+  PRcLit = ^TRcLit;
+
+{ Bits de un literal con el RC_BIT sin ramas (cmov): en los literales el bit es casi
+  aleatorio y la versión con rama falla la predicción; FPC además dejaba range/low en la
+  pila. Vuelve True cuando hace falta ShiftLow (range ya desplazado; el llamador la hace y
+  vuelve a llamar) y False al terminar el byte. Registros: r8d rng, r9 low, r10 probs,
+  r11d sym, r14d matchByte, r15d offs (versión con match), rsi prob, ecx bit, edx ttt,
+  eax newBound. }
+{$asmmode intel}
+function LitBitsAsm(r: PRcLit): Boolean; assembler; nostackframe;
+asm
+{$IFDEF WIN64}
+  mov rax, rcx
+{$ELSE}
+  mov rax, rdi
+{$ENDIF}
+  mov [rax + TRcLit.sv + 0], rbx
+  mov [rax + TRcLit.sv + 8], rbp
+  mov [rax + TRcLit.sv + 16], r12
+  mov [rax + TRcLit.sv + 24], r13
+  mov [rax + TRcLit.sv + 48], rdi
+  mov [rax + TRcLit.sv + 56], rsi
+  mov rdi, rax
+  mov r8d, [rdi + TRcLit.rng]
+  mov r9, [rdi + TRcLit.lo]
+  mov r10, [rdi + TRcLit.probs]
+  mov r11d, [rdi + TRcLit.sym]
+  xor ebp, ebp
+@loop:
+  cmp r11d, $10000
+  jae @done
+  mov eax, r11d
+  shr eax, 8
+  lea rsi, [r10 + rax*2]
+  mov ecx, r11d
+  shr ecx, 7
+  and ecx, 1
+  add r11d, r11d
+  movzx edx, word ptr [rsi]
+  mov eax, r8d
+  shr eax, 11
+  imul eax, edx
+  mov ebx, r8d
+  sub ebx, eax                          // range - newBound (bit 1)
+  lea r12, [r9 + rax]                   // low + newBound (bit 1)
+  mov r13d, edx
+  shr r13d, 5
+  neg r13d
+  add r13d, edx                         // ttt - ttt>>5 (bit 1)
+  mov ebp, 2048
+  sub ebp, edx
+  shr ebp, 5
+  add ebp, edx                          // ttt + (2048-ttt)>>5 (bit 0)
+  test ecx, ecx
+  cmovnz eax, ebx
+  cmovnz r9, r12
+  cmovnz ebp, r13d
+  mov r8d, eax
+  mov word ptr [rsi], bp
+  xor ebp, ebp
+  cmp r8d, $1000000
+  jae @loop
+  shl r8d, 8
+  mov ebp, 1
+@done:
+  mov [rdi + TRcLit.rng], r8d
+  mov [rdi + TRcLit.lo], r9
+  mov [rdi + TRcLit.sym], r11d
+  mov eax, ebp
+  mov rdx, rdi
+  mov rbx, [rdx + TRcLit.sv + 0]
+  mov rbp, [rdx + TRcLit.sv + 8]
+  mov r12, [rdx + TRcLit.sv + 16]
+  mov r13, [rdx + TRcLit.sv + 24]
+  mov rdi, [rdx + TRcLit.sv + 48]
+  mov rsi, [rdx + TRcLit.sv + 56]
+end;
+
+function LitBitsMatchedAsm(r: PRcLit): Boolean; assembler; nostackframe;
+asm
+{$IFDEF WIN64}
+  mov rax, rcx
+{$ELSE}
+  mov rax, rdi
+{$ENDIF}
+  mov [rax + TRcLit.sv + 0], rbx
+  mov [rax + TRcLit.sv + 8], rbp
+  mov [rax + TRcLit.sv + 16], r12
+  mov [rax + TRcLit.sv + 24], r13
+  mov [rax + TRcLit.sv + 32], r14
+  mov [rax + TRcLit.sv + 40], r15
+  mov [rax + TRcLit.sv + 48], rdi
+  mov [rax + TRcLit.sv + 56], rsi
+  mov rdi, rax
+  mov r8d, [rdi + TRcLit.rng]
+  mov r9, [rdi + TRcLit.lo]
+  mov r10, [rdi + TRcLit.probs]
+  mov r11d, [rdi + TRcLit.sym]
+  mov r14d, [rdi + TRcLit.matchByte]
+  mov r15d, [rdi + TRcLit.offs]
+  xor ebp, ebp
+@loop:
+  cmp r11d, $10000
+  jae @done
+  // matchByte <<= 1; prob = probs + offs + (matchByte & offs) + (sym >> 8)
+  add r14d, r14d
+  mov eax, r14d
+  and eax, r15d
+  add eax, r15d
+  mov ecx, r11d
+  shr ecx, 8
+  add eax, ecx
+  lea rsi, [r10 + rax*2]
+  mov ecx, r11d
+  shr ecx, 7
+  and ecx, 1
+  add r11d, r11d
+  // offs &= ~(matchByte ^ sym)
+  mov eax, r14d
+  xor eax, r11d
+  not eax
+  and r15d, eax
+  movzx edx, word ptr [rsi]
+  mov eax, r8d
+  shr eax, 11
+  imul eax, edx
+  mov ebx, r8d
+  sub ebx, eax
+  lea r12, [r9 + rax]
+  mov r13d, edx
+  shr r13d, 5
+  neg r13d
+  add r13d, edx
+  mov ebp, 2048
+  sub ebp, edx
+  shr ebp, 5
+  add ebp, edx
+  test ecx, ecx
+  cmovnz eax, ebx
+  cmovnz r9, r12
+  cmovnz ebp, r13d
+  mov r8d, eax
+  mov word ptr [rsi], bp
+  xor ebp, ebp
+  cmp r8d, $1000000
+  jae @loop
+  shl r8d, 8
+  mov ebp, 1
+@done:
+  mov [rdi + TRcLit.rng], r8d
+  mov [rdi + TRcLit.lo], r9
+  mov [rdi + TRcLit.sym], r11d
+  mov [rdi + TRcLit.matchByte], r14d
+  mov [rdi + TRcLit.offs], r15d
+  mov eax, ebp
+  mov rdx, rdi
+  mov rbx, [rdx + TRcLit.sv + 0]
+  mov rbp, [rdx + TRcLit.sv + 8]
+  mov r12, [rdx + TRcLit.sv + 16]
+  mov r13, [rdx + TRcLit.sv + 24]
+  mov r14, [rdx + TRcLit.sv + 32]
+  mov r15, [rdx + TRcLit.sv + 40]
+  mov rdi, [rdx + TRcLit.sv + 48]
+  mov rsi, [rdx + TRcLit.sv + 56]
+end;
+{$asmmode default}
+
+{ LitEnc_Encode }
+procedure TLzmaEnc.LitEncode(probs: PProb; sym: LongWord);
+var
+  r: TRcLit;
+begin
+  r.rng := rcRange; r.lo := rcLow; r.probs := probs; r.sym := sym or $100;
+  while LitBitsAsm(@r) do
+  begin
+    rcRange := r.rng; rcLow := r.lo;
+    RcShiftLow;
+    r.lo := rcLow;
+  end;
+  rcRange := r.rng; rcLow := r.lo;
+end;
+
+{ LitEnc_EncodeMatched }
+procedure TLzmaEnc.LitEncodeMatched(probs: PProb; sym, matchByte: LongWord);
+var
+  r: TRcLit;
+begin
+  r.rng := rcRange; r.lo := rcLow; r.probs := probs; r.sym := sym or $100;
+  r.matchByte := matchByte; r.offs := $100;
+  while LitBitsMatchedAsm(@r) do
+  begin
+    rcRange := r.rng; rcLow := r.lo;
+    RcShiftLow;
+    r.lo := rcLow;
+  end;
+  rcRange := r.rng; rcLow := r.lo;
+end;
+{$ELSE}
 { LitEnc_Encode }
 procedure TLzmaEnc.LitEncode(probs: PProb; sym: LongWord);
 var
@@ -2049,6 +2456,7 @@ begin
     RcBit(prob, bit);
   until sym >= $10000;
 end;
+{$ENDIF}
 
 { RcTree_ReverseEncode }
 procedure TLzmaEnc.RcTreeReverseEncode(probs: PProb; numBits, sym: LongWord);
@@ -2378,6 +2786,9 @@ var
   numAvailFull, newLen, prev, state, startLen, litPr: LongWord;
   nextIsLit: Boolean;
   b0, j, best, delta, temp, limit, state2, posState2, offset, len2, repIndex, prob, posSlot, lenNorm: LongWord;
+  endLen: LongWord;
+  lenPr: PLongWord;
+  distPr: array[0..kNumLenToPosStates - 1] of LongWord;
 begin
   FOptCur := 0;
   FOptEnd := 0;
@@ -2798,18 +3209,54 @@ begin
       offs := 0;
       while startLen > matches[offs] do Inc(offs, 2);
       dist := matches[offs + 1];
-      posSlot := 0;
-      if dist >= kNumFullDistances then posSlot := CalcPosSlot2(dist);
       len := startLen;
+      lenPr := @lenEnc.prices[posState][0];
       while True do
       begin
-        pr := normalMatchPrice + lenEnc.prices[posState][len - LZMA_MATCH_LEN_MIN];
+        { Precios de la distancia para los 4 lenToPosState (el SDK los suma en cada largo):
+          después el bucle por largo es una suma y una comparación. Misma salida. }
+        if dist < kNumFullDistances then
+          for lenNorm := 0 to kNumLenToPosStates - 1 do
+            distPr[lenNorm] := normalMatchPrice + distancesPrices[lenNorm][dist and (kNumFullDistances - 1)]
+        else
+        begin
+          posSlot := CalcPosSlot2(dist);
+          for lenNorm := 0 to kNumLenToPosStates - 1 do
+            distPr[lenNorm] := normalMatchPrice + posSlotPrices[lenNorm][posSlot] + alignPrices[dist and kAlignMask];
+        end;
+        endLen := matches[offs];
+        o := @opt[cur];
+        // largos 2..4: lenToPosState = len - 2
+        while (len < kNumLenToPosStates + 1) and (len < endLen) do
+        begin
+          pr := distPr[len - 2] + lenPr[len - LZMA_MATCH_LEN_MIN];
+          if pr < o[len].price then
+          begin
+            o[len].price := pr;
+            o[len].len := len;
+            o[len].dist := dist + LZMA_NUM_REPS;
+            o[len].extra := 0;
+          end;
+          Inc(len);
+        end;
+        // el resto hasta endLen (sin incluirlo): lenToPosState = 3
+        pr2 := distPr[kNumLenToPosStates - 1];
+        while len < endLen do
+        begin
+          pr := pr2 + lenPr[len - LZMA_MATCH_LEN_MIN];
+          if pr < o[len].price then
+          begin
+            o[len].price := pr;
+            o[len].len := len;
+            o[len].dist := dist + LZMA_NUM_REPS;
+            o[len].extra := 0;
+          end;
+          Inc(len);
+        end;
+        // len = endLen
         lenNorm := len - 2;
         if lenNorm >= kNumLenToPosStates - 1 then lenNorm := kNumLenToPosStates - 1;
-        if dist < kNumFullDistances then
-          Inc(pr, distancesPrices[lenNorm][dist and (kNumFullDistances - 1)])
-        else
-          Inc(pr, posSlotPrices[lenNorm][posSlot] + alignPrices[dist and kAlignMask]);
+        pr := distPr[lenNorm] + lenPr[len - LZMA_MATCH_LEN_MIN];
         o := @opt[cur + len];
         if pr < o^.price then
         begin
@@ -2819,7 +3266,6 @@ begin
           o^.extra := 0;
         end;
 
-        if len = matches[offs] then
         begin
           // MATCH : LIT : REP_0
           data2 := data - dist - 1;
@@ -2854,7 +3300,6 @@ begin
           Inc(offs, 2);
           if offs = numPairs then Break;
           dist := matches[offs + 1];
-          if dist >= kNumFullDistances then posSlot := CalcPosSlot2(dist);
         end;
         Inc(len);
       end;
