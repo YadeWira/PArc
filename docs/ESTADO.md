@@ -97,8 +97,8 @@ What makes this possible (all inside `.parc`; the codecs are unchanged):
 - **Tornado encoder**: every `tor:1`…`tor:16` combination runs a loop specialized for its
   match finder and coder (no virtual calls), with the same stream as FreeArc. On x86-64,
   `tor:1`…`tor:4` spans are assembler, `tor:5`/`tor:6` split match finding and arithmetic
-  coding into two assembler passes, the cycled match finders (`tor:7`…`tor:10`) scan their
-  rows with SSE2, and the optimal parser (`tor:11`…`tor:16`) prefetches like FreeArc;
+  coding into two assembler passes, and the optimal parser (`tor:11`…`tor:16`) prefetches
+  like FreeArc;
   `-dPARC_NOASM`/i386 use Pascal loops. `4x4:tor` reuses its engines between blocks, and the
   decoder has fast loops for `c1`/`c2` too. All `tor:` options (`l`, `p`, `s`, `x`, `u`, `t`,
   `ah`, `al`, `fb`) now reach the encoder (they used to be dropped from the stored method).

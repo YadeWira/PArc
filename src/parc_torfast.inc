@@ -305,118 +305,6 @@ begin
   Result := SizeInt(LongWord(Mul32(V32(p), K1) + Mul32(V32(p + 1), K2)) shr HShift);
 end;
 
-{ ---- Recorrido de las filas de CycledCachingMatchFinder (combinaciones 7 y 8) ----
-  PairScanZ: en una fila de pares (posición, clave), el primer par desde t (sin llegar a e)
-  con posición 0 o cuya clave coincide con k en los bits de mask; e si no hay. Solo lee. En
-  x86_64 mira 4 pares por vuelta con SSE2. }
-{$IF defined(CPUX86_64) and not defined(PARC_NOASM)}
-function PairScanZ(t, e: PLongWord; k, mask: LongWord): PLongWord;
-var
-  res: PLongWord;
-  lk, lmask: LongWord;
-begin
-  lk := k and mask;
-  lmask := mask;
-  res := e;
-  asm
-    movq    t, %rax
-    movq    e, %rdx
-    movl    lk, %ecx
-    movd    %ecx, %xmm2
-    pshufd  $0x11, %xmm2, %xmm2          // [0, k, 0, k]
-    movl    lmask, %ecx
-    movd    %ecx, %xmm3
-    pshufd  $0x11, %xmm3, %xmm3          // [0, mask, 0, mask]
-    pxor    %xmm4, %xmm4
-  .Lyz_loop:
-    leaq    32(%rax), %rcx
-    cmpq    %rdx, %rcx
-    ja      .Lyz_tail
-    movdqu  (%rax), %xmm0
-    movdqa  %xmm0, %xmm1
-    pand    %xmm3, %xmm0
-    pcmpeqd %xmm2, %xmm0                 // lanes de clave que coinciden
-    pcmpeqd %xmm4, %xmm1                 // lanes de posición en 0
-    pmovmskb %xmm0, %ecx
-    pmovmskb %xmm1, %r8d
-    andl    $0x1010, %ecx
-    andl    $0x0101, %r8d
-    orl     %r8d, %ecx
-    jnz     .Lyz_hit
-    movdqu  16(%rax), %xmm0
-    movdqa  %xmm0, %xmm1
-    pand    %xmm3, %xmm0
-    pcmpeqd %xmm2, %xmm0
-    pcmpeqd %xmm4, %xmm1
-    pmovmskb %xmm0, %ecx
-    pmovmskb %xmm1, %r8d
-    andl    $0x1010, %ecx
-    andl    $0x0101, %r8d
-    orl     %r8d, %ecx
-    jnz     .Lyz_hit16
-    addq    $32, %rax
-    jmp     .Lyz_loop
-  .Lyz_hit16:
-    addq    $16, %rax
-  .Lyz_hit:
-    bsfl    %ecx, %ecx                   // el bit más bajo: el primer par (la posición antes
-    shrl    $3, %ecx                     // que la clave en el mismo par)
-    leaq    (%rax,%rcx,8), %rax
-    movq    %rax, res
-    jmp     .Lyz_end
-  .Lyz_tail:
-    cmpq    %rdx, %rax
-    jae     .Lyz_end
-    cmpl    $0, (%rax)
-    je      .Lyz_thit
-    movl    4(%rax), %ecx
-    andl    lmask, %ecx
-    cmpl    lk, %ecx
-    je      .Lyz_thit
-    addq    $8, %rax
-    jmp     .Lyz_tail
-  .Lyz_thit:
-    movq    %rax, res
-  .Lyz_end:
-  end ['rax', 'rcx', 'rdx', 'r8', 'xmm0', 'xmm1', 'xmm2', 'xmm3', 'xmm4'];
-  Result := res;
-end;
-{$ELSE}
-function PairScanZ(t, e: PLongWord; k, mask: LongWord): PLongWord;
-begin
-  while t < e do
-  begin
-    if (t[0] = 0) or (((t[1] xor k) and mask) = 0) then Exit(t);
-    Inc(t, 2);
-  end;
-  Result := e;
-end;
-{$ENDIF}
-
-{ El recorrido circular de una fila de CycledCachingMatchFinder: avanza table (dando la vuelta
-  en rowend) hasta el próximo par con posición 0 o con la clave que coincide en mask, sin
-  llegar a tabend. True si lo hay (table apunta a él, sin pasarlo); False al llegar a tabend. }
-function YScan(var table: PLongWord; rowstart, rowend, tabend: PLongWord; k, mask: LongWord): Boolean; inline;
-var
-  t: PLongWord;
-begin
-  Result := False;
-  if table = tabend then Exit;
-  if table > tabend then
-  begin
-    t := PairScanZ(table, rowend, k, mask);
-    if t <> rowend then
-    begin
-      table := t;
-      Exit(True);
-    end;
-    table := rowstart;
-  end;
-  t := PairScanZ(table, tabend, k, mask);
-  table := t;
-  Result := t <> tabend;
-end;
-
 { CycledCachingMatchFinder<5>::find_matchlen (TCycledMF.FindMatchLen con N=5; mismo lazo con
   goto que la clase, que es el del C). q: el match (como el campo Q de la clase, que en len0
   queda sin tocar). }
@@ -442,10 +330,10 @@ begin
   if table = rowend then table := rowstart;
   x1 := 0;
 
-  while YScan(table, rowstart, rowend, tabend, k, $FF) do
+  while table <> tabend do
   begin
-    x1 := table[0]; if x1 = 0 then Break;
-    v1 := table[1]; Inc(table, 2);
+    x1 := table^; Inc(table); if x1 = 0 then Break;
+    v1 := table^; Inc(table);
     if table = rowend then table := rowstart;
     t := v1 xor k;
     if (t and $FF) = 0 then
@@ -460,10 +348,10 @@ begin
 
 len4:
   qq := bs + x1;
-  while YScan(table, rowstart, rowend, tabend, k, $FFFF) do
+  while table <> tabend do
   begin
-    x1 := table[0]; if x1 = 0 then Break;
-    v1 := table[1]; Inc(table, 2);
+    x1 := table^; Inc(table); if x1 = 0 then Break;
+    v1 := table^; Inc(table);
     if table = rowend then table := rowstart;
     t := v1 xor k;
     if (t and $FFFF) = 0 then
@@ -479,10 +367,10 @@ len4:
 
 len5:
   qq := bs + x1;
-  while YScan(table, rowstart, rowend, tabend, k, $FFFFFF) do
+  while table <> tabend do
   begin
-    x1 := table[0]; if x1 = 0 then Break;
-    v1 := table[1]; Inc(table, 2);
+    x1 := table^; Inc(table); if x1 = 0 then Break;
+    v1 := table^; Inc(table);
     if table = rowend then table := rowstart;
     t := v1 xor k;
     if (t and $FFFFFF) = 0 then
@@ -496,10 +384,10 @@ len5:
 
 len6:
   qq := bs + x1;
-  while YScan(table, rowstart, rowend, tabend, k, $FFFFFFFF) do
+  while table <> tabend do
   begin
-    x1 := table[0]; if x1 = 0 then Break;
-    v1 := table[1]; Inc(table, 2);
+    x1 := table^; Inc(table); if x1 = 0 then Break;
+    v1 := table^; Inc(table);
     if table = rowend then table := rowstart;
     t := v1 xor k;
     if t = 0 then
@@ -515,10 +403,10 @@ len7:
   len := 4;
   qq := bs + x1;
   if V32(p) = V32(qq) then len := ExtendC(p, qq, 4, bufend);
-  while YScan(table, rowstart, rowend, tabend, k, $FFFFFFFF) do
+  while table <> tabend do
   begin
-    x1 := table[0]; if x1 = 0 then Break;
-    v1 := table[1]; Inc(table, 2);
+    x1 := table^; Inc(table); if x1 = 0 then Break;
+    v1 := table^; Inc(table);
     if table = rowend then table := rowstart;
     t := v1 xor k;
     q1 := bs + x1;
@@ -713,10 +601,10 @@ begin
   x1 := 0;
   qq := q;
 
-  while YScan(table, rowstart, rowend, tabend, k, $FF) do
+  while table <> tabend do
   begin
-    x1 := table[0]; if x1 = 0 then Break;
-    v1 := table[1]; Inc(table, 2);
+    x1 := table^; Inc(table); if x1 = 0 then Break;
+    v1 := table^; Inc(table);
     if table = rowend then table := rowstart;
     t := v1 xor k;
     if (t and $FF) = 0 then
@@ -731,10 +619,10 @@ begin
 
 len4:
   qq := bs + x1;
-  while YScan(table, rowstart, rowend, tabend, k, $FFFF) do
+  while table <> tabend do
   begin
-    x1 := table[0]; if x1 = 0 then Break;
-    v1 := table[1]; Inc(table, 2);
+    x1 := table^; Inc(table); if x1 = 0 then Break;
+    v1 := table^; Inc(table);
     if table = rowend then table := rowstart;
     t := v1 xor k;
     if (t and $FFFF) = 0 then
@@ -750,10 +638,10 @@ len4:
 
 len5:
   qq := bs + x1;
-  while YScan(table, rowstart, rowend, tabend, k, $FFFFFF) do
+  while table <> tabend do
   begin
-    x1 := table[0]; if x1 = 0 then Break;
-    v1 := table[1]; Inc(table, 2);
+    x1 := table^; Inc(table); if x1 = 0 then Break;
+    v1 := table^; Inc(table);
     if table = rowend then table := rowstart;
     t := v1 xor k;
     if (t and $FFFFFF) = 0 then
@@ -767,10 +655,10 @@ len5:
 
 len6:
   qq := bs + x1;
-  while YScan(table, rowstart, rowend, tabend, k, $FFFFFFFF) do
+  while table <> tabend do
   begin
-    x1 := table[0]; if x1 = 0 then Break;
-    v1 := table[1]; Inc(table, 2);
+    x1 := table^; Inc(table); if x1 = 0 then Break;
+    v1 := table^; Inc(table);
     if table = rowend then table := rowstart;
     t := v1 xor k;
     if t = 0 then
@@ -792,10 +680,10 @@ len7:
     while (p + len < bufend) and (V32(p + len) = V32(qq + len)) do Inc(len, 4);
     while (p + len < bufend) and (p[len] = qq[len]) do Inc(len);
   end;
-  while YScan(table, rowstart, rowend, tabend, k, $FFFFFFFF) do
+  while table <> tabend do
   begin
-    x1 := table[0]; if x1 = 0 then Break;
-    v1 := table[1]; Inc(table, 2);
+    x1 := table^; Inc(table); if x1 = 0 then Break;
+    v1 := table^; Inc(table);
     if table = rowend then table := rowstart;
     t := v1 xor k;
     q1 := bs + x1;
