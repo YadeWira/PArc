@@ -20,6 +20,9 @@ unit parc_ppmd;
 
 {$mode objfpc}{$H+}
 {$GOTO ON}   { el port usa goto (fiel al C++); no depender del fpc.cfg }
+{ PARC: el paso de decodificación/codificación de un símbolo tiene versión en ensamblador
+  x86-64 (mismo resultado bit a bit); en i386, o con -dPARC_NOASM, va todo en Pascal. }
+{$IFDEF CPUX86_64}{$IFNDEF PARC_NOASM}{$DEFINE PPMD_ASM}{$ENDIF}{$ENDIF}
 
 interface
 
@@ -167,6 +170,13 @@ type
     FSEE2Cont: array[0..23, 0..31] of TSee2;
     FDummySEE2: TSee2;
     FCharMask: array[0..255] of Byte;
+    FExpEscape: array[0..15] of Byte;      { copia de EXP_ESCAPE para el ensamblador }
+    FAsmSv: array[0..7] of QWord;          { registros preservados durante el ensamblador }
+    FAsmPhase: LongWord;
+    FAsmLimit, FAsmCount, FAsmPos: SizeInt;      { estado de los bucles en ensamblador }
+    FAsmBuf: PByte;
+    FAsmPs: array[0..255] of PState;       { ps[] de DecodeSymbol2 en el ensamblador }
+    FInEof: Boolean;
     FFoundState, FMaxContext, FMinContext: LongWord;
     FOrderFall, FRunLength, FInitRL, FMaxOrder, FMRMethod: Integer;
     FEscCount, FNumMasked, FPrevSuccess, FInitEsc, FPrintCount: Byte;
@@ -174,6 +184,7 @@ type
     FAllocFailed: Boolean;
     FUmNs, FUmS0, FUmFreq, FUmSucc, FUmSym: LongWord;   { constantes de UpdateModelAddFast }
     FUmFlag: Byte;
+    FUmPc, FUmFSucc: LongWord;                         { dónde siguió UpdateModelResume }
     FInBuf: array[0..IN_BUF_SIZE - 1] of Byte;
     FInLen, FInPos: SizeInt;
     FEncIn: PByte;
@@ -238,6 +249,7 @@ type
     function  ReduceOrderWalk(ps: PPState; p: LongWord; var pc: LongWord; out n: LongWord): PState;
     function  UpdateModelSuffix(MinContext: LongWord): LongWord;
     procedure UpdateModel(MinContext: LongWord);
+    procedure UpdateModelResume(MinContext: LongWord);
     function  UpdateModelAddPrep(pc1: LongWord): Boolean;
     function  UpdateModelAddTail(pc1: LongWord): LongWord;
     function  UpdateModelAddFast(pc1, MinContext: LongWord): LongWord;
@@ -250,6 +262,7 @@ type
     procedure Emit(b: Byte); inline;
     procedure DecodeMore(ALimit: SizeInt);
     function  DecodeStepPas: Integer;
+    procedure InRefill;
     { --- lado encoder --- }
     function  EncInByte: Integer;
     procedure EncEmit(b: Byte); inline;
@@ -334,6 +347,7 @@ begin
     Inc(i);
   end;
   PLongWord(@FDummySEE2)^ := PPMD_SIGNATURE;
+  Move(EXP_ESCAPE[0], FExpEscape[0], SizeOf(FExpEscape));
 end;
 
 { --- heap ---------------------------------------------------------------- }
@@ -1733,6 +1747,9 @@ const
   PPMD_DEC_ERR_SCALE = 2;    { datos corruptos: escala 0 }
   PPMD_DEC_ERR_RANGE = 3;    { datos corruptos: rango 0 }
   PPMD_DEC_STOP = 4;         { fin del stream (escape desde el orden -1) }
+  { Bytes de entrada que tienen que estar en FInBuf para el paso en ensamblador: el peor caso de
+    un símbolo son 257 operaciones del range coder de hasta 4 bytes cada una. }
+  PPMD_IN_MARGIN = 2048;
 
 procedure TPpmdEngine.DecodeRare(r: Integer; ctx: LongWord);
 begin
@@ -1953,6 +1970,51 @@ begin
 end;
 
 
+{ Sigue el bucle de UpdateModelAdd donde lo dejó PpmdUmCore (código 2 de los bucles en
+  ensamblador). }
+procedure TPpmdEngine.UpdateModelResume(MinContext: LongWord);
+var
+  pc1: LongWord;
+begin
+  pc1 := FUmPc;
+  while True do
+  begin
+    if not UpdateModelAddPrep(pc1) then
+    begin
+      RestoreModelRare(pc1, MinContext, FUmFSucc);
+      Exit;
+    end;
+    pc1 := UpdateModelAddTail(pc1);
+    pc1 := UpdateModelAddFast(pc1, MinContext);
+    if pc1 = MinContext then Break;
+  end;
+  FMaxContext := FUmFSucc;
+end;
+
+{ Rellena FInBuf: corre lo que queda al principio y lee hasta llenarlo o hasta que la fuente
+  se acabe. Mismos bytes y en el mismo orden que InByte; sólo cambia de a cuánto se lee. }
+procedure TPpmdEngine.InRefill;
+var
+  n, r: SizeInt;
+begin
+  if FInEof then Exit;
+  n := FInLen - FInPos;
+  if n < 0 then n := 0;
+  if (n > 0) and (FInPos > 0) then Move(FInBuf[FInPos], FInBuf[0], n);
+  FInPos := 0;
+  FInLen := n;
+  while FInLen < SizeOf(FInBuf) do
+  begin
+    r := FSource.Read(@FInBuf[FInLen], SizeOf(FInBuf) - FInLen);
+    if r <= 0 then
+    begin
+      FInEof := True;
+      Break;
+    end;
+    Inc(FInLen, r);
+  end;
+end;
+
 { Un símbolo: normalizar, decodificar en MinContext y, si escapa, en los sufijos. Devuelve
   PPMD_DEC_OK / _RESCALE (encontrado; hay que llamar a Rescale(FMinContext)) / _ERR_* /
   _STOP. La normalización que en el C va al final del símbolo va acá al principio: entre
@@ -1985,6 +2047,10 @@ begin
 end;
 
 
+{$IFDEF PPMD_ASM}
+{$I parc_ppmd_x64.inc}
+{$ENDIF}
+
 procedure TPpmdEngine.DecodeMore(ALimit: SizeInt);
 var
   H: PByte;
@@ -2001,7 +2067,26 @@ begin
   end;
   while FOutLen < ALimit do
   begin
-    r := DecodeStepPas;
+    {$IFDEF PPMD_ASM}
+    if FInLen - FInPos < PPMD_IN_MARGIN then InRefill;
+    if FInLen - FInPos >= PPMD_IN_MARGIN then
+    begin
+      r := PpmdDecodeRunAsm(Self, ALimit);
+      case r of
+        0, 5: Continue;                  { llegó a ALimit / falta entrada: arriba }
+        6, 7:
+          begin
+            if r = 6 then UpdateModel(FMinContext) else UpdateModelResume(FMinContext);
+            if FEscCount = 0 then ClearMask;
+            FMinContext := FMaxContext;
+            Continue;
+          end;
+      end;
+      { 1..4: el símbolo sigue acá, igual que después de DecodeStepPas }
+    end
+    else
+    {$ENDIF}
+      r := DecodeStepPas;
     if r <> PPMD_DEC_OK then
     begin
       if r = PPMD_DEC_STOP then
@@ -2444,12 +2529,34 @@ end;
 procedure TPpmdEngine.EncodeBytes(Buf: PByte; Count: SizeInt);
 var
   i: SizeInt;
+  {$IFDEF PPMD_ASM}r: Integer;{$ENDIF}
 begin
+  {$IFDEF PPMD_ASM}
+  i := 0;
+  while (i < Count) and not FEncDone do
+  begin
+    if FEncBufLen > PPMD_ENC_BUF - PPMD_IN_MARGIN then EncFlush;
+    r := PpmdEncodeRunAsm(Self, Buf + i, Count - i);
+    Inc(i, FAsmPos);
+    case r of
+      0, 5: ;                            { terminó / vaciar la salida (arriba) }
+      6, 7:
+        begin
+          if r = 6 then UpdateModel(FMinContext) else UpdateModelResume(FMinContext);
+          if FEscCount = 0 then ClearMask;
+          FMinContext := FMaxContext;
+        end;
+    else
+      EncodeTail(r);                     { 1: RESCALE; 4: STOP }
+    end;
+  end;
+  {$ELSE}
   for i := 0 to Count - 1 do
   begin
     if FEncDone then Break;
     EncodeOne(Buf[i]);
   end;
+  {$ENDIF}
   EncFlush;
 end;
 
