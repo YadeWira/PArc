@@ -159,13 +159,70 @@ begin
   Result := Result / Size;
 end;
 
+{ Fracción de Buf[0..Size) cubierta por repeticiones de 8 bytes o más dentro del mismo trozo
+  (hash de 4 bytes, la última posición por hash, voraz): una estimación barata de lo que un LZ
+  puede sacar que el order-0 no ve. }
+function RepeatCoverage(Buf: PByte; Size: SizeInt): Double;
+const
+  HBITS = 16;
+var
+  h: array of LongInt;
+  i, c, l, cov: SizeInt;
+  k: LongWord;
+begin
+  SetLength(h, 1 shl HBITS);
+  FillChar(h[0], Length(h) * SizeOf(LongInt), $FF);
+  cov := 0;
+  i := 0;
+  while i + 8 <= Size do
+  begin
+    k := LongWord(PLongWord(Buf + i)^ * LongWord(2654435761)) shr (32 - HBITS);
+    c := h[k];
+    h[k] := i;
+    if (c >= 0) and (PQWord(Buf + c)^ = PQWord(Buf + i)^) then
+    begin
+      l := 8;
+      while (i + l < Size) and (Buf[c + l] = Buf[i + l]) do Inc(l);
+      Inc(cov, l);
+      Inc(i, l);
+      Continue;
+    end;
+    Inc(i);
+  end;
+  Result := cov / Size;
+end;
+
+{ ¿Vale la pena intentar comprimir un bloque que tiene order-0 >= Ratio? FreeArc no lo
+  intenta nunca, pero un bloque con unos MB comprimibles entre datos aleatorios tiene el
+  order-0 del promedio (slice TILIN @488 MB, 8 MB: 0,9958; lzma lo deja en 0,977), y datos
+  aleatorios repetidos tienen order-0 1. Se mira cada trozo de ~1 MB: si alguno repite
+  (RepeatCoverage >= 4 %), sí. JPEG/MP3 casi no repiten (< 2 %) y siguen sin intentarse. }
+function WorthTrying(Buf: PByte; Size: SizeInt): Boolean;
+const
+  PIECE = 1 shl 20;
+var
+  o, n: SizeInt;
+begin
+  o := 0;
+  while o < Size do
+  begin
+    n := Size - o;
+    if n - PIECE >= 64 * 1024 then n := PIECE;   // un resto de menos de 64 KB va con el último
+    if RepeatCoverage(Buf + o, n) >= 0.04 then Exit(True);
+    Inc(o, n);
+  end;
+  Result := False;
+end;
+
 procedure T4x4EncJob.Process;
 begin
   LzmaEncThreadGrant := 0;   // 4x4 ya reparte los bloques entre hilos: un hilo por bloque
   // Como _4x4MTCompressor::Process: un bloque de >= 32 KB casi aleatorio (order-0 >= r%) ni
-  // se intenta; y si no comprime, va guardado tal cual
+  // se intenta, salvo que tenga trozos que sí se pueden comprimir (WorthTrying); y si no
+  // comprime, va guardado tal cual
   if (MinOrder0Ratio <> 0) and (InLen >= 32 * 1024) and
-     (Order0Ratio(PByte(InBuf), InLen) >= MinOrder0Ratio) then
+     (Order0Ratio(PByte(InBuf), InLen) >= MinOrder0Ratio) and
+     not WorthTrying(PByte(InBuf), InLen) then
     Stored := True
   else if StageName(Inner) = 'lz4' then
     // LZ4_METHOD::DeCompressMem: versión + un solo bloque LZ4 (no el stream por bloques)

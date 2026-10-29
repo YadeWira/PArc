@@ -113,6 +113,12 @@ What makes this possible (all inside `.parc`; the codecs are unchanged):
   `WriteArchive` grants. `LzmaEncMaxThreads(P)` tells how many threads a stream can use (3 or
   1) and `LzmaEncThreadsFor(P)` how many it would take now. `tests/lzma_threads.sh` checks
   the thread peak under `PARC_THREADS`.
+- **4x4 skips fewer compressible blocks**: FreeArc does not even try a 4x4 block whose order-0
+  entropy is >= 99 % (`r99`). PArc still skips it, unless some ~1 MB piece of it repeats
+  (>= 4 % covered by repeats of 8+ bytes): a block that mixes random MBs with compressible ones,
+  or random data repeated, is compressed. 512 MB TILIN slice: one 8 MB block, 8,388,608 ->
+  8,196,086 bytes; `-m2`…`-m5` on the exe/document/video sets 0.5–2.5 % smaller (-m5 exe:
+  ~18 % more CPU). JPEG/MP3 blocks barely repeat and are still skipped.
 - **Automatic solid blocks**: without `-s`, 64 MB for `-m1`…`-m3` and 32 MB for `-m4`…`-m9`/`-mx`. On Silesia this improved compression time and ratio at every level; small archives still use one block. `-mxx` keeps a single block for ratio.
 - **GRZip adaptive LZP**: BWT blocks of 4 MB or more use `l64/h22` (fewer, longer matches); small blocks keep the fast LZP parameters. The choice is stored in each block's mode, so old decoders remain compatible. This makes `-m4` 1.2–1.4% smaller on text and many small files.
 - **Stronger and faster presets** than FreeArc's at the same level:
