@@ -6,7 +6,7 @@ program parc;
 
 uses
   {$IFDEF UNIX}cthreads, BaseUnix,{$ENDIF}
-  Classes, SysUtils, Types, DateUtils, parc_os, parc_bytes, parc_methods, parc_archive, parc_extract, parc_writer, parc_encoders, parc_presets, parc_recovery, parc_progress, parc_filelist, parc_volume, parc_console, parc_parallel;
+  Classes, SysUtils, Types, DateUtils, parc_os, parc_bytes, parc_methods, parc_archive, parc_extract, parc_writer, parc_encoders, parc_presets, parc_recovery, parc_progress, parc_filelist, parc_volume, parc_console;
 
 const
   PARC_VERSION = '0.0.2';
@@ -640,9 +640,7 @@ var
   i, g, k: Integer;
 begin
   if Length(Idx) = 0 then Exit;
-  // Las alternativas "a|b" de los presets se eligen por el presupuesto de hilos (PARC_THREADS,
-  // o los núcleos), como FreeArc con -mtN: con un solo hilo no conviene la variante multihilo.
-  GM := DecodeMethod(MO.Method, ThreadCount(High(Integer)));
+  GM := DecodeMethod(MO.Method, CpuCount);
   SetLength(Files, Length(Idx));
   for i := 0 to High(Idx) do
   begin
@@ -703,9 +701,7 @@ var
   end;
 
 begin
-  // Las alternativas "a|b" de los presets se eligen por el presupuesto de hilos (PARC_THREADS,
-  // o los núcleos), como FreeArc con -mtN: con un solo hilo no conviene la variante multihilo.
-  GM := DecodeMethod(MO.Method, ThreadCount(High(Integer)));
+  GM := DecodeMethod(MO.Method, CpuCount);
   // Bloque, posición y cantidad de archivos (sin directorios) de cada archivo viejo
   SetLength(BlockOf, Length(A.Files)); SetLength(PosOf, Length(A.Files)); SetLength(CountOf, Length(A.Files));
   for b := 0 to High(A.DataBlocks) do
