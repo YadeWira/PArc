@@ -175,18 +175,47 @@ Open points:
 | `lzma:96mb:max` | 289–307 | 229–250 | 353–376 | −0.06 % |
 | `lzma:96mb:normal` | 152 | 149–152 | 154–161 | −0.03 % (speed: only 1–8 % ahead) |
 
-Decoding is ~13–15 s vs FreeArc's ~20.5 s. Open points:
+Decoding is ~13–15 s vs FreeArc's ~20.5 s.
 
-- The multi-thread match finder (bt4 `:normal`/`:max`) runs with the threads `WriteArchive`
-  grants (`LzmaEncThreadGrant`, see docs/ESTADO.md); a global budget should set the grant there.
-- `4x4:lzma:8mb:normal` on the slice is +0.024 % vs FreeArc: some 8 MB blocks (e.g. slice
-  offset 472 MB) compress 1.4 % worse with `ht4` `mc16` than FreeArc's SDK 9.x parser, although
-  `:fast` (same match finder) is byte-identical; not found yet. The whole-stream `:normal` is
-  smaller.
+128 MB of the slice (offset 128 MB), 2 interleaved runs, compress wall s (CPU s), size; 4 threads
+= `PARC_THREADS=4` vs FreeArc `-mt4`:
+
+| method | threads | 41af3bc | now | FreeArc | size now / FreeArc |
+|---|---:|---:|---:|---:|---:|
+| `lzma:8mb:max` | 1 | 48.1 | 30.8–30.9 | 60.2–60.6 | 113,772,538 / 113,782,760 |
+| `lzma:8mb:max` | 4 | 23.5 (47.6) | 19.5–20.4 (36–38) | 26.9–27.9 (49–51) | same / 113,782,801 |
+| `lzma:96mb:max` | 1 | 60.8–75.8 | 37.3–68.3 | 90.7–93.7 | 113,931,550 / 113,959,261 |
+| `lzma:96mb:max` | 4 | 28.6–30.6 | 26.1–27.2 (44–46) | 32.5–33.4 (59–62) | same / 113,959,455 |
+| `lzma:8mb:normal` | 1 | 27.3–28.4 | 22.7–25.1 | 29.6–29.8 | 113,835,386 / 113,844,818 |
+| `lzma:8mb:normal` | 4 | 24.8–27.1 | 17.1–17.3 (28–29) | 25.4–25.5 (38) | 113,835,322 / 113,840,155 |
+| `lzma:96mb:normal` | 1 | 42.7–48.6 | 38.5–44.2 | 44.7–49.5 | 113,940,940 / 113,949,646 |
+| `lzma:96mb:normal` | 4 | 39.6–46.6 | 20.0–21.9 (prefetch 8) | 26.7–27.2 (45) | 113,935,194 / 113,941,108 |
+| `lzma:8mb:fast` | 1 | 21.4–22.5 | 18.1–19.6 | 27.3–28.8 | same stream (+17 B) |
+| `4x4:lzma:8mb:max` | 4 | 9.8–10.0 | 7.3 (27) | 7.7–7.8 (46) | 113,790,367 / 113,838,111 |
+| `4x4:lzma:8mb:normal` | 4 | 6.8–7.5 | 6.1–6.7 (23–25) | 7.2 (38) | 113,849,098 / 113,869,118 |
+| `4x4:lzma:8mb:fast` | 4 | 5.8–6.2 | 4.9–5.2 | 7.9–8.4 | same stream (+17 B) |
+
+Test (decode) 5.3–5.9 s vs FreeArc 8.6–9.8 s. Whole 512 MB slice at 4 threads: `lzma:8mb:normal`
+256,882,734 in 81–93 s vs FreeArc 256,921,155 in 105–169 s (machine loaded);
+`4x4:lzma:8mb:normal` 261,132,045 vs 261,261,944; `4x4:lzma:8mb:max` 257,218,019 vs 257,986,572.
+
+Notes and open points:
+
+- Thread grant: `WriteArchive` sets `LzmaEncThreadGrant` (whole budget for a lone block,
+  `budget div blocks in flight` in parallel, minus REP's hashing threads); a global budget only
+  has to change that (docs/ESTADO.md). bt4 uses up to 3 threads, ht4 `:normal` 2.
+- ht4 `:normal` output with 1 thread (FreeArc `-mt1`'s list) differs from 2+ threads (FreeArc's
+  multi-thread list, smaller), like FreeArc. Single 8 MB blocks with ht4 vary ±1.5 % either way
+  vs FreeArc (slice @472 MB: +1.4 % with 1 thread); totals are smaller.
 - `:fast` streams are identical to FreeArc's; whole-archive size then depends on the container
   (+15–20 bytes on one-file archives).
-- 32 bits: big dictionaries are shrunk to what can be reserved (e.g. `lzma:1gb:fast` →
-  960mb under Wine). Several big blocks compressed in parallel each probe on their own.
+- 32 bits: big dictionaries are shrunk to what can be reserved (`lzma:1gb:normal` → 960mb under
+  Wine, 2 threads, OK). Several big blocks compressed in parallel each probe on their own.
+- `-m3` output on the exe set varies by a few KB between runs with the same binary (also in
+  41af3bc): something in the `-m3` chain is timing-dependent (not LZMA: the LZMA tests show the
+  same output for any thread count).
+- `-m5` on the exe set is still 1.7 % larger than FreeArc's (78.29 MB vs 76.96 MB; preset
+  choice `4x4:i0:lzma:8mb:max` vs FreeArc's `lzma:96m:normal:mc32`), though 2.5× faster.
 
 ## P1 — BCJ2 exact
 
