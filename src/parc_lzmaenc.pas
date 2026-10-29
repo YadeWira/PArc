@@ -1810,6 +1810,7 @@ const
   kMtBtNumBlocksMax = 256;
   kMtHashBufferSize = kMtHashBlockSize * kMtHashNumBlocks;
   kMtCacheLine = 128;
+  kMtHtPrefetch = 8;   // ht4 multihilo: filas que se traen por adelantado en el hilo BT
 
 type
   { Semáforo contador con un solo hilo que espera (cada uno tiene un único consumidor).
@@ -2214,8 +2215,14 @@ begin
       h := mt^.hmf.hash + mt^.hmf.fixedHashSize;
       while (curPos < limit) and (size <> 0) do
       begin
-        if mt^.hashBufPos + 1 < mt^.hashBufPosLimit then
-          prefetch(h[PtrUInt(mt^.hashBuf[mt^.hashBufPos + 1]) * mt^.cutValue]);
+        // la fila de 8 posiciones más adelante (las cabezas ya están): la carga de la fila es
+        // el fallo de caché dominante; primera y última entrada (puede ocupar dos líneas)
+        if mt^.hashBufPos + kMtHtPrefetch < mt^.hashBufPosLimit then
+        begin
+          k := mt^.hashBuf[mt^.hashBufPos + kMtHtPrefetch] * mt^.cutValue;
+          prefetch(h[k]);
+          prefetch(h[k + mt^.cutValue - 1]);
+        end;
         sd := d + curPos;
         num := LongWord(MtHtRow(mt, h + PtrUInt(mt^.hashBuf[mt^.hashBufPos]) * mt^.cutValue,
           pos, mmm, lenLimit, cur, sd + 1) - sd);
