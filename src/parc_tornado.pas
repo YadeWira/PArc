@@ -1112,7 +1112,8 @@ begin
   if len < IMPOSSIBLE_LEN then
   begin
     // Validaciones del C, más len=0 y dist=0 (el C copiaría basura o daría la vuelta a len)
-    if (len = 0) or (dist = 0) or (SizeInt(dist) > FBufSize) or (Int64(len) > 2 * FHdrBufSize) or
+    // (comparaciones sin signo: en win32 SizeInt(dist) con dist >= 2^31 sería negativo)
+    if (len = 0) or (dist = 0) or (dist > SizeUInt(FBufSize)) or (Int64(len) > 2 * FHdrBufSize) or
        ((QWord(o) + FOffset < dist) and not FOffsetOverflow) then
       Corrupt('tor: invalid match');
     // Match lento: origen antes del inicio del buffer, que da la vuelta, o que cruza write_end
@@ -1191,7 +1192,7 @@ begin
           if o >= we then Break;
         end
         // Match simple (>99% de los casos): `output-outbuf>=dist && write_end-output>len`
-        else if (SizeInt(dist) <= o) and (we - o > SizeInt(len)) and (dist <> 0) then
+        else if (dist <= SizeUInt(o)) and (SizeUInt(we - o) > len) and (dist <> 0) then
         begin
           CopyMatch(FOut + o, dist, len);
           Inc(o, len);
@@ -1293,7 +1294,7 @@ begin
     end;
     len := FMinLen + l;
     dist := d;
-    if (SizeInt(dist) <= op - FOut) and (oend - op > SizeInt(len)) and (dist <> 0) then
+    if (dist <= SizeUInt(op - FOut)) and (SizeUInt(oend - op) > len) and (dist <> 0) then
     begin
       src := op - dist;
       k := 0;
@@ -1380,7 +1381,7 @@ begin
     dist := dc_base[x] + (LongWord(bb) and ((LongWord(1) shl n) - 1));
     bb := bb shr n;
     Dec(bc, n);
-    if (SizeInt(dist) <= op - FOut) and (oend - op > SizeInt(len)) and (dist <> 0) then
+    if (dist <= SizeUInt(op - FOut)) and (SizeUInt(oend - op) > len) and (dist <> 0) then
     begin
       src := op - dist;
       k := 0;

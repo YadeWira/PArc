@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """Fuzz del espacio de opciones de tor: combinaciones aleatorias de tor:N:... (y 4x4:tor)
-sobre entradas chicas. Cada caso comprime con `parc a`, verifica con `parc t`, extrae y
+sobre entradas chicas (generadas con la semilla: una falla se reproduce con la misma). Cada caso comprime con `parc a`, verifica con `parc t`, extrae y
 compara. Falla si hay un crash (señal), un cuelgue o un archivo creado que no verifica o no
 extrae igual. Un rechazo limpio de una combinación inválida (rc=3 sin archivo) es válido.
 
@@ -36,16 +36,16 @@ def make_inputs(d, r):
         p = os.path.join(d, 'in%d.bin' % i)
         kind = i % 3
         if kind == 0:
-            data = os.urandom(n)
+            data = r.randbytes(n)
         elif kind == 1:
             words = [b'alpha ', b'beta ', b'gamma\n', b'delta ', b'0123456789']
             data = b''.join(r.choice(words) for _ in range(n // 5 + 1))[:n]
         else:
-            base = os.urandom(997)
+            base = r.randbytes(997)
             data = bytearray()
             while len(data) < n:
                 data += base[r.randrange(500):][:r.randint(1, 400)]
-                if r.random() < 0.1: data += os.urandom(r.randint(1, 50))
+                if r.random() < 0.1: data += r.randbytes(r.randint(1, 50))
             data = bytes(data[:n])
         open(p, 'wb').write(data)
         files.append(p)

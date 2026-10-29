@@ -157,6 +157,20 @@ if [ -x "$PARC" ]; then
   "$PARC" a -mtor:5:l16 "$WORK/o16.parc" "$WORK/opt.bin" --no-progress >/dev/null 2>&1
   if "$PARC" lb "$WORK/o16.parc" 2>/dev/null | grep -q "tor:.*:l16"; then echo "  ok   l16 en el método guardado"
   else echo "  FAIL l16 no quedó en el método guardado"; nf=$((nf+1)); fi
+  # Parser óptimo y lastp más allá de bufend: tramos aleatorios + ceros. El repdist medía el
+  # match hasta lastp (basep+ventana), que cae en la parte del buffer aún no leída; la lectura
+  # siguiente pisaba esos bytes y `a` daba rc=0 con un archivo que `t` rechazaba (CRC ERROR).
+  python3 -c '
+import random, sys
+r = random.Random(7)
+sys.stdout.buffer.write(b"".join(r.randbytes(r.randint(500, 4000)) + bytes(r.randint(500, 6000)) for _ in range(60)))
+' > "$WORK/optz.bin"
+  for m in tor:11 tor:12 tor:13 tor:14 tor:15 tor:16 tor:11:l2 tor:12:l2 tor:11:33kb tor:12:33kb; do
+    rm -f "$WORK/optz.parc"
+    if "$PARC" a -m$m "$WORK/optz.parc" "$WORK/optz.bin" --no-progress >/dev/null 2>&1 &&
+       "$PARC" t "$WORK/optz.parc" --no-progress >/dev/null 2>&1; then echo "  ok   óptimo $m"
+    else echo "  FAIL óptimo $m (match leído más allá de bufend)"; nf=$((nf+1)); fi
+  done
   if python3 tests/tor_optfuzz.py "$PARC" "${TOR_OPTFUZZ_N:-150}" 1; then :; else nf=$((nf+1)); fi
 else
   echo "  (sin $PARC: se saltea)"

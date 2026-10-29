@@ -253,7 +253,12 @@ begin
       if Int64(dist) > (pp - Buf) then Break;
       if pp[len - 1] = (pp - dist)[len - 1] then
       begin
-        match_len := CheckMatchLen(pp, pp - dist, LongWord(LastP - pp));
+        // Tope: lastp, pero nunca más allá de bufend. El C usa lastp-p, y lastp (basep+ventana) puede
+        // caer en la parte del buffer aún no leída: el repdist "encontraba" un match largo contra basura
+        // igual en ambos lados, la lectura siguiente pisaba esos bytes y el bloque se codificaba con un
+        // match que ya no coincidía (CRC error en t; D3D.UC con tor:13..16, tor:11:l2, -b33kb).
+        if LastP < BufEnd then match_len := LongWord(LastP - pp) else match_len := LongWord(BufEnd - pp);
+        match_len := CheckMatchLen(pp, pp - dist, match_len);
         while LongWord(len) <= match_len do
         begin
           // RepdistPrice(len - 2, i): símbolo 256 + i*16 + lcode, extra = bits del largo
