@@ -48,12 +48,14 @@ type
     NumFastBytes: Integer;      // se recorta a 5..273 como LzmaEnc_SetProps
     MatchFinderCycles: Integer; // 0 = automático (fórmula de LzmaEncProps_Normalize de FreeArc)
     MatchFinder: TLzmaMatchFinder;
-    { Hilos ocupados que puede usar el stream (no va en el string del método; la salida es la
-      misma con cualquier valor): 0 = los que el llamador concedió al hilo que crea la etapa
-      (LzmaEncThreadGrant; sin concesión, 1); 1 = un hilo; 2 = match finder multihilo con un
-      hilo BT además del que comprime (el BT calcula también el hash); >= 3 = además un hilo
-      hash aparte, como LzFindMt del SDK y FreeArc (el hash es liviano: ~10 % de un núcleo).
-      Solo bt4 en :normal/:max usa más de uno (LzmaEncMaxThreads). }
+    { Hilos ocupados que puede usar el stream (no va en el string del método): 0 = los que el
+      llamador concedió al hilo que crea la etapa (LzmaEncThreadGrant; sin concesión, 1);
+      1 = un hilo; 2 = match finder multihilo con un hilo BT además del que comprime (el BT
+      calcula también el hash); >= 3 = además un hilo hash aparte, como LzFindMt del SDK y
+      FreeArc (el hash es liviano: ~10 % de un núcleo). Solo :normal/:max usa más de uno
+      (LzmaEncMaxThreads): bt4 hasta 3, con la misma salida que con uno; ht4 hasta 2, con la
+      lista de matches del multihilo de FreeArc (más chica que la de un hilo, que es la de
+      FreeArc -mt1): con ht4 la salida depende de si hay 1 o más hilos, como en FreeArc. }
     NumThreads: Integer;
   end;
 
@@ -102,10 +104,17 @@ var
   LzmaMtNormLimit: LongWord = $FFFFFFFF;
   { Solo para pruebas: cuántas veces arrancó el match finder multihilo. }
   LzmaMtStarts: LongInt = 0;
+  { Solo para pruebas: con un hilo, ht4 :normal/:max usa la lista de matches del multihilo
+    (Ht4mGetMatches/Ht4mSkip), que tiene que dar la misma salida que el multihilo. }
+  LzmaHtListOneThread: Boolean = False;
+  { Solo para pruebas: bits de posición de las filas ht4 (0 = los normales, >= 26); con menos
+    se ejercita la normalización de las filas sin comprimir 64 MB. }
+  LzmaHtPosBits: Integer = 0;
 
 { Presupuesto de hilos (para el planificador global):
   - LzmaEncMaxThreads(P): cuántos hilos ocupados le sirven a un stream con estos parámetros
-    (3 para bt4 en :normal/:max, 1 para el resto). Más que eso no se usa.
+    (3 para bt4 en :normal/:max, 2 para ht4 en :normal/:max, 1 para el resto). Más que eso
+    no se usa.
   - LzmaEncThreadGrant (por hilo): cuántos hilos concede el llamador a las etapas lzma que se
     creen en este hilo con NumThreads = 0 (las de CreateStage, desde el string del método).
     0 o 1 = uno (el valor por defecto: sin concesión no se abren hilos). Para dar 2 o 3 a un
@@ -506,6 +515,8 @@ begin
     while (QWord(1) shl (fixed + 1)) <= newSize do Inc(fixed);
     fixed := fixed + 2;
     if fixed < 26 then fixed := 26;
+    if (LzmaHtPosBits > 0) and (LzmaHtPosBits < fixed) and (LongWord(1) shl LzmaHtPosBits > 2 * newSize) then
+      fixed := LzmaHtPosBits;
     if fixed >= 32 then
     begin
       p^.matchMask := LongWord($FFFFFFFF); p^.tagMask := 0; p^.normLimit := 0;
@@ -1445,6 +1456,153 @@ begin
   Result := distances;
 end;
 
+{ HT4 para el parser óptimo (:normal), con la lista de matches del match finder multihilo de
+  FreeArc (LzFindMt.c: la fila HT4 en el hilo BT con maxLen = 3, y MixMatches3 adelante):
+  la fila informa todos los matches de 4 o más que alargan el anterior, aunque el de hash2/hash3
+  ya sea más largo, y los de 2/3 bytes van solo si están más cerca que el primero de la fila
+  (sin alargar). Así el parser ve también los matches cortos y cercanos que el HT4 de un hilo
+  tapa con el de hash3 largo y lejano: :normal queda más chico (FreeArc lo hace solo con -mt2+;
+  acá es igual con cualquier cantidad de hilos). Cada posición, también las salteadas, corre la
+  fila entera. }
+function Ht4mGetMatches(p: PMatchFinder; distances: PLongWord): PLongWord;
+var
+  hv, h2, h3, d2, d3, pos, mmm, maxLen, lenLimit, temp, tag, prevMatch, curMatch, delta, len,
+    first, n, i: LongWord;
+  cur, pb: PByte;
+  hash, row, rowEnd: PLongWord;
+  found: array[0..2 * (LZMA_MATCH_LEN_MAX + 1) - 1] of LongWord;
+begin
+  found[0] := 0;
+  lenLimit := p^.lenLimit;
+  if lenLimit < 4 then begin MfMovePos(p); Exit(distances); end;
+  cur := p^.buffer;
+  temp := p^.crc[cur[0]] xor cur[1];
+  h2 := temp and (kHash2Size - 1);
+  temp := temp xor (LongWord(cur[2]) shl 8);
+  h3 := temp and (kHash3Size - 1);
+  hv := (temp xor LongWord(p^.crc[cur[3]] shl kLzHash_CrcShift_1)) and p^.hashMask;
+  hash := p^.hash;
+  pos := p^.pos;
+  d2 := LongWord(pos - hash[h2]);
+  d3 := LongWord(pos - hash[kFix3HashSize + h3]);
+  hash[h2] := pos;
+  hash[kFix3HashSize + h3] := pos;
+  if lenLimit >= 6 then Ht4PrefetchNext2(p, cur) else if lenLimit >= 5 then Ht4PrefetchNext(p, cur);
+  mmm := p^.cyclicBufferSize;
+  if pos < mmm then mmm := pos;
+  // la fila: matches de 4 o más, cada uno más largo que el anterior
+  n := 0;
+  maxLen := 3;
+  row := hash + kFix4HashSize + PtrUInt(hv) * p^.cutValue;
+  rowEnd := row + p^.cutValue;
+  tag := (PLongWord(cur)^ * LongWord(123456791)) and p^.tagMask;
+  prevMatch := pos + tag;
+  repeat
+    curMatch := row^;
+    row^ := prevMatch;
+    Inc(row);
+    prevMatch := curMatch;
+    if (curMatch and p^.tagMask) <> tag then Continue;
+    delta := LongWord(pos - (curMatch and p^.matchMask));
+    if delta >= mmm then Break;
+    pb := cur - delta;
+    if (pb[maxLen] = cur[maxLen]) and (PLongWord(pb)^ = PLongWord(cur)^) then
+    begin
+      len := MatchLen(pb, cur, 4, lenLimit);
+      if len > maxLen then
+      begin
+        maxLen := len;
+        found[n] := len;
+        found[n + 1] := delta - 1;
+        Inc(n, 2);
+        if len = lenLimit then Break;
+      end;
+    end;
+  until row >= rowEnd;
+  // hash2/hash3 adelante, sin alargar, si están más cerca que el primero de la fila
+  if n > 0 then first := found[1] + 1 else first := mmm;
+  if (d2 < first) and ((cur - d2)^ = cur^) then
+  begin
+    distances[1] := d2 - 1;
+    if (cur - d2)[2] = cur[2] then
+    begin
+      distances[0] := 3;
+      Inc(distances, 2);
+      d3 := first;   // ya hay uno de 3
+    end
+    else
+    begin
+      distances[0] := 2;
+      Inc(distances, 2);
+    end;
+  end;
+  if (d3 < first) and (d3 <> d2) and ((cur - d3)^ = cur^) then
+  begin
+    distances[0] := 3;
+    distances[1] := d3 - 1;
+    Inc(distances, 2);
+  end;
+  i := 0;
+  while i < n do
+  begin
+    distances[0] := found[i];
+    distances[1] := found[i + 1];
+    Inc(distances, 2);
+    Inc(i, 2);
+  end;
+  MfMovePos(p);
+  Result := distances;
+end;
+
+{ Como en el hilo BT de FreeArc, también las posiciones salteadas buscan en la fila: al llegar a
+  lenLimit se corta, y la entrada que coincidió sale de la fila (la reemplaza la nueva). En una
+  repetición larga la fila no se llena de copias de lo mismo y conserva candidatos viejos. }
+procedure Ht4mSkip(p: PMatchFinder; num: LongWord);
+var
+  hv, h2, h3, temp, tag, prevMatch, curMatch, pos, mmm, lenLimit, delta: LongWord;
+  cur, pb: PByte;
+  hash, row, rowEnd: PLongWord;
+begin
+  repeat
+    lenLimit := p^.lenLimit;
+    if lenLimit < 4 then
+      MfMovePos(p)
+    else
+    begin
+      cur := p^.buffer;
+      temp := p^.crc[cur[0]] xor cur[1];
+      h2 := temp and (kHash2Size - 1);
+      temp := temp xor (LongWord(cur[2]) shl 8);
+      h3 := temp and (kHash3Size - 1);
+      hv := (temp xor LongWord(p^.crc[cur[3]] shl kLzHash_CrcShift_1)) and p^.hashMask;
+      hash := p^.hash;
+      pos := p^.pos;
+      hash[h2] := pos;
+      hash[kFix3HashSize + h3] := pos;
+      if lenLimit >= 5 then Ht4PrefetchNext(p, cur);
+      mmm := p^.cyclicBufferSize;
+      if pos < mmm then mmm := pos;
+      row := hash + kFix4HashSize + PtrUInt(hv) * p^.cutValue;
+      rowEnd := row + p^.cutValue;
+      tag := (PLongWord(cur)^ * LongWord(123456791)) and p^.tagMask;
+      prevMatch := pos + tag;
+      repeat
+        curMatch := row^;
+        row^ := prevMatch;
+        Inc(row);
+        prevMatch := curMatch;
+        if (curMatch and p^.tagMask) <> tag then Continue;
+        delta := LongWord(pos - (curMatch and p^.matchMask));
+        if delta >= mmm then Break;
+        pb := cur - delta;
+        if (PLongWord(pb)^ = PLongWord(cur)^) and (MatchLen(pb, cur, 4, lenLimit) = lenLimit) then Break;
+      until row >= rowEnd;
+      MfMovePos(p);
+    end;
+    Dec(num);
+  until num = 0;
+end;
+
 { Ht4_MatchFinder_Skip: solo la primera mitad de la fila se corre. }
 procedure Ht4Skip(p: PMatchFinder; num: LongWord);
 var
@@ -1686,6 +1844,9 @@ type
       cabezas hash cuando lo necesita (MtHashFill), en hashInlineIdx. }
     inlineHash: Boolean;
     hashInlineIdx: LongWord;
+    { ht4: el hilo BT recorre las filas de la tabla hash (Ht4mGetMatches) en vez del árbol;
+      las cabezas son índices de fila. Siempre con inlineHash (2 hilos). }
+    ht: Boolean;
     pad0: array[0..kMtCacheLine - 1] of Byte;
     btSync: TMtSync;
     pad1: array[0..kMtCacheLine - 1] of Byte;
@@ -1800,6 +1961,22 @@ begin
   end;
 end;
 
+{ ht4: el índice de fila de cada posición (el mismo hash que Ht4GetMatches). }
+procedure MtGetHeadsHt4(p: PByte; hashMask: LongWord; heads: PLongWord; numHeads: LongWord;
+  crc: PLongWord);
+var
+  temp: LongWord;
+begin
+  while numHeads <> 0 do
+  begin
+    temp := (crc[p[0]] xor p[1]) xor (LongWord(p[2]) shl 8);
+    heads^ := (temp xor LongWord(crc[p[3]] shl kLzHash_CrcShift_1)) and hashMask;
+    Inc(p);
+    Inc(heads);
+    Dec(numHeads);
+  end;
+end;
+
 { Mueve el bloque de la ventana si hace falta (con los "buffer lock" de los consumidores:
   btSync.cs del LZ y, si hay hilo hash, hashSync.cs del hilo BT; sin hilo hash quien llama es
   el hilo BT y ya tiene hashSync.cs). }
@@ -1857,11 +2034,16 @@ begin
       subValue := LongWord(mf^.pos - mf^.historySize - 1);
       mf^.pos := LongWord(mf^.pos - subValue);
       mf^.streamPos := LongWord(mf^.streamPos - subValue);
-      MfNormalize3(subValue, mf^.hash + mf^.fixedHashSize, PtrUInt(mf^.hashMask) + 1);
+      // (las filas ht4 las normaliza el hilo BT, que es el único que las usa)
+      if not mt^.ht then
+        MfNormalize3(subValue, mf^.hash + mf^.fixedHashSize, PtrUInt(mf^.hashMask) + 1);
     end;
     heads[0] := 2 + num;
-    MtGetHeads4(mf^.buffer, mf^.pos, mf^.hash + mf^.fixedHashSize, mf^.hashMask, heads + 2,
-      num, @mf^.crc[0]);
+    if mt^.ht then
+      MtGetHeadsHt4(mf^.buffer, mf^.hashMask, heads + 2, num, @mf^.crc[0])
+    else
+      MtGetHeads4(mf^.buffer, mf^.pos, mf^.hash + mf^.fixedHashSize, mf^.hashMask, heads + 2,
+        num, @mf^.crc[0]);
   end;
   mf^.pos := LongWord(mf^.pos + num);
   Inc(mf^.buffer, num);
@@ -1870,7 +2052,11 @@ end;
 { MatchFinder_Init_HighHash (la baja la inicializa el hilo LZ) }
 procedure MtHashInit(mt: PMtState);
 begin
-  FillDWord((mt^.hmf.hash + mt^.hmf.fixedHashSize)^, SizeInt(mt^.hmf.hashMask) + 1, 0);
+  if mt^.ht then
+    FillDWord((mt^.hmf.hash + mt^.hmf.fixedHashSize)^,
+      (SizeInt(mt^.hmf.hashMask) + 1) * SizeInt(mt^.hmf.cutValue), 0)
+  else
+    FillDWord((mt^.hmf.hash + mt^.hmf.fixedHashSize)^, SizeInt(mt^.hmf.hashMask) + 1, 0);
 end;
 
 function MtHashThreadFunc(param: Pointer): PtrInt;
@@ -1907,11 +2093,51 @@ begin
   end;
 end;
 
+{ La fila ht4 de una posición, como Ht4mGetMatches/Ht4mSkip con un hilo: matches de 4 o más,
+  cada uno más largo que el anterior, en d; corre la fila entera salvo que llegue a lenLimit. }
+function MtHtRow(mt: PMtState; row: PLongWord; pos, mmm, lenLimit: LongWord; cur: PByte;
+  d: PLongWord): PLongWord;
+var
+  rowEnd: PLongWord;
+  tag, prevMatch, curMatch, delta, len, maxLen, tagMask, matchMask: LongWord;
+  pb: PByte;
+begin
+  tagMask := mt^.hmf.tagMask;
+  matchMask := mt^.hmf.matchMask;
+  rowEnd := row + mt^.cutValue;
+  tag := (PLongWord(cur)^ * LongWord(123456791)) and tagMask;
+  prevMatch := pos + tag;
+  maxLen := 3;
+  repeat
+    curMatch := row^;
+    row^ := prevMatch;
+    Inc(row);
+    prevMatch := curMatch;
+    if (curMatch and tagMask) <> tag then Continue;
+    delta := LongWord(pos - (curMatch and matchMask));
+    if delta >= mmm then Break;
+    pb := cur - delta;
+    if (pb[maxLen] = cur[maxLen]) and (PLongWord(pb)^ = PLongWord(cur)^) then
+    begin
+      len := MatchLen(pb, cur, 4, lenLimit);
+      if len > maxLen then
+      begin
+        maxLen := len;
+        d[0] := len;
+        d[1] := delta - 1;
+        Inc(d, 2);
+        if len = lenLimit then Break;
+      end;
+    end;
+  until row >= rowEnd;
+  Result := d;
+end;
+
 { BtGetMatches (versión por posición, sin GetMatchesSpecN_2). Con hashSync.cs tomada. }
 procedure MtBtGetMatches(mt: PMtState; d: PLongWord);
 var
   numProcessed, curPos, limit, avail, availSum, bi, k, size, size2, pos, cyc, cycSize,
-    lenLimit, subValue, delta, curMatch, num, processed: LongWord;
+    lenLimit, subValue, delta, curMatch, num, processed, mmm: LongWord;
   h, sd: PLongWord;
   cur: PByte;
 begin
@@ -1965,6 +2191,52 @@ begin
     if size2 < size then size := size2;
     size2 := cycSize - cyc;
     if size2 < size then size := size2;
+    if mt^.ht then
+    begin
+      // filas ht4: se normalizan justo al llegar a normLimit, como con un hilo (MfCheckLimits),
+      // así una entrada vieja se lee igual (con su etiqueta o vacía) y la salida no cambia
+      if (mt^.hmf.normLimit <> 0) and (pos = mt^.hmf.normLimit) then
+      begin
+        subValue := LongWord(pos - cycSize);
+        pos := LongWord(pos - subValue);
+        mt^.pos := pos;
+        MfNormalizeHt(subValue, mt^.hmf.hash + mt^.hmf.fixedHashSize,
+          PtrUInt(mt^.hmf.hashMask + 1) * mt^.cutValue, mt^.hmf.matchMask);
+      end;
+      if mt^.hmf.normLimit <> 0 then
+      begin
+        size2 := LongWord(mt^.hmf.normLimit - pos);
+        if size2 < size then size := size2;
+      end;
+      if pos < cycSize then mmm := pos else mmm := cycSize;
+      cur := mt^.buffer;
+      processed := 0;
+      h := mt^.hmf.hash + mt^.hmf.fixedHashSize;
+      while (curPos < limit) and (size <> 0) do
+      begin
+        if mt^.hashBufPos + 1 < mt^.hashBufPosLimit then
+          prefetch(h[PtrUInt(mt^.hashBuf[mt^.hashBufPos + 1]) * mt^.cutValue]);
+        sd := d + curPos;
+        num := LongWord(MtHtRow(mt, h + PtrUInt(mt^.hashBuf[mt^.hashBufPos]) * mt^.cutValue,
+          pos, mmm, lenLimit, cur, sd + 1) - sd);
+        Inc(mt^.hashBufPos);
+        sd^ := num - 1;
+        Inc(curPos, num);
+        Inc(cyc);
+        pos := LongWord(pos + 1);
+        if mmm < cycSize then mmm := pos;
+        Inc(cur);
+        Inc(processed);
+        Dec(size);
+      end;
+      Inc(numProcessed, processed);
+      Dec(mt^.hashNumAvail, processed);
+      mt^.pos := pos;
+      mt^.buffer := cur;
+      if cyc = cycSize then cyc := 0;
+      mt^.cyclicBufferPos := cyc;
+      Continue;
+    end;
     if pos > LzmaMtNormLimit - size then
     begin
       subValue := LongWord(pos - cycSize);
@@ -2072,7 +2344,8 @@ begin
   Result := AllocMem(SizeOf(TMtState));
   try
     Result^.btNumBlocks := btNumBlocks;
-    Result^.inlineHash := inlineHash;
+    Result^.ht := lz^.htMode;
+    Result^.inlineHash := inlineHash or lz^.htMode;
     Result^.hashBuf := GetMem(SizeInt(kMtHashBufferSize + btNumBlocks * kMtBtBlockSize) * SizeOf(LongWord));
     Result^.btBuf := Result^.hashBuf + kMtHashBufferSize;
     MtSyncInit(Result^.hashSync, kMtHashNumBlocks);
@@ -2279,6 +2552,73 @@ begin
     until True;
     // pares del árbol (len crecientes): los de len > maxLen
     while (bt <> btLim) and (bt[0] <= maxLen) do Inc(bt, 2);
+    while bt <> btLim do
+    begin
+      distances[0] := bt[0];
+      distances[1] := bt[1];
+      Inc(distances, 2);
+      Inc(bt, 2);
+    end;
+  end;
+  p^.buffer := cur + 1;
+  p^.pos := LongWord(p^.pos + 1);
+  Result := distances;
+end;
+
+{ Ht4mGetMatches con las filas ya recorridas por el hilo BT: hash2/hash3 adelante (sin
+  alargar) si están más cerca que el primero de la fila, y después los de la fila. }
+function MtHt4GetMatches(p: PMatchFinder; distances: PLongWord): PLongWord;
+var
+  mt: PMtState;
+  bt, btLim: PLongWord;
+  len, avail, lenLimit, h2, h3, d2, d3, pos, first, temp: LongWord;
+  cur: PByte;
+  hash: PLongWord;
+begin
+  mt := PMtState(p^.mt);
+  if mt^.btBufPos = mt^.btBufPosLimit then MtGetNextBlockBt(mt);
+  bt := mt^.btBufPos;
+  len := bt^;
+  Inc(bt);
+  btLim := bt + len;
+  mt^.btBufPos := btLim;
+  avail := mt^.btNumAvailBytes;
+  mt^.btNumAvailBytes := avail - 1;
+  lenLimit := p^.matchMaxLen;
+  if avail < lenLimit then lenLimit := avail;
+  cur := p^.buffer;
+  if lenLimit >= 4 then
+  begin
+    temp := p^.crc[cur[0]] xor cur[1];
+    h2 := temp and (kHash2Size - 1);
+    temp := temp xor (LongWord(cur[2]) shl 8);
+    h3 := temp and (kHash3Size - 1);
+    hash := p^.hash;
+    pos := p^.pos;
+    d2 := LongWord(pos - hash[h2]);
+    d3 := LongWord(pos - hash[kFix3HashSize + h3]);
+    hash[h2] := pos;
+    hash[kFix3HashSize + h3] := pos;
+    if bt <> btLim then first := bt[1] + 1
+    else begin first := p^.cyclicBufferSize; if pos < first then first := pos; end;
+    if (d2 < first) and ((cur - d2)^ = cur^) then
+    begin
+      distances[1] := d2 - 1;
+      if (cur - d2)[2] = cur[2] then
+      begin
+        distances[0] := 3;
+        d3 := first;
+      end
+      else
+        distances[0] := 2;
+      Inc(distances, 2);
+    end;
+    if (d3 < first) and (d3 <> d2) and ((cur - d3)^ = cur^) then
+    begin
+      distances[0] := 3;
+      distances[1] := d3 - 1;
+      Inc(distances, 2);
+    end;
     while bt <> btLim do
     begin
       distances[0] := bt[0];
@@ -3915,8 +4255,19 @@ begin
   end
   else if mf.htMode then
   begin
-    GetMatchesF := @Ht4GetMatches;
-    SkipF := @Ht4Skip;
+    // :normal/:max con 2 hilos concedidos: la lista del multihilo (Ht4mGetMatches), aunque
+    // al final corra en un hilo (entrada chica en memoria, sin memoria para el multihilo),
+    // así la salida depende solo de si hay hilos; con uno, la de FreeArc -mt1
+    if (P.Algorithm <> 0) and (LzmaHtListOneThread or (LzmaEncThreadsFor(P) >= 2)) then
+    begin
+      GetMatchesF := @Ht4mGetMatches;
+      SkipF := @Ht4mSkip;
+    end
+    else
+    begin
+      GetMatchesF := @Ht4GetMatches;
+      SkipF := @Ht4Skip;
+    end;
   end
   else
   begin
@@ -3953,7 +4304,7 @@ begin
       MfCreate(@mf, LongWord(d), kNumOpts + kMtHashBufferSize + nb * kMtBtBlockSize, numFastBytes,
         LZMA_MATCH_LEN_MAX + 1 + kMtHashBlockSize);
       FMt := MtCreate(@mf, nb, nt = 2);
-      GetMatchesF := @MtBt4GetMatches;
+      if mf.htMode then GetMatchesF := @MtHt4GetMatches else GetMatchesF := @MtBt4GetMatches;
       SkipF := @MtBt4Skip;
     except
       // sin memoria para los buffers de más (o ventana demasiado grande): un hilo
@@ -4228,6 +4579,7 @@ end;
 function LzmaEncMaxThreads(const P: TLzmaEncParams): Integer;
 begin
   if (P.MatchFinder = mfBT4) and (P.Algorithm <> 0) and MtThreadsAvailable then Result := 3
+  else if (P.MatchFinder = mfHT4) and (P.Algorithm <> 0) and MtThreadsAvailable then Result := 2
   else Result := 1;
 end;
 

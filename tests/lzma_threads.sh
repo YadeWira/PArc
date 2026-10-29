@@ -2,7 +2,7 @@
 # tests/lzma_threads.sh — hilos del match finder multihilo de lzma bajo PARC_THREADS.
 #
 # parc_writer concede hilos a las etapas lzma (LzmaEncThreadGrant): un bloque solo recibe todo
-# el presupuesto (bt4 :max usa hasta 3: el que comprime, el BT y el hash) y los bloques en
+# el presupuesto (bt4 :max usa hasta 3: el que comprime, el BT y el hash; ht4 :normal 2) y los bloques en
 # paralelo se lo reparten. Sin la concesión el match finder multihilo no corría nunca (un
 # hilo con cualquier PARC_THREADS); antes de la concesión, cada bloque abría 3 hilos aunque
 # hubiera 4 bloques en paralelo con PARC_THREADS=4.
@@ -55,6 +55,16 @@ for T in 1 2 4; do
   if [ "$PEAK" -eq "$want" ]; then ok "bloque solo, PARC_THREADS=$T: $PEAK hilos"
   else bad "bloque solo, PARC_THREADS=$T: $PEAK hilos (se esperaban $want)"; fi
   roundtrip one "bloque solo, PARC_THREADS=$T"
+done
+
+# ht4 :normal: LZ + el hilo de las filas (2 como mucho)
+for T in 1 4; do
+  peak $T one -mlzma:16mb:normal
+  want=$T; [ "$want" -gt 2 ] && want=2
+  if [ "$RC" -ne 0 ]; then bad "ht4 normal, PARC_THREADS=$T: rc=$RC"; continue; fi
+  if [ "$PEAK" -eq "$want" ]; then ok "ht4 normal, PARC_THREADS=$T: $PEAK hilos"
+  else bad "ht4 normal, PARC_THREADS=$T: $PEAK hilos (se esperaban $want)"; fi
+  roundtrip one "ht4 normal, PARC_THREADS=$T"
 done
 
 # rep+lzma en un bloque: los hilos de hashing de rep (hasta 2) salen de la concesión de lzma

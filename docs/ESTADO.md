@@ -99,8 +99,15 @@ What makes this possible (all inside `.parc`; the codecs are unchanged):
   (hash head, first tree node, its children), and the optimal parser drops two SDK 18+ speed
   shortcuts that cost ratio (it always prices the literal, tries the short rep like SDK 9.x) and
   refreshes prices every 32 matches. `normal` and `max` are now smaller than FreeArc's.
-- **LZMA multi-thread match finder** (port of LzFindMt, bt4 in `normal`/`max` only, same output
-  as one thread). It is off unless the caller grants threads, so it fits the global thread
+- **LZMA multi-thread match finder** (port of LzFindMt, `normal`/`max` only). bt4: same output
+  as one thread. ht4 (the `normal` default): 2 threads, the BT thread walks the HT4 rows and
+  the list of matches is the one of FreeArc's multi-thread finder (rows report every longer
+  match from length 4, hash2/hash3 matches only when closer, skipped positions also search
+  their row), which is smaller than the one-thread list: like FreeArc, ht4 output with 2+
+  threads differs from 1 thread (that one is FreeArc `-mt1`'s). 512 MB TILIN slice,
+  `lzma:8mb:normal`: 1 thread 257,005,522, 2+ threads 256,882,467 (FreeArc `-mt1`
+  257,058,517, `-mt4` 256,920,905); `96mb`: 253,641,041 / 253,540,503 (FreeArc 253,723,647 /
+  253,565,992). It is off unless the caller grants threads, so it fits the global thread
   budget: `TLzmaEncParams.NumThreads` = 1 (one thread), 2 (compressing thread + a BT thread
   that also hashes) or 3 (+ a separate hash thread, like the SDK; the hash thread is light);
   0 = take the per-thread grant `LzmaEncThreadGrant` (threadvar in `parc_lzmaenc`, default 0 =
