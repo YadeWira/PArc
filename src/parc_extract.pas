@@ -325,6 +325,27 @@ begin
   end;
 end;
 
+{ Pool para decodificar bloques enteros a la vez (t, extracción a temporales): hasta el
+  presupuesto de hilos y la cantidad de bloques, mientras sus decodificadores entren en
+  memoria. Cada bloque planea sus pools internos (4x4, grzip) con su parte del presupuesto. }
+function CreateBlockPool(A: TArchive; const Blocks: array of Integer): TJobPool;
+var
+  Est: array of Int64;
+  i, w, Count: Integer;
+begin
+  Count := Length(Blocks);
+  SetLength(Est, Count);
+  for i := 0 to Count - 1 do
+    Est[i] := EstimateDecodeMem(A.DataBlocks[Blocks[i]].Method, A.DataBlocks[Blocks[i]].OrigSize);
+  w := BudgetThreads;
+  if w > Count then w := Count;
+  w := ThreadsForMemory(Est, w);
+  if w < 1 then w := 1;
+  Result := TJobPool.Create(w, Count);
+  Result.Share := BudgetThreads div w;
+  if Result.Share < 1 then Result.Share := 1;
+end;
+
 { `t` con bloques independientes en paralelo. La salida se emite en orden de bloque. }
 function VerifyArchiveParallel(A: TArchive; const Opt: TExtractOptions; Log: TLogProc): TExtractStats;
 var
@@ -336,6 +357,8 @@ var
   Reported: array of Int64;
   Done: Int64;
   k: Integer;
+  HadToken: Boolean;
+  Blks: array of Integer;
 begin
   Result := Default(TExtractStats);
   Damaged := False;
@@ -382,7 +405,11 @@ begin
   try
     if Count > 0 then
     begin
-      Pool := TJobPool.Create(ThreadCount(4), Count);
+      SetLength(Blks, Count);
+      for i := 0 to Count - 1 do Blks[i] := Jobs[i].BlockIndex;
+      Pool := CreateBlockPool(A, Blks);
+      // Este hilo solo junta el progreso: sin ficha (las N son de los que verifican)
+      HadToken := BudgetWaitBegin;
       try
         for i := 0 to Count - 1 do Pool.Submit(Jobs[i]);
         for i := 0 to Count - 1 do
@@ -400,6 +427,7 @@ begin
           until Finished;
       finally
         Pool.Free;
+        BudgetWaitEnd(HadToken);
       end;
     end;
 
@@ -506,6 +534,8 @@ var
   Jobs: array of TDecodeBlockJob;
   Pool: TJobPool;
   Tmp: string;
+  HadToken: Boolean;
+  Blks: array of Integer;
 begin
   Result := False;
   Temps := nil;
@@ -543,7 +573,10 @@ begin
     Inc(n);
   end;
 
-  Pool := TJobPool.Create(ThreadCount(4), Count);
+  SetLength(Blks, Count);
+  for i := 0 to Count - 1 do Blks[i] := Jobs[i].BlockIndex;
+  Pool := CreateBlockPool(A, Blks);
+  HadToken := BudgetWaitBegin;   // este hilo solo espera
   try
     try
       for i := 0 to Count - 1 do Pool.Submit(Jobs[i]);
@@ -553,6 +586,7 @@ begin
         if not Jobs[i].OK then Result := False;
     finally
       Pool.Free;
+      BudgetWaitEnd(HadToken);
     end;
   except
     for i := 0 to High(Temps) do
@@ -945,79 +979,6 @@ begin
 end;
 {$ENDIF}
 
-{ Memoria que estima el decodificador de un bloque: por cada etapa, el mayor parámetro de
-  memoria (diccionario, ventana de rep, modelo de ppmd...) sin pasar del tamaño del bloque (con
-  un mínimo, por los modelos que no dependen de él), más los búferes. Es aproximada: solo
-  decide cuántos bloques se decodifican a la vez; si se queda corta, el trabajo al que le falte
-  memoria se rehace solo. }
-function EstimateDecodeMem(const Method: string; OrigSize: Int64): Int64;
-var
-  Stages, Params: TStringArray;
-  s, k: Integer;
-  p: string;
-  m: QWord;
-  StageMax, Cap: Int64;
-begin
-  Result := 8 shl 20;
-  Cap := OrigSize;
-  if Cap < 64 shl 20 then Cap := 64 shl 20;
-  Stages := Method.Split(['+']);
-  for s := 0 to High(Stages) do
-  begin
-    Params := Stages[s].Split([':']);
-    StageMax := 0;
-    for k := 1 to High(Params) do
-    begin
-      p := Params[k];
-      while (p <> '') and not (p[1] in ['0'..'9']) do Delete(p, 1, 1);   // d64m, mem48m, *1gb...
-      // Solo con sufijo explícito: un entero pelado suele ser un orden o un nivel
-      if (p <> '') and (LowerCase(p[Length(p)]) in ['b', 'k', 'm', 'g']) and ParseMem(p, m) then
-        if (m <= QWord(High(Int64))) and (Int64(m) > StageMax) then StageMax := Int64(m);
-    end;
-    if StageMax > Cap then StageMax := Cap;
-    Inc(Result, StageMax);
-  end;
-end;
-
-{ Cuántos bloques se pueden decodificar a la vez: hasta Threads, mientras los más grandes
-  entren en la mitad de la memoria física y del espacio de direcciones (ulimit -v, ~2 GB en
-  win32). }
-function ThreadsForMemory(const Est: array of Int64; Threads: Integer): Integer;
-var
-  Sorted: array of Int64;
-  i, j: Integer;
-  t, Budget, Lim, Sum: Int64;
-begin
-  Budget := High(Int64);
-  Lim := PhysicalMemory;
-  if Lim > 0 then Budget := Lim div 2;
-  Lim := AddressSpaceLimit;
-  if (Lim > 0) and (Lim div 2 < Budget) then Budget := Lim div 2;
-  {$IFNDEF CPU64}
-  if Budget > Int64(1) shl 30 then Budget := Int64(1) shl 30;
-  {$ENDIF}
-  SetLength(Sorted, Length(Est));
-  for i := 0 to High(Est) do Sorted[i] := Est[i];
-  // Los Threads más grandes (selección parcial, de mayor a menor)
-  for i := 0 to High(Sorted) do
-  begin
-    if i >= Threads then Break;
-    for j := i + 1 to High(Sorted) do
-      if Sorted[j] > Sorted[i] then
-      begin
-        t := Sorted[i]; Sorted[i] := Sorted[j]; Sorted[j] := t;
-      end;
-  end;
-  Result := 0;
-  Sum := 0;
-  while (Result < Threads) and (Result <= High(Sorted)) do
-  begin
-    if Sum + Sorted[Result] > Budget then Break;
-    Inc(Sum, Sorted[Result]);
-    Inc(Result);
-  end;
-end;
-
 { Intenta la extracción paralela directa. False (sin haber tocado nada) si no corresponde. }
 function TryExtractParallel(A: TArchive; const Opt: TExtractOptions; Mode: TOverwriteMode;
   Log: TLogProc; var Stats: TExtractStats; var Damaged: Boolean): Boolean;
@@ -1029,11 +990,11 @@ var
   Names: TStrIntMap;
   Name: string;
   Shared: TExtractShared;
-  Finished: Boolean;
+  Finished, HadToken: Boolean;
 begin
   Result := False;
   if Opt.TestOnly or Opt.ToStdout then Exit;
-  Threads := ThreadCount(4);
+  Threads := BudgetThreads;
   if Threads < 2 then Exit;
   Count := 0;
   SetLength(Est, Length(A.DataBlocks));
@@ -1091,6 +1052,10 @@ begin
     end;
     Cur := 0;
     Pool := TJobPool.Create(Threads, Count);
+    Pool.Share := BudgetThreads div Threads;
+    if Pool.Share < 1 then Pool.Share := 1;
+    // Este hilo junta mensajes y progreso: sin ficha (las N son de los que extraen)
+    HadToken := BudgetWaitBegin;
     try
       try
         for i := 0 to Count - 1 do Pool.Submit(Jobs[i]);
@@ -1111,7 +1076,12 @@ begin
             for k := i + 1 to Count - 1 do Pool.WaitJobQuiet(Jobs[k]);
             Jobs[i].OutOfMem := False;   // (si falla acá, lo ya extraído de este bloque se informa)
             Jobs[i].InMainThread := True;
-            Jobs[i].Extract;
+            BudgetWaitEnd(HadToken);     // acá sí trabaja este hilo
+            try
+              Jobs[i].Extract;
+            finally
+              HadToken := BudgetWaitBegin;
+            end;
           end;
           for k := 0 to Jobs[i].Messages.Count - 1 do Log(Jobs[i].Messages[k]);
           Inc(Stats.Files, Jobs[i].Stats.Files);
@@ -1135,6 +1105,7 @@ begin
       end;
     finally
       Pool.Free;
+      BudgetWaitEnd(HadToken);
     end;
   finally
     for i := 0 to Count - 1 do Jobs[i].Free;
@@ -1237,7 +1208,7 @@ begin
   DirectParallel := TryExtractParallel(A, Opt, Mode, Log, Result, BlockDamaged);
   // Si no (nombres repetidos, preguntas pendientes), decodificar en paralelo a temporales y
   // escribir en orden; con un solo hilo eso solo agregaría una escritura y una lectura de todo
-  if not DirectParallel and (ThreadCount(4) >= 2) then
+  if not DirectParallel and (BudgetThreads >= 2) then
     DecodedParallel := TryDecodeBlocksParallel(A, Opt, Temps);
 
   if not DirectParallel then

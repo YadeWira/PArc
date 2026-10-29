@@ -73,7 +73,7 @@ type
     FLiterals: LongInt;
     FPool: TObject;                     // TJobPool de hashing (nil = en línea)
     FTasks: array of TObject;           // THashTask por ranura de FJobs (se reusan)
-    FHashGrant: LongInt;                // hilos de hashing reservados en GRepHashUsed
+    FHashGrant: LongInt;                // hilos de hashing de esta etapa (0 = en línea)
     procedure WaitTask(Idx: LongInt);
     procedure DrainTasks;
     procedure Push(var A: TRepIntArray; var N: LongInt; V: LongInt);
@@ -101,12 +101,12 @@ procedure CheckRepEncParams(const P: TRepEncParams; out L, HashSize: LongInt);
 { GetCompressionMem de REP_METHOD: BlockSize + HashSize*4 }
 function RepEncMemory(const P: TRepEncParams): Int64;
 
-{ Hilos de fondo para el hashing de REP (HashingThreads del C): sale de PARC_THREADS / los
-  núcleos, como los demás pools; 1 = en línea, sin hilos. Es el tope para TODO el proceso,
-  no por etapa: las etapas REP que corren a la vez (bloques escritos en paralelo) se reparten
-  estos hilos y las que llegan sin cupo hashean en línea. }
+{ Hilos de fondo para el hashing de REP (HashingThreads del C) de cada etapa: hasta 2, del
+  presupuesto global de hilos (parc_parallel); 1 = en línea, sin hilos (presupuesto de un
+  hilo). Los hilos de todas las etapas que corren a la vez (bloques escritos en paralelo)
+  compiten por las mismas fichas que el resto, así que nunca pasan de PARC_THREADS. }
 function RepHashThreads: Integer;
-{ Hilos de hashing de REP vivos ahora mismo en el proceso (para tests / presupuesto global). }
+{ Hilos de hashing de REP creados por las etapas vivas ahora mismo (para tests). }
 function RepHashThreadsInUse: Integer;
 
 implementation
@@ -138,31 +138,17 @@ end;
 
 function RepHashThreads: Integer;
 begin
-  Result := ThreadCount(REP_HASH_MAXTHREADS);
-  if Result > REP_HASH_MAXTHREADS then Result := REP_HASH_MAXTHREADS;
+  Result := PoolWorkers(REP_HASH_MAXTHREADS);
+  if Result < 1 then Result := 1;
 end;
 
 var
-  { Hilos de hashing reservados por las etapas REP vivas (suma de FHashGrant) }
+  { Hilos de hashing de las etapas REP vivas (suma de FHashGrant) }
   GRepHashUsed: LongInt = 0;
 
 function RepHashThreadsInUse: Integer;
 begin
   Result := InterlockedCompareExchange(GRepHashUsed, 0, 0);
-end;
-
-{ Reserva hasta Want hilos de hashing sin pasar de Limit en todo el proceso; devuelve los
-  reservados (0 = sin cupo: hashear en línea). }
-function ReserveRepHash(Want, Limit: LongInt): LongInt;
-var
-  cur: LongInt;
-begin
-  repeat
-    cur := GRepHashUsed;
-    Result := Limit - cur;
-    if Result > Want then Result := Want;
-    if Result <= 0 then Exit(0);
-  until InterlockedCompareExchange(GRepHashUsed, cur + Result, cur) = cur;
 end;
 
 const
@@ -381,11 +367,14 @@ begin
   FMoreHashed := True;
   FState := stNotStarted;
   // Hashing en hilos de fondo, como HashingThreads del C. No cambia la salida: HTBUFS sale
-  // de APar.Threads, no de estos hilos. RepHashThreads es el tope del proceso: con varios
-  // bloques escribiéndose a la vez, solo los primeros consiguen hilos y el resto hashea en
-  // línea (los hilos que escriben bloques ya ocupan los núcleos de PARC_THREADS).
+  // de APar.Threads, no de estos hilos. Los hilos toman fichas del presupuesto global: si no
+  // hay, el hashing que nadie empezó lo hace en línea este hilo al esperarlo (WaitTask).
   n := RepHashThreads;
-  if n > 1 then FHashGrant := ReserveRepHash(n, n);
+  if n > 1 then
+  begin
+    FHashGrant := n;
+    InterlockedExchangeAdd(GRepHashUsed, n);
+  end;
   if FHashGrant > 0 then
   begin
     FPool := TJobPool.Create(FHashGrant, FHtBufs);

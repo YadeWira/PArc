@@ -49,7 +49,7 @@ type
     FCur: TBytes;               // bloque que se está llenando
     FLen: SizeInt;
     FPool: TJobPool;
-    FQueue: array of TParallelJob;   // trabajos en vuelo, en orden
+    FQueue: TJobArray;               // trabajos en vuelo, en orden
     FHead, FCount: Integer;
     procedure CutBlocks(Final: Boolean);
     procedure SubmitBlock(Size: SizeInt);
@@ -1987,6 +1987,9 @@ begin
   InBuf := nil;
 end;
 
+const
+  GRZIP_MAXTHREADS = 8;
+
 constructor TGrzipEncStage.Create(ATarget: TOutStage; const Params: TStringArray);
 var
   Mode: LongInt;
@@ -1999,10 +2002,11 @@ begin
   FMode := Mode;
   FBlockSize := Bs;
   FAdaptive := Adapt;
-  // ~11 veces el bloque por hilo (BWT strong): tope de 8 hilos
-  Threads := ThreadCount(8);
-  SetLength(FQueue, Threads + 1);
-  FPool := TJobPool.Create(Threads, Threads + 1);
+  // ~11 veces el bloque por hilo (BWT strong): tope de 8 hilos. Según el presupuesto (la cola
+  // crece después si sobran fichas); con un solo hilo, todo en línea
+  Threads := PoolWorkers(GRZIP_MAXTHREADS);
+  if Threads > 0 then SetLength(FQueue, Threads + 1) else SetLength(FQueue, 1);
+  FPool := TJobPool.Create(Threads, Length(FQueue));
 end;
 
 destructor TGrzipEncStage.Destroy;
@@ -2032,8 +2036,20 @@ end;
 procedure TGrzipEncStage.SubmitBlock(Size: SizeInt);
 var
   Job: TGrzipEncJob;
+  w: Integer;
 begin
-  if FCount = Length(FQueue) then WriteOldest;
+  if FCount = Length(FQueue) then
+  begin
+    // Cola llena: si todos los hilos están trabajando, un bloque y un hilo más
+    w := FPool.MaxWorkers;
+    if FPool.CanGrow(GRZIP_MAXTHREADS) then
+    begin
+      GrowJobRing(FQueue, FHead, FCount, Length(FQueue) + 1);
+      FPool.SetMaxWorkers(w + 1);
+    end
+    else
+      WriteOldest;
+  end;
   Job := TGrzipEncJob.Create;
   Job.Mode := FMode;
   Job.InBuf := Copy(FCur, 0, Size);

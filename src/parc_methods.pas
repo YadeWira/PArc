@@ -41,6 +41,14 @@ function ParseMem(const S: string; out Value: QWord): Boolean;
 
 function IsStoring(const Method: string): Boolean;
 
+{ Memoria que estima el decodificador de un bloque (aproximada: solo decide cuántos bloques
+  se procesan a la vez). }
+function EstimateDecodeMem(const Method: string; OrigSize: Int64): Int64;
+{ Cuántos trabajos con esas estimaciones de memoria pueden correr a la vez: hasta Threads,
+  mientras los más grandes entren en la mitad de la memoria física y del espacio de
+  direcciones. }
+function ThreadsForMemory(const Est: array of Int64; Threads: Integer): Integer;
+
 implementation
 
 uses
@@ -587,6 +595,79 @@ begin
     if Chain.Read(@Extra, 1) <> 0 then Corrupt('block decompresses to more bytes than expected');
   finally
     Chain.Free;
+  end;
+end;
+
+{ Memoria que estima el decodificador de un bloque: por cada etapa, el mayor parámetro de
+  memoria (diccionario, ventana de rep, modelo de ppmd...) sin pasar del tamaño del bloque (con
+  un mínimo, por los modelos que no dependen de él), más los búferes. Es aproximada: solo
+  decide cuántos bloques se decodifican a la vez; si se queda corta, el trabajo al que le falte
+  memoria se rehace solo. }
+function EstimateDecodeMem(const Method: string; OrigSize: Int64): Int64;
+var
+  Stages, Params: TStringArray;
+  s, k: Integer;
+  p: string;
+  m: QWord;
+  StageMax, Cap: Int64;
+begin
+  Result := 8 shl 20;
+  Cap := OrigSize;
+  if Cap < 64 shl 20 then Cap := 64 shl 20;
+  Stages := Method.Split(['+']);
+  for s := 0 to High(Stages) do
+  begin
+    Params := Stages[s].Split([':']);
+    StageMax := 0;
+    for k := 1 to High(Params) do
+    begin
+      p := Params[k];
+      while (p <> '') and not (p[1] in ['0'..'9']) do Delete(p, 1, 1);   // d64m, mem48m, *1gb...
+      // Solo con sufijo explícito: un entero pelado suele ser un orden o un nivel
+      if (p <> '') and (LowerCase(p[Length(p)]) in ['b', 'k', 'm', 'g']) and ParseMem(p, m) then
+        if (m <= QWord(High(Int64))) and (Int64(m) > StageMax) then StageMax := Int64(m);
+    end;
+    if StageMax > Cap then StageMax := Cap;
+    Inc(Result, StageMax);
+  end;
+end;
+
+{ Cuántos bloques se pueden decodificar a la vez: hasta Threads, mientras los más grandes
+  entren en la mitad de la memoria física y del espacio de direcciones (ulimit -v, ~2 GB en
+  win32). }
+function ThreadsForMemory(const Est: array of Int64; Threads: Integer): Integer;
+var
+  Sorted: array of Int64;
+  i, j: Integer;
+  t, Budget, Lim, Sum: Int64;
+begin
+  Budget := High(Int64);
+  Lim := PhysicalMemory;
+  if Lim > 0 then Budget := Lim div 2;
+  Lim := AddressSpaceLimit;
+  if (Lim > 0) and (Lim div 2 < Budget) then Budget := Lim div 2;
+  {$IFNDEF CPU64}
+  if Budget > Int64(1) shl 30 then Budget := Int64(1) shl 30;
+  {$ENDIF}
+  SetLength(Sorted, Length(Est));
+  for i := 0 to High(Est) do Sorted[i] := Est[i];
+  // Los Threads más grandes (selección parcial, de mayor a menor)
+  for i := 0 to High(Sorted) do
+  begin
+    if i >= Threads then Break;
+    for j := i + 1 to High(Sorted) do
+      if Sorted[j] > Sorted[i] then
+      begin
+        t := Sorted[i]; Sorted[i] := Sorted[j]; Sorted[j] := t;
+      end;
+  end;
+  Result := 0;
+  Sum := 0;
+  while (Result < Threads) and (Result <= High(Sorted)) do
+  begin
+    if Sum + Sorted[Result] > Budget then Break;
+    Inc(Sum, Sorted[Result]);
+    Inc(Result);
   end;
 end;
 

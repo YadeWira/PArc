@@ -140,6 +140,7 @@ type
     OrigSize: SizeInt;
     Stored: Boolean;
     MinOrder0Ratio: Double;
+    procedure ProcessBlock;
     procedure Process; override;
   end;
 
@@ -160,8 +161,22 @@ begin
 end;
 
 procedure T4x4EncJob.Process;
+var
+  OldSingle: Boolean;
 begin
-  LzmaSingleThreadHere := True;   // 4x4 ya reparte los bloques entre hilos
+  // 4x4 ya reparte los bloques entre hilos. Se restaura: el trabajo puede correr en el hilo
+  // que lo espera (sin fichas libres), y ese hilo después puede usar LZMA multihilo
+  OldSingle := LzmaSingleThreadHere;
+  LzmaSingleThreadHere := True;
+  try
+    ProcessBlock;
+  finally
+    LzmaSingleThreadHere := OldSingle;
+  end;
+end;
+
+procedure T4x4EncJob.ProcessBlock;
+begin
   // Como _4x4MTCompressor::Process: un bloque de >= 32 KB casi aleatorio (order-0 >= r%) ni
   // se intenta; y si no comprime, va guardado tal cual
   if (MinOrder0Ratio <> 0) and (InLen >= 32 * 1024) and
@@ -184,6 +199,10 @@ end;
 
 { T4x4EncStage }
 
+const
+  { Tope de hilos de un 4x4 (como el decodificador: más allá, contención del heap) }
+  T4X4_MAXTHREADS = 16;
+
 constructor T4x4EncStage.Create(ATarget: TOutStage; const AInner: string; ABlockSize: SizeInt);
 var
   Threads: Integer;
@@ -195,9 +214,11 @@ begin
   FInner := AInner;
   FBlockSize := ABlockSize;
   MinOrder0Ratio := 0.99;
-  Threads := ThreadCount(16);
-  SetLength(FQueue, Threads + 1);
-  FPool := TJobPool.Create(Threads, Threads + 1);
+  // Hilos según el presupuesto (o la parte de este bloque, si hay bloques en paralelo); la
+  // cola crece después si sobran fichas (SubmitBlock). Con un solo hilo, todo en línea
+  Threads := PoolWorkers(T4X4_MAXTHREADS);
+  if Threads > 0 then SetLength(FQueue, Threads + 1) else SetLength(FQueue, 1);
+  FPool := TJobPool.Create(Threads, Length(FQueue));
   EmitU32(0);   // versión del formato 4x4 (se escribe aunque no haya datos, como el C)
 end;
 
@@ -237,9 +258,26 @@ end;
 procedure T4x4EncStage.SubmitBlock;
 var
   Job: T4x4EncJob;
+  Q: array of TObject;
+  i, w: Integer;
 begin
   if FLen = 0 then Exit;
-  if FCount = Length(FQueue) then WriteOldest;
+  if FCount = Length(FQueue) then
+  begin
+    // Cola llena: si todos los hilos están trabajando, un bloque y un hilo más en vez de
+    // esperar al más viejo (este hilo iba a soltar su ficha: la usa el nuevo)
+    w := TJobPool(FPool).MaxWorkers;
+    if TJobPool(FPool).CanGrow(T4X4_MAXTHREADS) then
+    begin
+      SetLength(Q, Length(FQueue) + 1);
+      for i := 0 to FCount - 1 do Q[i] := FQueue[(FHead + i) mod Length(FQueue)];
+      FQueue := Q;
+      FHead := 0;
+      TJobPool(FPool).SetMaxWorkers(w + 1);
+    end
+    else
+      WriteOldest;
+  end;
   Job := T4x4EncJob.Create;
   Job.Inner := FInner;
   // Sin copiar: el bloque lleno pasa al trabajo y se sigue llenando un buffer reciclado
