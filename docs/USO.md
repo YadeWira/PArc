@@ -81,8 +81,8 @@ require the full preset memory.
 (both with the level's filters). It is slightly smaller than `-m9` and decompresses at similar
 speed. `-mxx` uses the **context-mixing** codec (`cm`, lpaq1-style) for text and binaries: it
 produces clearly smaller archives, but decompression is roughly 5–40× slower than `-mx`.
-Independent data blocks are compressed in parallel (workers limited by `PARC_THREADS`) at every
-level; encrypted and incremental repacks stay serial. The block being written goes straight into
+Independent data blocks are compressed in parallel (all threads together limited by
+`PARC_THREADS`) at every level; encrypted and incremental repacks stay serial. The block being written goes straight into
 the archive; blocks that finish ahead of their turn wait in memory (at most min(1 GB, RAM/4)
 in total, 256 MB on 32-bit) and only what does not fit goes to a temporary file next to the
 archive.
@@ -211,7 +211,7 @@ archive has a recovery record, PArc suggests `parc r`.
 |---|---|
 | `--no-progress` | disable the progress line |
 
-The `t` command verifies independent blocks in parallel (workers limited by `PARC_THREADS`), so
+The `t` command verifies independent blocks in parallel (threads limited by `PARC_THREADS`), so
 its speed scales with the number of blocks. Extraction (`x`/`e`) also decodes independent blocks
 in parallel, and each worker writes its files straight to the destination (no temporary
 files, no size limit); messages are still printed in archive order, a damaged block is reported
@@ -241,7 +241,7 @@ extracting, the half-written file is deleted. A second Ctrl-C stops immediately.
 
 | variable | effect |
 |---|---|
-| `PARC_THREADS` | threads for parallel compressors (4x4, grzip), block compression, `t` verification and parallel block decoding for extraction; defaults to CPU cores |
+| `PARC_THREADS` | maximum number of threads working at the same time in the whole process (default: CPU cores, at most 64): block compression, 4x4/grzip, REP hashing, the multi-threaded LZMA match finder, `t` verification and parallel extraction all share it. It also picks the preset alternatives, like FreeArc's `-mtN` (e.g. `PARC_THREADS=1 -m1` uses the single-thread `tor:4`) |
 | `PARC_BUFMEM` | MB of memory for compressed blocks waiting their turn when compressing in parallel (default min(1024, RAM/4), 256 on 32-bit); the rest goes to temporary files |
 | `PARC_CRC` | `table` disables the PCLMULQDQ CRC-32 (for measurements) |
 

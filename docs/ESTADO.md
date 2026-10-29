@@ -119,6 +119,28 @@ What makes this possible (all inside `.parc`; the codecs are unchanged):
   the update merge and the directory index are no longer quadratic (35k files `-m1`: 20 s ->
   12 s with 1 thread, 11 s -> 4 s with 4); file enumeration does one `lstat` per entry on
   Unix; CRC-32 uses PCLMULQDQ on x86-64 (~18 GB/s, tables ~2 GB/s).
+- **Global thread budget** (`parc_parallel`): `PARC_THREADS=N` (default: cores, at most 64)
+  is the maximum number of threads *working* at the same time in the whole process. There are
+  N tokens; the main thread starts with one, pool threads take one per job, the LZMA match
+  finder threads hold one while they run. A thread that blocks on another thread (a job, a
+  match-finder semaphore, LZMA input) gives its token back while it waits and gets it back
+  with priority over new jobs; a job nobody has started yet is run inline by the thread that
+  waits for it, so nested pools (blocks -> 4x4/grzip/REP hashing -> LZMA MT) cannot deadlock
+  and degrade to fewer threads. Pools are sized from the caller's share (`ThreadShare`:
+  the whole budget at the top, `N div workers` inside a block job) and 4x4/grzip grow while
+  tokens are free (`TJobPool.CanGrow`), so tokens go to the inner pools of one huge block or
+  to the block level when there are many blocks. Verify/extract/compress main threads only
+  collect results and hold no token while they wait. `tests/thread_budget.py` samples
+  `/proc/<pid>/task/*/stat`: p99 of threads in R <= N and CPU/wall <= N + 0.3.
+  The preset alternatives `(a|b)` are picked by N too (like FreeArc's `-mtN`).
+  *Hook for the LZMA thread-grant API* (branch `perf2/lzma2`, `LzmaEncThreadGrant`): after
+  merging, replace `LzmaSingleThreadHere` with the grant: `T4x4EncJob.Process` saves the grant,
+  sets it to 0 (one thread) and restores it; the automatic case of the LZMA encoder (now
+  `nt := 2`, i.e. MT match finder, when `BudgetThreads >= 2` outside 4x4) becomes "with no
+  grant and `BudgetThreads >= 2`: min(LzmaEncMaxThreads(P), max(2, ThreadShare))" (the tokens
+  cap the real parallelism anyway; with a share of 2 the 2-thread mode avoids the hash thread). The MT threads keep
+  `BudgetEnter`/`BudgetLeave` and the semaphore waits keep `BudgetWaitBegin`/`End`
+  (including the 2-thread mode's inline hash, which runs in the BT thread with its token).
 - **Directory**: mtime in ns is stored losslessly as zigzag VInt deltas (tag 7) or, when it
   is smaller, as the sub-second part only on top of the `Time` column (tag 8): 6–10 % smaller
   directories with random nanoseconds.
@@ -153,6 +175,7 @@ fpc -O2 -Fusrc -Futests/lzma_ref -FUbuild/tests/units -FEbuild/tests tests/test_
 build/tests/test_lzma_diff 2000
 sudo bash tests/fixes.sh          # patterns, links, full disk, FAT32
 python3 tests/fuzz.py build/linux64/parc 100 build/linux64/parc
+python3 tests/thread_budget.py    # PARC_THREADS=N: <= N hilos trabajando (muestrea /proc)
 ```
 
 ## Known limitations
