@@ -571,7 +571,7 @@ end;
 function CreateEncoderChain(const Method: string; Target: TOutStage): TOutStage;
 var
   Stages: TStringArray;
-  k: Integer;
+  k, SavedGrant: Integer;
 begin
   // Validar todo antes de crear nada: si no, habría que desarmar la cadena a medias
   if not EncoderAvailable(Method) then
@@ -580,13 +580,24 @@ begin
     raise EUnsupportedEncoder.CreateFmt('cannot compress with "%s" yet', [Method]);
   end;
   Result := Target;
+  Stages := Method.Split(['+']);
+  // LzmaEncThreadGrant es para toda la cadena: los hilos de hashing de una etapa rep corren a
+  // la vez que el match finder multihilo de lzma, así que lzma se queda con lo que sobra
+  SavedGrant := LzmaEncThreadGrant;
+  if SavedGrant > 1 then
+    for k := 0 to High(Stages) do
+      if LowerCase(StageName(Stages[k])) = 'rep' then
+        LzmaEncThreadGrant := Max(1, LzmaEncThreadGrant - RepHashThreads);
   try
-    Stages := Method.Split(['+']);
-    for k := High(Stages) downto 0 do
-      Result := CreateStage(Stages[k], Result);
-  except
-    Result.Free;   // libera lo ya armado (y con eso Target)
-    raise;
+    try
+      for k := High(Stages) downto 0 do
+        Result := CreateStage(Stages[k], Result);
+    except
+      Result.Free;   // libera lo ya armado (y con eso Target)
+      raise;
+    end;
+  finally
+    LzmaEncThreadGrant := SavedGrant;
   end;
 end;
 

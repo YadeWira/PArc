@@ -177,8 +177,8 @@ Open points:
 
 Decoding is ~13–15 s vs FreeArc's ~20.5 s. Open points:
 
-- The multi-thread match finder (bt4 `:normal`/`:max`) only runs when the caller grants
-  threads (`LzmaEncThreadGrant`, see docs/ESTADO.md); the global thread budget must set it.
+- The multi-thread match finder (bt4 `:normal`/`:max`) runs with the threads `WriteArchive`
+  grants (`LzmaEncThreadGrant`, see docs/ESTADO.md); a global budget should set the grant there.
 - `4x4:lzma:8mb:normal` on the slice is +0.024 % vs FreeArc: some 8 MB blocks (e.g. slice
   offset 472 MB) compress 1.4 % worse with `ht4` `mc16` than FreeArc's SDK 9.x parser, although
   `:fast` (same match finder) is byte-identical; not found yet. The whole-stream `:normal` is

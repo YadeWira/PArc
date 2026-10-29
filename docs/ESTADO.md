@@ -104,11 +104,15 @@ What makes this possible (all inside `.parc`; the codecs are unchanged):
   budget: `TLzmaEncParams.NumThreads` = 1 (one thread), 2 (compressing thread + a BT thread
   that also hashes) or 3 (+ a separate hash thread, like the SDK; the hash thread is light);
   0 = take the per-thread grant `LzmaEncThreadGrant` (threadvar in `parc_lzmaenc`, default 0 =
-  one thread). Stages built from method strings (`CreateStage`) use 0, so a block writer that
-  wants to give a single `lzma:...:max` block 2–3 threads sets `LzmaEncThreadGrant` in the
-  thread that creates the encoder chain, before creating it, and resets it afterwards.
-  `LzmaEncMaxThreads(P)` tells how many threads a stream can use (3 or 1) and
-  `LzmaEncThreadsFor(P)` how many it would take now. 4x4 jobs always use one.
+  one thread). Stages built from method strings (`CreateStage`) use 0. The grant is set in
+  one place, `WriteArchive` (parc_writer): a block written alone gets the whole budget
+  (`ThreadCount`), blocks written in parallel get `budget div blocks in flight`;
+  `CreateEncoderChain` takes the REP hashing threads (`RepHashThreads`) out of it when the
+  chain has a `rep` stage, and 4x4 jobs set it to 0 (one thread per block). This is the hook
+  for the global thread budget: whoever owns the budget only has to change what
+  `WriteArchive` grants. `LzmaEncMaxThreads(P)` tells how many threads a stream can use (3 or
+  1) and `LzmaEncThreadsFor(P)` how many it would take now. `tests/lzma_threads.sh` checks
+  the thread peak under `PARC_THREADS`.
 - **Automatic solid blocks**: without `-s`, 64 MB for `-m1`…`-m3` and 32 MB for `-m4`…`-m9`/`-mx`. On Silesia this improved compression time and ratio at every level; small archives still use one block. `-mxx` keeps a single block for ratio.
 - **GRZip adaptive LZP**: BWT blocks of 4 MB or more use `l64/h22` (fewer, longer matches); small blocks keep the fast LZP parameters. The choice is stored in each block's mode, so old decoders remain compatible. This makes `-m4` 1.2–1.4% smaller on text and many small files.
 - **Stronger and faster presets** than FreeArc's at the same level:

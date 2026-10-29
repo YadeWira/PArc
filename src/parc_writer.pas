@@ -67,7 +67,7 @@ implementation
 
 uses
   parc_bytes, parc_crc, parc_stream, parc_outstream, parc_encoders, parc_methods, parc_recovery, parc_progress,
-  parc_volume, parc_parallel, parc_strmap;
+  parc_volume, parc_parallel, parc_strmap, parc_lzmaenc;
 
 const
   VERSION_PARC: array[0..3] of Byte = (PARC_FORMAT_VERSION, 0, 0, 0);
@@ -837,6 +837,7 @@ type
     Block: TDataBlock;
     Stats: TWriteStats;
     OrigBytes: Int64;
+    LzmaGrant: Integer;   // hilos que puede usar cada stream lzma de este bloque
     procedure Process; override;
     destructor Destroy; override;
   end;
@@ -856,7 +857,12 @@ begin
     if not Entries[Group.Files[i]].Meta.IsDir then
       Inc(OrigBytes, Entries[Group.Files[i]].Meta.Size);
   Stats := Default(TWriteStats);
-  Block := WriteDataBlock(Output, Entries, Group, Opt, nil, Stats, True);
+  LzmaEncThreadGrant := LzmaGrant;
+  try
+    Block := WriteDataBlock(Output, Entries, Group, Opt, nil, Stats, True);
+  finally
+    LzmaEncThreadGrant := 0;
+  end;
 end;
 
 function WriteArchive(const FileName: string; const Entries: TWriteEntryArray;
@@ -875,7 +881,7 @@ var
   DirData: TBytes;
   Ok, UseParallel: Boolean;
   Total, BlockPos: Int64;
-  Window: Integer;
+  Window, Workers, Grant: Integer;
 begin
   Result := Default(TWriteStats);
   if not EncoderAvailable(Opt.DirMethod) then
@@ -956,6 +962,21 @@ begin
 
       if UseParallel then
       begin
+        // Presupuesto estricto de hilos (PARC_THREADS o los núcleos): los bloques en vuelo
+        // a la vez se reparten los hilos, y lo que sobra lo usa el match finder multihilo de
+        // lzma (bt4 :normal/:max, hasta 3 por stream). Los grupos de solo directorios no cuentan.
+        Workers := 0;
+        for i := 0 to High(AllGroups) do
+          for k := 0 to High(AllGroups[i].Files) do
+            if not Entries[AllGroups[i].Files[k]].Meta.IsDir then
+            begin
+              Inc(Workers);
+              Break;
+            end;
+        if Workers > ThreadCount(4) then Workers := ThreadCount(4);
+        if Workers < 1 then Workers := 1;
+        Grant := ThreadCount(High(Integer)) div Workers;
+        if Grant < 1 then Grant := 1;
         n := Length(AllGroups);
         SetLength(Jobs, n);
         Pool := TJobPool.Create(ThreadCount(4), n);
@@ -966,6 +987,7 @@ begin
             Jobs[i].Entries := Entries;
             Jobs[i].Group := AllGroups[i];
             Jobs[i].Opt := Opt;
+            Jobs[i].LzmaGrant := Grant;
             Jobs[i].Output := TBlockOut.Create(FileName + '.blk' + IntToStr(i));
           end;
           // Ventana de trabajos en vuelo: lo que no es el bloque en curso espera en memoria,
@@ -997,12 +1019,20 @@ begin
         end;
       end
       else
-        for i := 0 to High(AllGroups) do
-        begin
-          n := Length(Blocks);
-          SetLength(Blocks, n + 1);
-          Blocks[n] := WriteDataBlock(S, Entries, AllGroups[i], Opt, Log, Result);
+      begin
+        // un bloque a la vez: todo el presupuesto de hilos para su cadena
+        LzmaEncThreadGrant := ThreadCount(High(Integer));
+        try
+          for i := 0 to High(AllGroups) do
+          begin
+            n := Length(Blocks);
+            SetLength(Blocks, n + 1);
+            Blocks[n] := WriteDataBlock(S, Entries, AllGroups[i], Opt, Log, Result);
+          end;
+        finally
+          LzmaEncThreadGrant := 0;
         end;
+      end;
 
       ProgressEnd;
       CheckCancel;
