@@ -48,15 +48,21 @@ type
   TParallelJob = class
   private
     FDone: PRTLEvent;
-    FFinished: LongInt;    // 1 cuando terminó (el evento se puede haber consumido en una espera con tope)
+    { 0 pendiente o corriendo; 1 terminó pero el hilo todavía no señaló FDone; 2 terminado y
+      señalado. Los que esperan ven el resultado con <>0 (el evento se puede haber consumido en
+      una espera con tope), pero liberar o reusar el trabajo exige 2: si no, el hilo llamaba a
+      RTLEventSetEvent sobre un evento ya destruido. }
+    FFinished: LongInt;
     FErrClass: ExceptClass;
     FErrMsg: string;
     procedure Run;
+    procedure WaitSignaled;
   public
     OutBuf: TBytes;
     OutSize: SizeInt;
     constructor Create;
     destructor Destroy; override;
+    procedure BeforeDestruction; override;   // espera que Run suelte el trabajo
     procedure Process; virtual; abstract;
     { Para reusar un trabajo ya terminado (y esperado): limpia el error y el evento. }
     procedure ResetForReuse;
@@ -175,6 +181,12 @@ procedure GrowJobRing(var Q: TJobArray; var Head: Integer; Count, NewLen: Intege
   pidió usa otro camino (un temporal). }
 function MemBudgetTryReserve(Bytes: Int64): Boolean;
 procedure MemBudgetRelease(Bytes: Int64);
+
+{$IFDEF PARC_RACE_TEST}
+var
+  RaceSleepMs: Integer = 0;   // pausa entre publicar el resultado y señalar el evento
+  RaceHits: LongInt = 0;      // trabajos destruidos con Run todavía adentro
+{$ENDIF}
 
 implementation
 
@@ -411,14 +423,32 @@ begin
   FDone := RTLEventCreate;
 end;
 
+{ Si Run ya publicó el resultado pero no terminó de señalar el evento, espera esas dos
+  instrucciones: después el hilo ya no toca el trabajo. }
+procedure TParallelJob.WaitSignaled;
+begin
+  while InterlockedCompareExchange(FFinished, 1, 1) = 1 do ThreadSwitch;
+end;
+
+procedure TParallelJob.BeforeDestruction;
+begin
+  // Antes que cualquier destructor (de la subclase también): nada se libera con Run adentro
+  WaitSignaled;
+  inherited BeforeDestruction;
+end;
+
 destructor TParallelJob.Destroy;
 begin
+  {$IFDEF PARC_RACE_TEST}
+  if InterlockedCompareExchange(FFinished, 1, 1) = 1 then InterlockedIncrement(RaceHits);
+  {$ENDIF}
   RTLEventDestroy(FDone);
   inherited Destroy;
 end;
 
 procedure TParallelJob.ResetForReuse;
 begin
+  WaitSignaled;
   FErrClass := nil;
   FErrMsg := '';
   // Sin esto, WaitJob de un trabajo reusado (los de hashing de REP) volvía sin esperar
@@ -439,7 +469,11 @@ begin
     end;
   end;
   InterlockedExchange(FFinished, 1);
+  {$IFDEF PARC_RACE_TEST}
+  if RaceSleepMs > 0 then Sleep(RaceSleepMs);   // ventana ampliada (tests/test_jobfree.lpr)
+  {$ENDIF}
   RTLEventSetEvent(FDone);
+  InterlockedExchange(FFinished, 2);   // desde acá el hilo ya no toca el trabajo
 end;
 
 { TParallelWorker }

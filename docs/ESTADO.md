@@ -176,6 +176,9 @@ build/tests/test_lzma_diff 2000
 sudo bash tests/fixes.sh          # patterns, links, full disk, FAT32
 python3 tests/fuzz.py build/linux64/parc 100 build/linux64/parc
 python3 tests/thread_budget.py    # PARC_THREADS=N: <= N hilos trabajando (muestrea /proc)
+# liberar/reusar un trabajo del pool apenas termina (ventana ampliada con -dPARC_RACE_TEST)
+fpc -O2 -dPARC_RACE_TEST -Fusrc -FUbuild/tests/race -FEbuild/tests tests/test_jobfree.lpr
+PARC_THREADS=4 build/tests/test_jobfree
 ```
 
 ## Known limitations
