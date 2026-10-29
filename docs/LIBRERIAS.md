@@ -17,7 +17,7 @@ document records where each one comes from, what it was verified against, and wh
 | LibTomCrypt (`_Encryption`) | 1.17 | 1.18.2 | AES/Blowfish/Serpent/Twofish/SHA produce the same output |
 | PPMd (D. Shkarin, modified by FreeArc) | var. H/I | no compatible upstream | Kept as PArc's own port (including the 32-bit layout on x64) |
 | SREP | 3.93 beta (2013) | 3.93a beta (2014-10-11) | freeware by Bulat Ziganshin; v1–v4 format |
-| Tornado, REP, 4x4, Dict, LZP, Delta, MM/TTA, GRZip, DisPack | 0.67 | no maintained upstream | Ported from `Compression/`; that code defines the stream |
+| Tornado, REP, 4x4, Dict, LZP, Delta, MM/TTA, GRZip, DisPack | 0.67 | no maintained upstream | Ported from `Compression/`; that code defines the stream. The Tornado encoder for `tor:10` and `tor:15` (combination 8, and the optimal parser with CachingMatchFinder<6> and rows >= 64) is FreeArc's C++ itself, compiled by `build.sh` with `src/parc_torglue.patch` (repdist match capped at bufend; decoder left out) |
 | Context mixing `cm` | lpaq1 (2007) | lpaq1 model | GPLv2; ported to Pascal and wrapped as a block codec. Used by `-mxx`; much slower than LZMA/PPMd |
 
 ## Status in PArc

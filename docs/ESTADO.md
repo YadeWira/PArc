@@ -8,7 +8,7 @@ and the other containers (`.zip`/`.7z`/`.rar`) lives in
 ## Layout
 
 ```
-src/                     Pascal sources
+src/                     Pascal sources (+ parc_torglue.cpp/.patch: bridge to FreeArc's Tornado encoder)
 docs/                    manual (USO.md), format (formato/FORMATO-PARC.md), codecs
 tests/                   tests, codec oracles and fuzzers
 reference/freearc-0.67/  only Compression/: C codec sources and test oracle
@@ -104,6 +104,24 @@ What makes this possible (all inside `.parc`; the codecs are unchanged):
   `ah`, `al`, `fb`) now reach the encoder (they used to be dropped from the stored method).
   512 MB of TILIN, one thread, compress CPU: `tor:1` 5.4 → 1.8 s (FreeArc 2.7), `tor:3`
   6.4 → 5.0 s (6.5), `tor:5` 18.4 → 14.4 s (23.4), `tor:6` 23.9 → 20.4 s (40.4).
+- **FreeArc's own Tornado encoder (C++) where it is faster**: `build.sh` compiles
+  `reference/freearc-0.67/Compression/Tornado` with g++ (linux64) or MinGW-w64 g++ (win64/win32,
+  libgcc/libmingwex static; the `.exe` imports the same system DLLs as before) through `src/parc_torglue.cpp`
+  (`extern "C"`, no exceptions across the boundary, `CHECK` → error code, out of memory →
+  `EOutOfMemory`, per-call `compress_all_at_once` for 4x4 threads). A single-stream `tor` runs
+  it in its own thread that hands the turn back and forth with the caller, so only one of the
+  two is busy. Chosen per method by measurement (compress CPU, one thread, minimum of 3–6 runs
+  on 128 MB of TILIN, the `text` and `exe` sets): the C++ wins at `tor:10` (combination 8:
+  0.85–1.00× the Pascal time; its Pascal engine was removed) and in the optimal parser with
+  CachingMatchFinder<6> and rows ≥ 64 (`tor:15`: 0.73–0.95×). Everywhere else the Pascal/asm
+  engine is faster or equal (C++ 0.98–2.1× at `tor:1`…`9`, `11`…`14`, `16`; 1.04–2.2× in `4x4:tor:5/6/7/12`
+  with 4 threads, where Pascal reuses its engines). `PARC_TORENC=c|pas` forces one of them.
+  `src/parc_torglue.patch` caps the optimal parser's repdist match at bufend while reads are
+  pending (FreeArc's encoder can write archives that fail `t`, see above) and leaves FreeArc's
+  decoder out. `tests/run_tornado_tests.sh` checks that both encoders produce FreeArc's stream
+  byte for byte (oracle `tor64`) and fuzzes the options through the C++ one.
+  128 MB of TILIN, one thread, compress CPU (41af3bc → now, FreeArc `-mt1`): `tor:10`
+  98.0 → 81.6 s (88.2), `tor:15` 70.7 → 32.9 s (34.7).
 - **Automatic solid blocks**: without `-s`, 64 MB for `-m1`…`-m3` and 32 MB for `-m4`…`-m9`/`-mx`. On Silesia this improved compression time and ratio at every level; small archives still use one block. `-mxx` keeps a single block for ratio.
 - **GRZip adaptive LZP**: BWT blocks of 4 MB or more use `l64/h22` (fewer, longer matches); small blocks keep the fast LZP parameters. The choice is stored in each block's mode, so old decoders remain compatible. This makes `-m4` 1.2–1.4% smaller on text and many small files.
 - **Stronger and faster presets** than FreeArc's at the same level:

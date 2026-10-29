@@ -1,0 +1,55 @@
+--- a/Tornado/OptimalParsing.cpp
++++ b/Tornado/OptimalParsing.cpp
+@@ -42,6 +42,7 @@
+     BYTE     *buf, *endbuf;  // Buffer boundaries
+     BYTE     *basep;
+     BYTE     *lastp;
++    BYTE     *readend;   // PArc: bufend mientras queden lecturas (tope del repdist), si no NULL
+     CALLBACK_FUNC *callback;
+     void     *auxdata;
+     uint64    prev_outsize;
+@@ -121,7 +122,7 @@
+ 
+             if (p[len-1] == (p-dist)[len-1]) {
+                 // Evaluate all matches in the [prev_len+1,cur_len] length range
+-                for (UINT match_len = check_match_len(p, p-dist, lastp-p);  len<=match_len;  len++) {
++                for (UINT match_len = check_match_len(p, p-dist, (readend && readend<lastp? readend:lastp)-p);  len<=match_len;  len++) {
+                     // Evaluate price[p+len] = price[p] + repdist_price(len,i)
+                     evaluate (p, len, dist, price + Coder::repdist_price(len-OPTIMAL_PARSER_MIN_MATCH_LEN, i));
+                     stat_only (cnt_eval_len_in_repdist++);
+@@ -230,6 +231,10 @@
+     // Data should be written in HUGE_BUFFER_SIZE chunks (at least) plus chunk*2 bytes should be allocated to ensure that no buffer overflow may occur (because we flush() data only after processing each 'chunk' input bytes)
+     OptimalParser<Coder>  coder (buf, buf+m.buffer, m.encoding_method, callback, auxdata, tornado_compressor_outbuf_size (m.buffer, bytes_to_compress), compress_all_at_once? 0:chunk*2, m.fast_bytes);
+     if (coder.error() != FREEARC_OK)  return coder.error();
++    // PArc: el repdist media el match hasta lastp (basep+OPTIMAL_WINDOW), que puede caer en la parte
++    // del buffer aun no leida; la lectura siguiente pisaba esos bytes y el bloque se codificaba con
++    // un match que ya no coincidia (archivo que no verifica). Con lecturas pendientes, el tope es bufend.
++    coder.readend = read_point < bufend? bufend : NULL;
+     BYTE *table_end  = coder.support_tables && m.find_tables? buf : buf+m.buffer+LOOKAHEAD;    // The end of last data table processed
+     BYTE *last_found = buf;                             // Last position where data table was found
+     byte *last_checked[MAX_TABLE_ROW][MAX_TABLE_ROW];   // Last position where data table of size %1 with offset %2 was tried
+@@ -255,6 +260,7 @@
+             byte *p1=p;  // This trick allows to not take address of p and this buys us a bit better program optimization
+             int res = read_next_chunk (m, callback, auxdata, mf, coder, p1, buf, bufend, table_end, last_found, read_point, bytes, chunk, offset, last_checked);
+             p=p1, matchend = bufend - mymin (MAX_HASHED_BYTES, bufend-buf);
++            coder.readend = read_point < bufend? bufend : NULL;   // PArc
+             if (res==0)  break;            // All input data were successfully compressed
+             if (res<0)   return res;       // Error occurred while reading data
+             silence = buf;
+--- a/Tornado/Tornado.cpp
++++ b/Tornado/Tornado.cpp
+@@ -459,6 +459,8 @@
+ 
+ #endif // FREEARC_DECOMPRESS_ONLY
+ 
++#ifndef PARC_ENCODER_ONLY   // PArc: solo el codificador (el decodificador es el de Pascal)
++
+ // LZ77 decompressor ******************************************************************************
+ 
+ // If condition is true, write data to outstream
+@@ -602,3 +604,5 @@
+     }}
+ finished: return errcode;
+ }
++
++#endif // PARC_ENCODER_ONLY

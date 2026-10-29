@@ -20,7 +20,9 @@ Documentation: [manual](docs/USO.md) · [format](docs/formato/FORMATO-PARC.md) �
 - **Own format**: `.parc` keeps names, sizes, CRCs and solid blocks from the FreeArc layout,
   and adds 64-bit nanosecond timestamps, Windows attributes and Unix modes/links as optional
   directory fields.
-- **All codecs implemented in Pascal**, no third-party compression libraries linked:
+- **Codecs implemented in Pascal** (hot loops in inline assembler), no third-party compression
+  libraries linked; the only C/C++ is FreeArc's own Tornado encoder, used for `tor:10` and
+  `tor:15` where it measured faster (`src/parc_torglue.cpp`):
   `storing`, `lzma`, `ppmd`, `grzip`, `dict`, `rep`, `delta`, `tor` (Tornado), `lzp`, `mm`,
   `tta`, `4x4`, `exe` (BCJ x86), `lz4`, `dispack070` (DisPack), `srep` (SREP) and `cm` (context mixing), alone or in
   chains (`exe+dispack070+lzma`, `srep+lzma`, …).
@@ -71,7 +73,11 @@ Exit codes: `0` OK, `1` usage error, `2` damaged data, `3` unsupported method/pa
 
 ## Build
 
-Requires Free Pascal 3.2 or newer.
+Requires Free Pascal 3.2 or newer, `g++` (linux64) and the MinGW-w64 `g++`
+(`x86_64-w64-mingw32-g++`, `i686-w64-mingw32-g++`) for the Windows targets: `build.sh` compiles
+FreeArc's Tornado encoder (`reference/freearc-0.67/Compression/Tornado`, patched with
+`src/parc_torglue.patch`) and links it statically (no extra DLLs: the `.exe` imports the same
+system DLLs as before, kernel32/user32/shell32/oleaut32/msvcrt).
 
 ```sh
 ./build.sh linux64     # default; produces build/linux64/parc

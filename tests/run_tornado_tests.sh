@@ -172,6 +172,47 @@ sys.stdout.buffer.write(b"".join(r.randbytes(r.randint(500, 4000)) + bytes(r.ran
     else echo "  FAIL óptimo $m (match leído más allá de bufend)"; nf=$((nf+1)); fi
   done
   if python3 tests/tor_optfuzz.py "$PARC" "${TOR_OPTFUZZ_N:-150}" 1; then :; else nf=$((nf+1)); fi
+  # Codificador C++ en 4x4 con bloques que no comprimen: OUTBLOCK_TOO_SMALL -> bloque guardado
+  head -c 2000000 /dev/urandom > "$WORK/rnd.bin"
+  for m in 4x4:tor:15:256kb 4x4:tor:10:256kb 4x4:tor:5:256kb; do
+    rm -f "$WORK/rnd.parc"
+    if PARC_TORENC=c PARC_THREADS=4 "$PARC" a -m$m "$WORK/rnd.parc" "$WORK/rnd.bin" --no-progress >/dev/null 2>&1 &&
+       "$PARC" t "$WORK/rnd.parc" --no-progress >/dev/null 2>&1; then echo "  ok   C++ $m incomprimible"
+    else echo "  FAIL C++ $m incomprimible"; nf=$((nf+1)); fi
+  done
+  rm -f "$WORK/rnd.bin" "$WORK/rnd.parc"
+  # El mismo fuzz con el codificador C++ (parc_torglue.cpp) forzado en todos los métodos
+  if PARC_TORENC=c python3 tests/tor_optfuzz.py "$PARC" "${TOR_OPTFUZZ_N:-150}" 2; then :; else nf=$((nf+1)); fi
+
+  # Codificador = FreeArc byte a byte: el stream del bloque de datos de `parc a -mtor:N` contra el
+  # oráculo con el mismo método (el que quedó guardado: parc achica el buffer al archivo; tor64
+  # lee por un pipe para no achicarlo él). Con los dos codificadores (PARC_TORENC=c|pas). En el
+  # parser óptimo (tor:11..16) el tope del repdist en bufend (parc_torglue.patch) puede cambiar
+  # algún byte respecto de FreeArc: ahí se exige que los dos codificadores den lo mismo.
+  echo; echo "== codificador contra el oráculo"
+  no=0; nd=0
+  for f in "$CORPUS/output.embl" "$CORPUS/src_arc067.exe" "$CORPUS/tablas_sint.bin" "$CORPUS/drumloop.wav"; do
+    for opt in 1 2 3 4 5 6 7 8 9 10 5:c3 3:t0 6:t0 7:c3 10:c3 4:64kb 7:1mb 11 12 13 14 15 16; do
+      for e in c pas; do
+        rm -f "$WORK/ora_$e.parc"
+        PARC_TORENC=$e PARC_THREADS=1 "$PARC" a -mtor:$opt "$WORK/ora_$e.parc" "$f" --no-progress >/dev/null 2>&1
+      done
+      read -r pos comp meth < <("$PARC" lb "$WORK/ora_c.parc" 2>/dev/null | awk '$1=="data"{sub("pos=","",$2); sub("comp=","",$4); print $2, $4, $5}')
+      if [ -z "$pos" ]; then echo "  FAIL oráculo tor:$opt $(basename "$f"): no comprimió"; nd=$((nd+1)); continue; fi
+      args=$(echo "$meth" | tr ':' '\n' | awk 'NR==1{next} NR==2&&/^[0-9]+$/{printf "-%s ",$0; next} /^[0-9]+(b|kb|mb|gb)?$/{printf "-b%s ",$0; next} {printf "-%s ",$0}')
+      # shellcheck disable=SC2086
+      cat "$f" | "$TOR" -q $args - -o"$WORK/ora.tor" 2>/dev/null
+      tail -c +$((pos+1)) "$WORK/ora_c.parc" | head -c "$comp" > "$WORK/ora_c.tor"
+      if ! cmp -s "$WORK/ora_c.parc" "$WORK/ora_pas.parc"; then
+        echo "  FAIL oráculo tor:$opt $(basename "$f"): C++ y Pascal difieren"; nd=$((nd+1))
+      elif cmp -s "$WORK/ora_c.tor" "$WORK/ora.tor"; then no=$((no+1))
+      elif [ "${opt%%:*}" -ge 11 ]; then no=$((no+1))
+      else echo "  FAIL oráculo tor:$opt $(basename "$f") ($args): distinto de FreeArc"; nd=$((nd+1)); fi
+    done
+  done
+  rm -f "$WORK"/ora*
+  echo "  codificador: $no ok, $nd fallas"
+  nf=$((nf+nd))
 else
   echo "  (sin $PARC: se saltea)"
 fi

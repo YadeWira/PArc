@@ -257,7 +257,9 @@ begin
         // caer en la parte del buffer aún no leída: el repdist "encontraba" un match largo contra basura
         // igual en ambos lados, la lectura siguiente pisaba esos bytes y el bloque se codificaba con un
         // match que ya no coincidía (CRC error en t; D3D.UC con tor:13..16, tor:11:l2, -b33kb).
-        if LastP < BufEnd then match_len := LongWord(LastP - pp) else match_len := LongWord(BufEnd - pp);
+        // Solo mientras quedan lecturas (ReadPoint < BufEnd), igual que parc_torglue.patch: sin
+        // lecturas pendientes no hay nada que pisar y la salida sigue siendo la de FreeArc.
+        if (LastP < BufEnd) or (ReadPoint >= BufEnd) then match_len := LongWord(LastP - pp) else match_len := LongWord(BufEnd - pp);
         match_len := CheckMatchLen(pp, pp - dist, match_len);
         while LongWord(len) <= match_len do
         begin

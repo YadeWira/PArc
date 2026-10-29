@@ -43,8 +43,24 @@ type
   { Etapa de compresión tor. Params = la etapa partida por ':' (Params[0]='tor'). }
   TTorEncStage = class(TOutStage)
   private
-    FEngine: TObject;
+    FEngine: TObject;           // motor Pascal (nil si codifica el C++)
+    // Codificador C++ (parc_torglue.cpp): corre en un hilo propio que pide datos ("read") y
+    // entrega salida ("write") por FReq; este hilo y aquél se pasan el turno con FToEnc/FToProd,
+    // así que nunca hay más de uno ocupado (presupuesto de hilos).
+    FCM: array[0..13] of LongInt;
+    FToEnc, FToProd: PRTLEvent;
+    FTid: TThreadID;
+    FStarted, FEof: Boolean;
+    FReq: Integer;              // 0 = el C trabaja, 1 = read, 2 = write, 3 = terminó (FRc)
+    FReqBuf: PByte;
+    FReqSize, FReqGot, FReply, FRc: LongInt;
+    FInP: PByte;
+    FInLeft: SizeInt;
     procedure EmitOut(P: PByte; N: SizeInt);
+    procedure CStart;
+    procedure CResume(Reply: LongInt);
+    procedure CPump;
+    procedure CJoin;
   protected
     procedure DoWrite(Buf: PByte; Count: SizeInt); override;
     procedure DoFinish; override;
@@ -2625,12 +2641,7 @@ type
     XHT: PLongWord;
     XShift, XMask: LongWord;
     XRow: SizeInt;
-    YN: LongWord;           // N del CycledCachingMatchFinder principal (5, o 7 en la 8)
-    // combinación 8: el auxiliar es CycledCachingMatchFinder<4>
-    ZHT: PLongWord;
-    ZHead: PByte;
-    ZShift: LongWord;
-    ZRow: SizeInt;
+    YN: LongWord;           // N del CycledCachingMatchFinder principal (5)
   end;
 
   TTorEngine = class
@@ -2689,8 +2700,6 @@ type
     procedure RunFast6(Resuming: Boolean);
     procedure RunFast7H(Resuming: Boolean);
     procedure RunFast7A(Resuming: Boolean);
-    procedure RunFast8H(Resuming: Boolean);
-    procedure RunFast8A(Resuming: Boolean);
     function ReadPart1: Boolean;    // True = hay que esperar datos
     procedure ReadPart2;
     procedure FinishStream;
@@ -2763,9 +2772,7 @@ begin
     7: Result := TLazyMF.Create(THash3MF.Create(TCombineMF.Create(
                    TCycledMF.Create(buf, m.HashSize, m.HashRowWidth, 5),
                    TExactMF.Create(buf, m.AuxHashSize, m.AuxHashRowWidth, 4)), 16, 12, True, buf));
-    8: Result := TLazyMF.Create(THash3MF.Create(TCombineMF.Create(
-                   TCycledMF.Create(buf, m.HashSize, m.HashRowWidth, 7),
-                   TCycledMF.Create(buf, m.AuxHashSize, m.AuxHashRowWidth, 4)), 16, 12, True, buf));
+    8: raise ETorEncoder.Create('tor: combinación 8 (tor:10) sin motor Pascal');   // UseCTor
     9: Result := TCombineMF.Create(TCachingMF.Create(buf, m.HashSize, m.HashRowWidth, 5),
                    THash3MF.Create(TExactMF.Create(buf, m.AuxHashSize, m.AuxHashRowWidth, 4), 14, 10, False, buf));
     10, 11: Result := TCombineMF.Create(TCachingMF.Create(buf, m.HashSize, m.HashRowWidth, 6),
@@ -3208,7 +3215,9 @@ begin
       // caer en la parte del buffer aún no leída: el repdist "encontraba" un match largo contra basura
       // igual en ambos lados, la lectura siguiente pisaba esos bytes y el bloque se codificaba con un
       // match que ya no coincidía (CRC error en t; D3D.UC con tor:13..16, tor:11:l2, -b33kb).
-      if LastP < BufEnd then match_len := LongWord(LastP - pp) else match_len := LongWord(BufEnd - pp);
+      // Solo mientras quedan lecturas (ReadPoint < BufEnd), igual que parc_torglue.patch: sin
+      // lecturas pendientes no hay nada que pisar y la salida sigue siendo la de FreeArc.
+      if (LastP < BufEnd) or (ReadPoint >= BufEnd) then match_len := LongWord(LastP - pp) else match_len := LongWord(BufEnd - pp);
       match_len := CheckMatchLen(pp, pp - dist, match_len);
       while LongWord(len) <= match_len do
       begin
@@ -3337,13 +3346,6 @@ begin
       case C.Kind of
         3: RunFast7H(Resuming);
         4: RunFast7A(Resuming);
-      else
-        Run(Resuming);
-      end;
-    8:
-      case C.Kind of
-        3: RunFast8H(Resuming);
-        4: RunFast8A(Resuming);
       else
         Run(Resuming);
       end;
@@ -3525,15 +3527,141 @@ begin
 end;
 
 { ---------------------------------------------------------------------------------------- }
+{ Codificador C++ de FreeArc (parc_torglue.cpp, Tornado.cpp compilado con g++/mingw-g++)     }
+{ ---------------------------------------------------------------------------------------- }
+
+{$L parc_torglue.o}
+{$IFDEF UNIX}{$LINKLIB m}{$ENDIF}
+{$IFDEF MSWINDOWS}{$LINKLIB gcc}{$LINKLIB mingwex}{$LINKLIB msvcrt}{$LINKLIB kernel32}{$ENDIF}
+
+type
+  TParcIoFunc = function(Aux, Buf: Pointer; Size: LongInt): LongInt; cdecl;
+
+function parc_tor_compress_mem(f: PLongInt; src: Pointer; srclen: LongInt; dst: Pointer; dstcap: LongInt;
+  outlen: PLongInt): LongInt; cdecl; external;
+function parc_tor_compress_stream(f: PLongInt; rd, wr: TParcIoFunc; aux: Pointer): LongInt; cdecl; external;
+procedure parc_tor_init; cdecl; external;
+
+const
+  // Compression/CELS.h
+  FREEARC_ERRCODE_OUTBLOCK_TOO_SMALL = -4;
+  FREEARC_ERRCODE_NOT_ENOUGH_MEMORY = -5;
+  FREEARC_ERRCODE_OPERATION_TERMINATED = -10;
+  CTOR_STACK = 8 * mb;           // OptimalParser vive en la pila (precios, lastchecked: ~300 KB)
+
+{ ¿Este método lo codifica el C++? Elegido por medición (CPU de `a`, 1 hilo, mínimo de 3-6
+  corridas en 128 MB de TILIN, el conjunto text y el exe; docs/ESTADO.md): el C++ gana en la
+  combinación 8 (tor:10: 0,85-1,00x el tiempo del Pascal) y en el parser óptimo con
+  CachingMatchFinder<6> y filas largas (tor:15: 0,73-0,95x; en tor:14, fila 32, pierde:
+  1,07-1,30x). En el resto el Pascal/asm es más rápido (tor:1..9, 11..14, 16: el C++ tarda
+  1,0-2,1x; 4x4:tor:5/6/7/12 con 4 hilos: 1,04-2,2x, el Pascal reusa los motores).
+  PARC_TORENC=c fuerza el C++ en todas (pruebas y medidas); =pas el Pascal donde lo hay. }
+function UseCTor(const M: TTorMethod; Combo: Integer): Boolean;
+var
+  e: string;
+begin
+  if Combo = 8 then Exit(True);           // el motor Pascal de la combinación 8 se quitó
+  e := GetEnvironmentVariable('PARC_TORENC');
+  if e = 'c' then Exit(True);
+  if e = 'pas' then Exit(False);
+  Result := (Combo in [10, 11]) and (M.HashRowWidth >= 64);
+end;
+
+{ PackMethod para el C: los campos en orden, tal como los dejó parse_TORNADO (el C hace sus
+  propios ajustes de tor_compress0). }
+procedure MethodToC(const M: TTorMethod; out F: array of LongInt);
+begin
+  F[0] := M.Number; F[1] := M.EncodingMethod; F[2] := Ord(M.FindTables); F[3] := M.HashRowWidth;
+  F[4] := LongInt(M.HashSize); F[5] := M.MatchFinder; F[6] := LongInt(M.Buffer); F[7] := M.MatchParser;
+  F[8] := M.Hash3; F[9] := M.Shift; F[10] := M.UpdateStep; F[11] := LongInt(M.AuxHashSize);
+  F[12] := M.AuxHashRowWidth; F[13] := M.FastBytes;
+end;
+
+procedure CTorError(rc: LongInt);
+begin
+  if rc = FREEARC_ERRCODE_NOT_ENOUGH_MEMORY then OutOfMemoryError;
+  raise ETorEncoder.CreateFmt('tor: el codificador devolvió el error %d', [rc]);
+end;
+
+{ 4x4: el bloque entero en memoria (compress_all_at_once=1). False = no entra en DstCap. }
+function TorEncodeMemC(const M: TTorMethod; Src: PByte; SrcLen, DstCap: SizeInt; out Dst: TBytes): Boolean;
+var
+  F: array[0..13] of LongInt;
+  ol, rc: LongInt;
+begin
+  Dst := nil;
+  if (SrcLen > High(LongInt) div 2) or (DstCap > High(LongInt) div 2) then
+    raise ETorEncoder.CreateFmt('tor: bloque de %d bytes demasiado grande', [SrcLen]);
+  MethodToC(M, F);
+  SetLength(Dst, DstCap + 1);
+  ol := 0;
+  rc := parc_tor_compress_mem(@F[0], Src, SrcLen, @Dst[0], DstCap, @ol);
+  if rc = FREEARC_ERRCODE_OUTBLOCK_TOO_SMALL then begin Dst := nil; Exit(False); end;
+  if rc < 0 then begin Dst := nil; CTorError(rc); end;
+  SetLength(Dst, ol);
+  Result := True;
+end;
+
+{ Lado del hilo del C: pedir y esperar el turno. Sin excepciones (vuelven al C++). }
+function CTorRead(Aux, Buf: Pointer; Size: LongInt): LongInt; cdecl;
+var
+  S: TTorEncStage;
+begin
+  S := TTorEncStage(Aux);
+  S.FReqBuf := Buf; S.FReqSize := Size; S.FReqGot := 0;
+  S.FReq := 1;
+  RTLEventSetEvent(S.FToProd);
+  RTLEventWaitFor(S.FToEnc);
+  Result := S.FReply;
+end;
+
+function CTorWrite(Aux, Buf: Pointer; Size: LongInt): LongInt; cdecl;
+var
+  S: TTorEncStage;
+begin
+  S := TTorEncStage(Aux);
+  S.FReqBuf := Buf; S.FReqSize := Size;
+  S.FReq := 2;
+  RTLEventSetEvent(S.FToProd);
+  RTLEventWaitFor(S.FToEnc);
+  Result := S.FReply;
+end;
+
+function CTorThread(P: Pointer): PtrInt;
+var
+  S: TTorEncStage;
+begin
+  S := TTorEncStage(P);
+  S.FRc := parc_tor_compress_stream(@S.FCM[0], @CTorRead, @CTorWrite, S);
+  S.FReq := 3;
+  RTLEventSetEvent(S.FToProd);
+  Result := 0;
+end;
+
+{ ---------------------------------------------------------------------------------------- }
 { TTorEncStage                                                                              }
 { ---------------------------------------------------------------------------------------- }
 
 constructor TTorEncStage.Create(ATarget: TOutStage; const Params: TStringArray);
 var
   E: TTorEngine;
+  M: TTorMethod;
+  Err: string;
+  Combo: Integer;
 begin
+  Err := ParseTorEncParams(Params, M);
+  if Err <> '' then raise ETorEncoder.Create('tor: ' + Err);
+  ValidateMethod(M, Combo);
+  if UseCTor(M, Combo) then
+  begin
+    MethodToC(M, FCM);
+    inherited Create(ATarget);
+    FToEnc := RTLEventCreate;
+    FToProd := RTLEventCreate;
+    Exit;
+  end;
   // Validar y reservar antes de adoptar el destino
-  E := CreateEngine(Params, False, 1 * mb);
+  E := TTorEngine.Create(M, Combo, False, 1 * mb);
   inherited Create(ATarget);
   FEngine := E;
   E.C.OnEmit := @EmitOut;
@@ -3541,8 +3669,86 @@ end;
 
 destructor TTorEncStage.Destroy;
 begin
+  if FStarted then
+  begin
+    // Cortado a mitad (error río abajo): cada pedido pendiente vuelve con error hasta que el
+    // C termina, y recién entonces se libera
+    while FReq <> 3 do CResume(FREEARC_ERRCODE_OPERATION_TERMINATED);
+    CJoin;
+  end;
+  if FToEnc <> nil then RTLEventDestroy(FToEnc);
+  if FToProd <> nil then RTLEventDestroy(FToProd);
   FEngine.Free;
   inherited Destroy;
+end;
+
+procedure TTorEncStage.CStart;
+begin
+  FStarted := True;
+  FReq := 0;
+  FTid := 0;
+  if BeginThread(@CTorThread, Pointer(Self), FTid, CTOR_STACK) = 0 then
+  begin
+    FStarted := False;
+    raise ETorEncoder.Create('tor: no se pudo crear el hilo del codificador');
+  end;
+  RTLEventWaitFor(FToProd);
+end;
+
+{ Devolverle el turno al C con la respuesta del pedido y esperar el siguiente. }
+procedure TTorEncStage.CResume(Reply: LongInt);
+begin
+  FReply := Reply;
+  FReq := 0;
+  RTLEventSetEvent(FToEnc);
+  RTLEventWaitFor(FToProd);
+end;
+
+procedure TTorEncStage.CJoin;
+begin
+  if not FStarted then Exit;
+  WaitForThreadTerminate(FTid, 0);
+  CloseThread(FTid);
+  FStarted := False;
+end;
+
+{ Atender pedidos del C hasta que necesite datos que todavía no llegaron o termine. Las
+  lecturas son completas (como read_data de FreeArc): un pedido se contesta cuando se llenó o
+  cuando ya no hay más datos. }
+procedure TTorEncStage.CPump;
+var
+  n: SizeInt;
+begin
+  while True do
+    case FReq of
+      1:
+        begin
+          n := FReqSize - FReqGot;
+          if n > FInLeft then n := FInLeft;
+          if n > 0 then
+          begin
+            Move(FInP^, (FReqBuf + FReqGot)^, n);
+            Inc(FReqGot, n);
+            Inc(FInP, n);
+            Dec(FInLeft, n);
+          end;
+          if (FReqGot < FReqSize) and not FEof then Exit;
+          CResume(FReqGot);
+        end;
+      2:
+        begin
+          Emit(FReqBuf, FReqSize);
+          CResume(FReqSize);
+        end;
+      3:
+        begin
+          CJoin;
+          if FRc < 0 then CTorError(FRc);
+          Exit;
+        end;
+    else
+      raise ETorEncoder.Create('tor: estado interno inesperado');
+    end;
 end;
 
 procedure TTorEncStage.EmitOut(P: PByte; N: SizeInt);
@@ -3555,6 +3761,16 @@ var
   E: TTorEngine;
   n: SizeInt;
 begin
+  if FEngine = nil then
+  begin
+    if FReq = 3 then raise ETorEncoder.Create('tor: data after the end');
+    FInP := Buf;
+    FInLeft := Count;
+    if not FStarted then CStart;
+    CPump;
+    if FInLeft > 0 then raise ETorEncoder.Create('tor: data after the end');
+    Exit;
+  end;
   E := TTorEngine(FEngine);
   while Count > 0 do
   begin
@@ -3575,6 +3791,15 @@ procedure TTorEncStage.DoFinish;
 var
   E: TTorEngine;
 begin
+  if FEngine = nil then
+  begin
+    FEof := True;
+    FInLeft := 0;
+    if FReq = 3 then Exit;
+    if not FStarted then CStart;
+    CPump;
+    Exit;
+  end;
   E := TTorEngine(FEngine);
   // Fin de los datos: la lectura pendiente vuelve corta y las siguientes con 0
   while E.State <> esDone do E.Resume;
@@ -3589,8 +3814,22 @@ var
   Key: string;
   Cap: SizeInt;
   Ok: Boolean;
+  M, A: TTorMethod;
+  Err: string;
+  Combo: Integer;
 begin
   Dst := nil;
+  Err := ParseTorEncParams(Params, M);
+  if Err <> '' then raise ETorEncoder.Create('tor: ' + Err);
+  ValidateMethod(M, Combo);
+  if UseCTor(M, Combo) then
+  begin
+    A := M;
+    AdjustMethod(A, Combo >= 9);
+    if SrcLen > SizeInt(A.Buffer) then
+      raise ETorEncoder.CreateFmt('tor: block of %d bytes larger than the buffer (%d)', [SrcLen, A.Buffer]);
+    Exit(TorEncodeMemC(M, Src, SrcLen, DstCap, Dst));
+  end;
   Cap := SrcLen + SrcLen div 4 + 4096;
   E := nil;
   Key := '';
@@ -3765,6 +4004,7 @@ begin
 end;
 
 initialization
+  parc_tor_init;
   InitVle(Lc, ExtraLBits);
   InitVle(Lc2, ExtraLBits2);
   InitDc;
