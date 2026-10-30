@@ -9,8 +9,11 @@
   de FreeArc 0.67 (tabla hash con filas de mc posiciones y etiqueta en los bits altos, sin
   "son"), portado aparte (Ht4GetMatches/Ht4Skip). PArc 0.0.2 lo mapeaba a hc4; los streams de
   los dos son LZMA estándar (el decodificador no cambia), solo cambian razón y velocidad.
-  Con los mismos parámetros la salida es idéntica byte a byte a la del SDK 26.03 (LzmaEnc_Encode
-  y LzmaEnc_MemEncode). Diferencias con FreeArc 0.67 (SDK 9.x modificado):
+  El parser óptimo (GetOptimum) se aparta del SDK 26.03 en dos atajos de velocidad del SDK 18+
+  que costaban razón (siempre cotiza el literal; short rep como el SDK 9.x) y actualiza los
+  precios cada 32 matches en vez de 64: 0.1-0.4 % más chico, ~1 % más lento, y queda igual o
+  más chico que FreeArc en :normal y :max. GetOptimumFast (:fast) sigue idéntico al SDK.
+  Los streams son LZMA estándar. Diferencias con FreeArc 0.67 (SDK 9.x modificado):
   - mc = 0 usa la fórmula de FreeArc (bt: 16+fb/2, hc4: 16+fb/4, ht4: fb/2). En ht4 mc es el
     largo de la fila de la tabla hash y se limita a kHtMaxCutValue (memoria acotada).
   - "h" (tamaño del hash) se acepta y se ignora: el SDK 26.03 lo deriva del diccionario.
@@ -22,6 +25,10 @@ unit parc_lzmaenc;
 {$R-}{$Q-}
 {$pointermath on}
 {$inline on}
+{$macro on}
+{ El recorrido del árbol binario (bt2/bt3/bt4) va en ensamblador x86-64 (SysV y Win64); en
+  i386, o compilando con -dPARC_NOASM, es Pascal. Misma salida. }
+{$IFDEF CPUX86_64}{$IFNDEF PARC_NOASM}{$DEFINE LZMA_ENC_ASM}{$ENDIF}{$ENDIF}
 
 interface
 
@@ -41,10 +48,17 @@ type
     NumFastBytes: Integer;      // se recorta a 5..273 como LzmaEnc_SetProps
     MatchFinderCycles: Integer; // 0 = automático (fórmula de LzmaEncProps_Normalize de FreeArc)
     MatchFinder: TLzmaMatchFinder;
-    { Hilos (no va en el string del método): 0 = automático (multihilo si el presupuesto global
-      de hilos, PARC_THREADS o los núcleos, es >= 2 y no está dentro de 4x4), 1 = un hilo, >= 2 =
-      match finder multihilo. Como FreeArc (mtMode = numThreads > 1
-      y no fast), pero acá solo para bt4: los demás match finders siguen con un hilo. }
+    { Hilos ocupados que puede usar el stream (no va en el string del método): 0 = automático
+      (LzmaEncThreadsFor: la concesión LzmaEncThreadGrant si el llamador fijó una; si no, la
+      parte del presupuesto global de hilos de este bloque, salvo dentro de 4x4 o con
+      presupuesto de un hilo); 1 = un hilo; 2 = match finder multihilo con un hilo BT además
+      del que comprime (el BT calcula también el hash); >= 3 = además un hilo hash aparte, como
+      LzFindMt del SDK y FreeArc (el hash es liviano: ~10 % de un núcleo). Solo :normal/:max
+      usa más de uno (LzmaEncMaxThreads): bt4 hasta 3, con la misma salida que con uno; ht4
+      hasta 2, con la lista de matches del multihilo de FreeArc (más chica que la de un hilo,
+      que es la de FreeArc -mt1): con ht4 la salida depende de si hay 1 o más hilos, como en
+      FreeArc. Los hilos del match finder toman fichas del presupuesto global mientras
+      trabajan, así que nunca se pasa de PARC_THREADS. }
     NumThreads: Integer;
   end;
 
@@ -93,8 +107,41 @@ var
   LzmaMtNormLimit: LongWord = $FFFFFFFF;
   { Solo para pruebas: cuántas veces arrancó el match finder multihilo. }
   LzmaMtStarts: LongInt = 0;
+  { Solo para pruebas: con un hilo, ht4 :normal/:max usa la lista de matches del multihilo
+    (Ht4mGetMatches/Ht4mSkip), que tiene que dar la misma salida que el multihilo. }
+  LzmaHtListOneThread: Boolean = False;
+  { Solo para pruebas: bits de posición de las filas ht4 (0 = los normales, >= 26); con menos
+    se ejercita la normalización de las filas sin comprimir 64 MB. }
+  LzmaHtPosBits: Integer = 0;
+
+{ Presupuesto de hilos (para el planificador global):
+  - LzmaEncMaxThreads(P): cuántos hilos ocupados le sirven a un stream con estos parámetros
+    (3 para bt4 en :normal/:max, 2 para ht4 en :normal/:max, 1 para el resto). Más que eso
+    no se usa.
+  - LzmaEncThreadGrant (por hilo): cuántos hilos concede el llamador a las etapas lzma que se
+    creen en este hilo con NumThreads = 0 (las de CreateStage, desde el string del método).
+    0 = automático (la parte del bloque del presupuesto global, ThreadShare; uno dentro de
+    4x4 o con presupuesto de un hilo). Para fijar otra cantidad: ponerla antes de crear la
+    cadena de codificadores, en el hilo que la crea, y volverla a 0 después.
+  - LzmaEncThreadsFor(P): los hilos que usará de verdad una etapa creada ahora (aplica
+    NumThreads o la concesión, y LzmaEncMaxThreads). }
+function LzmaEncMaxThreads(const P: TLzmaEncParams): Integer;
+function LzmaEncThreadsFor(const P: TLzmaEncParams): Integer;
+
+{ Memoria que reserva un codificador con estos parámetros (ventana + hash + árbol, un hilo),
+  en bytes; High(QWord) si el diccionario no se puede usar. }
+function LzmaEncMemory(const P: TLzmaEncParams): QWord;
+{ El diccionario más grande <= P.DictSize (de la forma m * 2^k, m = 8..15, mínimo 1 MB) con
+  el que LzmaEncMemory no pasa de MaxMem y, si Headroom > 0 y pasa de 256 MB, las piezas que
+  reserva el codificador (ventana, hash, árbol) más Headroom bytes se pueden reservar de
+  verdad ahora (se prueban y se liberan: en 32 bits lo que falla es el bloque contiguo más
+  grande). En
+  32 bits el método se ajusta con esto antes de comprimir (parc_canon), como FreeArc achica el
+  diccionario a la memoria disponible; así el decodificador también lo puede reservar. }
+function LzmaFitDictionary(const P: TLzmaEncParams; MaxMem, Headroom: QWord): QWord;
 
 threadvar
+  LzmaEncThreadGrant: Integer;
   { En un hilo que ya es parte de una compresión paralela (los trabajos de 4x4), el modo
     automático usa un hilo: sin esto, cada bloque abriría 2 hilos y hasta 64 MB más. }
   LzmaSingleThreadHere: Boolean;
@@ -116,6 +163,7 @@ const
   kNumBitPriceShiftBits = 4;
   REP_LEN_COUNT = 64;
   kNumOpts = 1 shl 11;
+  kPriceUpdateMatches = 32;     // matches entre actualizaciones de precios (SDK 26.03: 64)
   kNumLenToPosStates = 4;
   kNumPosSlotBits = 6;
   kDicLogSizeMax = 32;
@@ -188,6 +236,7 @@ type
       los altos (tagMask). normLimit: posición en que se normaliza (0 = al dar la vuelta). }
     htMode: Boolean;
     matchMask, tagMask, normLimit: LongWord;
+    pfPos, pfHv1, pfHv2: LongWord;  // bt4: hash de pos+1 y pos+2 calculados en pfPos - 1
     Read: TMfRead;
     mt: Pointer;                // PMtState con el match finder multihilo (si no, nil)
   end;
@@ -472,6 +521,8 @@ begin
     while (QWord(1) shl (fixed + 1)) <= newSize do Inc(fixed);
     fixed := fixed + 2;
     if fixed < 26 then fixed := 26;
+    if (LzmaHtPosBits > 0) and (LzmaHtPosBits < fixed) and (LongWord(1) shl LzmaHtPosBits > 2 * newSize) then
+      fixed := LzmaHtPosBits;
     if fixed >= 32 then
     begin
       p^.matchMask := LongWord($FFFFFFFF); p^.tagMask := 0; p^.normLimit := 0;
@@ -708,7 +759,7 @@ begin
   Result := len;
 end;
 
-function BtGetMatchesSpec(lenLimit, curMatch, pos: LongWord; cur: PByte; son: PLongWord;
+function BtGetMatchesSpecPas(lenLimit, curMatch, pos: LongWord; cur: PByte; son: PLongWord;
   cyclicBufferPos, cyclicBufferSize, cutValue: LongWord; d: PLongWord; maxLen: LongWord): PLongWord;
 var
   ptr0, ptr1, pair: PLongWord;
@@ -771,7 +822,7 @@ begin
 end;
 
 { SkipMatchesSpec }
-procedure BtSkipMatchesSpec(lenLimit, curMatch, pos: LongWord; cur: PByte; son: PLongWord;
+procedure BtSkipMatchesSpecPas(lenLimit, curMatch, pos: LongWord; cur: PByte; son: PLongWord;
   cyclicBufferPos, cyclicBufferSize, cutValue: LongWord);
 var
   ptr0, ptr1, pair: PLongWord;
@@ -819,6 +870,200 @@ begin
   ptr0^ := 0;
   ptr1^ := 0;
 end;
+
+{$IFDEF LZMA_ENC_ASM}
+type
+  { Parámetros y estado de BtWalkAsm. }
+  TBtArgs = record
+    lenLimit, curMatch, pos, cbp, cbs, cutValue, maxLen, skip: LongWord;
+    cur: PByte;
+    son, d: PLongWord;
+    sv: array[0..7] of QWord;     // registros preservados (la rutina no usa la pila)
+  end;
+  PBtArgs = ^TBtArgs;
+
+{ GetMatchesSpec1 (skip = 0) y SkipMatchesSpec (skip = 1) en ensamblador: FPC deja en la pila
+  casi todas las variables del bucle. Rutina hoja sin pila: los registros preservados (SysV y
+  Win64) se guardan en a.sv. Registros: rdi a, r14 cur, r15 son, ecx cutValue, edx lenLimit,
+  r13d curMatch, r12d cmCheck, r8 ptr0, r9 ptr1, r10d len0, r11d len1, rbx pair, rbp pb,
+  esi len. maxLen y d quedan en a (cambian poco). }
+{$asmmode intel}
+procedure BtWalkAsm(a: PBtArgs); assembler; nostackframe;
+asm
+{$IFDEF WIN64}
+  mov rax, rcx
+{$ELSE}
+  mov rax, rdi
+{$ENDIF}
+  mov [rax + TBtArgs.sv + 0], rbx
+  mov [rax + TBtArgs.sv + 8], rbp
+  mov [rax + TBtArgs.sv + 16], r12
+  mov [rax + TBtArgs.sv + 24], r13
+  mov [rax + TBtArgs.sv + 32], r14
+  mov [rax + TBtArgs.sv + 40], r15
+  mov [rax + TBtArgs.sv + 48], rdi
+  mov [rax + TBtArgs.sv + 56], rsi
+  mov rdi, rax
+  mov r14, [rdi + TBtArgs.cur]
+  mov r15, [rdi + TBtArgs.son]
+  mov ecx, [rdi + TBtArgs.cutValue]
+  mov edx, [rdi + TBtArgs.lenLimit]
+  mov r13d, [rdi + TBtArgs.curMatch]
+  mov eax, [rdi + TBtArgs.cbp]
+  lea r9, [r15 + rax*8]                 // ptr1 = son + 2*cbp
+  lea r8, [r9 + 4]                      // ptr0 = ptr1 + 1
+  xor r10d, r10d
+  xor r11d, r11d
+  // cmCheck = pos - cbs (0 si pos < cbs)
+  xor r12d, r12d
+  mov eax, [rdi + TBtArgs.pos]
+  sub eax, [rdi + TBtArgs.cbs]
+  cmovae r12d, eax
+  cmp r12d, r13d
+  jae @zero
+@loop:
+  // delta = pos - curMatch; pair = son + 2*(cbp - delta (+ cbs si delta > cbp))
+  mov eax, [rdi + TBtArgs.pos]
+  sub eax, r13d
+  mov ebx, [rdi + TBtArgs.cbp]
+  sub ebx, eax
+  jae @noWrap
+  add ebx, [rdi + TBtArgs.cbs]
+@noWrap:
+  lea rbx, [r15 + rbx*8]
+  mov rbp, r14
+  sub rbp, rax                          // pb = cur - delta
+  // len = min(len0, len1)
+  mov esi, r10d
+  cmp r11d, esi
+  cmovb esi, r11d
+  movzx eax, byte ptr [rbp + rsi]
+  cmp al, byte ptr [r14 + rsi]
+  jne @branch
+  inc esi
+  // MatchLen(pb, cur, len, lenLimit): de a 8 bytes y después de a uno
+@ml8:
+  lea eax, [esi + 8]
+  cmp eax, edx
+  ja @ml1
+  mov rax, [rbp + rsi]
+  xor rax, [r14 + rsi]
+  jnz @mlDiff
+  add esi, 8
+  jmp @ml8
+@mlDiff:
+  bsf rax, rax
+  shr eax, 3
+  add esi, eax
+  jmp @mlEnd
+@ml1:
+  cmp esi, edx
+  jae @mlEnd
+  movzx eax, byte ptr [rbp + rsi]
+  cmp al, byte ptr [r14 + rsi]
+  jne @mlEnd
+  inc esi
+  jmp @ml1
+@mlEnd:
+  cmp dword ptr [rdi + TBtArgs.skip], 0
+  jne @skipChk
+  // GetMatches: if maxLen < len -> par (len, delta - 1)
+  cmp esi, [rdi + TBtArgs.maxLen]
+  jbe @branch
+  mov [rdi + TBtArgs.maxLen], esi
+  mov [rdi + TBtArgs.cutValue], ecx     // ecx de temporal
+  mov rcx, [rdi + TBtArgs.d]
+  mov [rcx], esi
+  mov rax, r14
+  sub rax, rbp
+  dec eax                               // delta - 1
+  mov [rcx + 4], eax
+  add rcx, 8
+  mov [rdi + TBtArgs.d], rcx
+  mov ecx, [rdi + TBtArgs.cutValue]
+@skipChk:
+  cmp esi, edx
+  jne @branch
+  // len = lenLimit: el nodo actual hereda los hijos de pair
+  mov eax, [rbx]
+  mov [r9], eax
+  mov eax, [rbx + 4]
+  mov [r8], eax
+  jmp @ret
+@branch:
+  movzx eax, byte ptr [rbp + rsi]
+  cmp al, byte ptr [r14 + rsi]
+  jae @right
+  mov [r9], r13d                        // pb[len] < cur[len]: ptr1^ := curMatch
+  mov r13d, [rbx + 4]
+  lea r9, [rbx + 4]
+  mov r11d, esi
+  dec ecx
+  jz @zero
+  cmp r12d, r13d
+  jb @loop
+  jmp @zero
+@right:
+  mov [r8], r13d                        // ptr0^ := curMatch
+  mov r13d, [rbx]
+  mov r8, rbx
+  mov r10d, esi
+  dec ecx
+  jz @zero
+  cmp r12d, r13d
+  jb @loop
+@zero:
+  mov dword ptr [r8], 0
+  mov dword ptr [r9], 0
+@ret:
+  mov rax, rdi
+  mov rbx, [rax + TBtArgs.sv + 0]
+  mov rbp, [rax + TBtArgs.sv + 8]
+  mov r12, [rax + TBtArgs.sv + 16]
+  mov r13, [rax + TBtArgs.sv + 24]
+  mov r14, [rax + TBtArgs.sv + 32]
+  mov r15, [rax + TBtArgs.sv + 40]
+  mov rdi, [rax + TBtArgs.sv + 48]
+  mov rsi, [rax + TBtArgs.sv + 56]
+end;
+{$asmmode default}
+{$ENDIF}
+
+function BtGetMatchesSpec(lenLimit, curMatch, pos: LongWord; cur: PByte; son: PLongWord;
+  cyclicBufferPos, cyclicBufferSize, cutValue: LongWord; d: PLongWord; maxLen: LongWord): PLongWord; inline;
+{$IFDEF LZMA_ENC_ASM}
+var
+  a: TBtArgs;
+begin
+  a.lenLimit := lenLimit; a.curMatch := curMatch; a.pos := pos; a.cbp := cyclicBufferPos;
+  a.cbs := cyclicBufferSize; a.cutValue := cutValue; a.maxLen := maxLen; a.skip := 0;
+  a.cur := cur; a.son := son; a.d := d;
+  BtWalkAsm(@a);
+  Result := a.d;
+end;
+{$ELSE}
+begin
+  Result := BtGetMatchesSpecPas(lenLimit, curMatch, pos, cur, son, cyclicBufferPos,
+    cyclicBufferSize, cutValue, d, maxLen);
+end;
+{$ENDIF}
+
+procedure BtSkipMatchesSpec(lenLimit, curMatch, pos: LongWord; cur: PByte; son: PLongWord;
+  cyclicBufferPos, cyclicBufferSize, cutValue: LongWord); inline;
+{$IFDEF LZMA_ENC_ASM}
+var
+  a: TBtArgs;
+begin
+  a.lenLimit := lenLimit; a.curMatch := curMatch; a.pos := pos; a.cbp := cyclicBufferPos;
+  a.cbs := cyclicBufferSize; a.cutValue := cutValue; a.maxLen := 0; a.skip := 1;
+  a.cur := cur; a.son := son; a.d := nil;
+  BtWalkAsm(@a);
+end;
+{$ELSE}
+begin
+  BtSkipMatchesSpecPas(lenLimit, curMatch, pos, cur, son, cyclicBufferPos, cyclicBufferSize, cutValue);
+end;
+{$ENDIF}
 
 { UPDATE_maxLen }
 function UpdateMaxLen(cur: PByte; d2, maxLen, lenLimit: LongWord): LongWord; inline;
@@ -897,6 +1142,65 @@ begin
   prefetch(p^.hash[kFix4HashSize + hv]);
 end;
 
+{ bt4, en dos etapas: la cabeza hash de la posición +2, y el primer nodo del árbol (par en
+  son y datos) de la posición +1, cuya cabeza ya se trajo en la posición anterior. Solo
+  prefetch: no cambia la salida. Necesita lenLimit >= 6. }
+function H4Hash(p: PMatchFinder; cur: PByte): LongWord; inline;
+var
+  temp: LongWord;
+begin
+  temp := p^.crc[cur[0]] xor cur[1];
+  temp := temp xor (LongWord(cur[2]) shl 8);
+  Result := (temp xor LongWord(p^.crc[cur[3]] shl kLzHash_CrcShift_1)) and p^.hashMask;
+end;
+
+{ Prefetch del nodo m del árbol (par en son y datos) visto desde la posición pos + ofs. }
+procedure BtPrefetchNode(p: PMatchFinder; cur: PByte; m, ofs: LongWord); inline;
+var
+  delta, cbp: LongWord;
+begin
+  delta := LongWord(p^.pos + ofs - m);
+  if delta < p^.cyclicBufferSize then
+  begin
+    cbp := p^.cyclicBufferPos + ofs;
+    if cbp >= delta then cbp := cbp - delta else cbp := cbp - delta + p^.cyclicBufferSize;
+    prefetch(p^.son[PtrUInt(cbp) * 2]);
+    prefetch((cur + ofs - delta)^);
+  end;
+end;
+
+{ bt4: prefetch en tres etapas, para que el recorrido del árbol no espere a la memoria:
+  posición +3 la cabeza hash; +2 el primer nodo (su cabeza se trajo en la llamada anterior);
+  +1 los dos hijos del primer nodo (traído hace una llamada). Los hash de +1 y +2 se guardan
+  de la llamada anterior (pfPos). Solo prefetch: no cambia la salida. lenLimit >= 7. }
+procedure Bt4PrefetchNext(p: PMatchFinder; cur: PByte); inline;
+var
+  h1, h2, h3, cbp, delta: LongWord;
+  pair: PLongWord;
+begin
+  if p^.pfPos = p^.pos then
+  begin
+    h1 := p^.pfHv1; h2 := p^.pfHv2;
+  end
+  else
+  begin
+    h1 := H4Hash(p, cur + 1); h2 := H4Hash(p, cur + 2);
+  end;
+  h3 := H4Hash(p, cur + 3);
+  p^.pfPos := LongWord(p^.pos + 1); p^.pfHv1 := h2; p^.pfHv2 := h3;
+  prefetch(p^.hash[kFix4HashSize + h3]);
+  BtPrefetchNode(p, cur, p^.hash[kFix4HashSize + h2], 2);
+  delta := LongWord(p^.pos + 1 - p^.hash[kFix4HashSize + h1]);
+  if delta < p^.cyclicBufferSize then
+  begin
+    cbp := p^.cyclicBufferPos + 1;
+    if cbp >= delta then cbp := cbp - delta else cbp := cbp - delta + p^.cyclicBufferSize;
+    pair := p^.son + PtrUInt(cbp) * 2;
+    BtPrefetchNode(p, cur, pair[0], 1);
+    BtPrefetchNode(p, cur, pair[1], 1);
+  end;
+end;
+
 { Bt4_MatchFinder_GetMatches y Hc4_MatchFinder_GetMatches comparten la cabecera. }
 function Bt4GetMatches(p: PMatchFinder; distances: PLongWord): PLongWord;
 var
@@ -920,7 +1224,7 @@ begin
   hash[h2] := pos;
   hash[kFix3HashSize + h3] := pos;
   hash[kFix4HashSize + hv] := pos;
-  if lenLimit >= 5 then H4PrefetchNext(p, cur);
+  if lenLimit >= 7 then Bt4PrefetchNext(p, cur) else if lenLimit >= 5 then H4PrefetchNext(p, cur);
   mmm := p^.cyclicBufferSize;
   if pos < mmm then mmm := pos;
   maxLen := 3;
@@ -1046,6 +1350,35 @@ begin
   prefetch((p^.hash + kFix4HashSize + PtrUInt(hv) * p^.cutValue)^);
 end;
 
+{ HT4 en dos etapas (como Bt4PrefetchNext): la fila de la posición +2, y para la +1 (cuya
+  fila se trajo en la llamada anterior) los datos de los candidatos de hash2/hash3 y de las
+  entradas de la fila con la misma etiqueta: son las lecturas de la ventana que va a hacer
+  Ht4GetMatches. Solo prefetch: no cambia la salida. Necesita lenLimit >= 6. }
+procedure Ht4PrefetchNext2(p: PMatchFinder; cur: PByte);
+var
+  temp, h1, h2, d, tag, mmm, pos1, e: LongWord;
+  row, rowEnd: PLongWord;
+  c1: PByte;
+begin
+  if p^.pfPos = p^.pos then
+    h1 := p^.pfHv1
+  else
+    h1 := H4Hash(p, cur + 1);
+  h2 := H4Hash(p, cur + 2);
+  p^.pfPos := LongWord(p^.pos + 1); p^.pfHv1 := h2;
+  prefetch((p^.hash + kFix4HashSize + PtrUInt(h2) * p^.cutValue)^);
+  c1 := cur + 1;
+  pos1 := LongWord(p^.pos + 1);
+  mmm := p^.cyclicBufferSize;
+  if pos1 < mmm then mmm := pos1;
+  temp := p^.crc[c1[0]] xor c1[1];
+  d := LongWord(pos1 - p^.hash[temp and (kHash2Size - 1)]);
+  if d < mmm then prefetch((c1 - d)^);
+  temp := temp xor (LongWord(c1[2]) shl 8);
+  d := LongWord(pos1 - p^.hash[kFix3HashSize + (temp and (kHash3Size - 1))]);
+  if d < mmm then prefetch((c1 - d)^);
+end;
+
 function Ht4GetMatches(p: PMatchFinder; distances: PLongWord): PLongWord;
 var
   hv, h2, h3, d2, d3, pos, mmm, maxLen, lenLimit, temp, tag, prevMatch, curMatch, delta, len: LongWord;
@@ -1067,7 +1400,7 @@ begin
   d3 := LongWord(pos - hash[kFix3HashSize + h3]);
   hash[h2] := pos;
   hash[kFix3HashSize + h3] := pos;
-  if lenLimit >= 5 then Ht4PrefetchNext(p, cur);
+  if lenLimit >= 6 then Ht4PrefetchNext2(p, cur) else if lenLimit >= 5 then Ht4PrefetchNext(p, cur);
   mmm := p^.cyclicBufferSize;
   if pos < mmm then mmm := pos;
   maxLen := 1;
@@ -1127,6 +1460,153 @@ begin
   until row >= rowEnd;
   MfMovePos(p);
   Result := distances;
+end;
+
+{ HT4 para el parser óptimo (:normal), con la lista de matches del match finder multihilo de
+  FreeArc (LzFindMt.c: la fila HT4 en el hilo BT con maxLen = 3, y MixMatches3 adelante):
+  la fila informa todos los matches de 4 o más que alargan el anterior, aunque el de hash2/hash3
+  ya sea más largo, y los de 2/3 bytes van solo si están más cerca que el primero de la fila
+  (sin alargar). Así el parser ve también los matches cortos y cercanos que el HT4 de un hilo
+  tapa con el de hash3 largo y lejano: :normal queda más chico (FreeArc lo hace solo con -mt2+;
+  acá es igual con cualquier cantidad de hilos). Cada posición, también las salteadas, corre la
+  fila entera. }
+function Ht4mGetMatches(p: PMatchFinder; distances: PLongWord): PLongWord;
+var
+  hv, h2, h3, d2, d3, pos, mmm, maxLen, lenLimit, temp, tag, prevMatch, curMatch, delta, len,
+    first, n, i: LongWord;
+  cur, pb: PByte;
+  hash, row, rowEnd: PLongWord;
+  found: array[0..2 * (LZMA_MATCH_LEN_MAX + 1) - 1] of LongWord;
+begin
+  found[0] := 0;
+  lenLimit := p^.lenLimit;
+  if lenLimit < 4 then begin MfMovePos(p); Exit(distances); end;
+  cur := p^.buffer;
+  temp := p^.crc[cur[0]] xor cur[1];
+  h2 := temp and (kHash2Size - 1);
+  temp := temp xor (LongWord(cur[2]) shl 8);
+  h3 := temp and (kHash3Size - 1);
+  hv := (temp xor LongWord(p^.crc[cur[3]] shl kLzHash_CrcShift_1)) and p^.hashMask;
+  hash := p^.hash;
+  pos := p^.pos;
+  d2 := LongWord(pos - hash[h2]);
+  d3 := LongWord(pos - hash[kFix3HashSize + h3]);
+  hash[h2] := pos;
+  hash[kFix3HashSize + h3] := pos;
+  if lenLimit >= 6 then Ht4PrefetchNext2(p, cur) else if lenLimit >= 5 then Ht4PrefetchNext(p, cur);
+  mmm := p^.cyclicBufferSize;
+  if pos < mmm then mmm := pos;
+  // la fila: matches de 4 o más, cada uno más largo que el anterior
+  n := 0;
+  maxLen := 3;
+  row := hash + kFix4HashSize + PtrUInt(hv) * p^.cutValue;
+  rowEnd := row + p^.cutValue;
+  tag := (PLongWord(cur)^ * LongWord(123456791)) and p^.tagMask;
+  prevMatch := pos + tag;
+  repeat
+    curMatch := row^;
+    row^ := prevMatch;
+    Inc(row);
+    prevMatch := curMatch;
+    if (curMatch and p^.tagMask) <> tag then Continue;
+    delta := LongWord(pos - (curMatch and p^.matchMask));
+    if delta >= mmm then Break;
+    pb := cur - delta;
+    if (pb[maxLen] = cur[maxLen]) and (PLongWord(pb)^ = PLongWord(cur)^) then
+    begin
+      len := MatchLen(pb, cur, 4, lenLimit);
+      if len > maxLen then
+      begin
+        maxLen := len;
+        found[n] := len;
+        found[n + 1] := delta - 1;
+        Inc(n, 2);
+        if len = lenLimit then Break;
+      end;
+    end;
+  until row >= rowEnd;
+  // hash2/hash3 adelante, sin alargar, si están más cerca que el primero de la fila
+  if n > 0 then first := found[1] + 1 else first := mmm;
+  if (d2 < first) and ((cur - d2)^ = cur^) then
+  begin
+    distances[1] := d2 - 1;
+    if (cur - d2)[2] = cur[2] then
+    begin
+      distances[0] := 3;
+      Inc(distances, 2);
+      d3 := first;   // ya hay uno de 3
+    end
+    else
+    begin
+      distances[0] := 2;
+      Inc(distances, 2);
+    end;
+  end;
+  if (d3 < first) and (d3 <> d2) and ((cur - d3)^ = cur^) then
+  begin
+    distances[0] := 3;
+    distances[1] := d3 - 1;
+    Inc(distances, 2);
+  end;
+  i := 0;
+  while i < n do
+  begin
+    distances[0] := found[i];
+    distances[1] := found[i + 1];
+    Inc(distances, 2);
+    Inc(i, 2);
+  end;
+  MfMovePos(p);
+  Result := distances;
+end;
+
+{ Como en el hilo BT de FreeArc, también las posiciones salteadas buscan en la fila: al llegar a
+  lenLimit se corta, y la entrada que coincidió sale de la fila (la reemplaza la nueva). En una
+  repetición larga la fila no se llena de copias de lo mismo y conserva candidatos viejos. }
+procedure Ht4mSkip(p: PMatchFinder; num: LongWord);
+var
+  hv, h2, h3, temp, tag, prevMatch, curMatch, pos, mmm, lenLimit, delta: LongWord;
+  cur, pb: PByte;
+  hash, row, rowEnd: PLongWord;
+begin
+  repeat
+    lenLimit := p^.lenLimit;
+    if lenLimit < 4 then
+      MfMovePos(p)
+    else
+    begin
+      cur := p^.buffer;
+      temp := p^.crc[cur[0]] xor cur[1];
+      h2 := temp and (kHash2Size - 1);
+      temp := temp xor (LongWord(cur[2]) shl 8);
+      h3 := temp and (kHash3Size - 1);
+      hv := (temp xor LongWord(p^.crc[cur[3]] shl kLzHash_CrcShift_1)) and p^.hashMask;
+      hash := p^.hash;
+      pos := p^.pos;
+      hash[h2] := pos;
+      hash[kFix3HashSize + h3] := pos;
+      if lenLimit >= 5 then Ht4PrefetchNext(p, cur);
+      mmm := p^.cyclicBufferSize;
+      if pos < mmm then mmm := pos;
+      row := hash + kFix4HashSize + PtrUInt(hv) * p^.cutValue;
+      rowEnd := row + p^.cutValue;
+      tag := (PLongWord(cur)^ * LongWord(123456791)) and p^.tagMask;
+      prevMatch := pos + tag;
+      repeat
+        curMatch := row^;
+        row^ := prevMatch;
+        Inc(row);
+        prevMatch := curMatch;
+        if (curMatch and p^.tagMask) <> tag then Continue;
+        delta := LongWord(pos - (curMatch and p^.matchMask));
+        if delta >= mmm then Break;
+        pb := cur - delta;
+        if (PLongWord(pb)^ = PLongWord(cur)^) and (MatchLen(pb, cur, 4, lenLimit) = lenLimit) then Break;
+      until row >= rowEnd;
+      MfMovePos(p);
+    end;
+    Dec(num);
+  until num = 0;
 end;
 
 { Ht4_MatchFinder_Skip: solo la primera mitad de la fila se corre. }
@@ -1241,7 +1721,7 @@ begin
       hash[h2] := p^.pos;
       hash[kFix3HashSize + h3] := p^.pos;
       hash[kFix4HashSize + hv] := p^.pos;
-      if p^.lenLimit >= 5 then H4PrefetchNext(p, cur);
+      if p^.lenLimit >= 7 then Bt4PrefetchNext(p, cur) else if p^.lenLimit >= 5 then H4PrefetchNext(p, cur);
       BtSkipMatchesSpec(p^.lenLimit, curMatch, p^.pos, p^.buffer, p^.son,
         p^.cyclicBufferPos, p^.cyclicBufferSize, p^.cutValue);
       MfMovePos(p);
@@ -1336,6 +1816,7 @@ const
   kMtBtNumBlocksMax = 256;
   kMtHashBufferSize = kMtHashBlockSize * kMtHashNumBlocks;
   kMtCacheLine = 128;
+  kMtHtPrefetch = 8;   // ht4 multihilo: filas que se traen por adelantado en el hilo BT
 
 type
   { Semáforo contador con un solo hilo que espera (cada uno tiene un único consumidor).
@@ -1366,6 +1847,13 @@ type
     btNumBlocks: LongWord;       // potencia de 2
     started, failed: Boolean;
     initOk: Boolean;
+    { Sin hilo hash (2 hilos en total: LZ + BT): el hilo BT calcula él mismo cada bloque de
+      cabezas hash cuando lo necesita (MtHashFill), en hashInlineIdx. }
+    inlineHash: Boolean;
+    hashInlineIdx: LongWord;
+    { ht4: el hilo BT recorre las filas de la tabla hash (Ht4mGetMatches) en vez del árbol;
+      las cabezas son índices de fila. Siempre con inlineHash (2 hilos). }
+    ht: Boolean;
     pad0: array[0..kMtCacheLine - 1] of Byte;
     btSync: TMtSync;
     pad1: array[0..kMtCacheLine - 1] of Byte;
@@ -1492,73 +1980,121 @@ begin
   end;
 end;
 
+{ ht4: el índice de fila de cada posición (el mismo hash que Ht4GetMatches). }
+procedure MtGetHeadsHt4(p: PByte; hashMask: LongWord; heads: PLongWord; numHeads: LongWord;
+  crc: PLongWord);
+var
+  temp: LongWord;
+begin
+  while numHeads <> 0 do
+  begin
+    temp := (crc[p[0]] xor p[1]) xor (LongWord(p[2]) shl 8);
+    heads^ := (temp xor LongWord(crc[p[3]] shl kLzHash_CrcShift_1)) and hashMask;
+    Inc(p);
+    Inc(heads);
+    Dec(numHeads);
+  end;
+end;
+
+{ Mueve el bloque de la ventana si hace falta (con los "buffer lock" de los consumidores:
+  btSync.cs del LZ y, si hay hilo hash, hashSync.cs del hilo BT; sin hilo hash quien llama es
+  el hilo BT y ya tiene hashSync.cs). }
+procedure MtHashMoveIfNeeded(mt: PMtState);
+var
+  mf: PMatchFinder;
+  before: PByte;
+  offset: PtrInt;
+begin
+  mf := @mt^.hmf;
+  while MfNeedMove(mf) do
+  begin
+    EnterCriticalSection(mt^.btSync.cs);
+    if not mt^.inlineHash then EnterCriticalSection(mt^.hashSync.cs);
+    before := mf^.buffer;
+    MfMoveBlock(mf);
+    offset := before - mf^.buffer;
+    mt^.lz^.buffer := mt^.lz^.buffer - offset;
+    mt^.buffer := mt^.buffer - offset;
+    if not mt^.inlineHash then LeaveCriticalSection(mt^.hashSync.cs);
+    LeaveCriticalSection(mt^.btSync.cs);
+  end;
+end;
+
+{ Llena el bloque blockIndex de cabezas hash: [2 + n, avail, n distancias]. }
+procedure MtHashFill(mt: PMtState; blockIndex: LongWord);
+var
+  mf: PMatchFinder;
+  num, subValue: LongWord;
+  heads: PLongWord;
+begin
+  mf := @mt^.hmf;
+  // MatchFinder_ReadIfRequired
+  if mf^.keepSizeAfter >= MfAvail(mf) then
+    try
+      MfReadBlock(mf);
+    except
+      // No debería pasar (ReadIn no falla en multihilo): se corta el stream y el hilo LZ
+      // lanza el error al tomar el próximo bloque
+      mt^.failed := True;
+      mf^.streamEndWasReached := True;
+    end;
+  heads := mt^.hashBuf + (blockIndex and (kMtHashNumBlocks - 1)) * kMtHashBlockSize;
+  num := MfAvail(mf);
+  heads[0] := 2;
+  heads[1] := num;
+  { heads[1] < numHashBytes: fin del stream; el hilo BT avanza esos bytes sin hash y los
+    bloques siguientes son (2, 0) }
+  if num >= mf^.numHashBytes then
+  begin
+    num := num - mf^.numHashBytes + 1;
+    if num > kMtHashBlockSize - 2 then num := kMtHashBlockSize - 2;
+    if mf^.pos > LzmaMtNormLimit - num then
+    begin
+      subValue := LongWord(mf^.pos - mf^.historySize - 1);
+      mf^.pos := LongWord(mf^.pos - subValue);
+      mf^.streamPos := LongWord(mf^.streamPos - subValue);
+      // (las filas ht4 las normaliza el hilo BT, que es el único que las usa)
+      if not mt^.ht then
+        MfNormalize3(subValue, mf^.hash + mf^.fixedHashSize, PtrUInt(mf^.hashMask) + 1);
+    end;
+    heads[0] := 2 + num;
+    if mt^.ht then
+      MtGetHeadsHt4(mf^.buffer, mf^.hashMask, heads + 2, num, @mf^.crc[0])
+    else
+      MtGetHeads4(mf^.buffer, mf^.pos, mf^.hash + mf^.fixedHashSize, mf^.hashMask, heads + 2,
+        num, @mf^.crc[0]);
+  end;
+  mf^.pos := LongWord(mf^.pos + num);
+  Inc(mf^.buffer, num);
+end;
+
+{ MatchFinder_Init_HighHash (la baja la inicializa el hilo LZ) }
+procedure MtHashInit(mt: PMtState);
+begin
+  if mt^.ht then
+    FillDWord((mt^.hmf.hash + mt^.hmf.fixedHashSize)^,
+      (SizeInt(mt^.hmf.hashMask) + 1) * SizeInt(mt^.hmf.cutValue), 0)
+  else
+    FillDWord((mt^.hmf.hash + mt^.hmf.fixedHashSize)^, SizeInt(mt^.hmf.hashMask) + 1, 0);
+end;
+
 function MtHashThreadFunc(param: Pointer): PtrInt;
 var
   mt: PMtState;
-  mf: PMatchFinder;
-  blockIndex, num, subValue: LongWord;
-  heads: PLongWord;
-  before: PByte;
-  offset: PtrInt;
+  blockIndex: LongWord;
 begin
   Result := 0;
   BudgetEnter;   // una ficha del presupuesto global mientras trabaja
   mt := PMtState(param);
-  mf := @mt^.hmf;
-  // MatchFinder_Init_HighHash (la baja la inicializa el hilo LZ)
-  FillDWord((mf^.hash + mf^.fixedHashSize)^, SizeInt(mf^.hashMask) + 1, 0);
+  MtHashInit(mt);
   blockIndex := 0;
   while True do
   begin
-    if MfNeedMove(mf) then
-    begin
-      EnterCriticalSection(mt^.btSync.cs);
-      EnterCriticalSection(mt^.hashSync.cs);
-      before := mf^.buffer;
-      MfMoveBlock(mf);
-      offset := before - mf^.buffer;
-      mt^.lz^.buffer := mt^.lz^.buffer - offset;
-      mt^.buffer := mt^.buffer - offset;
-      LeaveCriticalSection(mt^.hashSync.cs);
-      LeaveCriticalSection(mt^.btSync.cs);
-      Continue;
-    end;
+    MtHashMoveIfNeeded(mt);
     MtSemWait(mt^.hashSync.freeSem);
     if mt^.hashSync.stopWriting then Break;
-    // MatchFinder_ReadIfRequired
-    if mf^.keepSizeAfter >= MfAvail(mf) then
-      try
-        MfReadBlock(mf);
-      except
-        // No debería pasar (ReadIn no falla en multihilo): se corta el stream y el hilo LZ
-        // lanza el error al tomar el próximo bloque
-        mt^.failed := True;
-        mf^.streamEndWasReached := True;
-      end;
-    heads := mt^.hashBuf + (blockIndex and (kMtHashNumBlocks - 1)) * kMtHashBlockSize;
+    MtHashFill(mt, blockIndex);
     Inc(blockIndex);
-    num := MfAvail(mf);
-    heads[0] := 2;
-    heads[1] := num;
-    { heads[1] < numHashBytes: fin del stream; el hilo BT avanza esos bytes sin hash y los
-      bloques siguientes son (2, 0) }
-    if num >= mf^.numHashBytes then
-    begin
-      num := num - mf^.numHashBytes + 1;
-      if num > kMtHashBlockSize - 2 then num := kMtHashBlockSize - 2;
-      if mf^.pos > LzmaMtNormLimit - num then
-      begin
-        subValue := LongWord(mf^.pos - mf^.historySize - 1);
-        mf^.pos := LongWord(mf^.pos - subValue);
-        mf^.streamPos := LongWord(mf^.streamPos - subValue);
-        MfNormalize3(subValue, mf^.hash + mf^.fixedHashSize, PtrUInt(mf^.hashMask) + 1);
-      end;
-      heads[0] := 2 + num;
-      MtGetHeads4(mf^.buffer, mf^.pos, mf^.hash + mf^.fixedHashSize, mf^.hashMask, heads + 2,
-        num, @mf^.crc[0]);
-    end;
-    mf^.pos := LongWord(mf^.pos + num);
-    Inc(mf^.buffer, num);
     MtSemRelease(mt^.hashSync.filledSem);
   end;
   BudgetLeave;
@@ -1566,11 +2102,63 @@ end;
 
 { ---------- hilo BT ---------- }
 
+{ Prefetch del nodo a distancia delta de la posición actual + ofs (par en son y datos). }
+procedure MtPrefetchNode(mt: PMtState; cur: PByte; cyc, delta, ofs: LongWord); inline;
+begin
+  if delta < mt^.cyclicBufferSize then
+  begin
+    cyc := cyc + ofs;
+    if cyc >= delta then cyc := cyc - delta else cyc := cyc - delta + mt^.cyclicBufferSize;
+    prefetch(mt^.son[PtrUInt(cyc) * 2]);
+    prefetch((cur + ofs - delta)^);
+  end;
+end;
+
+{ La fila ht4 de una posición, como Ht4mGetMatches/Ht4mSkip con un hilo: matches de 4 o más,
+  cada uno más largo que el anterior, en d; corre la fila entera salvo que llegue a lenLimit. }
+function MtHtRow(mt: PMtState; row: PLongWord; pos, mmm, lenLimit: LongWord; cur: PByte;
+  d: PLongWord): PLongWord;
+var
+  rowEnd: PLongWord;
+  tag, prevMatch, curMatch, delta, len, maxLen, tagMask, matchMask: LongWord;
+  pb: PByte;
+begin
+  tagMask := mt^.hmf.tagMask;
+  matchMask := mt^.hmf.matchMask;
+  rowEnd := row + mt^.cutValue;
+  tag := (PLongWord(cur)^ * LongWord(123456791)) and tagMask;
+  prevMatch := pos + tag;
+  maxLen := 3;
+  repeat
+    curMatch := row^;
+    row^ := prevMatch;
+    Inc(row);
+    prevMatch := curMatch;
+    if (curMatch and tagMask) <> tag then Continue;
+    delta := LongWord(pos - (curMatch and matchMask));
+    if delta >= mmm then Break;
+    pb := cur - delta;
+    if (pb[maxLen] = cur[maxLen]) and (PLongWord(pb)^ = PLongWord(cur)^) then
+    begin
+      len := MatchLen(pb, cur, 4, lenLimit);
+      if len > maxLen then
+      begin
+        maxLen := len;
+        d[0] := len;
+        d[1] := delta - 1;
+        Inc(d, 2);
+        if len = lenLimit then Break;
+      end;
+    end;
+  until row >= rowEnd;
+  Result := d;
+end;
+
 { BtGetMatches (versión por posición, sin GetMatchesSpecN_2). Con hashSync.cs tomada. }
 procedure MtBtGetMatches(mt: PMtState; d: PLongWord);
 var
   numProcessed, curPos, limit, avail, availSum, bi, k, size, size2, pos, cyc, cycSize,
-    lenLimit, subValue, delta, curMatch, num, processed: LongWord;
+    lenLimit, subValue, delta, curMatch, num, processed, mmm: LongWord;
   h, sd: PLongWord;
   cur: PByte;
 begin
@@ -1583,7 +2171,16 @@ begin
   begin
     if mt^.hashBufPos = mt^.hashBufPosLimit then
     begin
-      bi := MtSyncGetNextBlock(mt^.hashSync, mt^.hashBufPosLimit = 0);
+      if mt^.inlineHash then
+      begin
+        // sin hilo hash: el bloque se calcula acá (este hilo ya tiene hashSync.cs)
+        MtHashMoveIfNeeded(mt);
+        bi := mt^.hashInlineIdx;
+        Inc(mt^.hashInlineIdx);
+        MtHashFill(mt, bi);
+      end
+      else
+        bi := MtSyncGetNextBlock(mt^.hashSync, mt^.hashBufPosLimit = 0);
       k := (bi and (kMtHashNumBlocks - 1)) * kMtHashBlockSize;
       h := mt^.hashBuf + k;
       avail := h[1];
@@ -1615,6 +2212,58 @@ begin
     if size2 < size then size := size2;
     size2 := cycSize - cyc;
     if size2 < size then size := size2;
+    if mt^.ht then
+    begin
+      // filas ht4: se normalizan justo al llegar a normLimit, como con un hilo (MfCheckLimits),
+      // así una entrada vieja se lee igual (con su etiqueta o vacía) y la salida no cambia
+      if (mt^.hmf.normLimit <> 0) and (pos = mt^.hmf.normLimit) then
+      begin
+        subValue := LongWord(pos - cycSize);
+        pos := LongWord(pos - subValue);
+        mt^.pos := pos;
+        MfNormalizeHt(subValue, mt^.hmf.hash + mt^.hmf.fixedHashSize,
+          PtrUInt(mt^.hmf.hashMask + 1) * mt^.cutValue, mt^.hmf.matchMask);
+      end;
+      if mt^.hmf.normLimit <> 0 then
+      begin
+        size2 := LongWord(mt^.hmf.normLimit - pos);
+        if size2 < size then size := size2;
+      end;
+      if pos < cycSize then mmm := pos else mmm := cycSize;
+      cur := mt^.buffer;
+      processed := 0;
+      h := mt^.hmf.hash + mt^.hmf.fixedHashSize;
+      while (curPos < limit) and (size <> 0) do
+      begin
+        // la fila de 8 posiciones más adelante (las cabezas ya están): la carga de la fila es
+        // el fallo de caché dominante; primera y última entrada (puede ocupar dos líneas)
+        if mt^.hashBufPos + kMtHtPrefetch < mt^.hashBufPosLimit then
+        begin
+          k := mt^.hashBuf[mt^.hashBufPos + kMtHtPrefetch] * mt^.cutValue;
+          prefetch(h[k]);
+          prefetch(h[k + mt^.cutValue - 1]);
+        end;
+        sd := d + curPos;
+        num := LongWord(MtHtRow(mt, h + PtrUInt(mt^.hashBuf[mt^.hashBufPos]) * mt^.cutValue,
+          pos, mmm, lenLimit, cur, sd + 1) - sd);
+        Inc(mt^.hashBufPos);
+        sd^ := num - 1;
+        Inc(curPos, num);
+        Inc(cyc);
+        pos := LongWord(pos + 1);
+        if mmm < cycSize then mmm := pos;
+        Inc(cur);
+        Inc(processed);
+        Dec(size);
+      end;
+      Inc(numProcessed, processed);
+      Dec(mt^.hashNumAvail, processed);
+      mt^.pos := pos;
+      mt^.buffer := cur;
+      if cyc = cycSize then cyc := 0;
+      mt^.cyclicBufferPos := cyc;
+      Continue;
+    end;
     if pos > LzmaMtNormLimit - size then
     begin
       subValue := LongWord(pos - cycSize);
@@ -1626,6 +2275,21 @@ begin
     processed := 0;
     while (curPos < limit) and (size <> 0) do
     begin
+      // prefetch como Bt4PrefetchNext: primer nodo de +2 e hijos del de +1 (las distancias
+      // ya están en hashBuf); no cambia la salida
+      if mt^.hashBufPos + 2 < mt^.hashBufPosLimit then
+      begin
+        MtPrefetchNode(mt, cur, cyc, mt^.hashBuf[mt^.hashBufPos + 2], 2);
+        delta := mt^.hashBuf[mt^.hashBufPos + 1];
+        if (delta < cycSize) and (delta < pos + 1) then
+        begin
+          k := cyc + 1;
+          if k >= delta then k := k - delta else k := k - delta + cycSize;
+          h := mt^.son + PtrUInt(k) * 2;
+          MtPrefetchNode(mt, cur, cyc, LongWord(pos + 1 - h[0]), 1);
+          MtPrefetchNode(mt, cur, cyc, LongWord(pos + 1 - h[1]), 1);
+        end;
+      end;
       delta := mt^.hashBuf[mt^.hashBufPos];
       Inc(mt^.hashBufPos);
       // distancia fuera de la ventana (o entrada vacía / normalizada): sin candidato, como
@@ -1660,6 +2324,7 @@ begin
   Result := 0;
   BudgetEnter;
   mt := PMtState(param);
+  if mt^.inlineHash then MtHashInit(mt);
   blockIndex := 0;
   while True do
   begin
@@ -1701,12 +2366,15 @@ begin
     Result := Result * 2;
 end;
 
-{ MatchFinderMt_Create (después de MfCreate con los keep ampliados). Lanza EOutOfMemory. }
-function MtCreate(lz: PMatchFinder; btNumBlocks: LongWord): PMtState;
+{ MatchFinderMt_Create (después de MfCreate con los keep ampliados). inlineHash: sin hilo
+  hash (el hilo BT calcula las cabezas). Lanza EOutOfMemory. }
+function MtCreate(lz: PMatchFinder; btNumBlocks: LongWord; inlineHash: Boolean): PMtState;
 begin
   Result := AllocMem(SizeOf(TMtState));
   try
     Result^.btNumBlocks := btNumBlocks;
+    Result^.ht := lz^.htMode;
+    Result^.inlineHash := inlineHash or lz^.htMode;
     Result^.hashBuf := GetMem(SizeInt(kMtHashBufferSize + btNumBlocks * kMtBtBlockSize) * SizeOf(LongWord));
     Result^.btBuf := Result^.hashBuf + kMtHashBufferSize;
     MtSyncInit(Result^.hashSync, kMtHashNumBlocks);
@@ -1796,6 +2464,7 @@ begin
   mt^.hashBufPos := 0;
   mt^.hashBufPosLimit := 0;
   mt^.hashNumAvail := 0;
+  mt^.hashInlineIdx := 0;
   mt^.son := mf^.son;
   mt^.matchMaxLen := mf^.matchMaxLen;
   mt^.pos := 1;
@@ -1811,9 +2480,12 @@ var
 begin
   mt^.started := True;
   InterLockedIncrement(LzmaMtStarts);
-  mt^.hashSync.thread := BeginThread(@MtHashThreadFunc, mt, tid);
-  if mt^.hashSync.thread = TThreadID(0) then raise Exception.Create('lzma: could not create a thread');
-  mt^.hashSync.created := True;
+  if not mt^.inlineHash then
+  begin
+    mt^.hashSync.thread := BeginThread(@MtHashThreadFunc, mt, tid);
+    if mt^.hashSync.thread = TThreadID(0) then raise Exception.Create('lzma: could not create a thread');
+    mt^.hashSync.created := True;
+  end;
   mt^.btSync.thread := BeginThread(@MtBtThreadFunc, mt, tid);
   if mt^.btSync.thread = TThreadID(0) then raise Exception.Create('lzma: could not create a thread');
   mt^.btSync.created := True;
@@ -1924,6 +2596,73 @@ begin
     until True;
     // pares del árbol (len crecientes): los de len > maxLen
     while (bt <> btLim) and (bt[0] <= maxLen) do Inc(bt, 2);
+    while bt <> btLim do
+    begin
+      distances[0] := bt[0];
+      distances[1] := bt[1];
+      Inc(distances, 2);
+      Inc(bt, 2);
+    end;
+  end;
+  p^.buffer := cur + 1;
+  p^.pos := LongWord(p^.pos + 1);
+  Result := distances;
+end;
+
+{ Ht4mGetMatches con las filas ya recorridas por el hilo BT: hash2/hash3 adelante (sin
+  alargar) si están más cerca que el primero de la fila, y después los de la fila. }
+function MtHt4GetMatches(p: PMatchFinder; distances: PLongWord): PLongWord;
+var
+  mt: PMtState;
+  bt, btLim: PLongWord;
+  len, avail, lenLimit, h2, h3, d2, d3, pos, first, temp: LongWord;
+  cur: PByte;
+  hash: PLongWord;
+begin
+  mt := PMtState(p^.mt);
+  if mt^.btBufPos = mt^.btBufPosLimit then MtGetNextBlockBt(mt);
+  bt := mt^.btBufPos;
+  len := bt^;
+  Inc(bt);
+  btLim := bt + len;
+  mt^.btBufPos := btLim;
+  avail := mt^.btNumAvailBytes;
+  mt^.btNumAvailBytes := avail - 1;
+  lenLimit := p^.matchMaxLen;
+  if avail < lenLimit then lenLimit := avail;
+  cur := p^.buffer;
+  if lenLimit >= 4 then
+  begin
+    temp := p^.crc[cur[0]] xor cur[1];
+    h2 := temp and (kHash2Size - 1);
+    temp := temp xor (LongWord(cur[2]) shl 8);
+    h3 := temp and (kHash3Size - 1);
+    hash := p^.hash;
+    pos := p^.pos;
+    d2 := LongWord(pos - hash[h2]);
+    d3 := LongWord(pos - hash[kFix3HashSize + h3]);
+    hash[h2] := pos;
+    hash[kFix3HashSize + h3] := pos;
+    if bt <> btLim then first := bt[1] + 1
+    else begin first := p^.cyclicBufferSize; if pos < first then first := pos; end;
+    if (d2 < first) and ((cur - d2)^ = cur^) then
+    begin
+      distances[1] := d2 - 1;
+      if (cur - d2)[2] = cur[2] then
+      begin
+        distances[0] := 3;
+        d3 := first;
+      end
+      else
+        distances[0] := 2;
+      Inc(distances, 2);
+    end;
+    if (d3 < first) and (d3 <> d2) and ((cur - d3)^ = cur^) then
+    begin
+      distances[0] := 3;
+      distances[1] := d3 - 1;
+      Inc(distances, 2);
+    end;
     while bt <> btLim do
     begin
       distances[0] := bt[0];
@@ -2051,6 +2790,215 @@ begin
   end;
 end;
 
+{$IFDEF LZMA_ENC_ASM}
+type
+  { Estado de LitBitsAsm / LitBitsMatchedAsm. }
+  TRcLit = record
+    rng: LongWord;
+    sym: LongWord;
+    lo: QWord;
+    probs: PProb;
+    matchByte, offs: LongWord;
+    sv: array[0..7] of QWord;     // registros preservados (la rutina no usa la pila)
+  end;
+  PRcLit = ^TRcLit;
+
+{ Bits de un literal con el RC_BIT sin ramas (cmov): en los literales el bit es casi
+  aleatorio y la versión con rama falla la predicción; FPC además dejaba range/low en la
+  pila. Vuelve True cuando hace falta ShiftLow (range ya desplazado; el llamador la hace y
+  vuelve a llamar) y False al terminar el byte. Registros: r8d rng, r9 low, r10 probs,
+  r11d sym, r14d matchByte, r15d offs (versión con match), rsi prob, ecx bit, edx ttt,
+  eax newBound. }
+{$asmmode intel}
+function LitBitsAsm(r: PRcLit): Boolean; assembler; nostackframe;
+asm
+{$IFDEF WIN64}
+  mov rax, rcx
+{$ELSE}
+  mov rax, rdi
+{$ENDIF}
+  mov [rax + TRcLit.sv + 0], rbx
+  mov [rax + TRcLit.sv + 8], rbp
+  mov [rax + TRcLit.sv + 16], r12
+  mov [rax + TRcLit.sv + 24], r13
+  mov [rax + TRcLit.sv + 48], rdi
+  mov [rax + TRcLit.sv + 56], rsi
+  mov rdi, rax
+  mov r8d, [rdi + TRcLit.rng]
+  mov r9, [rdi + TRcLit.lo]
+  mov r10, [rdi + TRcLit.probs]
+  mov r11d, [rdi + TRcLit.sym]
+  xor ebp, ebp
+@loop:
+  cmp r11d, $10000
+  jae @done
+  mov eax, r11d
+  shr eax, 8
+  lea rsi, [r10 + rax*2]
+  mov ecx, r11d
+  shr ecx, 7
+  and ecx, 1
+  add r11d, r11d
+  movzx edx, word ptr [rsi]
+  mov eax, r8d
+  shr eax, 11
+  imul eax, edx
+  mov ebx, r8d
+  sub ebx, eax                          // range - newBound (bit 1)
+  lea r12, [r9 + rax]                   // low + newBound (bit 1)
+  mov r13d, edx
+  shr r13d, 5
+  neg r13d
+  add r13d, edx                         // ttt - ttt>>5 (bit 1)
+  mov ebp, 2048
+  sub ebp, edx
+  shr ebp, 5
+  add ebp, edx                          // ttt + (2048-ttt)>>5 (bit 0)
+  test ecx, ecx
+  cmovnz eax, ebx
+  cmovnz r9, r12
+  cmovnz ebp, r13d
+  mov r8d, eax
+  mov word ptr [rsi], bp
+  xor ebp, ebp
+  cmp r8d, $1000000
+  jae @loop
+  shl r8d, 8
+  mov ebp, 1
+@done:
+  mov [rdi + TRcLit.rng], r8d
+  mov [rdi + TRcLit.lo], r9
+  mov [rdi + TRcLit.sym], r11d
+  mov eax, ebp
+  mov rdx, rdi
+  mov rbx, [rdx + TRcLit.sv + 0]
+  mov rbp, [rdx + TRcLit.sv + 8]
+  mov r12, [rdx + TRcLit.sv + 16]
+  mov r13, [rdx + TRcLit.sv + 24]
+  mov rdi, [rdx + TRcLit.sv + 48]
+  mov rsi, [rdx + TRcLit.sv + 56]
+end;
+
+function LitBitsMatchedAsm(r: PRcLit): Boolean; assembler; nostackframe;
+asm
+{$IFDEF WIN64}
+  mov rax, rcx
+{$ELSE}
+  mov rax, rdi
+{$ENDIF}
+  mov [rax + TRcLit.sv + 0], rbx
+  mov [rax + TRcLit.sv + 8], rbp
+  mov [rax + TRcLit.sv + 16], r12
+  mov [rax + TRcLit.sv + 24], r13
+  mov [rax + TRcLit.sv + 32], r14
+  mov [rax + TRcLit.sv + 40], r15
+  mov [rax + TRcLit.sv + 48], rdi
+  mov [rax + TRcLit.sv + 56], rsi
+  mov rdi, rax
+  mov r8d, [rdi + TRcLit.rng]
+  mov r9, [rdi + TRcLit.lo]
+  mov r10, [rdi + TRcLit.probs]
+  mov r11d, [rdi + TRcLit.sym]
+  mov r14d, [rdi + TRcLit.matchByte]
+  mov r15d, [rdi + TRcLit.offs]
+  xor ebp, ebp
+@loop:
+  cmp r11d, $10000
+  jae @done
+  // matchByte <<= 1; prob = probs + offs + (matchByte & offs) + (sym >> 8)
+  add r14d, r14d
+  mov eax, r14d
+  and eax, r15d
+  add eax, r15d
+  mov ecx, r11d
+  shr ecx, 8
+  add eax, ecx
+  lea rsi, [r10 + rax*2]
+  mov ecx, r11d
+  shr ecx, 7
+  and ecx, 1
+  add r11d, r11d
+  // offs &= ~(matchByte ^ sym)
+  mov eax, r14d
+  xor eax, r11d
+  not eax
+  and r15d, eax
+  movzx edx, word ptr [rsi]
+  mov eax, r8d
+  shr eax, 11
+  imul eax, edx
+  mov ebx, r8d
+  sub ebx, eax
+  lea r12, [r9 + rax]
+  mov r13d, edx
+  shr r13d, 5
+  neg r13d
+  add r13d, edx
+  mov ebp, 2048
+  sub ebp, edx
+  shr ebp, 5
+  add ebp, edx
+  test ecx, ecx
+  cmovnz eax, ebx
+  cmovnz r9, r12
+  cmovnz ebp, r13d
+  mov r8d, eax
+  mov word ptr [rsi], bp
+  xor ebp, ebp
+  cmp r8d, $1000000
+  jae @loop
+  shl r8d, 8
+  mov ebp, 1
+@done:
+  mov [rdi + TRcLit.rng], r8d
+  mov [rdi + TRcLit.lo], r9
+  mov [rdi + TRcLit.sym], r11d
+  mov [rdi + TRcLit.matchByte], r14d
+  mov [rdi + TRcLit.offs], r15d
+  mov eax, ebp
+  mov rdx, rdi
+  mov rbx, [rdx + TRcLit.sv + 0]
+  mov rbp, [rdx + TRcLit.sv + 8]
+  mov r12, [rdx + TRcLit.sv + 16]
+  mov r13, [rdx + TRcLit.sv + 24]
+  mov r14, [rdx + TRcLit.sv + 32]
+  mov r15, [rdx + TRcLit.sv + 40]
+  mov rdi, [rdx + TRcLit.sv + 48]
+  mov rsi, [rdx + TRcLit.sv + 56]
+end;
+{$asmmode default}
+
+{ LitEnc_Encode }
+procedure TLzmaEnc.LitEncode(probs: PProb; sym: LongWord);
+var
+  r: TRcLit;
+begin
+  r.rng := rcRange; r.lo := rcLow; r.probs := probs; r.sym := sym or $100;
+  while LitBitsAsm(@r) do
+  begin
+    rcRange := r.rng; rcLow := r.lo;
+    RcShiftLow;
+    r.lo := rcLow;
+  end;
+  rcRange := r.rng; rcLow := r.lo;
+end;
+
+{ LitEnc_EncodeMatched }
+procedure TLzmaEnc.LitEncodeMatched(probs: PProb; sym, matchByte: LongWord);
+var
+  r: TRcLit;
+begin
+  r.rng := rcRange; r.lo := rcLow; r.probs := probs; r.sym := sym or $100;
+  r.matchByte := matchByte; r.offs := $100;
+  while LitBitsMatchedAsm(@r) do
+  begin
+    rcRange := r.rng; rcLow := r.lo;
+    RcShiftLow;
+    r.lo := rcLow;
+  end;
+  rcRange := r.rng; rcLow := r.lo;
+end;
+{$ELSE}
 { LitEnc_Encode }
 procedure TLzmaEnc.LitEncode(probs: PProb; sym: LongWord);
 var
@@ -2081,6 +3029,7 @@ begin
     RcBit(prob, bit);
   until sym >= $10000;
 end;
+{$ENDIF}
 
 { RcTree_ReverseEncode }
 procedure TLzmaEnc.RcTreeReverseEncode(probs: PProb; numBits, sym: LongWord);
@@ -2153,13 +3102,13 @@ function TLzmaEnc.LitPrice(probs: PProb; sym: LongWord): LongWord;
 var
   bit: LongWord;
 begin
+  // sin ramas: el bit invierte la probabilidad con un xor por máscara
   Result := 0;
   sym := sym or $100;
   repeat
     bit := sym and 1;
     sym := sym shr 1;
-    if bit = 0 then Inc(Result, ProbPrices[probs[sym] shr 4])
-    else Inc(Result, ProbPrices[(probs[sym] xor (kBitModelTotal - 1)) shr 4]);
+    Inc(Result, ProbPrices[(probs[sym] xor ((0 - bit) and (kBitModelTotal - 1))) shr kNumMoveReducingBits]);
   until sym < 2;
 end;
 
@@ -2174,8 +3123,7 @@ begin
   repeat
     matchByte := matchByte shl 1;
     prob := probs[offs + (matchByte and offs) + (sym shr 8)];
-    if ((sym shr 7) and 1) = 0 then Inc(Result, ProbPrices[prob shr 4])
-    else Inc(Result, ProbPrices[(prob xor (kBitModelTotal - 1)) shr 4]);
+    Inc(Result, ProbPrices[(prob xor ((0 - ((sym shr 7) and 1)) and (kBitModelTotal - 1))) shr kNumMoveReducingBits]);
     sym := sym shl 1;
     offs := offs and not (matchByte xor sym);
   until sym >= $10000;
@@ -2394,6 +3342,47 @@ begin
 end;
 
 { GetOptimum: parseo óptimo }
+{ Bucles por largo de GetOptimum como rutinas hoja (pocas variables, todas en registros; en
+  el cuerpo enorme de GetOptimum FPC las deja en la pila). o = @opt[cur], lp = precios por
+  largo (índice largo - 2). Misma salida que los bucles del SDK. }
+
+{ REP: largos len..2 con precio pr + lp[largo - 2] }
+procedure OptRepLens(o: POptimal; lp: PLongWord; pr, len, repIndex: LongWord);
+var
+  pr2: LongWord;
+begin
+  repeat
+    pr2 := pr + lp[len - LZMA_MATCH_LEN_MIN];
+    if pr2 < o[len].price then
+    begin
+      o[len].price := pr2;
+      o[len].len := len;
+      o[len].dist := repIndex;
+      o[len].extra := 0;
+    end;
+    Dec(len);
+  until len < 2;
+end;
+
+{ MATCH: largos len..endLen - 1 (todos con lenToPosState = 3) con precio base + lp[largo - 2] }
+procedure OptMatchLens(o: POptimal; lp: PLongWord; base, len, endLen, dist: LongWord);
+var
+  pr: LongWord;
+begin
+  while len < endLen do
+  begin
+    pr := base + lp[len - LZMA_MATCH_LEN_MIN];
+    if pr < o[len].price then
+    begin
+      o[len].price := pr;
+      o[len].len := len;
+      o[len].dist := dist;
+      o[len].extra := 0;
+    end;
+    Inc(len);
+  end;
+end;
+
 function TLzmaEnc.GetOptimum(position: LongWord): LongWord;
 var
   last, cur: LongWord;
@@ -2410,6 +3399,9 @@ var
   numAvailFull, newLen, prev, state, startLen, litPr: LongWord;
   nextIsLit: Boolean;
   b0, j, best, delta, temp, limit, state2, posState2, offset, len2, repIndex, prob, posSlot, lenNorm: LongWord;
+  endLen: LongWord;
+  lenPr: PLongWord;
+  distPr: array[0..kNumLenToPosStates - 1] of LongWord;
 begin
   FOptCur := 0;
   FOptEnd := 0;
@@ -2681,9 +3673,9 @@ begin
     nextOpt := @opt[cur + 1];
     nextIsLit := False;
 
-    if ((nextOpt^.price < kInfinityPrice) and (matchByte = curByte)) or (litPr > nextOpt^.price) then
-      litPr := 0
-    else
+    // El SDK 18+ no cotiza el literal si ya hay un precio y matchByte = curByte, o si el
+    // match solo ya cuesta más: acá se cotiza siempre (como el SDK 9.x de FreeArc): 0.1-0.4 %
+    // más chico por ~1 % de tiempo.
     begin
       probs := LitProbsPtr(position, (data - 1)^);
       if not IsLitState(state) then
@@ -2707,11 +3699,12 @@ begin
     if numAvailFull > temp then numAvailFull := temp;
 
     // ---------- SHORT_REP ----------
-    if IsLitState(state) and (matchByte = curByte) and (repMatchPrice < nextOpt^.price)
-      and ((nextOpt^.len < 2) or (nextOpt^.dist <> 0)) then
+    // Como el SDK 9.x: en cualquier estado (el SDK 18+ solo después de un literal y si
+    // repMatchPrice ya es menor) y con <= (a igual precio gana el short rep).
+    if (matchByte = curByte) and ((nextOpt^.len < 2) or (nextOpt^.dist <> 0)) then
     begin
       shortRepPrice := repMatchPrice + PriceShortRep(state, posState);
-      if shortRepPrice < nextOpt^.price then
+      if shortRepPrice <= nextOpt^.price then
       begin
         nextOpt^.price := shortRepPrice;
         nextOpt^.len := 1;
@@ -2763,20 +3756,8 @@ begin
       len := MatchLen(data2, data, len, numAvail);
       offset := cur + len;
       if last < offset then last := offset;
-      len2 := len;
       pr := repMatchPrice + PricePureRep(repIndex, state, posState);
-      repeat
-        pr2 := pr + repLenEnc.prices[posState][len2 - LZMA_MATCH_LEN_MIN];
-        o := @opt[cur + len2];
-        if pr2 < o^.price then
-        begin
-          o^.price := pr2;
-          o^.len := len2;
-          o^.dist := repIndex;
-          o^.extra := 0;
-        end;
-        Dec(len2);
-      until len2 < 2;
+      OptRepLens(@opt[cur], @repLenEnc.prices[posState][0], pr, len, repIndex);
 
       if repIndex = 0 then startLen := len + 1;
 
@@ -2830,18 +3811,52 @@ begin
       offs := 0;
       while startLen > matches[offs] do Inc(offs, 2);
       dist := matches[offs + 1];
-      posSlot := 0;
-      if dist >= kNumFullDistances then posSlot := CalcPosSlot2(dist);
       len := startLen;
+      lenPr := @lenEnc.prices[posState][0];
       while True do
       begin
-        pr := normalMatchPrice + lenEnc.prices[posState][len - LZMA_MATCH_LEN_MIN];
+        { Precio de la distancia para cada lenToPosState que toca [len, endLen] (el SDK lo
+          suma en cada largo): después el bucle por largo es una suma y una comparación. }
+        endLen := matches[offs];
+        lenNorm := len - 2;
+        if lenNorm > kNumLenToPosStates - 1 then lenNorm := kNumLenToPosStates - 1;
+        j := endLen - 2;
+        if j > kNumLenToPosStates - 1 then j := kNumLenToPosStates - 1;
+        i := lenNorm;
+        if dist < kNumFullDistances then
+          for lenNorm := i to j do
+            distPr[lenNorm] := normalMatchPrice + distancesPrices[lenNorm][dist and (kNumFullDistances - 1)]
+        else
+        begin
+          posSlot := CalcPosSlot2(dist);
+          temp := normalMatchPrice + alignPrices[dist and kAlignMask];
+          for lenNorm := i to j do
+            distPr[lenNorm] := temp + posSlotPrices[lenNorm][posSlot];
+        end;
+        o := @opt[cur];
+        // largos 2..4: lenToPosState = len - 2
+        while (len < kNumLenToPosStates + 1) and (len < endLen) do
+        begin
+          pr := distPr[len - 2] + lenPr[len - LZMA_MATCH_LEN_MIN];
+          if pr < o[len].price then
+          begin
+            o[len].price := pr;
+            o[len].len := len;
+            o[len].dist := dist + LZMA_NUM_REPS;
+            o[len].extra := 0;
+          end;
+          Inc(len);
+        end;
+        // el resto hasta endLen (sin incluirlo): lenToPosState = 3
+        if len < endLen then
+        begin
+          OptMatchLens(o, lenPr, distPr[kNumLenToPosStates - 1], len, endLen, dist + LZMA_NUM_REPS);
+          len := endLen;
+        end;
+        // len = endLen
         lenNorm := len - 2;
         if lenNorm >= kNumLenToPosStates - 1 then lenNorm := kNumLenToPosStates - 1;
-        if dist < kNumFullDistances then
-          Inc(pr, distancesPrices[lenNorm][dist and (kNumFullDistances - 1)])
-        else
-          Inc(pr, posSlotPrices[lenNorm][posSlot] + alignPrices[dist and kAlignMask]);
+        pr := distPr[lenNorm] + lenPr[len - LZMA_MATCH_LEN_MIN];
         o := @opt[cur + len];
         if pr < o^.price then
         begin
@@ -2851,7 +3866,6 @@ begin
           o^.extra := 0;
         end;
 
-        if len = matches[offs] then
         begin
           // MATCH : LIT : REP_0
           data2 := data - dist - 1;
@@ -2886,7 +3900,6 @@ begin
           Inc(offs, 2);
           if offs = numPairs then Break;
           dist := matches[offs + 1];
-          if dist >= kNumFullDistances then posSlot := CalcPosSlot2(dist);
         end;
         Inc(len);
       end;
@@ -3286,8 +4299,19 @@ begin
   end
   else if mf.htMode then
   begin
-    GetMatchesF := @Ht4GetMatches;
-    SkipF := @Ht4Skip;
+    // :normal/:max con 2 hilos concedidos: la lista del multihilo (Ht4mGetMatches), aunque
+    // al final corra en un hilo (entrada chica en memoria, sin memoria para el multihilo),
+    // así la salida depende solo de si hay hilos; con uno, la de FreeArc -mt1
+    if (P.Algorithm <> 0) and (LzmaHtListOneThread or (LzmaEncThreadsFor(P) >= 2)) then
+    begin
+      GetMatchesF := @Ht4mGetMatches;
+      SkipF := @Ht4mSkip;
+    end
+    else
+    begin
+      GetMatchesF := @Ht4GetMatches;
+      SkipF := @Ht4Skip;
+    end;
   end
   else
   begin
@@ -3311,17 +4335,10 @@ begin
   if (d = (QWord(2) shl 30)) or (d = (QWord(3) shl 30)) then Dec(d);
   // Multihilo como FreeArc (mtMode = numThreads > 1 y no fast), solo para bt4. En memoria,
   // solo si el bloque lo justifica (crear los hilos y 5 MB de buffers cuesta ~ms). La salida
-  // es la misma con o sin hilos.
-  // Automático: multihilo si el presupuesto global de hilos es de 2 o más, también con bloques
-  // en paralelo: los 3 hilos (LZ, BT, hash) toman fichas como los demás, así que no se pasa
-  // de PARC_THREADS, y cuando los últimos bloques quedan solos usan las fichas que sobran (el
-  // match finder no puede pasar a multihilo a mitad del stream). Medido en sets/exe -m6 con
-  // bloques desparejos: más rápido que un hilo por bloque salvo con todas las fichas ocupadas
-  // hasta el final (ahí ~+10% de CPU).
-  nt := P.NumThreads;
-  if nt = 0 then
-    if LzmaSingleThreadHere or (BudgetThreads < 2) then nt := 1 else nt := 2;
-  useMt := (nt >= 2) and (P.MatchFinder = mfBT4) and not fastMode
+  // es la misma con o sin hilos. Hilos: los de P, o (0) los que el llamador concedió a este
+  // hilo (LzmaEncThreadGrant; sin concesión, uno).
+  nt := LzmaEncThreadsFor(P);
+  useMt := (nt >= 2)
     and ((DirectSrc = nil) or (DirectLen >= kMtMinMemSize)) and MtThreadsAvailable;
   if useMt then
     try
@@ -3330,8 +4347,8 @@ begin
       nb := MtBtNumBlocks(LongWord(d));
       MfCreate(@mf, LongWord(d), kNumOpts + kMtHashBufferSize + nb * kMtBtBlockSize, numFastBytes,
         LZMA_MATCH_LEN_MAX + 1 + kMtHashBlockSize);
-      FMt := MtCreate(@mf, nb);
-      GetMatchesF := @MtBt4GetMatches;
+      FMt := MtCreate(@mf, nb, nt = 2);
+      if mf.htMode then GetMatchesF := @MtHt4GetMatches else GetMatchesF := @MtBt4GetMatches;
       SkipF := @MtBt4Skip;
     except
       // sin memoria para los buffers de más (o ventana demasiado grande): un hilo
@@ -3572,7 +4589,8 @@ begin
       begin
         if not fastMode then
         begin
-          if matchPriceCount >= 64 then
+          // Cada 32 matches (el SDK 26.03: 64): precios más al día, ~0.03 % más chico
+          if matchPriceCount >= kPriceUpdateMatches then
           begin
             FillAlignPrices;
             FillDistancesPrices;
@@ -3601,6 +4619,139 @@ end;
 { ====================================================================== }
 { Parámetros (parse_LZMA de C_LZMA.cpp)                                    }
 { ====================================================================== }
+
+function LzmaEncMaxThreads(const P: TLzmaEncParams): Integer;
+begin
+  if (P.MatchFinder = mfBT4) and (P.Algorithm <> 0) and MtThreadsAvailable then Result := 3
+  else if (P.MatchFinder = mfHT4) and (P.Algorithm <> 0) and MtThreadsAvailable then Result := 2
+  else Result := 1;
+end;
+
+function LzmaEncThreadsFor(const P: TLzmaEncParams): Integer;
+begin
+  Result := P.NumThreads;
+  if Result = 0 then Result := LzmaEncThreadGrant;
+  // Automático: la parte de este bloque del presupuesto global (al menos 2: los hilos toman
+  // fichas, así que no se pasa de PARC_THREADS), salvo dentro de 4x4 o con un solo hilo
+  if Result = 0 then
+    if LzmaSingleThreadHere or (BudgetThreads < 2) then Result := 1
+    else if ThreadShare > 2 then Result := ThreadShare else Result := 2;
+  if Result < 1 then Result := 1;
+  if Result > LzmaEncMaxThreads(P) then Result := LzmaEncMaxThreads(P);
+end;
+
+{ Tamaños de las reservas de un codificador de un hilo (los mismos que MfCreate(d, kNumOpts,
+  fb, LZMA_MATCH_LEN_MAX + 1) más litProbs y el objeto). False si el diccionario no sirve. }
+function LzmaEncPieces(const P: TLzmaEncParams; out Win, Hash, Son, Rest: QWord): Boolean;
+var
+  m: TMatchFinder;
+  d, fb, mc, hs, rows: QWord;
+begin
+  Win := 0; Hash := 0; Son := 0; Rest := 0;
+  d := P.DictSize;
+  if d > kLzmaMaxHistorySize then d := kLzmaMaxHistorySize;
+  if (d = (QWord(2) shl 30)) or (d = (QWord(3) shl 30)) then Dec(d);
+  fb := P.NumFastBytes;
+  if fb < 5 then fb := 5 else if fb > LZMA_MATCH_LEN_MAX then fb := LZMA_MATCH_LEN_MAX;
+  FillChar(m, SizeOf(m), 0);
+  m.numHashBytes := 4;
+  case P.MatchFinder of
+    mfBT2: m.numHashBytes := 2;
+    mfBT3: m.numHashBytes := 3;
+  end;
+  m.keepSizeBefore := LongWord(d) + kNumOpts + 1;
+  m.keepSizeAfter := LZMA_MATCH_LEN_MAX + 1 + LongWord(fb);
+  Win := MfGetBlockSize(@m, LongWord(d));
+  if Win = 0 then Exit(False);
+  if P.MatchFinder = mfHT4 then
+  begin
+    mc := P.MatchFinderCycles;
+    if mc = 0 then mc := QWord(P.NumFastBytes) div 2;
+    if mc = 0 then mc := 1;
+    if mc > kHtMaxCutValue then mc := kHtMaxCutValue;
+    hs := d div 4 div mc;
+    rows := kHtMinRows;
+    while rows * 2 <= hs do rows := rows * 2;
+    Hash := 4 * (rows * mc + kFix4HashSize);
+  end
+  else
+  begin
+    hs := QWord(MfGetHashMask(@m, LongWord(d))) + 1;
+    if m.numHashBytes > 2 then Inc(hs, kHash2Size);
+    if m.numHashBytes > 3 then Inc(hs, kHash3Size);
+    Hash := 4 * hs;
+    if P.MatchFinder = mfHC4 then Son := 4 * (d + 1) else Son := 8 * (d + 1);
+  end;
+  // probabilidades de los literales y el resto del codificador (opt, precios, buffers)
+  Rest := (QWord($300) * SizeOf(TProb)) shl (P.lc + P.lp) + (1 shl 20);
+  Result := True;
+end;
+
+function LzmaEncMemory(const P: TLzmaEncParams): QWord;
+var
+  w, h, so, r: QWord;
+begin
+  if not LzmaEncPieces(P, w, h, so, r) then Exit(High(QWord));
+  Result := w + h + so + r;
+end;
+
+{ ¿Se pueden reservar ahora todas las piezas juntas, más Headroom? }
+function LzmaCanReserve(const P: TLzmaEncParams; Headroom: QWord): Boolean;
+var
+  sz: array[0..3] of QWord;
+  pt: array[0..3] of Pointer;
+  r: QWord;
+  i: Integer;
+begin
+  if not LzmaEncPieces(P, sz[0], sz[1], sz[2], r) then Exit(False);
+  sz[3] := Headroom + r;
+  for i := 0 to 3 do
+    if sz[i] > QWord(High(SizeInt)) then Exit(False);
+  FillChar(pt, SizeOf(pt), 0);
+  Result := True;
+  try
+    try
+      for i := 0 to 3 do
+        if sz[i] > 0 then pt[i] := GetMem(SizeInt(sz[i]));
+    except
+      on EOutOfMemory do Result := False;
+    end;
+  finally
+    for i := 0 to 3 do
+      if pt[i] <> nil then FreeMem(pt[i]);
+  end;
+end;
+
+function LzmaFitDictionary(const P: TLzmaEncParams; MaxMem, Headroom: QWord): QWord;
+
+  function Fits(const Q: TLzmaEncParams): Boolean;
+  var
+    mem: QWord;
+  begin
+    // hasta 256 MB no se prueba: el resultado no depende de cómo esté la memoria en ese momento
+    mem := LzmaEncMemory(Q);
+    Result := (mem <= MaxMem) and ((Headroom = 0) or (mem <= (256 shl 20)) or LzmaCanReserve(Q, Headroom));
+  end;
+
+var
+  Q: TLzmaEncParams;
+  k, m: Integer;
+  c: QWord;
+begin
+  Q := P;
+  Result := P.DictSize;
+  if Fits(Q) then Exit;
+  // candidatos m * 2^k decrecientes por debajo de DictSize: 15/16, 14/16 ... de cada potencia
+  for k := 40 downto 20 do
+    for m := 15 downto 8 do
+    begin
+      c := QWord(m) shl (k - 3);
+      if (c >= P.DictSize) or (c < (1 shl 20)) then Continue;
+      Q.DictSize := c;
+      if Fits(Q) then Exit(c);
+    end;
+  Result := 1 shl 20;
+end;
 
 function DefaultLzmaEncParams: TLzmaEncParams;
 begin

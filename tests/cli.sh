@@ -57,6 +57,16 @@ printf 'cambiado\n' > ov/src/a.txt
 ck "-o- no sobrescribe"        '"$PARC" x t.parc -dpov -o- --no-progress >/dev/null 2>&1; grep -q cambiado ov/src/a.txt'
 ck "-o+ sobrescribe"           '"$PARC" x t.parc -dpov -o+ --no-progress >/dev/null 2>&1; grep -q alpha4 ov/src/a.txt'
 
+# 4x4: un bloque con order-0 >= 99 % en total pero con un MB repetitivo se comprime igual
+# (FreeArc lo guardaba sin intentar); uno aleatorio entero se guarda
+mkdir -p o0
+head -c $((7 << 20)) /dev/urandom > o0/mix
+for i in $(seq 1 4096); do head -c 256 /dev/urandom; done | head -c $((1 << 20)) > o0/rnd1
+for i in $(seq 1 8); do head -c $((128 << 10)) o0/rnd1; done >> o0/mix
+head -c $((8 << 20)) /dev/urandom > o0/rnd
+ck "4x4 bloque mixto se comprime" '"$PARC" a o0m.parc o0/mix -m4x4:lzma:8mb:fast >/dev/null 2>&1 && [ $(stat -c %s o0m.parc) -lt $((8 << 20)) ] && "$PARC" t o0m.parc >/dev/null 2>&1'
+ck "4x4 bloque aleatorio guardado" '"$PARC" a o0r.parc o0/rnd -m4x4:lzma:8mb:fast >/dev/null 2>&1 && [ $(stat -c %s o0r.parc) -gt $((8 << 20)) ] && "$PARC" t o0r.parc >/dev/null 2>&1'
+
 # ayuda y versión
 ck "sin argumentos: 0"         '"$PARC" >/dev/null 2>&1; [ $? = 0 ]'
 ck "--version"                '"$PARC" --version | grep -q "^PArc 0.0.2"'

@@ -3,6 +3,9 @@
 program parc;
 
 {$mode objfpc}{$H+}
+{ win32: "large address aware" (como FreeArc): en Windows de 64 bits el proceso tiene 4 GB de
+  direcciones en vez de 2, y los diccionarios grandes (lzma:1gb) se achican menos. }
+{$IFDEF WIN32}{$SETPEFLAGS $20}{$ENDIF}
 
 uses
   {$IFDEF UNIX}cthreads, BaseUnix,{$ENDIF}

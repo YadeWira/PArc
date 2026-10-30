@@ -122,6 +122,34 @@ What makes this possible (all inside `.parc`; the codecs are unchanged):
   byte for byte (oracle `tor64`) and fuzzes the options through the C++ one.
   128 MB of TILIN, one thread, compress CPU (41af3bc → now, FreeArc `-mt1`): `tor:10`
   98.0 → 81.6 s (88.2), `tor:15` 70.7 → 32.9 s (34.7).
+- **LZMA encoder (`normal`/`max`)**: the bt tree walk and the literal coder are x86-64
+  assembler (Pascal fallback), the bt4/ht4 match finders prefetch two or three positions ahead
+  (hash head, first tree node, its children), and the optimal parser drops two SDK 18+ speed
+  shortcuts that cost ratio (it always prices the literal, tries the short rep like SDK 9.x) and
+  refreshes prices every 32 matches. `normal` and `max` are now smaller than FreeArc's.
+- **LZMA multi-thread match finder** (port of LzFindMt, `normal`/`max` only). bt4: same output
+  as one thread. ht4 (the `normal` default): 2 threads, the BT thread walks the HT4 rows and
+  the list of matches is the one of FreeArc's multi-thread finder (rows report every longer
+  match from length 4, hash2/hash3 matches only when closer, skipped positions also search
+  their row), which is smaller than the one-thread list: like FreeArc, ht4 output with 2+
+  threads differs from 1 thread (that one is FreeArc `-mt1`'s). 512 MB TILIN slice,
+  `lzma:8mb:normal`: 1 thread 257,005,522, 2+ threads 256,882,467 (FreeArc `-mt1`
+  257,058,517, `-mt4` 256,920,905); `96mb`: 253,641,041 / 253,540,503 (FreeArc 253,723,647 /
+  253,565,992). Threads: `TLzmaEncParams.NumThreads` = 1 (one thread), 2 (compressing thread
+  + a BT thread that also hashes) or 3 (+ a separate hash thread, like the SDK; the hash
+  thread is light); 0 = automatic: the per-thread grant `LzmaEncThreadGrant` if a caller set
+  one, otherwise this block's share of the global thread budget (`ThreadShare`, at least 2),
+  and one thread inside 4x4 or with a one-thread budget. The match-finder threads take tokens
+  from the global budget while they work, so PARC_THREADS is never exceeded.
+  `LzmaEncMaxThreads(P)` tells how many threads a stream can use (3 for bt4, 2 for ht4, else
+  1) and `LzmaEncThreadsFor(P)` how many it would take now. `tests/lzma_threads.sh` checks
+  the thread peak under `PARC_THREADS`.
+- **4x4 skips fewer compressible blocks**: FreeArc does not even try a 4x4 block whose order-0
+  entropy is >= 99 % (`r99`). PArc still skips it, unless some ~1 MB piece of it repeats
+  (>= 4 % covered by repeats of 8+ bytes): a block that mixes random MBs with compressible ones,
+  or random data repeated, is compressed. 512 MB TILIN slice: one 8 MB block, 8,388,608 ->
+  8,196,086 bytes; `-m2`…`-m5` on the exe/document/video sets 0.5–2.5 % smaller (-m5 exe:
+  ~18 % more CPU). JPEG/MP3 blocks barely repeat and are still skipped.
 - **Automatic solid blocks**: without `-s`, 64 MB for `-m1`…`-m3` and 32 MB for `-m4`…`-m9`/`-mx`. On Silesia this improved compression time and ratio at every level; small archives still use one block. `-mxx` keeps a single block for ratio.
 - **GRZip adaptive LZP**: BWT blocks of 4 MB or more use `l64/h22` (fewer, longer matches); small blocks keep the fast LZP parameters. The choice is stored in each block's mode, so old decoders remain compatible. This makes `-m4` 1.2–1.4% smaller on text and many small files.
 - **Stronger and faster presets** than FreeArc's at the same level:
@@ -161,14 +189,10 @@ What makes this possible (all inside `.parc`; the codecs are unchanged):
   collect results and hold no token while they wait. `tests/thread_budget.py` samples
   `/proc/<pid>/task/*/stat`: p99 of threads in R <= N and CPU/wall <= N + 0.3.
   The preset alternatives `(a|b)` are picked by N too (like FreeArc's `-mtN`).
-  *Hook for the LZMA thread-grant API* (branch `perf2/lzma2`, `LzmaEncThreadGrant`): after
-  merging, replace `LzmaSingleThreadHere` with the grant: `T4x4EncJob.Process` saves the grant,
-  sets it to 0 (one thread) and restores it; the automatic case of the LZMA encoder (now
-  `nt := 2`, i.e. MT match finder, when `BudgetThreads >= 2` outside 4x4) becomes "with no
-  grant and `BudgetThreads >= 2`: min(LzmaEncMaxThreads(P), max(2, ThreadShare))" (the tokens
-  cap the real parallelism anyway; with a share of 2 the 2-thread mode avoids the hash thread). The MT threads keep
-  `BudgetEnter`/`BudgetLeave` and the semaphore waits keep `BudgetWaitBegin`/`End`
-  (including the 2-thread mode's inline hash, which runs in the BT thread with its token).
+  LZMA joins the budget through `LzmaEncThreadsFor` (see the multi-thread match finder
+  above): 4x4 jobs set `LzmaSingleThreadHere` (one thread per block), the MT threads take a
+  token with `BudgetEnter`/`BudgetLeave` and the semaphore waits give it back with
+  `BudgetWaitBegin`/`End` (also the 2-thread mode's inline hash, run by the BT thread).
 - **Directory**: mtime in ns is stored losslessly as zigzag VInt deltas (tag 7) or, when it
   is smaller, as the sub-second part only on top of the `Time` column (tag 8): 6–10 % smaller
   directories with random nanoseconds.

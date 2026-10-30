@@ -51,6 +51,19 @@ for T in 2 4; do
   else bad "PARC_THREADS=$T: extracción distinta"; fi
 done
 
+# Un bloque: el hashing en hilos de fondo no cambia la salida (es la misma que en línea).
+# Antes TParallelJob.ResetForReuse no volvía FFinished a 0 y desde el segundo uso de cada
+# tarea WaitJob no esperaba: la búsqueda leía hashes viejos y cada corrida daba otro archivo
+# (hasta 1,6% más grande).
+cat g/f1 g/f2 > one; rm -f r1.parc
+PARC_THREADS=1 "$PARC" a r1.parc one -mrep:96mb:256 >/dev/null 2>&1 || bad "un bloque, T=1: rc=$?"
+for k in 1 2 3; do
+  rm -f r4.parc
+  PARC_THREADS=4 "$PARC" a r4.parc one -mrep:96mb:256 >/dev/null 2>&1 || bad "un bloque, T=4: rc=$?"
+  if cmp -s r1.parc r4.parc; then ok "un bloque, T=4 (corrida $k): mismo archivo que en línea"
+  else bad "un bloque, T=4 (corrida $k): archivo distinto del de T=1 ($(stat -c %s r4.parc) vs $(stat -c %s r1.parc))"; fi
+done
+
 echo "rep_threads: $pass ok, $fail fallos"
 cd / && rm -rf -- "${OUT:?}"
 [ "$fail" -eq 0 ]
