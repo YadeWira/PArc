@@ -160,11 +160,15 @@ asm
   movzx eax, byte ptr [rdi + rdx + TPpmdEngine.FUnits2Indx]
   cmp al, byte ptr [rdi + rdx + TPpmdEngine.FUnits2Indx - 1]
   je @unoexp
-  mov ebx, [rdi + rax * 8 + TPpmdEngine.FBList + 4]
+  // FBList es un array de TBlkNode (8 bytes): sin "dword ptr", FPC toma el tamaño del campo
+  // y "mov [..FBList + 4], r10d" sale como mov de 64 bits, que pisaba el Stamp de la lista
+  // siguiente (contadores de GetUsedMemory/GlueCount distintos del C: otra salida y, con
+  // mucho modelo, Range = 0 y un bucle de AriEncNormalize fuera de FEncBuf)
+  mov ebx, dword ptr [rdi + rax * 8 + TPpmdEngine.FBList + 4]
   test ebx, ebx
   jz @ulo
   mov r10d, [r15 + rbx + 4]
-  mov [rdi + rax * 8 + TPpmdEngine.FBList + 4], r10d
+  mov dword ptr [rdi + rax * 8 + TPpmdEngine.FBList + 4], r10d
   dec dword ptr [rdi + rax * 8 + TPpmdEngine.FBList]
   jmp @ucopy
 @ulo:
@@ -193,9 +197,9 @@ asm
   // BListInsert(Units2Indx[nu - 1], vieja, nu)
   movzx eax, byte ptr [rdi + rdx + TPpmdEngine.FUnits2Indx - 1]
   mov ecx, [rsi + 4]
-  mov r10d, [rdi + rax * 8 + TPpmdEngine.FBList + 4]
+  mov r10d, dword ptr [rdi + rax * 8 + TPpmdEngine.FBList + 4]
   mov [r15 + rcx + 4], r10d
-  mov [rdi + rax * 8 + TPpmdEngine.FBList + 4], ecx
+  mov dword ptr [rdi + rax * 8 + TPpmdEngine.FBList + 4], ecx
   mov dword ptr [r15 + rcx], $FFFFFFFF
   mov [r15 + rcx + 8], edx
   inc dword ptr [rdi + rax * 8 + TPpmdEngine.FBList]
@@ -209,11 +213,11 @@ asm
   jmp @ucommon
 @ubin:
   // AllocUnits(1)
-  mov ebx, [rdi + TPpmdEngine.FBList + 4]
+  mov ebx, dword ptr [rdi + TPpmdEngine.FBList + 4]
   test ebx, ebx
   jz @ublo
   mov eax, [r15 + rbx + 4]
-  mov [rdi + TPpmdEngine.FBList + 4], eax
+  mov dword ptr [rdi + TPpmdEngine.FBList + 4], eax
   dec dword ptr [rdi + TPpmdEngine.FBList]
   jmp @ubok
 @ublo:
