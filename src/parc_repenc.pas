@@ -109,6 +109,14 @@ function RepHashThreads: Integer;
 { Hilos de hashing de REP vivos ahora mismo en el proceso (para tests / presupuesto global). }
 function RepHashThreadsInUse: Integer;
 
+{ Reserva para una cadena de codificadores (CreateEncoderChain): reserva ya, en el hilo que
+  arma la cadena, hasta Want hilos de hashing (sin pasar de RepHashThreads en el proceso) y
+  los deja en RepHashChainGrant; la primera etapa REP que se cree en este hilo se queda con
+  ellos (y las demás hashean en línea). Así la cadena sabe cuántos hilos tomó REP de verdad
+  antes de concederle el resto a lzma. EndRepHashChain devuelve lo que ninguna etapa tomó. }
+function BeginRepHashChain(Want: LongInt): LongInt;
+procedure EndRepHashChain;
+
 implementation
 
 uses
@@ -163,6 +171,25 @@ begin
     if Result > Want then Result := Want;
     if Result <= 0 then Exit(0);
   until InterlockedCompareExchange(GRepHashUsed, cur + Result, cur) = cur;
+end;
+
+threadvar
+  RepHashChainSet: Boolean;      // hay una reserva de CreateEncoderChain en curso
+  RepHashChainGrant: LongInt;    // hilos reservados que todavía no tomó ninguna etapa
+
+function BeginRepHashChain(Want: LongInt): LongInt;
+begin
+  Result := 0;
+  if (Want > 0) and (RepHashThreads > 1) then Result := ReserveRepHash(Want, RepHashThreads);
+  RepHashChainGrant := Result;
+  RepHashChainSet := True;
+end;
+
+procedure EndRepHashChain;
+begin
+  if RepHashChainGrant > 0 then InterlockedExchangeAdd(GRepHashUsed, -RepHashChainGrant);
+  RepHashChainGrant := 0;
+  RepHashChainSet := False;
 end;
 
 const
@@ -384,8 +411,18 @@ begin
   // de APar.Threads, no de estos hilos. RepHashThreads es el tope del proceso: con varios
   // bloques escribiéndose a la vez, solo los primeros consiguen hilos y el resto hashea en
   // línea (los hilos que escriben bloques ya ocupan los núcleos de PARC_THREADS).
-  n := RepHashThreads;
-  if n > 1 then FHashGrant := ReserveRepHash(n, n);
+  // Dentro de CreateEncoderChain la reserva ya está hecha (BeginRepHashChain): se toma esa,
+  // aunque sea 0 (presupuesto justo: el hashing va en línea y los hilos quedan para lzma).
+  if RepHashChainSet then
+  begin
+    FHashGrant := RepHashChainGrant;
+    RepHashChainGrant := 0;
+  end
+  else
+  begin
+    n := RepHashThreads;
+    if n > 1 then FHashGrant := ReserveRepHash(n, n);
+  end;
   if FHashGrant > 0 then
   begin
     FPool := TJobPool.Create(FHashGrant, FHtBufs);

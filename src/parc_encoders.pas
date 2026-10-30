@@ -628,7 +628,8 @@ end;
 function CreateEncoderChain(const Method: string; Target: TOutStage): TOutStage;
 var
   Stages: TStringArray;
-  k, SavedGrant: Integer;
+  k, SavedGrant, Need: Integer;
+  HasRep: Boolean;
 begin
   // Validar todo antes de crear nada: si no, habría que desarmar la cadena a medias
   if not EncoderAvailable(Method) then
@@ -639,12 +640,26 @@ begin
   Result := Target;
   Stages := Method.Split(['+']);
   // LzmaEncThreadGrant es para toda la cadena: los hilos de hashing de una etapa rep corren a
-  // la vez que el match finder multihilo de lzma, así que lzma se queda con lo que sobra
+  // la vez que el match finder multihilo de lzma. El hashing de REP casi siempre está ocioso
+  // (va a ~1 GB/s por hilo) y el match finder multihilo de lzma vale mucho más, así que lzma
+  // se queda primero con todos los hilos que le sirven (LzmaEncThreadsFor) y REP solo toma
+  // los que sobran (si no sobra ninguno hashea en línea); a lzma se le descuentan solo los que
+  // REP reservó de verdad (con bloques en paralelo puede no quedar cupo).
   SavedGrant := LzmaEncThreadGrant;
-  if SavedGrant > 1 then
-    for k := 0 to High(Stages) do
-      if LowerCase(StageName(Stages[k])) = 'rep' then
-        LzmaEncThreadGrant := Max(1, LzmaEncThreadGrant - RepHashThreads);
+  HasRep := False;
+  Need := 1;   // el hilo que escribe: búsqueda de REP y el resto de la cadena
+  for k := 0 to High(Stages) do
+    case LowerCase(StageName(Stages[k])) of
+      'rep': HasRep := True;
+      'lzma':
+        try
+          Need := Max(Need, LzmaEncThreadsFor(ParseLzmaEncParams(Stages[k].Split([':']))));
+        except
+          on E: Exception do ;   // CreateStage dará el error
+        end;
+    end;
+  if HasRep and (SavedGrant > 1) then
+    LzmaEncThreadGrant := Max(1, SavedGrant - BeginRepHashChain(Min(RepHashThreads, SavedGrant - Need)));
   try
     try
       for k := High(Stages) downto 0 do
@@ -654,6 +669,7 @@ begin
       raise;
     end;
   finally
+    if HasRep and (SavedGrant > 1) then EndRepHashChain;
     LzmaEncThreadGrant := SavedGrant;
   end;
 end;

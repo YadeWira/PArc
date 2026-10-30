@@ -114,8 +114,10 @@ What makes this possible (all inside `.parc`; the codecs are unchanged):
   one thread). Stages built from method strings (`CreateStage`) use 0. The grant is set in
   one place, `WriteArchive` (parc_writer): a block written alone gets the whole budget
   (`ThreadCount`), blocks written in parallel get `budget div blocks in flight`;
-  `CreateEncoderChain` takes the REP hashing threads (`RepHashThreads`) out of it when the
-  chain has a `rep` stage, and 4x4 jobs set it to 0 (one thread per block). This is the hook
+  when the chain has a `rep` stage, `CreateEncoderChain` first keeps for lzma the threads it
+  can use (`LzmaEncThreadsFor`), reserves REP hashing threads only from what is left
+  (`BeginRepHashChain`; none left = REP hashes inline) and takes off the grant only what REP
+  really reserved; 4x4 jobs set it to 0 (one thread per block). This is the hook
   for the global thread budget: whoever owns the budget only has to change what
   `WriteArchive` grants. `LzmaEncMaxThreads(P)` tells how many threads a stream can use (3 or
   1) and `LzmaEncThreadsFor(P)` how many it would take now. `tests/lzma_threads.sh` checks

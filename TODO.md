@@ -195,6 +195,12 @@ Decoding is ~13–15 s vs FreeArc's ~20.5 s.
 | `4x4:lzma:8mb:normal` | 4 | 6.8–7.5 | 6.1–6.7 (23–25) | 7.2 (38) | 113,849,098 / 113,869,118 |
 | `4x4:lzma:8mb:fast` | 4 | 5.8–6.2 | 4.9–5.2 | 7.9–8.4 | same stream (+17 B) |
 
+The 1-thread `lzma:8mb:max` gain (48.1 → 30.8 s, −36 %) is specific to this nearly
+incompressible 128 MB sample. Other 64 MB pieces of TILIN, same interleaved setup: offset 460 MB
+of TILIN.tar 16.1–16.6 → 13.1–13.3 s (−19 %); first 64 MB of the slice 20.5–21.5 → 18.7–19.4 s;
+last 64 MB 20.6–21.3 → 18.4–18.7 s (−11 %) and there the output is 1,211 bytes larger than
+41af3bc's (25,870,691 vs 25,869,480). Expect 10–20 % on ordinary data.
+
 Test (decode) 5.3–5.9 s vs FreeArc 8.6–9.8 s. Whole 512 MB slice at 4 threads: `lzma:8mb:normal`
 256,882,734 in 81–93 s vs FreeArc 256,921,155 in 105–169 s (machine loaded);
 `4x4:lzma:8mb:normal` 261,132,045 vs 261,261,944; `4x4:lzma:8mb:max` 257,218,019 vs 257,986,572.
@@ -202,8 +208,15 @@ Test (decode) 5.3–5.9 s vs FreeArc 8.6–9.8 s. Whole 512 MB slice at 4 thread
 Notes and open points:
 
 - Thread grant: `WriteArchive` sets `LzmaEncThreadGrant` (whole budget for a lone block,
-  `budget div blocks in flight` in parallel, minus REP's hashing threads); a global budget only
-  has to change that (docs/ESTADO.md). bt4 uses up to 3 threads, ht4 `:normal` 2.
+  `budget div blocks in flight` in parallel); in a rep+lzma chain lzma takes the threads it can
+  use first and REP hashes in background only with what is left (docs/ESTADO.md). bt4 uses up
+  to 3 threads, ht4 `:normal` 2. Before, REP always took 2 off the grant, so at
+  `PARC_THREADS=2`/`3` `-m6..-m9`/`-mx` ran lzma on one thread: 60 MB of the slice with `-m7`
+  took 11.6–14.8 s vs 7.5–7.8 s now (41af3bc 8.0–9.9 s, FreeArc `-mt2/3` 11.2–11.5 s).
+- REP with hashing threads was nondeterministic and lost ratio: `ResetForReuse` left the job's
+  finished flag set, so from the second use of each hashing task the search did not wait for
+  it (also in 41af3bc). `-mrep:58mb` on 60 MB: 28.97–29.03 MB in some runs vs 28.57 MB inline;
+  4× larger on very repetitive input. Fixed; output is now the same for any thread count.
 - ht4 `:normal` output with 1 thread (FreeArc `-mt1`'s list) differs from 2+ threads (FreeArc's
   multi-thread list, smaller), like FreeArc. Single 8 MB blocks with ht4 vary ±1.5 % either way
   vs FreeArc (slice @472 MB: +1.4 % with 1 thread); totals are smaller.
@@ -211,9 +224,8 @@ Notes and open points:
   (+15–20 bytes on one-file archives).
 - 32 bits: big dictionaries are shrunk to what can be reserved (`lzma:1gb:normal` → 960mb under
   Wine, 2 threads, OK). Several big blocks compressed in parallel each probe on their own.
-- `-m3` output on the exe set varies by a few KB between runs with the same binary (also in
-  41af3bc): something in the `-m3` chain is timing-dependent (not LZMA: the LZMA tests show the
-  same output for any thread count).
+- `-m3` output on the exe set used to vary by a few hundred bytes between runs (also in
+  41af3bc): it was the REP hashing race above. Now 77,813,396 every run.
 - `-m5` on the exe set is still 1.7 % larger than FreeArc's (78.29 MB vs 76.96 MB; preset
   choice `4x4:i0:lzma:8mb:max` vs FreeArc's `lzma:96m:normal:mc32`), though 2.5× faster.
 

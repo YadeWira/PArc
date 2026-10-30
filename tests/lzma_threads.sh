@@ -67,13 +67,16 @@ for T in 1 4; do
   roundtrip one "ht4 normal, PARC_THREADS=$T"
 done
 
-# rep+lzma en un bloque: los hilos de hashing de rep (hasta 2) salen de la concesión de lzma
-# (CreateEncoderChain), así que el total no pasa de PARC_THREADS
-for T in 4; do
+# rep+lzma en un bloque: los hilos de hashing de rep salen de la concesión de lzma
+# (CreateEncoderChain), así que el total no pasa de PARC_THREADS; y lzma se queda primero con
+# los hilos que le sirven (bt4 :max, 3): T=2 -> lzma 2 y rep en línea; T=3 -> lzma 3 y rep en
+# línea; T=4 -> 3 + 1 de rep. Antes con T=2 rep se quedaba 2 hilos y lzma corría en uno solo
+# (pico 3, por encima del tope, y -m7 un 50% más lento que con el match finder multihilo).
+for T in 2 3 4; do
   peak $T one -mrep:16mb+lzma:16mb:max
   if [ "$RC" -ne 0 ]; then bad "rep+lzma, PARC_THREADS=$T: rc=$RC"; continue; fi
-  if [ "$PEAK" -le "$T" ]; then ok "rep+lzma, PARC_THREADS=$T: pico $PEAK hilos (tope $T)"
-  else bad "rep+lzma, PARC_THREADS=$T: pico $PEAK hilos > tope $T"; fi
+  if [ "$PEAK" -eq "$T" ]; then ok "rep+lzma, PARC_THREADS=$T: $PEAK hilos"
+  else bad "rep+lzma, PARC_THREADS=$T: $PEAK hilos (se esperaban $T)"; fi
   roundtrip one "rep+lzma, PARC_THREADS=$T"
 done
 
