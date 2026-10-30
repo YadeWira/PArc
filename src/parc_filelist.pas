@@ -89,7 +89,8 @@ function FaCompareNames(const A, B: string): Integer;
 implementation
 
 uses
-  Classes, Math, parc_os, parc_methods, parc_filetype, parc_mmdet, parc_torenc, parc_strmap;
+  Classes, Math, parc_os, parc_methods, parc_filetype, parc_mmdet, parc_torenc, parc_strmap,
+  parc_parallel;
 
 const
   KB = 1024;
@@ -812,12 +813,29 @@ begin
     AddTyped(Result, ChooseType(All, DefaultType), L);
 end;
 
+type
+  { GroupType de una tanda en un hilo (lee el principio de los archivos: con miles de
+    archivos chicos, abrirlos y mirarlos era casi todo el tiempo antes de comprimir) }
+  TGroupTypeJob = class(TParallelJob)
+  public
+    Chunk: TIntArray;
+    Sub: TTypedArray;
+    procedure Process; override;
+  end;
+
+procedure TGroupTypeJob.Process;
+begin
+  // Solo lee el estado global (CurFiles, CurGM, CurLevel) y los archivos
+  Sub := GroupType(Chunk);
+end;
+
 function SplitFileTypes(const Order: TIntArray; TypesCount: Integer): TTypedArray;
 var
   Quick: Boolean;
-  i, t, a, Len, ExtRun: Integer;
+  i, t, a, Len, ExtRun, k: Integer;
   Bucket, Chunk: TIntArray;
-  Sub: TTypedArray;
+  Jobs: array of TGroupTypeJob;
+  Pool: TJobPool;
 begin
   Result := nil;
   Quick := CurLevel <= 1;
@@ -843,7 +861,8 @@ begin
     Exit;
   end;
   // splitBy [GroupByExt, GroupByBlockSize aGROUP_SIZE]: tandas de igual extensión y < 8 MB
-  // (special: 4*2mb)
+  // (special: 4*2mb). Las tandas se miran en paralelo; el resultado va en su orden
+  Jobs := nil;
   a := 0;
   while a <= High(Order) do
   begin
@@ -853,9 +872,26 @@ begin
       Inc(ExtRun);
     Len := Min(ExtRun, Max(1, PrefixUnder(Order, a, 4 * aGROUP_SIZE)));
     Chunk := Copy(Order, a, Len);
-    Sub := GroupType(Chunk);
-    for i := 0 to High(Sub) do AddTyped(Result, Sub[i].Typ, Sub[i].Files);
+    k := Length(Jobs);
+    SetLength(Jobs, k + 1);
+    Jobs[k] := TGroupTypeJob.Create;
+    Jobs[k].Chunk := Chunk;
     Inc(a, Len);
+  end;
+  Pool := TJobPool.Create(PoolWorkers(64), Length(Jobs));
+  try
+    try
+      for k := 0 to High(Jobs) do Pool.Submit(Jobs[k]);
+      for k := 0 to High(Jobs) do
+      begin
+        Pool.WaitJob(Jobs[k]);   // (si nadie la empezó, la hace este hilo)
+        for i := 0 to High(Jobs[k].Sub) do AddTyped(Result, Jobs[k].Sub[i].Typ, Jobs[k].Sub[i].Files);
+      end;
+    finally
+      Pool.Free;   // espera a los hilos antes de liberar sus trabajos
+    end;
+  finally
+    for k := 0 to High(Jobs) do Jobs[k].Free;
   end;
 end;
 
@@ -1212,10 +1248,11 @@ var
   Order: TIntArray;
   Typed: TTypedArray;
   Meth: TStringArray;
-  Idx: TIntArray;
   NoSort: Boolean;
   L, LineT: TIntArray;
-  MaxT: Integer;
+  MaxT, n: Integer;
+  Keys: TStringArray;      // métodos distintos (pocos), en orden de aparición
+  KeyOf, KeyOrder: TIntArray;
 begin
   Result := nil;
   if Length(Files) = 0 then Exit;
@@ -1252,43 +1289,53 @@ begin
   else
     Order := SortGerpn(Files);
   Typed := SplitFileTypes(Order, TypesCount);
-  // sort_and_groupOn por método (estable): cada método junta sus tandas en orden
+  // sort_and_groupOn por método (estable): cada método junta sus tandas en orden. Con muchos
+  // archivos chicos hay miles de tandas pero pocos métodos: se ordenan los métodos distintos
+  // (CmpMethod parte los textos, es cara) y las tandas van a su método en orden de aparición
   SetLength(Meth, Length(Typed));
-  SetLength(Idx, Length(Typed));
+  SetLength(KeyOf, Length(Typed));
+  Keys := nil;
   for i := 0 to High(Typed) do
   begin
     Meth[i] := GM[Typed[i].Typ].Method;
     if Meth[i] = '' then Meth[i] := 'storing';
-    Idx[i] := i;
-  end;
-  // (inserción estable: son pocas tandas)
-  for i := 1 to High(Idx) do
-  begin
-    k := Idx[i];
-    j := i - 1;
-    while (j >= 0) and (CmpMethod(Meth[Idx[j]], Meth[k]) > 0) do
+    k := High(Keys);
+    while (k >= 0) and (Keys[k] <> Meth[i]) do Dec(k);
+    if k < 0 then
     begin
-      Idx[j + 1] := Idx[j];
+      k := Length(Keys);
+      SetLength(Keys, k + 1);
+      Keys[k] := Meth[i];
+    end;
+    KeyOf[i] := k;
+  end;
+  SetLength(KeyOrder, Length(Keys));
+  for i := 0 to High(Keys) do
+  begin
+    j := i - 1;
+    while (j >= 0) and (CmpMethod(Keys[KeyOrder[j]], Keys[i]) > 0) do
+    begin
+      KeyOrder[j + 1] := KeyOrder[j];
       Dec(j);
     end;
-    Idx[j + 1] := k;
+    KeyOrder[j + 1] := i;
   end;
-  i := 0;
-  while i <= High(Idx) do
+  for k := 0 to High(KeyOrder) do
   begin
-    L := nil;
-    j := i;
-    while (j <= High(Idx)) and (Meth[Idx[j]] = Meth[Idx[i]]) do
-    begin
-      for k := 0 to High(Typed[Idx[j]].Files) do
-      begin
-        SetLength(L, Length(L) + 1);
-        L[High(L)] := Typed[Idx[j]].Files[k];
-      end;
-      Inc(j);
-    end;
-    SplitOneType(Meth[Idx[i]], L, Crits, Result);
-    i := j;
+    n := 0;
+    for i := 0 to High(Typed) do
+      if KeyOf[i] = KeyOrder[k] then Inc(n, Length(Typed[i].Files));
+    L := nil;   // (SplitOneType se puede quedar con el anterior)
+    SetLength(L, n);
+    n := 0;
+    for i := 0 to High(Typed) do
+      if KeyOf[i] = KeyOrder[k] then
+        for j := 0 to High(Typed[i].Files) do
+        begin
+          L[n] := Typed[i].Files[j];
+          Inc(n);
+        end;
+    SplitOneType(Keys[KeyOrder[k]], L, Crits, Result);
   end;
 end;
 
