@@ -120,7 +120,7 @@ begin
   OutLn('                  -mxx (CM max, slow decode), or a method: -mlzma, -mcm');
   OutLn('  -s...           solid blocks: -s- non-solid, -se by extension,');
   OutLn('                  -s<N>f N files, -s<N>m blocks of at least N bytes');
-  OutLn('                  default: 64 MB for -m1..-m3, 32 MB for -m4..-m9/-mx');
+  OutLn('                  default: solid, split only where a method needs it');
   OutLn('  -rr[spec]       recovery record: -rr, -rr5%, -rr10, -rr-');
   OutLn('');
   OutLn('Encryption:');
@@ -610,24 +610,14 @@ begin
   end;
 end;
 
-{ Tamaño de bloque sólido automático: sin -s, los niveles rápidos usan 64 MB y los altos
-  32 MB. Así los bloques aprovechan varios hilos; en corpus chicos no cambia nada. -s- o
-  cualquier -s explícito desactivan esta heurística. }
+{ Bloques sólidos: sin -s, como FreeArc (sin tope de tamaño; solo los cortes de dict/grzip/
+  lzp y de tta/mm). Antes había un tope automático (64 MB en -m1..-m3, 32 MB en -m4..-mx)
+  para repartir bloques entre hilos, pero hoy 4x4, LZMA multihilo y el presupuesto global ya
+  usan los hilos dentro de un bloque, y partir cortaba las repeticiones entre archivos: set
+  document -m6 43,8 -> 36,6 MB (FreeArc 36,6), exe -m6..-m9 -1,9 %, -m1 -0,9..-15 %. }
 function EffectiveSolid(const MO: TModifyOptions): TFaCrits;
-var
-  M: string;
-  L: Integer;
-  BS: Int64;
 begin
   Result := MO.Solid;
-  if MO.SolidGiven then Exit;
-  M := MO.Method.Split(['/'])[0];
-  if M = 'xx' then Exit;                 // CM: priorizar ratio, no partir
-  L := FaDetectLevel(MO.Method);
-  if L < 1 then Exit;
-  if L <= 3 then BS := Int64(64) shl 20 else BS := Int64(32) shl 20;
-  SetLength(Result, 1);
-  Result[0] := FaCrit(fcSize, BS);
 end;
 
 { Agrupa entradas nuevas en bloques sólidos exactamente como FreeArc 0.67 (parc_filelist):

@@ -144,19 +144,38 @@ What makes this possible (all inside `.parc`; the codecs are unchanged):
   `LzmaEncMaxThreads(P)` tells how many threads a stream can use (3 for bt4, 2 for ht4, else
   1) and `LzmaEncThreadsFor(P)` how many it would take now. `tests/lzma_threads.sh` checks
   the thread peak under `PARC_THREADS`.
-- **4x4 skips fewer compressible blocks**: FreeArc does not even try a 4x4 block whose order-0
-  entropy is >= 99 % (`r99`). PArc still skips it, unless some ~1 MB piece of it repeats
-  (>= 4 % covered by repeats of 8+ bytes): a block that mixes random MBs with compressible ones,
-  or random data repeated, is compressed. 512 MB TILIN slice: one 8 MB block, 8,388,608 ->
-  8,196,086 bytes; `-m2`…`-m5` on the exe/document/video sets 0.5–2.5 % smaller (-m5 exe:
-  ~18 % more CPU). JPEG/MP3 blocks barely repeat and are still skipped.
-- **Automatic solid blocks**: without `-s`, 64 MB for `-m1`…`-m3` and 32 MB for `-m4`…`-m9`/`-mx`. On Silesia this improved compression time and ratio at every level; small archives still use one block. `-mxx` keeps a single block for ratio.
+- **4x4 and nearly random blocks**: FreeArc does not even try a 4x4 block whose order-0
+  entropy is >= 99 % (`r99`). PArc looks at each ~1 MB piece of such a block: runs of pieces
+  that repeat (>= 4 % covered by repeats of 8+ bytes) are compressed as 4x4 blocks of their
+  own and the random pieces are stored, so the inner method never walks the random MBs (the
+  4x4 format already allows blocks of any size; old decoders read it). JPEG/MP3 barely repeat
+  and stay stored whole, as in FreeArc. Before, one repeating piece made the whole block go
+  through the inner method: TILIN.tar `-m4` with 4 threads took 78 s (FreeArc 58 s); now
+  55–61 s at 1,042 MB (FreeArc 1,050 MB), and `-m1` 9.1 s -> 6.3 s.
+- **Solid blocks like FreeArc**: without `-s` there is no size cap (only the cuts that `dict`/
+  `grzip`/`lzp`/`tta`/`mm` need and the file groups). The old automatic cap (64 MB for
+  `-m1`…`-m3`, 32 MB above) predates 4x4/LZMA threads inside a block and cut the repeats between
+  files: document set `-m6` 43.8 -> 36.6 MB (FreeArc 36.6 MB), exe set `-m6`…`-m9` -1.9 %,
+  `-m1` -1 to -15 %.
 - **GRZip adaptive LZP**: BWT blocks of 4 MB or more use `l64/h22` (fewer, longer matches); small blocks keep the fast LZP parameters. The choice is stored in each block's mode, so old decoders remain compatible. This makes `-m4` 1.2–1.4% smaller on text and many small files.
-- **Stronger and faster presets** than FreeArc's at the same level:
-  `-m1` Tornado with a 16 MB window; `-m2` 64 MB; `-m3` LZMA `fast` with `mc8`; `-m4`/`-m5`
-  binaries with `4x4:i0:lzma:8mb:max` (better and faster than `normal:32:mc8/mc32`);
-  `-m5` PPMd 12/192 MB; GRZip with a 2^20 hash (`-m2`/`-m3`) and 2^17 (`-m4`); and the text
-  group for `-m6`+ with `dict:m800:s250:75%`, 90% LZP and PPMd 16/384 MB.
+- **Presets by thread count** (`src/parc_presets_data.inc`, lines marked `// PARC`): like
+  FreeArc's `-mtN`, the `(a|b)` alternatives follow `PARC_THREADS`: one thread uses
+  single-stream methods, 2+ threads the 4x4 ones. Binaries (FreeArc's method in brackets):
+  `-m1` `rep+tor:4:h4m` [`tor:4`] / `rep+4x4:tor:3` [same]; `-m2` `rep+exe+delta+tor:6`
+  [no delta] / `4x4:tor:5`; `-m3` `lzma:96m:fast:mc6:lc4` [`mc4`] /
+  `4x4:lzma:16mb:normal:16:mc4:lc4` [`4x4:lzma:96mb:fast:mc4`, one block on 100 MB]; `-m4`
+  `lzma:96m:normal:16:mc8:lc4` / `4x4:lzma:24mb:normal:20:mc6:lc4`; `-m5`
+  `lzma:96m:normal:32:bt4:mc8` [ht4 `mc32`] / `4x4:lzma:24mb:normal:32:bt4:mc8:lc4`. Files
+  of the `$compressed` group (by extension at `-m1`) are no longer stored at `-m1`: they go
+  with the rest (with threads, 4x4 stores the random pieces).
+  `-m6`…`-m9` keep FreeArc's methods, and `-mx` is `-m9` again, as in FreeArc (its own
+  `x$text`/`x$binary` with PPMd 20/1 GB and a 64 MB REP window were larger: document set
+  +0.05 %). Text: GRZip with adaptive blocks (`:a`, FreeArc's reads end up cutting its
+  blocks too) at `-m2`/`-m3`/`-m4` with threads, `dict+lzp:32+grzip:m3:a` at `-m3`, PPMd
+  8/192 MB at `-m4`, 13/192 MB at `-m5`, 12/192 MB (`4x4`) at `-m5` with threads, and
+  `dict:m800:s250:75%`, 90% LZP and PPMd 18/512 MB for `-m6`+. `*.pak` left the
+  `$compressed` group (FreeArc's `find_type` sends them to `$precomp`, i.e. compressed).
+  Measurements and the remaining losses: TODO.md, "Presets retune".
 - **Context mixing (`cm`)**: lpaq1-style model ported to Pascal and used by `-mxx` on text and
   binaries (`-mxx` text: 1.81 MB vs 2.16 MB for FreeArc on the 20 MB corpus; binaries: 5.45 MB
   vs 5.93 MB). It stores incompressible blocks raw, and `-O3` plus hot-loop optimisations

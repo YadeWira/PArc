@@ -94,10 +94,10 @@ recompressed with that method, just like FreeArc (a "copying" command:
 
 ### Solid blocks: `-s`
 
-Without `-s`, PArc uses an automatic solid-block size: **64 MB** for `-m1`…`-m3` and
-**32 MB** for `-m4`…`-m9`/`-mx`. This lets large archives use several workers; small archives
-still fit in one block. Use `-s-`, `-s...` or an explicit `-s<N>m` to override it. `-mxx` keeps
-all data together to maximize the CM ratio.
+Without `-s`, archives are solid like FreeArc's: a block is only cut where a method needs it
+(the dictionary of `dict`/`grzip`/`lzp`, `tta`/`mm` data) or where the file group changes. The
+threads are used inside each block (4x4, multithreaded LZMA). Use `-s-`, `-s...` or an explicit
+`-s<N>m` to cut blocks, for example to extract single files faster.
 
 | option | effect |
 |---|---|

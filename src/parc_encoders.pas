@@ -133,6 +133,13 @@ end;
 function StageName(const Stage: string): string; forward;
 
 type
+  { Un bloque de 4x4 en la salida: Len bytes de InBuf desde Off, guardados o comprimidos en Data }
+  T4x4Part = record
+    Off, Len: SizeInt;
+    Stored: Boolean;
+    Data: TBytes;
+  end;
+
   T4x4EncJob = class(TParallelJob)
   public
     Inner: string;
@@ -142,6 +149,9 @@ type
     Stored: Boolean;
     MinOrder0Ratio: Double;
     TorCache: TObject;      // TTorEncCache de la etapa (nil si el método interno no es tor)
+    Parts: array of T4x4Part;   // vacío: un solo bloque (Stored/OutBuf/OutSize)
+    function CompressPart(Src: PByte; Len: SizeInt; out Data: TBytes): Boolean;
+    procedure SplitHighEntropy;
     procedure ProcessBlock;
     procedure Process; override;
   end;
@@ -195,26 +205,15 @@ begin
   Result := cov / Size;
 end;
 
-{ ¿Vale la pena intentar comprimir un bloque que tiene order-0 >= Ratio? FreeArc no lo
-  intenta nunca, pero un bloque con unos MB comprimibles entre datos aleatorios tiene el
-  order-0 del promedio (slice TILIN @488 MB, 8 MB: 0,9958; lzma lo deja en 0,977), y datos
-  aleatorios repetidos tienen order-0 1. Se mira cada trozo de ~1 MB: si alguno repite
-  (RepeatCoverage >= 4 %), sí. JPEG/MP3 casi no repiten (< 2 %) y siguen sin intentarse. }
-function WorthTrying(Buf: PByte; Size: SizeInt): Boolean;
 const
-  PIECE = 1 shl 20;
-var
-  o, n: SizeInt;
+  WORTH_PIECE = 1 shl 20;      // trozo en que se mide si un bloque casi aleatorio repite
+  WORTH_COVERAGE = 0.04;       // cobertura de repeticiones desde la que se comprime un trozo
+
+{ Largo del trozo que empieza en o (un resto de menos de 64 KB va con el anterior). }
+function WorthPieceLen(o, Size: SizeInt): SizeInt; inline;
 begin
-  o := 0;
-  while o < Size do
-  begin
-    n := Size - o;
-    if n - PIECE >= 64 * 1024 then n := PIECE;   // un resto de menos de 64 KB va con el último
-    if RepeatCoverage(Buf + o, n) >= 0.04 then Exit(True);
-    Inc(o, n);
-  end;
-  Result := False;
+  Result := Size - o;
+  if Result - WORTH_PIECE >= 64 * 1024 then Result := WORTH_PIECE;
 end;
 
 procedure T4x4EncJob.Process;
@@ -232,26 +231,87 @@ begin
   end;
 end;
 
-procedure T4x4EncJob.ProcessBlock;
+{ Comprime Src[0..Len) con el método interno; False si no achica (va guardado). }
+function T4x4EncJob.CompressPart(Src: PByte; Len: SizeInt; out Data: TBytes): Boolean;
 begin
-  // Como _4x4MTCompressor::Process: un bloque de >= 32 KB casi aleatorio (order-0 >= r%) ni
-  // se intenta, salvo que tenga trozos que sí se pueden comprimir (WorthTrying); y si no
-  // comprime, va guardado tal cual
-  if (MinOrder0Ratio <> 0) and (InLen >= 32 * 1024) and
-     (Order0Ratio(PByte(InBuf), InLen) >= MinOrder0Ratio) and
-     not WorthTrying(PByte(InBuf), InLen) then
-    Stored := True
-  else if StageName(Inner) = 'lz4' then
+  Data := nil;
+  if StageName(Inner) = 'lz4' then
     // LZ4_METHOD::DeCompressMem: versión + un solo bloque LZ4 (no el stream por bloques)
-    Stored := not Lz4EncodeMem(Inner.Split([':']), PByte(InBuf), InLen, OutBuf)
+    Result := Lz4EncodeMem(Inner.Split([':']), Src, Len, Data)
   else if StageName(Inner) = 'tor' then
     // TORNADO_METHOD::DeCompressMem con compress_all_at_once=1; OutputSize = InSize
-    Stored := not TorEncodeMem(Inner.Split([':']), PByte(InBuf), InLen, InLen, OutBuf, TorCache)
+    Result := TorEncodeMem(Inner.Split([':']), Src, Len, Len, Data, TorCache)
   else
   begin
-    OutBuf := CompressMem(Inner, PByte(InBuf), InLen);
-    Stored := Length(OutBuf) >= InLen;
+    Data := CompressMem(Inner, Src, Len);
+    Result := Length(Data) < Len;
   end;
+end;
+
+{ Bloque casi aleatorio (order-0 >= r%). FreeArc no lo intenta nunca, pero un bloque con unos
+  MB comprimibles entre datos aleatorios tiene el order-0 del promedio (slice TILIN @488 MB,
+  8 MB: 0,9958; lzma lo deja en 0,977), y datos aleatorios repetidos tienen order-0 1. Se mira
+  cada trozo de ~1 MB (RepeatCoverage): las tiradas de trozos que repiten (>= 4 %) se
+  comprimen como bloques de 4x4 propios y el resto va guardado, así el método interno no
+  recorre los MB aleatorios (TILIN.tar -m4 con 4 hilos: 78 -> 55 s, 1.032 -> 1.042 MB; -m1
+  9,1 -> 6,3 s). JPEG/MP3 casi no repiten (< 2 %): todo el bloque queda guardado, como en
+  FreeArc. El decodificador ya acepta bloques de cualquier tamaño. }
+procedure T4x4EncJob.SplitHighEntropy;
+var
+  o, n, RunOff: SizeInt;
+  Worth, RunWorth: Boolean;
+  k: Integer;
+
+  procedure AddPart(Off, Len: SizeInt; Compress: Boolean);
+  begin
+    k := Length(Parts);
+    SetLength(Parts, k + 1);
+    Parts[k].Off := Off;
+    Parts[k].Len := Len;
+    Parts[k].Stored := not (Compress and CompressPart(PByte(InBuf) + Off, Len, Parts[k].Data));
+    if Parts[k].Stored then Parts[k].Data := nil;
+  end;
+
+begin
+  Parts := nil;
+  RunOff := 0;
+  RunWorth := False;
+  o := 0;
+  while o < InLen do
+  begin
+    n := WorthPieceLen(o, InLen);
+    Worth := RepeatCoverage(PByte(InBuf) + o, n) >= WORTH_COVERAGE;
+    if (o > 0) and (Worth <> RunWorth) then
+    begin
+      AddPart(RunOff, o - RunOff, RunWorth);
+      RunOff := o;
+    end;
+    RunWorth := Worth;
+    Inc(o, n);
+  end;
+  if (Length(Parts) = 0) and not RunWorth then
+  begin
+    // Nada repite: un solo bloque guardado, como antes
+    Parts := nil;
+    Stored := True;
+    OutSize := InLen;
+    Exit;
+  end;
+  AddPart(RunOff, InLen - RunOff, RunWorth);
+end;
+
+procedure T4x4EncJob.ProcessBlock;
+begin
+  // Como _4x4MTCompressor::Process: un bloque de >= 32 KB casi aleatorio (order-0 >= r%) no
+  // se intenta entero (SplitHighEntropy); y si no comprime, va guardado tal cual
+  Parts := nil;
+  if (MinOrder0Ratio <> 0) and (InLen >= 32 * 1024) and
+     (Order0Ratio(PByte(InBuf), InLen) >= MinOrder0Ratio) then
+  begin
+    SplitHighEntropy;
+    Exit;
+  end;
+  Stored := not CompressPart(PByte(InBuf), InLen, OutBuf);
   // Guardado: se escribe InBuf tal cual (OutBuf no se usa)
   if Stored then OutSize := InLen else OutSize := Length(OutBuf);
 end;
@@ -295,17 +355,36 @@ end;
 procedure T4x4EncStage.WriteOldest;
 var
   Job: T4x4EncJob;
+  i: Integer;
 begin
   Job := T4x4EncJob(FQueue[FHead]);
   FHead := (FHead + 1) mod Length(FQueue);
   Dec(FCount);
   try
     TJobPool(FPool).WaitJob(Job);
-    // Encabezado del bloque: tamaño original (-1 = guardado) y largo de los datos
-    if Job.Stored then EmitU32($FFFFFFFF) else EmitU32(LongWord(Job.OrigSize));
-    EmitU32(LongWord(Job.OutSize));
-    if Job.Stored then Emit(PByte(Job.InBuf), Job.OutSize)
-    else Emit(PByte(Job.OutBuf), Job.OutSize);
+    // Encabezado de cada bloque: tamaño original (-1 = guardado) y largo de los datos
+    if Length(Job.Parts) > 0 then
+      for i := 0 to High(Job.Parts) do
+        with Job.Parts[i] do
+          if Stored then
+          begin
+            EmitU32($FFFFFFFF);
+            EmitU32(LongWord(Len));
+            Emit(PByte(Job.InBuf) + Off, Len);
+          end
+          else
+          begin
+            EmitU32(LongWord(Len));
+            EmitU32(LongWord(Length(Data)));
+            Emit(PByte(Data), Length(Data));
+          end
+    else
+    begin
+      if Job.Stored then EmitU32($FFFFFFFF) else EmitU32(LongWord(Job.OrigSize));
+      EmitU32(LongWord(Job.OutSize));
+      if Job.Stored then Emit(PByte(Job.InBuf), Job.OutSize)
+      else Emit(PByte(Job.OutBuf), Job.OutSize);
+    end;
     // Ya escrito: el buffer de entrada vuelve al escritor para el próximo bloque
     if FNumFree >= Length(FFree) then SetLength(FFree, FNumFree + 4);
     FFree[FNumFree] := Job.InBuf;

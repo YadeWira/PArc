@@ -82,6 +82,7 @@ Open points from this run:
   blocks should get a bigger LZMA dictionary.
 - `-m6`…`-m9` verification is 14–18 % slower than FreeArc (PPMd decode).
 - `-m4` and `-m5` produce the same size on large binaries (same effective method).
+- (perf3/presets) The three points above are fixed: see "Presets retune" below.
 
 ### Experiments already tried
 
@@ -228,6 +229,102 @@ Notes and open points:
 - `-m5` on the exe set is still 1.7 % larger than FreeArc's (78.29 MB vs 76.96 MB; preset
   choice `4x4:i0:lzma:8mb:max` vs FreeArc's `lzma:96m:normal:mc32`), though 2.5× faster.
 
+## Done — presets retune (branch perf3/presets)
+
+Goal: beat FreeArc 0.67.1 on size, compression time and decompression time at `-m1`…`-m9`/`-mx`
+with `PARC_THREADS=1` vs `-mt1` and `PARC_THREADS=4` vs `-mt4`. What changed (details in
+docs/ESTADO.md, "Presets by thread count"):
+
+- No automatic solid-block cap (document set `-m6` 43.8 -> 36.6 MB).
+- One-thread presets use FreeArc's single-stream families with a cheap edge (`tor:4:h4m`, delta
+  at `-m2`, LZMA `fast` `mc6:lc4`, `normal:16:mc8:lc4`, bt4 `normal:32:mc8` at `-m5`); the 4x4
+  presets for 2+ threads use 16–24 MB blocks (FreeArc's 96 MB blocks leave one job on 100 MB).
+  `-m4` and `-m5` are now different methods at every thread count.
+- 4x4 compresses only the repeating 1 MB pieces of a nearly random block and stores the rest.
+- GRZip with adaptive blocks (`:a`) on text; PPMd 8/192 at `-m4`, 13/192 at `-m5`.
+- `*.pak` is no longer `$compressed`; `-m1` compresses the `$compressed` group; `-mx` is `-m9`
+  again (as in FreeArc).
+
+TILIN.tar (1,876,746,240 bytes, one file). PArc = final presets; FreeArc 0.67.1 under Wine with
+its internal times. Minimum of 2+ runs each (PArc and FreeArc interleaved by level; shared
+machine, load 10–45). Compress (`a`) and verify (`t`) wall/CPU in seconds:
+
+**N=1 (PARC_THREADS=1 vs FreeArc -mt1)**
+
+| level | PArc size | FA size | Δ size | PArc a wall/CPU s | FA a wall/CPU s | PArc t wall/CPU s | FA t wall/CPU s | runs P/F | loses |
+|---|---:|---:|---:|---:|---:|---:|---:|---:|---|
+| -m1 | 1,078,738,049 | 1,081,103,174 | -0.22 % | 32.2 / 32.2 | 46.5 / 50.6 | 15.2 / 15.2 | 23.1 / 22.6 | 2/2 | - |
+| -m2 | 1,055,483,179 | 1,058,239,640 | -0.26 % | 92.2 / 92.2 | 206.1 / 209.8 | 23.4 / 23.4 | 30.4 / 29.8 | 2/2 | - |
+| -m3 | 1,022,570,069 | 1,028,395,199 | -0.57 % | 247.3 / 247.3 | 345.7 / 351.3 | 47.3 / 47.3 | 86.4 / 85.5 | 2/2 | - |
+| -m4 | 1,021,791,037 | 1,023,010,425 | -0.12 % | 358.3 / 358.2 | 447.7 / 453.7 | 49.2 / 49.2 | 84.8 / 83.9 | 2/2 | - |
+| -m5 | 1,007,585,616 | 1,021,542,174 | -1.37 % | 420.6 / 420.5 | 582.9 / 589.0 | 49.9 / 49.9 | 87.5 / 86.8 | 2/2 | - |
+| -m6 | 854,659,630 | 854,741,998 | -0.01 % | 423.9 / 423.5 | 736.0 / 741.1 | 45.4 / 45.4 | 74.7 / 73.9 | 2/2 | - |
+| -m7 | 832,483,473 | 832,609,515 | -0.02 % | 490.4 / 489.3 | 836.2 / 842.2 | 41.6 / 41.6 | 72.6 / 71.8 | 2/2 | - |
+| -m8 | 759,142,603 | 759,326,184 | -0.02 % | 473.0 / 472.9 | 719.0 / 718.9 | 40.7 / 40.7 | 63.8 / 62.8 | 2/2 | - |
+| -m9 | 755,066,875 | 756,097,042 | -0.14 % | 440.5 / 440.2 | 783.6 / 783.7 | 40.4 / 40.4 | 68.2 / 66.7 | 2/2 | - |
+
+**N=4 (PARC_THREADS=4 vs FreeArc -mt4)**
+
+| level | PArc size | FA size | Δ size | PArc a wall/CPU s | FA a wall/CPU s | PArc t wall/CPU s | FA t wall/CPU s | runs P/F | loses |
+|---|---:|---:|---:|---:|---:|---:|---:|---:|---|
+| -m1 | 1,091,769,617 | 1,103,120,152 | -1.03 % | 5.7 / 22.0 | 6.6 / 22.3 | 3.3 / 10.3 | 3.9 / 9.8 | 2/4 | - |
+| -m2 | 1,071,314,845 | 1,083,677,529 | -1.14 % | 12.2 / 45.3 | 17.4 / 60.3 | 5.1 / 15.0 | 6.0 / 15.1 | 2/2 | - |
+| -m3 | 1,044,078,773 | 1,058,918,491 | -1.40 % | 40.3 / 150.7 | 70.5 / 211.0 | 9.3 / 30.5 | 17.2 / 47.8 | 2/3 | - |
+| -m4 | 1,041,822,059 | 1,050,244,855 | -0.80 % | 47.8 / 179.9 | 51.3 / 280.9 | 8.9 / 30.2 | 17.2 / 47.3 | 2/4 | - |
+| -m5 | 1,037,925,682 | 1,046,548,284 | -0.82 % | 58.0 / 217.0 | 57.9 / 376.5 | 8.9 / 30.3 | 16.6 / 46.8 | 4/4 | compress |
+| -m6 | 854,659,630 | 854,856,052 | -0.02 % | 265.5 / 520.8 | 331.9 / 627.6 | 44.4 / 44.5 | 71.8 / 71.0 | 2/2 | - |
+| -m7 | 832,483,473 | 832,579,383 | -0.01 % | 268.1 / 529.6 | 337.9 / 618.5 | 42.4 / 42.4 | 69.1 / 68.2 | 2/2 | - |
+| -m8 | 759,142,603 | 759,690,384 | -0.07 % | 236.9 / 458.6 | 319.8 / 564.6 | 37.7 / 37.8 | 64.7 / 63.5 | 2/2 | - |
+| -m9 | 755,066,875 | 755,862,632 | -0.11 % | 222.5 / 433.7 | 325.3 / 576.4 | 33.7 / 33.7 | 65.4 / 64.2 | 3/3 | - |
+
+Sets of `diag/broad-sweep/sets` (~100 MB each; `small` = 7,896 files, 11 MB), the pure-text
+Silesia trio `sil` (22 MB) and the 512 MB TILIN slice; same method, `S`/`A`/`T` = PArc
+loses on size / compression / verification time in that cell (`r` runs below 2 are single
+interleaved runs). Full table: `logs/final_sets_table.txt` in the workstream scratch.
+
+| set | N | Δ size vs FreeArc (m1…mx) | cells where PArc loses |
+|---|---|---|---|
+| archive | 1 | -0.24 … -0.02 % | - |
+| archive | 4 | -1.29 … +0.04 % | m4:S m5:S |
+| document | 1 | -0.44 … -0.05 % | - |
+| document | 4 | -2.88 … +0.07 % | m1:S |
+| exe | 1 | -2.04 … -0.00 % | - |
+| exe | 4 | -2.14 … +0.13 % | m3:S m5:S |
+| image | 1 | -0.23 … +0.21 % | m2:S |
+| image | 4 | -2.56 … -0.01 % | - |
+| sil | 1 | -1.06 … -0.03 % | m3:T m8:A |
+| sil | 4 | -1.05 … -0.01 % | m3:T m4:T |
+| slice | 1 | -0.70 … -0.04 % | - |
+| slice | 4 | -1.68 … -0.04 % | m4:A m5:A |
+| small | 1 | -0.07 … +0.81 % | m2:S m3:S m4:S m5:S m6:S m7:S m8:S m9:S mx:S |
+| small | 4 | -1.59 … +0.62 % | m1:S m2:S m4:S m5:S m6:S m7:S m8:S m9:S mx:S |
+| text | 1 | -0.49 … -0.03 % | - |
+| text | 4 | -6.43 … -0.01 % | - |
+
+Why the remaining cells lose:
+
+- `small` (many tiny files): the directory keeps nanosecond mtimes (random sub-second parts, ~3.4
+  bytes per file after compression) and Unix modes: 127 KB vs FreeArc's 102 KB for 7,896 files,
+  i.e. +0.5 % of the archive. The data blocks are smaller than FreeArc's; the ns mtimes are a
+  user decision.
+- `exe` and `archive` `-m3`…`-m5` with 4 threads (+0.02…+0.13 %): FreeArc's `4x4:lzma:96mb`
+  is one block (one job, its LZMA match finder threaded) on these 60 MB binary blocks, i.e. a
+  96 MB dictionary; PArc's 16–24 MB 4x4 blocks run in parallel (2–3x faster) but lose that much
+  ratio on executables. Bigger blocks lose the time on TILIN/slice. Letting a 4x4 job use the
+  threaded match finder when tokens are free would fix it (scheduler work).
+- `image` `-m2` 1 thread (+0.21 %): `delta` before `tor:6` hurts these images; it wins on exe,
+  slice and TILIN.
+- `document` `-m1` 4 threads (+0.07 %): same method as FreeArc (`rep+4x4:tor:3`); PArc's split
+  of random blocks gains less than its container/directory costs here.
+- TILIN `-m5` with 4 threads: 58.0 s vs 57.9 s (minimum of 4 runs each; medians 59.7 vs 60.3
+  s), a tie: FreeArc keeps 5.8 cores busy at `-mt4` (376 s CPU), PArc the 4 of its budget
+  (217 s CPU). Slice `-m4`/`-m5` with 4 threads: PArc won both interleaved pairs at `-m4`
+  (28.3/25.8 vs 32.3/29.3 s) and one of two at `-m5` (40.5/34.7 vs 39.8/36.5 s); the table's
+  FreeArc minimum comes from earlier, less loaded runs.
+- The `sil` time cells (2.68 vs 2.74 s and the like) are within the run-to-run noise of the
+  loaded machine; the same methods win at the neighbouring levels.
+
+
 ## P1 — BCJ2 exact
 
 A BCJ2-style filter is present as experimental `-mbcj2`/`-mexe2`, with round-trip tests, but it is
@@ -285,8 +382,9 @@ Still to consider:
 - Brotli is MIT but loses to PPMd/GRZip in the relevant speed/ratio ranges.
 - `-mxx` is the absolute-ratio CM mode and is intentionally slow; `-mx` is the fast-decode
   maximum.
-- Automatic solid blocks without `-s`: 64 MB for `-m1`…`-m3`, 32 MB for `-m4`…`-m9`/`-mx`;
-  `-mxx` keeps one block.
+- Solid blocks without `-s` have no size cap, like FreeArc (the 64/32 MB automatic cap was
+  removed in perf3/presets: it cut repeats between files and the threads now work inside each
+  block).
 
 ## Release checklist
 

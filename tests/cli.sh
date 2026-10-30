@@ -95,5 +95,15 @@ ck "d sin archivo: 1"          '"$PARC" d no.parc src >/dev/null 2>&1; [ $? = 1 
 ck "r sin registro: 1"         '"$PARC" r t.parc >/dev/null 2>&1; [ $? = 1 ]'
 ck "r avisa el registro"       '"$PARC" r t.parc 2>&1 | grep -q "recovery record"'
 
+# 4x4 con un bloque casi aleatorio: solo el trozo de 1 MB que repite se comprime (bloque propio),
+# los MB aleatorios van guardados; el resultado se decodifica igual
+python3 -c "
+import os
+r=os.urandom(64*1024)
+open('mezcla.bin','wb').write(os.urandom(2<<20)+r*16+os.urandom(2<<20))"
+PARC_THREADS=2 "$PARC" a mezcla.parc mezcla.bin -m4x4:lzma:8mb:normal --no-progress >/dev/null 2>&1
+ck "4x4: trozo repetido comprimido"  '[ "$(stat -c %s mezcla.parc)" -lt 4300000 ] && [ "$(stat -c %s mezcla.parc)" -gt 4194304 ]'
+mkdir outm; ck "4x4: bloques partidos extraen" '"$PARC" x mezcla.parc -dpoutm --no-progress >/dev/null 2>&1 && cmp -s mezcla.bin outm/mezcla.bin'
+
 echo "== CLI: $fail failures"
 [ $fail -eq 0 ]
