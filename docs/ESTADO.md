@@ -193,6 +193,10 @@ What makes this possible (all inside `.parc`; the codecs are unchanged):
   above): 4x4 jobs set `LzmaSingleThreadHere` (one thread per block), the MT threads take a
   token with `BudgetEnter`/`BudgetLeave` and the semaphore waits give it back with
   `BudgetWaitBegin`/`End` (also the 2-thread mode's inline hash, run by the BT thread).
+- **Deterministic output**: the same binary, input and `PARC_THREADS` always write the same
+  archive (`tests/determinism.sh`). Different N may differ only through the preset
+  alternatives `(a|b||c)` (N=1, 2, ≥3) and lzma ht4's 1-thread match list; with the same method
+  string every codec gives the same stream for any N.
 - **Directory**: mtime in ns is stored losslessly as zigzag VInt deltas (tag 7) or, when it
   is smaller, as the sub-second part only on top of the `Time` column (tag 8): 6–10 % smaller
   directories with random nanoseconds.
@@ -228,6 +232,8 @@ build/tests/test_lzma_diff 2000
 sudo bash tests/fixes.sh          # patterns, links, full disk, FAT32
 python3 tests/fuzz.py build/linux64/parc 100 build/linux64/parc
 python3 tests/thread_budget.py    # PARC_THREADS=N: <= N hilos trabajando (muestrea /proc)
+bash tests/determinism.sh         # mismo N => mismo archivo (todos los niveles, N=1/2/4/8)
+bash tests/ppmd_asm.sh            # PPMd: bucles en ensamblador == Pascal (-dPARC_NOASM)
 # liberar/reusar un trabajo del pool apenas termina (ventana ampliada con -dPARC_RACE_TEST)
 fpc -O2 -dPARC_RACE_TEST -Fusrc -FUbuild/tests/race -FEbuild/tests tests/test_jobfree.lpr
 PARC_THREADS=4 build/tests/test_jobfree

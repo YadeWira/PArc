@@ -1,6 +1,6 @@
 # PArc — pending work and details
 
-Updated: 2026-10-21 (single-thread TILIN run, `rep` fix)  
+Updated: 2026-10-29 (output determinism, PPMd asm fix)  
 Current release: **0.0.2** (`v0.0.2`, GitHub release published).  
 Format: `.parc` only. License: GPL-2.0.
 
@@ -227,6 +227,35 @@ Notes and open points:
   41af3bc): it was the REP hashing race above. Now 77,813,396 every run.
 - `-m5` on the exe set is still 1.7 % larger than FreeArc's (78.29 MB vs 76.96 MB; preset
   choice `4x4:i0:lzma:8mb:max` vs FreeArc's `lzma:96m:normal:mc32`), though 2.5× faster.
+
+## Done — output determinism (branch perf3/determinism)
+
+Same binary, same input and same `PARC_THREADS` now always give the same archive:
+
+- Sweep: `-m1`…`-m9`, `-mx`, `-mxx` × `PARC_THREADS=1,2,4,8` × 5 runs on the exe, text, small
+  and document sets (880 archives, 8 jobs at a time on the loaded machine), plus 2 runs at
+  T=2/4/8 on the 512 MB slice: every (set, level, N) gave one md5. The `-m3` exe variation
+  of phase 3a was the REP `FFinished` race (0909464, already in main); the pre-fix build
+  still gave 77,846,004 instead of 77,813,396 in 1 of 3 runs at T=4.
+- Between different N the output may change, and that is by design: the presets' `(a|b||c)`
+  alternatives are picked by N (`-m1`…`-m5` use other methods with N=1, N=2 and N≥3), and
+  lzma ht4 `:normal/:max` uses FreeArc `-mt1`'s match list with one thread. With the same
+  method string, every codec is N-independent (4x4 with tor engine reuse, bt4 MT, REP, grzip,
+  dict/lzp/ppmd, exe/delta, parallel blocks): checked on 24 MB at N=1/2/8. `-m0` and
+  `-m6`…`-mxx` give the same archive for every N on the sets; N=4 and N=8 agree everywhere.
+- Audit: valgrind memcheck on `a -m0`…`-mxx` (T=1 and 4) and on multi-block chains (4x4 tor
+  with reused engines, rep+4x4 lzma, bt4/ht4 MT, grzip, ppmd) found no uninitialized byte
+  written or used. No seeds or clocks reach the archive (only `-si` takes the current time
+  as mtime, like FreeArc); 4x4's stored decision depends only on the block's bytes.
+- `tests/determinism.sh` (new): every level 3× at N=1/2/4/8 on a 33 MB tree, byte-identical
+  per N, N=4 = N=8, and explicit chains identical for every N (ht4 N=1 apart).
+- **PPMd asm bug found by it** (63b88d5, phase 3a): three `mov [..FBList + 4], r32` in
+  `PpmdUmCore` were assembled as 64-bit stores (FPC sizes the operand from the field, an
+  8-byte `TBlkNode`) and zeroed the next free list's `Stamp`. Encoder and decoder share the
+  core, so PArc archives still round-tripped, but the stream differed from FreeArc's/the
+  Pascal one and, with enough model (the parc binary twice, `ppmd:4`/`ppmd:6`/
+  `dict+lzp+ppmd:6`), Range reached 0 and `a` died with an access violation. Fixed with
+  `dword ptr`; `tests/ppmd_asm.sh` (new) compares asm and `-dPARC_NOASM` streams.
 
 ## P1 — BCJ2 exact
 
