@@ -1,4 +1,4 @@
-# PArc status (2026-10-20)
+# PArc status (2026-10-30)
 
 PArc is an archiver written in **Free Pascal** with its own format, **`.parc`**, for Windows 7+
 (x86/x64) and Linux x64. It does not read or write `.arc` and has no GUI: support for `.arc`
@@ -26,7 +26,7 @@ The rest of the FreeArc 0.67 tree is in git history (commit `82ea8d9`) and in Fr
 | GUI | ❌ dropped |
 | `.zip/.7z/.rar` containers | ➡ moved to FreeArc-ex (tag `entrega-arc`) |
 | SFX (creation) | ❌ dropped: `parcsfx` is not built and `-sfx` does not exist; old SFX archives are read/extracted and updating them preserves their stub |
-| Performance vs FreeArc 0.67.1 | ✅ PArc wins on size at `-m1`…`-mx`; faster through `-m9` with 4 threads (with 1 thread not everywhere: document `-m3` compresses ~1.8× slower, see TODO.md); `-mx` is fast to decode, `-mxx` is the CM maximum (see below) |
+| Performance vs FreeArc 0.67.1 | ✅ on TILIN.tar (2026-10-30) PArc wins size, compression and verify time at every `-m1`…`-m9` with 1 thread, and with 4 threads except `-m5` compression (a tie); remaining small losses per set are listed in TODO.md; `-mx` is fast to decode, `-mxx` is the CM maximum (see below) |
 
 ## What it does today
 

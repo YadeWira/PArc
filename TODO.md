@@ -1,5 +1,6 @@
 # PArc — pending work and details
 
+Updated: 2026-10-30 (phase 3b merged to main: presets + sched + determinism)  
 Updated: 2026-10-29 (output determinism, PPMd asm fix)  
 Updated: 2026-10-29 (block scheduling under the thread budget)  
 Current release: **0.0.2** (`v0.0.2`, GitHub release published).  
@@ -311,12 +312,14 @@ Same binary, same input and same `PARC_THREADS` now always give the same archive
   method string, every codec is N-independent (4x4 with tor engine reuse, bt4 MT, REP, grzip,
   dict/lzp/ppmd, exe/delta, parallel blocks): checked on 24 MB at N=1/2/8. `-m0` and
   `-m6`…`-mxx` give the same archive for every N on the sets; N=4 and N=8 agree everywhere.
+  (After merging perf3/sched, `-m1`…`-m4` also differ between N=4 and N=8: the 4x4 block size
+  for fast inner methods follows N, `Adaptive4x4Block`. Same N is still byte-identical.)
 - Audit: valgrind memcheck on `a -m0`…`-mxx` (T=1 and 4) and on multi-block chains (4x4 tor
   with reused engines, rep+4x4 lzma, bt4/ht4 MT, grzip, ppmd) found no uninitialized byte
   written or used. No seeds or clocks reach the archive (only `-si` takes the current time
   as mtime, like FreeArc); 4x4's stored decision depends only on the block's bytes.
 - `tests/determinism.sh` (new): every level 3× at N=1/2/4/8 on a 33 MB tree, byte-identical
-  per N, N=4 = N=8, and explicit chains identical for every N (ht4 N=1 apart).
+  per N, N=4 = N=8 outside `-m1`…`-m4` (`DET_NDEP`), and explicit chains identical for every N (ht4 N=1 apart).
 - **PPMd asm bug found by it** (63b88d5, phase 3a): three `mov [..FBList + 4], r32` in
   `PpmdUmCore` were assembled as 64-bit stores (FPC sizes the operand from the field, an
   8-byte `TBlkNode`) and zeroed the next free list's `Stamp`. Encoder and decoder share the
