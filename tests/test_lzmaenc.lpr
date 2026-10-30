@@ -17,7 +17,7 @@ program test_lzmaenc;
 
 uses
   {$IFDEF UNIX}cthreads,{$ENDIF}
-  SysUtils, Classes, parc_outstream, parc_stream, parc_lzma, parc_lzmaenc;
+  SysUtils, Classes, parc_outstream, parc_stream, parc_lzma, parc_lzmaenc, parc_parallel;
 
 var
   Fails, Passes, DumpN: Integer;
@@ -453,7 +453,15 @@ begin
   SaveTmp('lejos1m', d, path); RunSet('repite a 1MB-1', d, path);
 
   WriteLn('== hilos del match finder');
-  ExpectThreads('lzma:max', 0, 0, 1);       // sin concesión: un hilo
+  // Sin concesión: automático, la parte del presupuesto global (al menos 2, como mucho los
+  // que le sirven); un hilo dentro de 4x4 (LzmaSingleThreadHere) o con presupuesto de uno
+  if BudgetThreads >= 2 then ExpectThreads('lzma:max', 0, 0, 3)
+  else ExpectThreads('lzma:max', 0, 0, 1);
+  LzmaSingleThreadHere := True;
+  ExpectThreads('lzma:max', 0, 0, 1);
+  ExpectThreads('lzma:max', 0, 2, 1);       // dentro de 4x4 manda el hilo único
+  ExpectThreads('lzma:max', 2, 0, 2);       // salvo NumThreads explícito
+  LzmaSingleThreadHere := False;
   ExpectThreads('lzma:max', 0, 2, 2);
   ExpectThreads('lzma:max', 0, 8, 3);       // más de 3 no le sirven
   ExpectThreads('lzma:max', 2, 0, 2);

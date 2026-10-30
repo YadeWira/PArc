@@ -4630,11 +4630,13 @@ end;
 function LzmaEncThreadsFor(const P: TLzmaEncParams): Integer;
 begin
   Result := P.NumThreads;
-  if Result = 0 then Result := LzmaEncThreadGrant;
-  // Automático: la parte de este bloque del presupuesto global (al menos 2: los hilos toman
-  // fichas, así que no se pasa de PARC_THREADS), salvo dentro de 4x4 o con un solo hilo
+  // Dentro de 4x4 (ya reparte los bloques entre hilos), uno; si no, la concesión del llamador
   if Result = 0 then
-    if LzmaSingleThreadHere or (BudgetThreads < 2) then Result := 1
+    if LzmaSingleThreadHere then Result := 1 else Result := LzmaEncThreadGrant;
+  // Automático: la parte de este bloque del presupuesto global (al menos 2: los hilos toman
+  // fichas, así que no se pasa de PARC_THREADS); uno con presupuesto de un hilo
+  if Result = 0 then
+    if BudgetThreads < 2 then Result := 1
     else if ThreadShare > 2 then Result := ThreadShare else Result := 2;
   if Result < 1 then Result := 1;
   if Result > LzmaEncMaxThreads(P) then Result := LzmaEncMaxThreads(P);
