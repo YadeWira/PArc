@@ -71,6 +71,8 @@ type
     FFree: array of TBytes;     // buffers de entrada ya escritos, para reciclar (sin ceros ni faltas de página)
     FNumFree: Integer;
     FTorCache: TObject;         // motores de tor reusados entre bloques (TTorEncCache)
+    FHint, FIn: Int64;          // entrada esperada del bloque sólido (0: no se sabe) y recibida
+    FTarget: SizeInt;           // tamaño del bloque que se está llenando (<= FBlockSize)
     procedure SubmitBlock;
     procedure WriteOldest;
   protected
@@ -82,6 +84,17 @@ type
     constructor Create(ATarget: TOutStage; const AInner: string; ABlockSize: SizeInt);
     destructor Destroy; override;
   end;
+
+var
+  { Bytes de entrada de todo lo que se va a comprimir (lo fija el escritor del archivo; 0 si no
+    se sabe, p. ej. -si). Con pocos datos para los hilos, 4x4 achica sus bloques (ver
+    Adaptive4x4Block). }
+  Enc4x4TotalHint: Int64 = 0;
+
+threadvar
+  { Bytes de entrada del bloque sólido cuya cadena se está armando en este hilo (0: no se
+    sabe): con varios hilos, 4x4 achica sus últimos bloques (ver T4x4EncStage.DoWrite). }
+  Enc4x4BlockHint: Int64;
 
 { Arma la cadena de codificadores delante de Target (la cadena pasa a ser dueña de Target). }
 function CreateEncoderChain(const Method: string; Target: TOutStage): TOutStage;
@@ -131,6 +144,7 @@ begin
 end;
 
 function StageName(const Stage: string): string; forward;
+function FastInner4x4(const Inner: string): Boolean; forward;
 
 type
   { Un bloque de 4x4 en la salida: Len bytes de InBuf desde Off, guardados o comprimidos en Data }
@@ -339,6 +353,7 @@ begin
   if Threads > 0 then SetLength(FQueue, Threads + 1) else SetLength(FQueue, 1);
   FPool := TJobPool.Create(Threads, Length(FQueue));
   if StageName(AInner) = 'tor' then FTorCache := TTorEncCache.Create;
+  if (BudgetThreads >= 2) and FastInner4x4(AInner) then FHint := Enc4x4BlockHint;
   EmitU32(0);   // versión del formato 4x4 (se escribe aunque no haya datos, como el C)
 end;
 
@@ -440,19 +455,41 @@ begin
 end;
 
 procedure T4x4EncStage.DoWrite(Buf: PByte; Count: SizeInt);
+const
+  MB = 1 shl 20;
 var
   n: SizeInt;
+  Rem, Low: Int64;
 begin
   while Count > 0 do
   begin
     if Length(FCur) = 0 then SetLength(FCur, FBlockSize);
-    n := FBlockSize - FLen;
+    if FLen = 0 then
+    begin
+      // Bloque nuevo. Cerca del final del bloque sólido (menos de dos bloques por llegar), un
+      // cuarto de lo que falta, hasta FBlockSize/4: el final son varios bloques chicos que
+      // terminan casi juntos en vez de uno o dos grandes con los demás hilos sin trabajo. Lo
+      // que falta se estima con el tamaño de entrada del bloque sólido (con rep delante llega
+      // menos, y el final más chico casi no se da), así que solo depende de los datos: la
+      // salida es la misma en cada corrida
+      FTarget := FBlockSize;
+      Rem := FHint - FIn;
+      if (FHint > 0) and (Rem < 2 * Int64(FBlockSize)) then
+      begin
+        Low := FBlockSize div 4;
+        if Low < MB then Low := MB;
+        if (Rem + 3) div 4 > Low then Low := (Rem + 3) div 4;
+        if Low < FTarget then FTarget := Low;
+      end;
+    end;
+    n := FTarget - FLen;
     if n > Count then n := Count;
     Move(Buf^, FCur[FLen], n);
     Inc(FLen, n);
+    Inc(FIn, n);
     Inc(Buf, n);
     Dec(Count, n);
-    if FLen = FBlockSize then SubmitBlock;
+    if FLen = FTarget then SubmitBlock;
   end;
 end;
 
@@ -607,6 +644,62 @@ begin
   Result := string.Join('+', Stages);
 end;
 
+{ Tamaño de bloque de 4x4 según los datos y los hilos: si todo lo que se comprime
+  (Enc4x4TotalHint) no da al menos 3 bloques por hilo, los bloques se achican hasta eso (en MB
+  enteros, como mucho a la cuarta parte y no menos de 1 MB). Si no, el final de cada archivo
+  era uno o dos bloques grandes con los demás hilos sin trabajo (exe -m1, 4 hilos: 8 bloques
+  de 16 MB). El tamaño depende solo de los datos y de PARC_THREADS: la salida es la misma en
+  cada corrida con el mismo N. Bloques más chicos limitan la ventana del método interno (en
+  datos de muchos archivos casi no cuesta; en un archivo grande la regla no cambia nada). }
+function Adaptive4x4Block(BlockSize: SizeInt): SizeInt;
+const
+  MB = 1 shl 20;
+var
+  Want, c: Int64;
+begin
+  Result := BlockSize;
+  if (BudgetThreads < 2) or (Enc4x4TotalHint <= 0) or (BlockSize <= MB) then Exit;
+  Want := 3 * BudgetThreads;
+  if Enc4x4TotalHint div BlockSize >= Want then Exit;
+  c := (Enc4x4TotalHint + Want - 1) div Want;
+  c := (c + MB - 1) div MB * MB;
+  if c < BlockSize div 4 then c := BlockSize div 4;
+  if c < MB then c := MB;
+  if c < BlockSize then Result := c;
+end;
+
+{ ¿Método interno rápido (tor, lz4, lzma fast)? Solo con esos 4x4 achica bloques
+  (Adaptive4x4Block y el final de T4x4EncStage.DoWrite): son los niveles -m1..-m3, donde el
+  tiempo pesa; con lzma normal/max, ppmd, etc. el bloque grande vale más por el tamaño (y
+  esos niveles ya sobran en velocidad). }
+function FastInner4x4(const Inner: string): Boolean;
+begin
+  case StageName(Inner) of
+    'tor', 'lz4': Result := True;
+    'lzma': Result := ParseLzmaEncParams(Inner.Split([':'])).Algorithm = 0;
+  else
+    Result := False;
+  end;
+end;
+
+{ ¿El método 4x4 fija su tamaño de bloque (b<mem>)? }
+function Has4x4BlockParam(const Stage: string): Boolean;
+var
+  Params: TStringArray;
+  k: Integer;
+begin
+  Params := Stage.Split([':']);
+  Result := False;
+  for k := 1 to High(Params) do
+    if (Params[k] <> '') and ((Params[k][1] in ['0'..'9']) or
+       ((Length(Params[k]) > 1) and (Params[k][2] in ['0'..'9']))) then
+    begin
+      if Params[k][1] = 'b' then Exit(True);
+    end
+    else
+      Break;   // desde acá, el método interno
+end;
+
 function LimitMethodToSize(const Method: string; DataSize: Int64): string;
 begin
   // limitDictionary + el texto canónico de cada compresor (parc_canon, PA-Lab): el mismo
@@ -651,6 +744,7 @@ begin
     '4x4':
       begin
         Parse4x4(Stage, Inner, Bs);
+        if not Has4x4BlockParam(Stage) and FastInner4x4(Inner) then Bs := Adaptive4x4Block(Bs);
         Result := T4x4EncStage.Create(Target, Inner, Bs);
         // r<percent> (antes del método interno)
         for k := 1 to High(Parts) do

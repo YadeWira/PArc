@@ -26,7 +26,7 @@ The rest of the FreeArc 0.67 tree is in git history (commit `82ea8d9`) and in Fr
 | GUI | ❌ dropped |
 | `.zip/.7z/.rar` containers | ➡ moved to FreeArc-ex (tag `entrega-arc`) |
 | SFX (creation) | ❌ dropped: `parcsfx` is not built and `-sfx` does not exist; old SFX archives are read/extracted and updating them preserves their stub |
-| Performance vs FreeArc 0.67.1 | ✅ PArc wins on size at `-m1`…`-mx`; faster through `-m9`; `-mx` is fast to decode, `-mxx` is the CM maximum (see below) |
+| Performance vs FreeArc 0.67.1 | ✅ PArc wins on size at `-m1`…`-mx`; faster through `-m9` with 4 threads (with 1 thread not everywhere: document `-m3` compresses ~1.8× slower, see TODO.md); `-mx` is fast to decode, `-mxx` is the CM maximum (see below) |
 
 ## What it does today
 
@@ -221,8 +221,35 @@ What makes this possible (all inside `.parc`; the codecs are unchanged):
   `BudgetWaitBegin`/`End` (also the 2-thread mode's inline hash, run by the BT thread).
 - **Deterministic output**: the same binary, input and `PARC_THREADS` always write the same
   archive (`tests/determinism.sh`). Different N may differ only through the preset
-  alternatives `(a|b||c)` (N=1, 2, ≥3) and lzma ht4's 1-thread match list; with the same method
-  string every codec gives the same stream for any N.
+  alternatives `(a|b||c)` (N=1, 2, ≥3), lzma ht4's 1-thread match list, and the 4x4 block size
+  for fast inner methods (see block scheduling below); otherwise, with the same method string,
+  every codec gives the same stream for any N.
+- **Block scheduling under the budget** (branch perf3/sched):
+  - Planning: grouping the sorted runs by method was quadratic (an insertion sort that split
+    both method strings on every comparison: thousands of runs with many small files); now the
+    few distinct methods are sorted and the runs bucketed. File-type detection (`GroupType`,
+    which opens and samples files) runs per extension run in the thread pool. Same archives.
+  - Solid blocks go into the archive **largest first** (LPT): the threads start with what takes
+    longest and the run ends with small blocks; `t`/`x` submit blocks in archive order, so they
+    get the same order. Only block order (and listing order) changes; not on updates that copy
+    or re-read old blocks. The sort is a stable merge sort of indexes with one permutation of
+    the groups (`SortGroupsBySize`, O(G log G): with `-s-` there is one group per file);
+    `tests/block_order.sh` checks the order, its stability and the round trip.
+  - `4x4` with a fast inner method (`tor`, `lz4`, `lzma:fast`) and no explicit `b<size>`:
+    if everything being compressed (`Enc4x4TotalHint`) gives fewer than 3 blocks per thread,
+    blocks shrink to that (whole MB, down to a quarter, at least 1 MB); and near the end of
+    each solid block (less than two blocks of input left, from `Enc4x4BlockHint`) each new
+    4x4 block is a quarter of what is left, down to a quarter block, so a solid block ends with
+    several small pieces instead of one or two big ones. Both depend only on the data and on
+    `PARC_THREADS` (and are off with 1 thread): **archive bytes depend on N** (they already did
+    through the `(a|b)` presets and ht4) but are identical across runs with the same N.
+  - LZMA `bt4` (same output with any number of threads) always uses its 3 threads when the
+    budget has 3 or more, even if the block's share is smaller: the threads hold tokens only
+    while they work, so the last block picks up the tokens the others leave.
+  - Tried and dropped: a pipe stage that runs a decoder in its own thread (ppmd | lzp,
+    lzma | delta+exe+rep): no gain, lzp and dict decode whole blocks (lzp reads its match
+    lengths from the end of the block) and lzma's consumers are cheap; letting the 4x4 writer
+    queue grow while its oldest block runs (instead of waiting for it): no measurable gain.
 - **Directory**: mtime in ns is stored losslessly as zigzag VInt deltas (tag 7) or, when it
   is smaller, as the sub-second part only on top of the `Time` column (tag 8): 6–10 % smaller
   directories with random nanoseconds.

@@ -4635,8 +4635,12 @@ begin
     if LzmaSingleThreadHere then Result := 1 else Result := LzmaEncThreadGrant;
   // Automático: la parte de este bloque del presupuesto global (al menos 2: los hilos toman
   // fichas, así que no se pasa de PARC_THREADS); uno con presupuesto de un hilo
+  // bt4 da la misma salida con cualquier cantidad de hilos: con presupuesto para 3, los 3
+  // aunque a este bloque le toque menos (los hilos toman fichas solo mientras trabajan, y así
+  // el último bloque usa las que dejan libres los que ya terminaron)
   if Result = 0 then
     if BudgetThreads < 2 then Result := 1
+    else if (P.MatchFinder = mfBT4) and (BudgetThreads >= 3) then Result := 3
     else if ThreadShare > 2 then Result := ThreadShare else Result := 2;
   if Result < 1 then Result := 1;
   if Result > LzmaEncMaxThreads(P) then Result := LzmaEncMaxThreads(P);
