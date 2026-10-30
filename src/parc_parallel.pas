@@ -126,6 +126,11 @@ procedure TParallelJob.ResetForReuse;
 begin
   FErrClass := nil;
   FErrMsg := '';
+  // También FFinished: si quedaba en 1 del uso anterior, WaitJob volvía sin esperar y el
+  // llamador leía resultados a medio escribir (REP con hilos de hashing: hashes viejos,
+  // salida distinta en cada corrida y hasta 1,6% más grande). TParallelBlockStage (4x4)
+  // espera el evento directamente y no se veía afectado.
+  InterlockedExchange(FFinished, 0);
   RTLEventResetEvent(FDone);
 end;
 
