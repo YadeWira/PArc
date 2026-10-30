@@ -325,6 +325,31 @@ Why the remaining cells lose:
   loaded machine; the same methods win at the neighbouring levels.
 
 
+### Review fixes (perf3/presets)
+
+Four review findings on the retune, checked against FreeArc on the ~100 MB sets (PArc
+`PARC_THREADS=N` vs `-mtN`, FreeArc internal times, 2 interleaved runs, load 2–7):
+
+- `-m5` with 1 thread, audio set: `bt4:mc8` lost by 23 KB (76,475,171 vs 76,451,963). Now
+  `lzma:96m:normal:32:bt4:mc8:lc4:pb1`: 76,381,929 (lc4 alone lost 0.9 KB on fonts, pb1 wins it
+  back), no slower; all ten sets win at `-m5` N=1 except `small` (directory, as before).
+- `-m4` with 4 threads, large set: `4x4:lzma:24mb:normal:20:mc6:lc4` lost by 23 KB (and archive
+  by 22 KB). Now `…:mc6:lc5:pb1`: large 68,828,040 vs 69,129,232 (-0.44 %), archive
+  63,853,651 vs 63,864,061, same speed (TILIN 41.0 s vs 46.3 s for FreeArc, 1,040,813,664 vs
+  1,050,244,855). Stronger match finding (bt4, mc8..mc12, fb24..fb32) also fixed large but made
+  the TILIN slice 4–15 % slower; `mc12` took TILIN to 46.1–46.4 s vs FreeArc's 45.2–46.9 s.
+- `-m4` with 4 threads, document set 9.6 s vs FreeArc 10.3 s: REP shrinks its 66 MB binary block
+  to ~47 MB and 24 MB 4x4 blocks leave two jobs for four threads. New `Balance4x4`
+  (parc_encoders): with J = ceil(S/B) < N jobs and a nearly full last block, J equal blocks
+  (`4x4:b<kb>`): 5.2 s. Not applied with J >= N or a small last block (equal blocks there cost
+  0.03–0.7 % on exe/archive/document at `-m4`/`-m5`).
+- Audio -m4 vs -m3 with 4 threads (76.49 vs 76.43 MB) and -m5 vs -m4 with 1 thread: kept.
+  These levels win on the other sets and on TILIN, and FreeArc is not monotonic there either
+  (audio `-mt1`: `-m4` 76,432,228 < `-m5` 76,451,963).
+- Rejected: matching base 3e8f8cb on image/archive/audio/document `-m3`/`-m4` N=4 (its
+  `4x4:lzma:8mb:max` took 78 s on TILIN `-m4` N=4 vs FreeArc's 46–51 s). The losses vs
+  FreeArc that remain are the ones listed above (`small`; exe/archive `-m3`/`-m5` N=4).
+
 ## P1 — BCJ2 exact
 
 A BCJ2-style filter is present as experimental `-mbcj2`/`-mexe2`, with round-trip tests, but it is

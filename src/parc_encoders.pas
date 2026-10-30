@@ -566,11 +566,52 @@ begin
   if BlockSize = 0 then BlockSize := 8 shl 20;
 end;
 
+{ 4x4 de lzma sin :b explícito con 2+ hilos: bloques parejos cuando el último bloque está
+  casi lleno. Con S bytes en bloques de B quedan J = ceil(S/B) trabajos; S es lo que entra al
+  método y REP puede achicarlo antes de 4x4: documentos, 66 MB en bloques de 24 MB (24+24+18)
+  que REP deja en ~47 MB, son 24+23, dos trabajos con 4 hilos (9,9 s). En J bloques iguales
+  (22+22+3 después de REP) son tres (5,3 s, +0,02 %). Sólo si J < N (con J >= N cada hilo ya
+  tiene un trabajo y sólo se acortaría la cola: 4 bloques iguales en vez de 24x3+23 eran
+  +0,03 % en archive -m5, +0,2 % en documentos -m5) y los bloques se achican a lo sumo 1/8:
+  más chicos pierden relación (ejecutables, 24+24+11 -> 3x19,7 MB: +0,05 %; S/N o el
+  múltiplo de N siguiente, 0,1..0,7 %). tor/lz4 no se tocan (su bloque es su ventana). El :b
+  queda en el método guardado; el decodificador lee bloques de cualquier tamaño. }
+function Balance4x4(const Method: string; DataSize: Int64): string;
+var
+  Stages: TStringArray;
+  Inner, Own: string;
+  Bs: SizeInt;
+  N, i: Integer;
+  B, J: Int64;
+begin
+  Result := Method;
+  N := BudgetThreads;
+  if (N < 2) or (DataSize <= 0) then Exit;
+  Stages := Method.Split(['+']);
+  for i := 0 to High(Stages) do
+  begin
+    if StageName(Stages[i]) <> '4x4' then Continue;
+    Parse4x4(Stages[i], Inner, Bs);
+    if StageName(Inner) <> 'lzma' then Continue;
+    Own := Copy(Stages[i], 1, Length(Stages[i]) - Length(Inner));   // "4x4:" y sus parámetros
+    if (Pos(':b', Own) > 0) or (Pos(':B', Own) > 0) then Continue;   // :b explícito
+    if DataSize <= Bs then Continue;           // un solo trabajo: nada que repartir
+    J := (DataSize + Bs - 1) div Bs;
+    if J >= N then Continue;                  // un trabajo por hilo o más: sólo acortaría la cola
+    B := (DataSize + J - 1) div J;
+    if B < Int64(Bs) - Bs div 8 then Continue;   // el resto es chico: termina antes igual
+    B := (B + 65535) and not Int64(65535);      // múltiplo de 64 KB
+    if B = Bs then Continue;
+    Stages[i] := '4x4:b' + IntToStr(B div 1024) + 'kb:' + Copy(Stages[i], 5, MaxInt);
+  end;
+  Result := string.Join('+', Stages);
+end;
+
 function LimitMethodToSize(const Method: string; DataSize: Int64): string;
 begin
   // limitDictionary + el texto canónico de cada compresor (parc_canon, PA-Lab): el mismo
   // método que guarda FreeArc para un bloque de ese tamaño
-  Result := LimitAndCanonize(Method, DataSize);
+  Result := LimitAndCanonize(Balance4x4(Method, DataSize), DataSize);
 end;
 
 function EncoderAvailable(const Method: string): Boolean;

@@ -158,14 +158,21 @@ What makes this possible (all inside `.parc`; the codecs are unchanged):
   files: document set `-m6` 43.8 -> 36.6 MB (FreeArc 36.6 MB), exe set `-m6`…`-m9` -1.9 %,
   `-m1` -1 to -15 %.
 - **GRZip adaptive LZP**: BWT blocks of 4 MB or more use `l64/h22` (fewer, longer matches); small blocks keep the fast LZP parameters. The choice is stored in each block's mode, so old decoders remain compatible. This makes `-m4` 1.2–1.4% smaller on text and many small files.
+- **Even 4x4 blocks** (`Balance4x4` in `parc_encoders`, applied with the dictionary limit):
+  with 2+ threads, a 4x4 of LZMA without its own `:b` whose `J = ceil(S/B)` jobs are fewer
+  than the threads and whose last block is nearly full (equal blocks at most 1/8 smaller)
+  splits the solid block into J equal blocks (`4x4:b<kb>` in the stored method). REP shrinks
+  the stream before 4x4: the document set's 66 MB binary block became 24+23 MB, two jobs on
+  four threads (9.9 s at `-m4`); now 22+22+3, 5.3 s. With J >= N, or a small last block,
+  nothing changes: smaller blocks only cost ratio there (executables +0.05..0.7 %).
 - **Presets by thread count** (`src/parc_presets_data.inc`, lines marked `// PARC`): like
   FreeArc's `-mtN`, the `(a|b)` alternatives follow `PARC_THREADS`: one thread uses
   single-stream methods, 2+ threads the 4x4 ones. Binaries (FreeArc's method in brackets):
   `-m1` `rep+tor:4:h4m` [`tor:4`] / `rep+4x4:tor:3` [same]; `-m2` `rep+exe+delta+tor:6`
   [no delta] / `4x4:tor:5`; `-m3` `lzma:96m:fast:mc6:lc4` [`mc4`] /
   `4x4:lzma:16mb:normal:16:mc4:lc4` [`4x4:lzma:96mb:fast:mc4`, one block on 100 MB]; `-m4`
-  `lzma:96m:normal:16:mc8:lc4` / `4x4:lzma:24mb:normal:20:mc6:lc4`; `-m5`
-  `lzma:96m:normal:32:bt4:mc8` [ht4 `mc32`] / `4x4:lzma:24mb:normal:32:bt4:mc8:lc4`. Files
+  `lzma:96m:normal:16:mc8:lc4` / `4x4:lzma:24mb:normal:20:mc6:lc5:pb1`; `-m5`
+  `lzma:96m:normal:32:bt4:mc8:lc4` [ht4 `mc32`] / `4x4:lzma:24mb:normal:32:bt4:mc8:lc4`. Files
   of the `$compressed` group (by extension at `-m1`) are no longer stored at `-m1`: they go
   with the rest (with threads, 4x4 stores the random pieces).
   `-m6`…`-m9` keep FreeArc's methods, and `-mx` is `-m9` again, as in FreeArc (its own

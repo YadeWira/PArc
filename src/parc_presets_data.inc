@@ -56,7 +56,7 @@ const
     '2binary = tor:6                       | ex2binary',
     '3binary = lzma: 96m:fast  :32:mc6:lc4 | ex3binary',  // PARC: mc6 y lc4
     '4binary = lzma: 96m:normal:16:mc8:lc4 | | ex4binary',  // PARC: lc4
-    '5binary = lzma: 96m:normal:32:bt4:mc8 | | ex5binary',  // PARC: bt4 con 8 ciclos: más chico que ht4 mc32 y no más lento
+    '5binary = lzma: 96m:normal:32:bt4:mc8:lc4:pb1 | | ex5binary',  // PARC: bt4 con 8 ciclos, lc4 y pb1: más chico que ht4 mc32 y no más lento (sin lc4 perdía en audio; lc4 solo, en fuentes)
     '6binary = lzma: 32m:max',
     '7binary = lzma: 64m:max',
     '8binary = lzma:128m:max',
@@ -135,7 +135,7 @@ const
     'ex1binary = xtor:3:8mb',
     'ex2binary = xtor:5',
     'ex3binary = 4x4:lzma:16mb:normal:16:mc4:lc4',  // PARC: bloques de 16 MB (FreeArc: 96 MB, casi sin paralelismo)
-    'ex4binary = 4x4:lzma:24mb:normal:20:mc6:lc4',  // PARC: ht4 con 6 ciclos, fb20 y lc4
+    'ex4binary = 4x4:lzma:24mb:normal:20:mc6:lc5:pb1',  // PARC: ht4 con 6 ciclos, fb20, lc5 y pb1 (lc4/pb2 perdía en 'large' y 'archive'; más ciclos o fb, lentos en TILIN)
     'ex5binary = 4x4:lzma:24mb:normal:32:bt4:mc8:lc4',  // PARC: bt4 con 8 ciclos y lc4
     'ex6binary = 4x4:i0:lzma: 8mb:max',
     'ex7binary = 4x4:i0:lzma:16mb:max',
