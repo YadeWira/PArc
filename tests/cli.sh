@@ -95,5 +95,39 @@ ck "d sin archivo: 1"          '"$PARC" d no.parc src >/dev/null 2>&1; [ $? = 1 
 ck "r sin registro: 1"         '"$PARC" r t.parc >/dev/null 2>&1; [ $? = 1 ]'
 ck "r avisa el registro"       '"$PARC" r t.parc 2>&1 | grep -q "recovery record"'
 
+# 4x4 con un bloque casi aleatorio: solo el trozo de 1 MB que repite se comprime (bloque propio),
+# los MB aleatorios van guardados; el resultado se decodifica igual
+python3 -c "
+import os
+r=os.urandom(64*1024)
+open('mezcla.bin','wb').write(os.urandom(2<<20)+r*16+os.urandom(2<<20))"
+PARC_THREADS=2 "$PARC" a mezcla.parc mezcla.bin -m4x4:lzma:8mb:normal --no-progress >/dev/null 2>&1
+ck "4x4: trozo repetido comprimido"  '[ "$(stat -c %s mezcla.parc)" -lt 4300000 ] && [ "$(stat -c %s mezcla.parc)" -gt 4194304 ]'
+mkdir outm; ck "4x4: bloques partidos extraen" '"$PARC" x mezcla.parc -dpoutm --no-progress >/dev/null 2>&1 && cmp -s mezcla.bin outm/mezcla.bin'
+
+# 4x4 de lzma con 2+ hilos: si los bloques entran en una vuelta y el último está casi lleno se
+# reparten parejos (2,8 MB en bloques de 1 MB con 4 hilos: 3 de 960 KB, no 1+1+0,8); con un
+# resto chico (2,2 MB: 1+1+0,2), más trabajos que hilos o un hilo, sin :b. Parejos extraen igual.
+python3 -c "
+import random
+r=random.Random(7); w=[''.join(r.choice('abcdefghij') for _ in range(r.randint(2,9))) for _ in range(4000)]
+t=' '.join(r.choice(w) for _ in range(600000))
+open('par.txt','w').write(t[:2936013]); open('par22.txt','w').write(t[:2306867])"
+PARC_THREADS=4 "$PARC" a par4.parc par.txt -m4x4:lzma:1mb:normal --no-progress >/dev/null 2>&1
+PARC_THREADS=4 "$PARC" a par22.parc par22.txt -m4x4:lzma:1mb:normal --no-progress >/dev/null 2>&1
+PARC_THREADS=2 "$PARC" a par2.parc par.txt -m4x4:lzma:1mb:normal --no-progress >/dev/null 2>&1
+PARC_THREADS=1 "$PARC" a par1.parc par.txt -m4x4:lzma:1mb:normal --no-progress >/dev/null 2>&1
+ck "4x4: bloques parejos (4 hilos)"  '"$PARC" lb par4.parc | grep -q "4x4:b960kb:lzma"'
+ck "4x4: resto chico sin :b"         '"$PARC" lb par22.parc | grep "4x4:" | grep -vq ":b"'
+ck "4x4: más trabajos que hilos"     '"$PARC" lb par2.parc | grep "4x4:" | grep -vq ":b"'
+ck "4x4: un hilo sin :b"             '"$PARC" lb par1.parc | grep "4x4:" | grep -vq ":b"'
+mkdir outp; ck "4x4: parejos extraen" '"$PARC" x par4.parc -dpoutp --no-progress >/dev/null 2>&1 && cmp -s par.txt outp/par.txt'
+# presets con hilos/sin hilos (perf3/presets fix): -m5 de un hilo con pb1 y lc4, -m4 con 4 hilos pb1 y lc5
+head -c 300000 "$PARC" > bin.dat
+PARC_THREADS=1 "$PARC" a p51.parc bin.dat -m5 --no-progress >/dev/null 2>&1
+PARC_THREADS=4 "$PARC" a p44.parc bin.dat -m4 --no-progress >/dev/null 2>&1
+ck "-m5 un hilo: bt4 pb1 lc4"        '"$PARC" lb p51.parc | grep -q "lzma:[^ ]*bt4[^ ]*pb1:lc4"'
+ck "-m4 4 hilos: 4x4 pb1 lc5"        '"$PARC" lb p44.parc | grep -q "4x4:[^ ]*lzma:[^ ]*mc6:pb1:lc5"'
+
 echo "== CLI: $fail failures"
 [ $fail -eq 0 ]

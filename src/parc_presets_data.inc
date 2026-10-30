@@ -1,14 +1,13 @@
 { Tabla de sustitución de métodos y arc.groups tomada de FreeArc 0.67 (builtinMethodSubsts).
   PArc la mantiene a mano: los ajustes marcados con // PARC buscan mejor relación que
-  FreeArc en el mismo nivel (ver docs/ESTADO.md). }
+  FreeArc en el mismo nivel (ver docs/ESTADO.md). arc.groups es el de FreeArc salvo '*.pak',
+  que acá queda solo en $precomp: FreeArc (find_type) los comprime como binarios, y con la
+  línea de $compressed PArc los guardaba sin comprimir en -m1. }
 
 const
-  BUILTIN_METHOD_SUBSTS: array[0..151] of string = (
+  BUILTIN_METHOD_SUBSTS: array[0..142] of string = (
     ';High-level method definitions',
-    'x  = 9            ;highest compression mode using only internal algorithms',
-    'x$text = dict:p:128m:75%:l8192:m800:s250+lzp:160m:145:d1m:s32:h23:90%+ppmd:20:1g',
-    'x$binary = rep+exe+delta+lzma:256m:max',
-    'x$obj = rep+exe+delta+lzma:256m:max',
+    'x  = 9            ;highest compression mode using only internal algorithms',  // PARC: igual que -m9, como FreeArc (los x$text/x$binary con PPMd 20/1 GB y rep de 64 MB eran más grandes)
     'xx$text = dict:p:128m:75%:l8192:m800:s250+lzp:160m:145:d1m:s32:h23:90%+cm',
     'xx$binary = rep+exe+delta+cm',
     'xx$obj = rep+exe+delta+cm',
@@ -22,10 +21,10 @@ const
     '',
     ';Text files compression with slow decompression',
     '1t  = 1b',
-    '2t  = grzip:m4:8m:32:h15                                             | ex2t',
-    '3t  = dict:p: 64m:85% + lzp: 64m: 24:h20        :92% + grzip:m3:8m:l | ex3t',
-    '4t  = dict:p: 64m:80% + lzp: 64m: 65:d1m:s16:h20:90% + ppmd:8:96m    | ex4t',
-    '5t  = dict:p: 64m:80% + lzp: 80m:105:d1m:s32:h22:92% + ppmd:12:192m  | ex5t',
+    '2t  = grzip:m4:8m:32:h18:a                                           | ex2t',  // PARC: bloque adaptativo, hash 2^18
+    '3t  = dict:p: 64m:85% + lzp: 64m: 32:h20        :92% + grzip:m3:8m:l:a | ex3t',  // PARC: LZP 32, bloque adaptativo
+    '4t  = dict:p: 64m:80% + lzp: 64m: 65:d1m:s16:h20:90% + ppmd:8:192m   | ex4t',  // PARC: 192 MB
+    '5t  = dict:p: 64m:80% + lzp: 80m:105:d1m:s32:h22:92% + ppmd:13:192m  | ex5t',  // PARC: orden 13
     '#t  = dict:p:128m:75%:l8192:m800:s250 + lzp:160m:145:d1m:s32:h23:90% + ppmd:18:512m',  // PARC: más fuerte que FreeArc
     '',
     ';Binary files compression with slow and/or memory-expensive decompression',
@@ -49,21 +48,15 @@ const
     '',
     ';Binary files compression with fast decompression',
     '1xb = 1binary',
-    '2xb = 2binary',
+    '2xb = delta + 2binary | 2binary',  // PARC: delta con un hilo (con más, es una etapa en serie)
     '#xb = delta + #binary',
     '',
     ';Binary files compression with fast decompression',
-    '1binary = tor:4                       | ex1binary',
+    '1binary = tor:4:8mb:h4m               | ex1binary',  // PARC: hash 4 MB
     '2binary = tor:6                       | ex2binary',
-    '3binary = lzma: 96m:fast  :32:mc4     | ex3binary',
-    '4binary = lzma: 96m:normal:16:mc8   | | ex4binary',
-    '5binary = lzma: 96m:normal:32:mc32  | | ex5binary',
-    '2$binary = 2rep+exe+delta+4x4:lzma:8mb:fast',
-    '2$obj    = 2rep+exe+delta+4x4:lzma:8mb:fast',
-    '3$binary = 3rep+exe+delta+4x4:lzma:8mb:normal',
-    '3$obj    = 3rep+exe+delta+4x4:lzma:8mb:normal',
-    '5$binary = 5rep+exe+delta+4x4:lzma:8mb:max',
-    '5$obj    = 5rep+exe+delta+4x4:lzma:8mb:max',
+    '3binary = lzma: 96m:fast  :32:mc6:lc4 | ex3binary',  // PARC: mc6 y lc4
+    '4binary = lzma: 96m:normal:16:mc8:lc4 | | ex4binary',  // PARC: lc4
+    '5binary = lzma: 96m:normal:32:bt4:mc8:lc4:pb1 | | ex5binary',  // PARC: bt4 con 8 ciclos, lc4 y pb1: más chico que ht4 mc32 y no más lento (sin lc4 perdía en audio; lc4 solo, en fuentes)
     '6binary = lzma: 32m:max',
     '7binary = lzma: 64m:max',
     '8binary = lzma:128m:max',
@@ -103,7 +96,7 @@ const
     '#x$bmp = mm+#binary',
     '',
     ';Quick & dirty compression for already compressed data',
-    '1$compressed   = storing | 1rep',
+    '1$compressed   = ',  // PARC: comprimidos por extensión van con el resto (4x4 saltea los aleatorios)
     '2$compressed   = 2rep + 1binary',
     '3$compressed   = 3rep + 1binary',
     '4$compressed   = 4rep + etor:c3',
@@ -139,26 +132,26 @@ const
     'ex2b = ex2binary',
     'ex#b = delta + ex#binary',
     '',
-    'ex1binary = xtor:5',  // PARC: ventana 16m, nivel máximo (FreeArc: 8m/nivel 3)
-    'ex2binary = xtor:6',  // PARC: ventana 64m (FreeArc: 16m)
-    'ex3binary = xlzma:96mb:fast  :32:mc8',  // PARC: mc8, más chico y aún más rápido
-    'ex4binary = 4x4:i0:lzma: 8mb:max',  // PARC: más rápido y más chico que normal:32:mc8
-    'ex5binary = 4x4:i0:lzma: 8mb:max',  // PARC: mc32 era 1,4x más lento en binarios
+    'ex1binary = xtor:3:8mb',
+    'ex2binary = xtor:5',
+    'ex3binary = 4x4:lzma:16mb:normal:16:mc4:lc4',  // PARC: bloques de 16 MB (FreeArc: 96 MB, casi sin paralelismo)
+    'ex4binary = 4x4:lzma:24mb:normal:20:mc6:lc5:pb1',  // PARC: ht4 con 6 ciclos, fb20, lc5 y pb1 (lc4/pb2 perdía en 'large' y 'archive'; más ciclos o fb, lentos en TILIN)
+    'ex5binary = 4x4:lzma:24mb:normal:32:bt4:mc8:lc4',  // PARC: bt4 con 8 ciclos y lc4
     'ex6binary = 4x4:i0:lzma: 8mb:max',
     'ex7binary = 4x4:i0:lzma:16mb:max',
     'ex8binary = 4x4:i0:lzma:32mb:max',
     'ex9binary = 4x4:i0:lzma:64mb:max',
     '',
     'ex1t = ex1b',
-    'ex2t = grzip:m4:h20',  // PARC: hash 2^20
-    'ex3t = grzip:m2:h20',  // PARC: hash 2^20
-    'ex4t = grzip:m1:h17',  // PARC: hash 2^17
+    'ex2t = grzip:m4:h20:a',  // PARC: hash 2^20, bloque adaptativo
+    'ex3t = grzip:m2:h20:a',
+    'ex4t = grzip:m1:h20:a',
     'ex5t = dict:p: 64m:80% + lzp: 64m: 65:d1m:s32:h22:90% + xppmd:12:192m',  // PARC: 8:96->12:192
     'ex6t = dict:p: 64m:80% + lzp: 80m:105:d1m:s32:h22:92% + xppmd:12:192m',
     'ex#t = dict:p:128m:80% + lzp:160m:145:d1m:s32:h23:92% + xppmd:18:512m'
   );
 
-  ARC_GROUPS: array[0..379] of string = (
+  ARC_GROUPS: array[0..378] of string = (
     '$text',
     'file_id.diz',
     'descript.ion',
@@ -513,7 +506,6 @@ const
     '*.zoo',
     '*.arc',
     '*.hyp',
-    '*.pak',
     '*.lzh',
     '*.chz',
     '*.arj',
