@@ -43,7 +43,8 @@ for t in 1 4; do
   ck "t N=$t"                      '"$PARC" t o$t.parc --no-progress | grep -q "Errors: 0"'
   ck "x + diff N=$t"               'mkdir x$t && "$PARC" x o$t.parc -dpx$t --no-progress >/dev/null 2>&1 && diff -r src x$t/src'
 done
-ck "mismo archivo con 1 y 4 hilos" 'cmp -s o1.parc o4.parc'
+# (con 1 y 4 hilos el archivo puede diferir: -m2 elige otro método según N; misma N => mismo
+# archivo lo cubre tests/determinism.sh)
 # Al actualizar no se reordena (los bloques viejos se copian): agrega y se extrae igual
 printf 'nuevo\n' > src/zz_new.txt
 ck "u agrega sin reordenar"      '"$PARC" u o4.parc src -s- -m2 --no-progress >/dev/null 2>&1 && rm -rf xu && mkdir xu && "$PARC" x o4.parc -dpxu --no-progress >/dev/null 2>&1 && diff -r src xu/src'

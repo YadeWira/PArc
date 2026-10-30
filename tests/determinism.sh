@@ -12,12 +12,14 @@
 #  - los presets eligen alternativas "a|b||c" según los hilos (DecodeMethod(.., BudgetThreads),
 #    como -mtN de FreeArc): -m1..-m5 usan otros métodos con N=1, N=2 y N>=3;
 #  - lzma ht4 :normal/:max usa con 1 hilo la lista de matches de FreeArc -mt1 y con 2 o más la
-#    del multihilo (más chica), como FreeArc.
+#    del multihilo (más chica), como FreeArc;
+#  - en -m1..-m4 (4x4 con método interno rápido y sin :b explícito) el tamaño de bloque de 4x4
+#    sale de los datos y de N (Adaptive4x4Block: al menos 3 bloques por hilo).
 # Fuera de eso ningún codificador depende de los hilos (bt4 multihilo, 4x4, REP, grzip y los
 # bloques en paralelo dan la misma salida que en línea). Como las alternativas llegan hasta
-# 3, también se exige que N=4 y N=8 den el mismo archivo en cada nivel: si difieren, algo
-# depende de la cantidad de hilos en tiempo de ejecución. Las demás diferencias entre N solo
-# se informan.
+# 3, también se exige que N=4 y N=8 den el mismo archivo en cada nivel fuera de -m1..-m4
+# (DET_NDEP): si difieren, algo depende de la cantidad de hilos en tiempo de ejecución. Las
+# demás diferencias entre N solo se informan.
 # Antes de 0909464 (TParallelJob.ResetForReuse no volvía FFinished a 0) REP leía hashes
 # viejos según el orden de los hilos y -m3 cambiaba entre corridas: esta prueba lo detecta.
 #
@@ -31,6 +33,7 @@ case "$PARC" in /*) ;; *) PARC=$PWD/$PARC ;; esac
 LEVELS=${DET_LEVELS:-"0 1 2 3 4 5 6 7 8 9 x xx"}
 THREADS=${DET_THREADS:-"1 2 4 8"}
 RUNS=${DET_RUNS:-3}
+NDEP=" ${DET_NDEP:-1 2 3 4} "   # niveles con bloque de 4x4 según N (Adaptive4x4Block)
 OUT=${DETERMINISM_WORK:-${TMPDIR:-/tmp}/parc_determinism}
 rm -rf -- "${OUT:?}"; mkdir -p "$OUT/d/bin" "$OUT/d/txt" "$OUT/d/misc" && cd "$OUT" || exit 2
 fail=0; pass=0
@@ -77,7 +80,7 @@ for L in $LEVELS; do
     elif [ $same -eq 0 ]; then bad "-m$L N=$T: corridas distintas (tamaños:$sizes )"; fi
   done
   # Entre N: N=4 y N=8 (presets saturados) tienen que coincidir; lo demás se informa
-  if [ -n "${H[$L,4]:-}" ] && [ -n "${H[$L,8]:-}" ]; then
+  if [ -n "${H[$L,4]:-}" ] && [ -n "${H[$L,8]:-}" ] && [[ "$NDEP" != *" $L "* ]]; then
     if [ "${H[$L,4]}" = "${H[$L,8]}" ]; then ok "-m$L: N=4 y N=8 dan el mismo archivo"
     else bad "-m$L: N=4 y N=8 dan archivos distintos (algo depende de los hilos en ejecución)"; fi
   fi
