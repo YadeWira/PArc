@@ -160,7 +160,6 @@ Open points:
 - `d` without `-m` repacks the affected solid block with the default `-m4`; FreeArc reuses the
   block's old method (10 s vs 31 s CPU on 24 MB, but 35 % larger). Decide the policy.
 - High-entropy files are not routed to storing at `-m1`/`-m5+` (FreeArc neither).
-- Thread budget: extraction/verify workers × per-block decoder threads (4x4) still nest.
 - Many-file FreeArc numbers are under Wine (file creation dominates); compare natively on win10.
 
 ## P1 — BCJ2 exact

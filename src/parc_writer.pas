@@ -859,6 +859,39 @@ begin
   Block := WriteDataBlock(Output, Entries, Group, Opt, nil, Stats, True);
 end;
 
+const
+  { Entrada de los bloques que se pueden ir comprimiendo detrás del que se está escribiendo
+    (su salida espera en memoria, con el presupuesto de PARC_BUFMEM, o en un temporal). }
+  AHEAD_BYTES = {$IFDEF CPU64}Int64(256) shl 20{$ELSE}Int64(64) shl 20{$ENDIF};
+
+{ Cuántos bloques se comprimen a la vez: hasta el presupuesto de hilos y la cantidad de
+  bloques con datos, mientras la memoria estimada de sus compresores entre en la mitad de la
+  RAM (la estimación del decodificador por 8: lzma bt4 usa ~11 veces el diccionario, que ya
+  está limitado al tamaño del bloque). Las fichas que no usan los bloques las toman sus pools
+  internos. }
+function BlockWorkers(const Entries: TWriteEntryArray; const AllGroups: TSolidGroupArray): Integer;
+var
+  Est: array of Int64;
+  i, k, n: Integer;
+  Size: Int64;
+begin
+  SetLength(Est, Length(AllGroups));
+  n := 0;
+  for i := 0 to High(AllGroups) do
+  begin
+    Size := 0;
+    for k := 0 to High(AllGroups[i].Files) do
+      if not Entries[AllGroups[i].Files[k]].Meta.IsDir then Inc(Size, Entries[AllGroups[i].Files[k]].Meta.Size);
+    if (Size = 0) or IsStoring(AllGroups[i].Method) then Continue;
+    Est[n] := 8 * EstimateDecodeMem(LimitMethodToSize(WithoutCipher(AllGroups[i].Method), Size), Size);
+    Inc(n);
+  end;
+  SetLength(Est, n);
+  Result := BudgetThreads;
+  if Result > n then Result := n;
+  Result := ThreadsForMemory(Est, Result);
+end;
+
 function WriteArchive(const FileName: string; const Entries: TWriteEntryArray;
   const Groups: array of TSolidGroup; const Opt: TWriteOptions; Log: TLogProc): TWriteStats;
 var
@@ -875,7 +908,10 @@ var
   DirData: TBytes;
   Ok, UseParallel: Boolean;
   Total, BlockPos: Int64;
-  Window: Integer;
+  Window, Workers, Next: Integer;
+  Sizes: array of Int64;
+  Ahead: Int64;
+  HadToken: Boolean;
 begin
   Result := Default(TWriteStats);
   if not EncoderAvailable(Opt.DirMethod) then
@@ -933,7 +969,7 @@ begin
         end;
 
       // (con un solo hilo se escribe directo, sin pasar por el camino de los trabajos)
-      UseParallel := Opt.Parallel and (Length(AllGroups) > 1) and (ThreadCount(4) >= 2) and
+      UseParallel := Opt.Parallel and (Length(AllGroups) > 1) and (BudgetThreads >= 2) and
         (Opt.DataPassword = '') and (Opt.HeadersPassword = '');
       if UseParallel then
       begin
@@ -954,11 +990,25 @@ begin
         for i := 0 to High(AllGroups) do
           if AllGroups[i].CopyFrom <> nil then UseParallel := False;
 
+      Workers := 0;
+      if UseParallel then
+      begin
+        Workers := BlockWorkers(Entries, AllGroups);
+        if Workers < 2 then UseParallel := False;
+      end;
+
       if UseParallel then
       begin
         n := Length(AllGroups);
         SetLength(Jobs, n);
-        Pool := TJobPool.Create(ThreadCount(4), n);
+        Pool := TJobPool.Create(Workers, n);
+        // Cada bloque planea sus pools internos (4x4, grzip, REP) con su parte del presupuesto;
+        // si después sobran fichas (los últimos bloques), 4x4/grzip crecen solos
+        Pool.Share := BudgetThreads div Workers;
+        if Pool.Share < 1 then Pool.Share := 1;
+        // Este hilo casi solo espera: sin ficha mientras tanto (las N son de los que comprimen),
+        // salvo para copiar al archivo lo que un bloque ya dejó en memoria
+        HadToken := BudgetWaitBegin;
         try
           for i := 0 to n - 1 do
           begin
@@ -969,17 +1019,43 @@ begin
             Jobs[i].Output := TBlockOut.Create(FileName + '.blk' + IntToStr(i));
           end;
           // Ventana de trabajos en vuelo: lo que no es el bloque en curso espera en memoria,
-          // así que no se arranca todo de una vez
+          // así que no se arranca todo de una vez. Además de 2 por hilo, los que entren en
+          // AHEAD_BYTES de entrada (hasta 16 por hilo): si no, un bloque grande seguido de
+          // muchos chicos dejaba sin trabajo a los demás hilos hasta terminarlo, y otro bloque
+          // grande más adelante no podía empezar (con muchos archivos chicos, todo en serie)
           Window := 2 * Pool.MaxWorkers;
+          SetLength(Sizes, n);
           for i := 0 to n - 1 do
-            if i < Window then Pool.Submit(Jobs[i]);
+          begin
+            Sizes[i] := 0;
+            for k := 0 to High(AllGroups[i].Files) do
+              if not Entries[AllGroups[i].Files[k]].Meta.IsDir then
+                Inc(Sizes[i], Entries[AllGroups[i].Files[k]].Meta.Size);
+          end;
+          Next := 0;
+          Ahead := 0;
           SetLength(Blocks, n);
           for i := 0 to n - 1 do
           begin
+            // Ahead: entrada de los trabajos enviados después del bloque en curso (i)
+            if i < Next then Dec(Ahead, Sizes[i]);
+            while (Next < n) and ((Next <= i + Window) or
+              ((Next - i <= 16 * Pool.MaxWorkers) and (Ahead + Sizes[Next] <= AHEAD_BYTES))) do
+            begin
+              Pool.Submit(Jobs[Next]);
+              if Next > i then Inc(Ahead, Sizes[Next]);
+              Inc(Next);
+            end;
             Blocks[i].Pos := S.Position;
-            Jobs[i].Output.GoDirect(S);   // lo ya comprimido, y el resto directo al archivo
+            // Lo ya comprimido, y el resto directo al archivo. Copiar lo guardado sí es trabajo
+            // (puede ser mucho): con ficha
+            BudgetWaitEnd(HadToken);
+            try
+              Jobs[i].Output.GoDirect(S);
+            finally
+              HadToken := BudgetWaitBegin;
+            end;
             Pool.WaitJob(Jobs[i]);
-            if i + Window < n then Pool.Submit(Jobs[i + Window]);
             BlockPos := Blocks[i].Pos;
             Blocks[i] := Jobs[i].Block;
             Blocks[i].Pos := BlockPos;
@@ -993,6 +1069,7 @@ begin
           end;
         finally
           Pool.Free;   // espera a los hilos antes de liberar sus trabajos (y sus temporales)
+          BudgetWaitEnd(HadToken);
           for i := 0 to High(Jobs) do Jobs[i].Free;
         end;
       end

@@ -41,8 +41,9 @@ type
     NumFastBytes: Integer;      // se recorta a 5..273 como LzmaEnc_SetProps
     MatchFinderCycles: Integer; // 0 = automático (fórmula de LzmaEncProps_Normalize de FreeArc)
     MatchFinder: TLzmaMatchFinder;
-    { Hilos (no va en el string del método): 0 = automático (ThreadCount: PARC_THREADS o los
-      núcleos), 1 = un hilo, >= 2 = match finder multihilo. Como FreeArc (mtMode = numThreads > 1
+    { Hilos (no va en el string del método): 0 = automático (multihilo si el presupuesto global
+      de hilos, PARC_THREADS o los núcleos, es >= 2 y no está dentro de 4x4), 1 = un hilo, >= 2 =
+      match finder multihilo. Como FreeArc (mtMode = numThreads > 1
       y no fast), pero acá solo para bt4: los demás match finders siguen con un hilo. }
     NumThreads: Integer;
   end;
@@ -1396,17 +1397,29 @@ begin
   DoneCriticalSection(s.cs);
 end;
 
+{ Si hay que esperar, la ficha del presupuesto de hilos se suelta mientras tanto y se
+  recupera al final, ya sin ningún lock tomado (el que libera puede necesitarlo). }
 procedure MtSemWait(var s: TMtSem);
+var
+  Had, Waited: Boolean;
 begin
+  Had := False;
+  Waited := False;
   EnterCriticalSection(s.cs);
   while s.count = 0 do
   begin
     LeaveCriticalSection(s.cs);
+    if not Waited then
+    begin
+      Had := BudgetWaitBegin;
+      Waited := True;
+    end;
     RTLEventWaitFor(s.ev);
     EnterCriticalSection(s.cs);
   end;
   Dec(s.count);
   LeaveCriticalSection(s.cs);
+  if Waited then BudgetWaitEnd(Had);
 end;
 
 procedure MtSemRelease(var s: TMtSem);
@@ -1489,6 +1502,7 @@ var
   offset: PtrInt;
 begin
   Result := 0;
+  BudgetEnter;   // una ficha del presupuesto global mientras trabaja
   mt := PMtState(param);
   mf := @mt^.hmf;
   // MatchFinder_Init_HighHash (la baja la inicializa el hilo LZ)
@@ -1547,6 +1561,7 @@ begin
     Inc(mf^.buffer, num);
     MtSemRelease(mt^.hashSync.filledSem);
   end;
+  BudgetLeave;
 end;
 
 { ---------- hilo BT ---------- }
@@ -1643,6 +1658,7 @@ var
   blockIndex: LongWord;
 begin
   Result := 0;
+  BudgetEnter;
   mt := PMtState(param);
   blockIndex := 0;
   while True do
@@ -1655,6 +1671,7 @@ begin
     Inc(blockIndex);
     MtSemRelease(mt^.btSync.filledSem);
   end;
+  BudgetLeave;
 end;
 
 { ---------- ciclo de vida ---------- }
@@ -1704,11 +1721,34 @@ begin
   lz^.mt := Result;
 end;
 
+procedure MtStopThreads(mt: PMtState); forward;
+
 { Para los hilos (MtSync_StopWriting + exit) y libera. El lector de la entrada no debe quedar
   bloqueado: el llamador ya marcó EOF o abortó la lectura. }
 procedure MtDestroy(mt: PMtState);
+var
+  Had: Boolean;
 begin
   if mt = nil then Exit;
+  // Los hilos pueden necesitar una ficha para llegar a ver stopWriting: esperarlos sin la propia
+  Had := BudgetWaitBegin;
+  try
+    MtStopThreads(mt);
+  finally
+    BudgetWaitEnd(Had);
+  end;
+  if mt^.initOk then
+  begin
+    MtSyncDone(mt^.btSync);
+    MtSyncDone(mt^.hashSync);
+  end;
+  if mt^.lz <> nil then mt^.lz^.mt := nil;
+  if mt^.hashBuf <> nil then FreeMem(mt^.hashBuf);
+  FreeMem(mt);
+end;
+
+procedure MtStopThreads(mt: PMtState);
+begin
   if mt^.btSync.created then
   begin
     // el hilo BT ve stopWriting en su próximo Wait(free); para terminar el bloque en curso
@@ -1727,14 +1767,6 @@ begin
     CloseThread(mt^.hashSync.thread);
     mt^.hashSync.created := False;
   end;
-  if mt^.initOk then
-  begin
-    MtSyncDone(mt^.btSync);
-    MtSyncDone(mt^.hashSync);
-  end;
-  if mt^.lz <> nil then mt^.lz^.mt := nil;
-  if mt^.hashBuf <> nil then FreeMem(mt^.hashBuf);
-  FreeMem(mt);
 end;
 
 { MatchFinderMt_Init: sin leer datos (los lee el hilo hash). lz = el mf del codificador,
@@ -3280,9 +3312,15 @@ begin
   // Multihilo como FreeArc (mtMode = numThreads > 1 y no fast), solo para bt4. En memoria,
   // solo si el bloque lo justifica (crear los hilos y 5 MB de buffers cuesta ~ms). La salida
   // es la misma con o sin hilos.
+  // Automático: multihilo si el presupuesto global de hilos es de 2 o más, también con bloques
+  // en paralelo: los 3 hilos (LZ, BT, hash) toman fichas como los demás, así que no se pasa
+  // de PARC_THREADS, y cuando los últimos bloques quedan solos usan las fichas que sobran (el
+  // match finder no puede pasar a multihilo a mitad del stream). Medido en sets/exe -m6 con
+  // bloques desparejos: más rápido que un hilo por bloque salvo con todas las fichas ocupadas
+  // hasta el final (ahí ~+10% de CPU).
   nt := P.NumThreads;
   if nt = 0 then
-    if LzmaSingleThreadHere then nt := 1 else nt := ThreadCount(2);
+    if LzmaSingleThreadHere or (BudgetThreads < 2) then nt := 1 else nt := 2;
   useMt := (nt >= 2) and (P.MatchFinder = mfBT4) and not fastMode
     and ((DirectSrc = nil) or (DirectLen >= kMtMinMemSize)) and MtThreadsAvailable;
   if useMt then
@@ -3846,10 +3884,13 @@ end;
 function TLzmaEncStage.ReadInMt(Buf: PByte; Size: SizeInt): SizeInt;
 var
   n, want, avail: SizeInt;
+  Had, Waited: Boolean;
 begin
   Result := 0;
   want := Size;
   if want > kMtReadGrain then want := kMtReadGrain;
+  Had := False;
+  Waited := False;
   EnterCriticalSection(FInLock);
   try
     while True do
@@ -3860,6 +3901,12 @@ begin
       FWant := want;
       FWaiting := True;
       LeaveCriticalSection(FInLock);
+      // sin la ficha mientras espera entrada (la recupera al final, fuera del lock)
+      if not Waited then
+      begin
+        Had := BudgetWaitBegin;
+        Waited := True;
+      end;
       RTLEventWaitFor(FInEvent);
       EnterCriticalSection(FInLock);
       FWaiting := False;
@@ -3885,6 +3932,7 @@ begin
     end;
   finally
     LeaveCriticalSection(FInLock);
+    if Waited then BudgetWaitEnd(Had);
   end;
 end;
 

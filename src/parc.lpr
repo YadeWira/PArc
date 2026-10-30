@@ -6,7 +6,7 @@ program parc;
 
 uses
   {$IFDEF UNIX}cthreads, BaseUnix,{$ENDIF}
-  Classes, SysUtils, Types, DateUtils, parc_os, parc_bytes, parc_methods, parc_archive, parc_extract, parc_writer, parc_encoders, parc_presets, parc_recovery, parc_progress, parc_filelist, parc_volume, parc_console;
+  Classes, SysUtils, Types, DateUtils, parc_os, parc_bytes, parc_methods, parc_archive, parc_extract, parc_writer, parc_encoders, parc_presets, parc_recovery, parc_progress, parc_filelist, parc_volume, parc_console, parc_parallel;
 
 const
   PARC_VERSION = '0.0.2';
@@ -640,7 +640,7 @@ var
   i, g, k: Integer;
 begin
   if Length(Idx) = 0 then Exit;
-  GM := DecodeMethod(MO.Method, CpuCount);
+  GM := DecodeMethod(MO.Method, BudgetThreads);   // las alternativas "(a|b)" según los hilos efectivos, como -mtN
   SetLength(Files, Length(Idx));
   for i := 0 to High(Idx) do
   begin
@@ -701,7 +701,7 @@ var
   end;
 
 begin
-  GM := DecodeMethod(MO.Method, CpuCount);
+  GM := DecodeMethod(MO.Method, BudgetThreads);   // las alternativas "(a|b)" según los hilos efectivos, como -mtN
   // Bloque, posición y cantidad de archivos (sin directorios) de cada archivo viejo
   SetLength(BlockOf, Length(A.Files)); SetLength(PosOf, Length(A.Files)); SetLength(CountOf, Length(A.Files));
   for b := 0 to High(A.DataBlocks) do
