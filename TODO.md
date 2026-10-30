@@ -1,6 +1,6 @@
 # PArc — pending work and details
 
-Updated: 2026-10-21 (single-thread TILIN run, `rep` fix)  
+Updated: 2026-10-29 (block scheduling under the thread budget)  
 Current release: **0.0.2** (`v0.0.2`, GitHub release published).  
 Format: `.parc` only. License: GPL-2.0.
 
@@ -161,6 +161,55 @@ Open points:
   block's old method (10 s vs 31 s CPU on 24 MB, but 35 % larger). Decide the policy.
 - High-entropy files are not routed to storing at `-m1`/`-m5+` (FreeArc neither).
 - Many-file FreeArc numbers are under Wine (file creation dominates); compare natively on win10.
+
+## Done — block scheduling under the thread budget (branch perf3/sched)
+
+See docs/ESTADO.md ("Block scheduling under the budget"): linear method grouping and parallel
+file-type detection in planning, largest-first solid blocks, smaller/tapered 4x4 blocks for
+fast inner methods when the data is short for the threads, bt4 always with its 3 threads.
+Measured on the shared 64-core machine (load 10–35, pinned to idle cores, minimum of 2 runs;
+FreeArc times are its internal ones under Wine), compress / `t` wall s, 3e8f8cb → now:
+
+| set, level | N=2 | N=4 | N=8 | FreeArc `-mt4` |
+|---|---|---|---|---|
+| small `-m1` | 0.83 / 0.19 → 0.66 / 0.13 | 0.84 / 0.20 → 0.64 / 0.12 | 0.86 → 0.59 | 3.48 / 1.04 |
+| small `-m2` | 2.65 → 1.48 | 2.61 → 1.07 | 2.72 → 1.06 | 6.56 / 1.77 |
+| small `-m9` | 4.67 → 2.90 | 4.18 → 2.38 | 4.00 → 2.48 | 10.86 / 3.27 |
+| exe `-m1` | 2.68 / 1.13 → 2.24 / 0.85 | 1.68 / 0.72 → 1.39 / 0.46 | 1.42 / 0.65 → 0.80 / 0.32 | 0.68 / 0.48 |
+| exe `-m2` | 4.93 → 4.64 | 3.14 → 2.95 | 2.34 / 0.73 → 1.66 / 0.45 | 2.21 / 0.79 |
+| document `-m1` | 1.87 → 1.73 | 1.22 / 0.52 → 1.26 / 0.45 | 1.18 / 0.49 → 0.87 / 0.26 | 0.93 / 0.38 |
+| text `-m1` | 1.71 → 1.73 | 1.41 / 0.46 → 1.32 / 0.42 | 1.21 / 0.40 → 1.01 / 0.29 | 2.15 / 0.74 |
+| text `-m2` | 5.50 → 5.54 | 4.02 → 3.99 | 3.29 → 2.31 | 3.84 / 1.26 |
+
+`-m3`…`-m9` on these sets and the 512 MB slice (`-m1`, `-m2`, `-m5`, N=2/4/8) are within the
+noise of the machine (±15 %). Sizes: `-m3`+ unchanged except block order (± a few bytes of
+directory); `-m1`/`-m2` with the smaller 4x4 blocks: exe `-m1` −0.2 % (N=4), small `-m1`
++0.65 %, document `-m1` +0.3 % (N=4) / +0.7 % (N=8), document `-m3` N=8 +0.8 %. Archives are
+identical across runs for the same N and differ between N (as before). Logs and scripts:
+`/mnt/IA_LAB/agentes/PArc/impl3/sched/`.
+
+Open points:
+
+- `-m1`/`-m2` on binaries/documents at N≥2 are still behind FreeArc in compression time:
+  scheduling is no longer the limit (exe `-m1` N=4 uses ~3.4 of 4 cores), the preset is.
+  FreeArc `-mt4` uses `rep:96mb+4x4:tor:3:8mb` at `-m1` (exe: 1.8 s CPU) where PArc uses
+  `rep+4x4:tor:16mb` (tor level 5, ~4 s CPU). Pick the `-m1`/`-m2` methods by thread count
+  (user decision). N=4, explicit `-m<method> -s64m`, size / compress wall / `t` wall:
+  exe `4x4:tor:16mb` 81.02 MB 1.53 s 0.53 s, `tor:4:16mb` 82.29 MB 1.08 s 0.47 s,
+  `tor:3:16mb` 83.05 MB 0.71 s 0.34 s (FreeArc 83.24 MB 0.68 s 0.48 s); text `tor:16mb`
+  30.07 MB 1.16 s, `tor:3:16mb` 32.27 MB 0.75 s (FreeArc 32.29 MB 2.15 s). Document `-m1` is
+  11 % larger than FreeArc's whatever the tor level (see below).
+- `t`/`x` of text at `-m5`+ end on one thread: lzp decodes whole blocks (its match lengths are
+  read from the block's end) at ~10–20 MB/s, after ppmd. Only a faster LZP decoder helps.
+- document set: `-m9` is 19 % larger than `-m5` (43.8 MB vs 36.7 MB; FreeArc `-m9` 36.6 MB),
+  the solid blocks are split differently; and `-m1` is 11 % larger than FreeArc's `-m1`
+  (47.5 MB vs 42.6 MB). Grouping/preset issues, not scheduling.
+- The front end is still serial for the rest of planning (directory scan, sort) and for
+  `-m1` (no type detection there).
+- The 4x4 tail split estimates what is left from the solid block's input size; with `rep`
+  in front (most presets) 4x4 receives less and the split rarely happens (the 512 MB slice is
+  unchanged). Scaling by what the writer has fed so far works and is deterministic, but cost
+  0.3–0.9 % at `-m2` for no measurable time gain, so it was not kept.
 
 ## Done — LZMA encoder speed/ratio (branch perf2/lzma2)
 
