@@ -188,8 +188,25 @@ directory); `-m1`/`-m2` with the smaller 4x4 blocks: exe `-m1` −0.2 % (N=4), s
 identical across runs for the same N and differ between N (as before). Logs and scripts:
 `/mnt/IA_LAB/agentes/PArc/impl3/sched/`.
 
+These comparisons are **N=2/4/8 only**; "within the noise" above is against 3e8f8cb, not a
+claim that `-m3`+ beats FreeArc on all three metrics at every N. At N=1 it does not (see the
+first open point). The largest-first sort of the solid blocks was an insertion sort over the
+records (quadratic: one block per file with `-s-`, 40,000 files of growing size took ~26 s of
+planning); it is now a merge sort of indexes, archives byte-identical (`tests/block_order.sh`).
+
 Open points:
 
+- **N=1, document `-m3`: compression ~1.8× slower than FreeArc `-mt1`** (pre-existing, same at
+  3e8f8cb). 2026-10-29, load ~4, 2 runs: PArc 37,313,130 B, `a` 12.97 / 13.36 s, `t` 1.86 /
+  1.92 s; FreeArc 38,454,002 B, `a` 7.10 / 7.50 s real, `t` 2.93 / 2.75 s. Size and `t` win,
+  `a` loses: 66 MB of the 101 MB go through `rep+exe+delta+4x4:lzma:8mb:normal` (bt4, one
+  thread). Needs a 1-thread `-m3` preset (like `-m1`/`-m2`) or a faster lzma normal.
+- `-s-` with thousands of small files, N=1: ~+20 % system time vs 3e8f8cb on the `small` set
+  (`-s- -m1`: 12.3–13.0 s vs 10.5–10.7 s, CPU sys 8.3–8.8 vs 7.0 s). Not the block sort (fixed,
+  above): with the largest-first order each block's `TRepEnc` hash (~1 MB) and `TTorCoder`
+  (~256 KB) land on FPC heap OS chunks that are mmapped and unmapped again per block (4,090
+  more mmap/munmap pairs of 1 MB + 256 KB than at 3e8f8cb). Reusing those per thread (as
+  `TTorEncCache` does for 4x4) would remove it.
 - `-m1`/`-m2` on binaries/documents at N≥2 are still behind FreeArc in compression time:
   scheduling is no longer the limit (exe `-m1` N=4 uses ~3.4 of 4 cores), the preset is.
   FreeArc `-mt4` uses `rep:96mb+4x4:tor:3:8mb` at `-m1` (exe: 1.8 s CPU) where PArc uses

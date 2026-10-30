@@ -26,7 +26,7 @@ The rest of the FreeArc 0.67 tree is in git history (commit `82ea8d9`) and in Fr
 | GUI | ❌ dropped |
 | `.zip/.7z/.rar` containers | ➡ moved to FreeArc-ex (tag `entrega-arc`) |
 | SFX (creation) | ❌ dropped: `parcsfx` is not built and `-sfx` does not exist; old SFX archives are read/extracted and updating them preserves their stub |
-| Performance vs FreeArc 0.67.1 | ✅ PArc wins on size at `-m1`…`-mx`; faster through `-m9`; `-mx` is fast to decode, `-mxx` is the CM maximum (see below) |
+| Performance vs FreeArc 0.67.1 | ✅ PArc wins on size at `-m1`…`-mx`; faster through `-m9` with 4 threads (with 1 thread not everywhere: document `-m3` compresses ~1.8× slower, see TODO.md); `-mx` is fast to decode, `-mxx` is the CM maximum (see below) |
 
 ## What it does today
 
@@ -201,7 +201,9 @@ What makes this possible (all inside `.parc`; the codecs are unchanged):
   - Solid blocks go into the archive **largest first** (LPT): the threads start with what takes
     longest and the run ends with small blocks; `t`/`x` submit blocks in archive order, so they
     get the same order. Only block order (and listing order) changes; not on updates that copy
-    or re-read old blocks.
+    or re-read old blocks. The sort is a stable merge sort of indexes with one permutation of
+    the groups (`SortGroupsBySize`, O(G log G): with `-s-` there is one group per file);
+    `tests/block_order.sh` checks the order, its stability and the round trip.
   - `4x4` with a fast inner method (`tor`, `lz4`, `lzma:fast`) and no explicit `b<size>`:
     if everything being compressed (`Enc4x4TotalHint`) gives fewer than 3 blocks per thread,
     blocks shrink to that (whole MB, down to a quarter, at least 1 MB); and near the end of
