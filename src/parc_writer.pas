@@ -598,7 +598,12 @@ begin
   Result.Pos := S.Position;
   SetLength(Result.Files, Length(G.Files));
   SetLength(Buf, COPY_BUF);
-  Chain := CreateEncoderChain(EncMethod, TStreamSink.Create(S));
+  Enc4x4BlockHint := Size;   // (lo lee 4x4 al armarse la cadena, en este hilo)
+  try
+    Chain := CreateEncoderChain(EncMethod, TStreamSink.Create(S));
+  finally
+    Enc4x4BlockHint := 0;
+  end;
   try
     for i := 0 to High(G.Files) do
     begin
@@ -892,6 +897,47 @@ begin
   Result := ThreadsForMemory(Est, Result);
 end;
 
+{ Ordena AllGroups[First..] por tamaño de entrada, de mayor a menor (estable; storing cuenta
+  0); antes de First está el grupo de directorios y enlaces, que queda primero. Nada si algún
+  grupo copia un bloque viejo o algún archivo sale de un archivo viejo. }
+procedure SortGroupsBySize(const Entries: TWriteEntryArray; var AllGroups: TSolidGroupArray;
+  First: Integer);
+var
+  Key: array of Int64;
+  i, j, k: Integer;
+  G: TSolidGroup;
+  v: Int64;
+begin
+  for i := 0 to High(AllGroups) do
+    if AllGroups[i].CopyFrom <> nil then Exit;
+  for i := 0 to High(Entries) do
+    if Entries[i].SrcArc <> nil then Exit;
+  SetLength(Key, Length(AllGroups));
+  for i := 0 to High(AllGroups) do
+  begin
+    Key[i] := 0;
+    if not IsStoring(AllGroups[i].Method) then
+      for k := 0 to High(AllGroups[i].Files) do
+        if not Entries[AllGroups[i].Files[k]].Meta.IsDir then
+          Inc(Key[i], Entries[AllGroups[i].Files[k]].Meta.Size);
+  end;
+  // (inserción estable desde First: son pocos grupos)
+  for i := First + 1 to High(AllGroups) do
+  begin
+    G := AllGroups[i];
+    v := Key[i];
+    j := i - 1;
+    while (j >= First) and (Key[j] < v) do
+    begin
+      AllGroups[j + 1] := AllGroups[j];
+      Key[j + 1] := Key[j];
+      Dec(j);
+    end;
+    AllGroups[j + 1] := G;
+    Key[j + 1] := v;
+  end;
+end;
+
 function WriteArchive(const FileName: string; const Entries: TWriteEntryArray;
   const Groups: array of TSolidGroup; const Opt: TWriteOptions; Log: TLogProc): TWriteStats;
 var
@@ -967,6 +1013,21 @@ begin
           SetLength(AllGroups, n + 1);
           AllGroups[n] := Groups[i];
         end;
+
+      // Bloques más grandes primero (como la planificación LPT): los hilos empiezan por lo que
+      // más tarda y el final queda con bloques chicos, no con uno grande y los demás hilos sin
+      // trabajo; t/x los toman en el mismo orden. Solo cambia el orden de los bloques en el
+      // archivo (y en el listado), no su contenido; el orden depende solo de los datos. No al
+      // actualizar: los archivos que salen de bloques viejos se leen en orden
+      SortGroupsBySize(Entries, AllGroups, Ord(Length(DirGroup.Files) > 0));
+
+      // Lo que se va a comprimir, para el tamaño de bloque de 4x4 (Adaptive4x4Block)
+      Enc4x4TotalHint := 0;
+      for i := 0 to High(AllGroups) do
+        if (AllGroups[i].CopyFrom = nil) and not IsStoring(AllGroups[i].Method) then
+          for k := 0 to High(AllGroups[i].Files) do
+            if not Entries[AllGroups[i].Files[k]].Meta.IsDir then
+              Inc(Enc4x4TotalHint, Entries[AllGroups[i].Files[k]].Meta.Size);
 
       // (con un solo hilo se escribe directo, sin pasar por el camino de los trabajos)
       UseParallel := Opt.Parallel and (Length(AllGroups) > 1) and (BudgetThreads >= 2) and
@@ -1083,6 +1144,7 @@ begin
 
       ProgressEnd;
       CheckCancel;
+      Enc4x4TotalHint := 0;
 
       // Directorio (los offsets de los bloques son relativos a su posición)
       DirData := BuildDirectory(Entries, Blocks, S.Position, True, Opt.DirMethod);
@@ -1104,6 +1166,7 @@ begin
       Result.ArcSize := S.Size;
       Ok := True;
     finally
+      Enc4x4TotalHint := 0;
       S.Free;
     end;
   finally
