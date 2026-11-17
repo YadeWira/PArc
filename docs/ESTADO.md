@@ -40,6 +40,10 @@ The rest of the FreeArc 0.67 tree is in git history (commit `82ea8d9`) and in Fr
   `tta`, `4x4`, `exe` (BCJ), `lz4`, `dispack070`, `srep` and `cm` (context mixing), alone or
   chained.
 - FreeArc built-in presets ported: `-m0`…`-m9`, `-mx`, `-mxx` and the `d/t/xt/xb/binary/rep` families.
+- `ppmd` (2026-11) is PPMd var.I from the public-domain LZMA SDK (`Ppmd8`), ported to Pascal
+  with x86-64 assembler for the symbol coder and `UpdateModel`; it replaced FreeArc's PPMd (a
+  step towards relicensing). Same ratio as before plus an 8-byte stream header; `ppmd` blocks
+  from earlier versions no longer decode. Stream format in `formato/FORMATO-PARC.md` §6.1.
 
 ## Performance vs FreeArc 0.67.1
 
@@ -287,7 +291,8 @@ sudo bash tests/fixes.sh          # patterns, links, full disk, FAT32
 python3 tests/fuzz.py build/linux64/parc 100 build/linux64/parc
 python3 tests/thread_budget.py    # PARC_THREADS=N: <= N hilos trabajando (muestrea /proc)
 bash tests/determinism.sh         # mismo N => mismo archivo (todos los niveles, N=1/2/4/8)
-bash tests/ppmd_asm.sh            # PPMd: bucles en ensamblador == Pascal (-dPARC_NOASM)
+bash tests/ppmd.sh                # PPMd: ida y vuelta, streams dañados y bit a bit contra el LZMA SDK ($PPMD_SDK)
+bash tests/ppmd_asm.sh            # PPMd: ensamblador == Pascal (-dPARC_NOASM)
 # liberar/reusar un trabajo del pool apenas termina (ventana ampliada con -dPARC_RACE_TEST)
 fpc -O2 -dPARC_RACE_TEST -Fusrc -FUbuild/tests/race -FEbuild/tests tests/test_jobfree.lpr
 PARC_THREADS=4 build/tests/test_jobfree

@@ -82,7 +82,8 @@ Open points from this run:
 - `-m3`…`-m5` are 2,7–3,0 % larger than FreeArc on TILIN (FreeArc uses LZMA 96 MB there, PArc
   `4x4:lzma:8mb`), while compressing 1,2–3× and verifying 2,2–2,9× faster. Decide whether large
   blocks should get a bigger LZMA dictionary.
-- `-m6`…`-m9` verification is 14–18 % slower than FreeArc (PPMd decode).
+- `-m6`…`-m9` verification is 14–18 % slower than FreeArc (PPMd decode). (2026-11: the LZMA
+  SDK PPMd decodes at least as fast as the old port; re-measure against FreeArc.)
 - `-m4` and `-m5` produce the same size on large binaries (same effective method).
 - (perf3/presets) The three points above are fixed: see "Presets retune" below.
 
@@ -114,27 +115,26 @@ single 64-bit move in `FindMatchLen`.
 Acceptance: for TILIN, `-m1` should be materially faster without giving up the ~57,8 % ratio;
 otherwise keep the current preset.
 
-## P0 — PPMd7 port
+## Done — PPMd from the LZMA SDK (relicensing step)
 
-7-Zip PPMd (`Ppmd7`, public domain) is 30–45 % faster than our FreeArc-compatible PPMd, but its
-ratio alone is not better. Measurements on a 20 MB text file:
+`ppmd` is now a Pascal port of the LZMA SDK's `Ppmd8` (PPMd var.I rev.1, Igor Pavlov, public
+domain, after D. Shkarin's public-domain PPMd): no FreeArc code is left in the PPMd path. The
+symbol coder and `CreateSuccessors`/`UpdateModel` are x86-64 assembler (Pascal elsewhere, same
+bytes); streams are bit-identical to the SDK's C (`tests/ppmd.sh` with `$PPMD_SDK`).
 
-| Implementation | Size | Compress | Decompress |
-|---|---:|---:|---:|
-| PArc `ppmd:16:384m` | 2.176.051 | 2,89 s | 3,14 s |
-| PArc `ppmd:18:1g` | 2.159.448 | 3,13 s | 3,49 s |
-| PArc `dict+lzp+ppmd:16` | **2.103.674** | 3,64 s | 3,01 s |
-| 7-Zip PPMd `o18:1g` | 2.162.416 | 2,25 s | 2,24 s |
-| 7-Zip PPMd `o20:1g` | 2.152.065 | 2,40 s | 2,77 s |
-
-Plan: port `Ppmd7.c`/`Ppmd7Enc.c`/`Ppmd7Dec.c` to Pascal, add a `ppmd7` method, keep our
-`dict+lzp` preprocessing, and use it only if it passes the gate:
-
-1. size <= current `dict+lzp+ppmd`;
-2. compression faster;
-3. decompression faster.
-
-A direct replacement without preprocessing does not pass the ratio gate.
+- Variant: var.I. The `Ppmd7` (var.H, 7z) port was also tried: ~0,3 % larger on text and not
+  faster once both are compiled the same way, so it was dropped. The earlier "7-Zip PPMd is
+  30–45 % faster" came from comparing gcc-compiled C with FPC; the gap was the compiler, not
+  the variant (the Pascal port ran ~1,6x slower than the same C, hence the assembler).
+- Ratio: identical to the old FreeArc PPMd (same algorithm with restart); each stream gains an
+  8-byte header. Presets unchanged.
+- Speed on 20 MB of text (codec alone, cycles of compress + decompress): `ppmd:8:192m`
+  8,6G → 8,2G, `ppmd:13:192m` 10,2G → 9,7G, `ppmd:18:512m` 10,3G → 10,2G.
+- Old `ppmd` blocks no longer decode (pre-1.0, no compatibility). Stream format:
+  `docs/formato/FORMATO-PARC.md` §6.1.
+- Cut-off mode (`ppmd:...:r`): the SDK's `RestoreModel` loops forever when a `CutOff` pass
+  cannot get the model below 3/4 of the memory (seen with 2 KB); PArc restarts the model when a
+  pass changes nothing, which keeps every stream the SDK can finish identical.
 
 ## Done — level monotonicity on TILIN
 
@@ -524,7 +524,8 @@ Still to consider:
 
 ## Decisions / non-goals
 
-- Keep GPL-2.0. MIT is not possible without replacing all GPL-derived FreeArc/lpaq1 code.
+- Licence: GPL-2.0 today; the plan is MIT, which needs every GPL-derived FreeArc/lpaq1 piece
+  replaced (PPMd done in 2026-11 with the LZMA SDK).
 - `.arc`, `.zip`, `.7z`, `.rar` are out of scope; use FreeArc-ex for those containers.
 - No GUI and no SFX creation; existing SFX archives are read and preserved on update.
 - bsc/libbsc is Apache-2.0 (incompatible with GPLv2); bzip3 is LGPL-3+ (incompatible).
@@ -545,6 +546,6 @@ Still to consider:
 - [x] 0.0.1 and 0.0.2 GitHub releases; asset hashes verified after download.
 - [ ] Real Windows 10/7 re-test for 0.0.2.
 - [ ] Tornado/REP speed work.
-- [ ] Ppmd7 port.
+- [x] PPMd from the LZMA SDK (`Ppmd8`, var.I).
 - [x] Preset monotonicity for large single files.
 - [ ] Exact BCJ2 (optional).

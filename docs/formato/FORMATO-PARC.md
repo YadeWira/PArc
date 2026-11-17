@@ -212,3 +212,43 @@ FreeArc's calculation.
 
 - Stronger per-file hash than CRC-32 (e.g. a `BLAKE2B` tag)? To be decided.
 - Hard links, ACLs, extended attributes: future tags.
+
+## 6. Codec streams that differ from FreeArc
+
+### 6.1 `ppmd` (since 2026-11)
+
+The `ppmd` method is PPMd var.I rev.1 as implemented in the public-domain LZMA SDK by Igor Pavlov
+(`Ppmd8.c`, based on Dmitry Shkarin's public-domain PPMd), translated to Pascal in
+`src/parc_ppmd.pas` (with x86-64 assembler in `src/parc_ppmd8_x64.inc`). It replaced FreeArc's
+modified PPMd; **`ppmd` blocks written before this change do not decode** (the header check
+below rejects them).
+
+Method string: `ppmd:<order>:<mem>[:r]`, also `o<order>`, `m<mem>`/`mem<mem>`, `r<N>`.
+Defaults: order 10, 48 MB, restart. Order 2..64; memory 2 KB .. 4 GB − 36 bytes; `r`/`r1` =
+cut-off, `r0` = restart. `c<mem>` (FreeArc's chunk) is accepted and ignored.
+
+Stream:
+
+| Offset | Size | Value |
+|---|---|---|
+| 0 | 1 | `'P'` (0x50) |
+| 1 | 1 | variant: `'I'` (0x49) |
+| 2 | 1 | maximum order (2..64) |
+| 3 | 1 | restore method when the model memory is full: 0 = restart, 1 = cut-off |
+| 4 | 4 | model memory in bytes, little-endian |
+| 8 | … | Subbotin carry-less range coder data (`Ppmd8Enc.c`), ending with PPMd's end marker (an escape from the order −1 context) followed by the 4-byte flush |
+
+The stream is self-terminating: the decoder needs neither the original size nor a byte count.
+The encoder is streaming (no block buffering).
+
+The decoder requires the 8 header bytes to equal the parameters of the stored method string,
+decodes until the end marker and then requires the range coder to finish exactly (`Code = 0`)
+without having read past the end of the stream; anything else is a damaged block. Model memory
+is allocated from the method string (the same limits as the encoder), never from untrusted
+stream data.
+
+Differences from the SDK, none of which changes the bytes of a stream the SDK can produce:
+orders above 16 are allowed (the SDK limits them to 16 only for the zip format; the
+`CreateSuccessors` stack array is sized for 64); and in cut-off mode, when a `CutOff` +
+`ExpandTextArea` pass changes nothing while the memory is still above 3/4 (the SDK would loop
+forever, e.g. with very small memories), the model is restarted instead.

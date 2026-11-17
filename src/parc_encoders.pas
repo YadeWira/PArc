@@ -776,9 +776,9 @@ begin
       end;
     'ppmd':
       begin
-        // La misma sintaxis que el decodificador (parse_PPMD): una sola implementación
+        // La misma sintaxis que el decodificador: una sola implementación
         pp := ParsePpmdParams(Parts);
-        Result := TPpmdEncStage.Create(Target, pp.Order, pp.Mem, pp.MRMethod, pp.Chunk);
+        Result := TPpmdEncStage.Create(Target, pp.Order, pp.Mem, pp.Restore);
       end;
   else
     raise EUnsupportedEncoder.CreateFmt('cannot compress with "%s" yet', [Stage]);

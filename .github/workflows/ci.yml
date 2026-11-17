@@ -22,7 +22,7 @@ jobs:
         run: bash tests/smoke.sh build/linux64/parc
       - name: Tests de la CLI y de formato
         run: |
-          for t in cli stdio volumes rs_recovery bcj crc lz4frame; do
+          for t in cli stdio volumes rs_recovery bcj crc lz4frame ppmd ppmd_asm; do
             bash tests/$t.sh || exit 1
           done
       - uses: actions/upload-artifact@v5
@@ -40,6 +40,8 @@ jobs:
         run: ./build.sh linuxarm64
       - name: Ida y vuelta (todos los niveles, 1 y 4 hilos)
         run: bash tests/smoke.sh build/linuxarm64/parc
+      - name: PPMd (Pascal, sin ensamblador)
+        run: bash tests/ppmd.sh
       - uses: actions/upload-artifact@v5
         with:
           name: parc-linux-arm64
