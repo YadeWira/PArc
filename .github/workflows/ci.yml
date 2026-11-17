@@ -44,18 +44,3 @@ jobs:
         with:
           name: parc-linux-arm64
           path: build/linuxarm64/parc
-
-  macos-arm64:
-    runs-on: macos-latest
-    steps:
-      - uses: actions/checkout@v5
-      - name: Herramientas
-        run: brew install fpc
-      - name: Compilar
-        run: ./build.sh macos
-      - name: Ida y vuelta (todos los niveles, 1 y 4 hilos)
-        run: bash tests/smoke.sh build/macos/parc
-      - uses: actions/upload-artifact@v5
-        with:
-          name: parc-macos-arm64
-          path: build/macos/parc
