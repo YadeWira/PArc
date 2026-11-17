@@ -82,7 +82,7 @@ require the full preset memory.
 speed. `-mxx` uses the **context-mixing** codec (`cm`, lpaq1-style) for text and binaries: it
 produces clearly smaller archives, but decompression is roughly 5–40× slower than `-mx`.
 Independent data blocks are compressed in parallel (all threads together limited by
-`PARC_THREADS`) at every level; encrypted and incremental repacks stay serial. The block being written goes straight into
+`PARC_THREADS`) at every level, also when encrypting; incremental repacks stay serial. The block being written goes straight into
 the archive; blocks that finish ahead of their turn wait in memory (at most min(1 GB, RAM/4)
 in total, 256 MB on 32-bit) and only what does not fit goes to a temporary file next to the
 archive.
@@ -160,23 +160,35 @@ Splits the archive into fixed-size pieces, 7-Zip style: `backup.parc.001`, `back
 | `-p<password>` | on read: password of an encrypted archive. When compressing: encrypt data |
 | `-p` | no value: prompt on the console (twice when encrypting) |
 | `-hp[<password>]` | also encrypt the directory and footer: without the password not even the listing is visible |
-| `-ae=<alg>`, `--encryption=<alg>` | `aes` (default, aes-256/ctr), `blowfish`, `serpent`, `twofish`; with size and mode: `serpent-256/cfb`, `blowfish-448/ctr`… |
+| `-ae=<alg>`, `--encryption=<alg>` | `chacha` (default: XChaCha20-Poly1305) or `aes` (AES-256-GCM) |
+| `-ae=<alg>:t<n>:m<size>:p<n>` | key derivation cost: Argon2id passes, memory (`65536` KiB, `64m`, `1g`) and lanes; default `t3:m64m:p4` |
 
 `-p` and `-hp` may carry different passwords; both are tried when reading.
 If the password of an encrypted archive is missing, PArc prompts (up to three attempts).
-When updating an encrypted archive, blocks that are repacked are encrypted again even if `-p`
-was not given: deleting a file does not leave the rest in plaintext.
+A wrong password is reported as such (exit code 5); damaged or modified encrypted data is reported
+as "authentication failed" (exit code 2), never as a CRC error.
 
-`.parc` encryption uses:
+`.parc` encryption (format: [FORMATO-PARC.md §3b](formato/FORMATO-PARC.md)):
 
-- 200,000 PBKDF2-HMAC-SHA512 iterations to derive the key. This costs ~0.6 s, once per archive.
-  `-ae=aes:n<N>` selects another count;
-- the full key (32 bytes for AES-256), without FreeArc's defective decoding;
-- one authentication tag per block (32-byte HMAC-SHA512): a change in the encrypted data is
-  detected ("authentication failed"), which CRC alone does not guarantee with CTR;
-- the password in UTF-8, so any character counts.
+- the key comes from the password (its UTF-8 bytes) with **Argon2id** (64 MiB, 3 passes, 4 lanes
+  computed in parallel: ~0.2 s, once per archive); the cost is stored in the archive;
+- **XChaCha20-Poly1305** or **AES-256-GCM** (AES-NI and PCLMULQDQ when the CPU has them), in
+  64 KiB chunks, each with its own authentication tag: any change, truncation or reordering is
+  detected, and nothing unauthenticated is decompressed;
+- `-p` alone encrypts the file data; names, sizes and dates stay visible. `-hp` also encrypts and
+  authenticates the directory and footer.
+- Speed on one x86-64 core (Xeon E5-2697A v4, AVX2): XChaCha20-Poly1305 ~1.5 GB/s, AES-256-GCM
+  ~1.7 GB/s. Without AVX2/AES-NI (and on i386/ARM) the portable code is much slower
+  (~0.2 GB/s for XChaCha20, ~0.07 GB/s for AES-GCM), so `chacha` is the better choice there. The
+  portable AES is table based and not constant-time; the x86-64 AES-NI path is.
 
-`.parc` archives encrypted by older PArc versions can still be read and updated.
+Updating an encrypted archive (`a`, `u`, `f`, `d`) needs its password: a different `-p` is
+rejected as a wrong password, so the data of one archive never mixes passwords. Intact solid blocks
+are copied as they are; blocks that are repacked are encrypted again even if `-p` was not given
+(deleting a file does not leave the rest in plaintext).
+
+Archives encrypted by PArc 0.0.3 or earlier (FreeArc's AES/Blowfish/Serpent/Twofish scheme) can no
+longer be read; extract them with PArc 0.0.3.
 
 ### Standard input and output
 

@@ -9,7 +9,7 @@ program parc;
 
 uses
   {$IFDEF UNIX}cthreads, BaseUnix,{$ENDIF}
-  Classes, SysUtils, Types, DateUtils, parc_os, parc_bytes, parc_methods, parc_archive, parc_extract, parc_writer, parc_encoders, parc_presets, parc_recovery, parc_progress, parc_filelist, parc_volume, parc_console, parc_parallel;
+  Classes, SysUtils, Types, DateUtils, parc_os, parc_bytes, parc_methods, parc_archive, parc_extract, parc_writer, parc_encoders, parc_presets, parc_recovery, parc_progress, parc_filelist, parc_volume, parc_console, parc_parallel, parc_crypt;
 
 const
   PARC_VERSION = '0.0.3';
@@ -128,7 +128,8 @@ begin
   OutLn('Encryption:');
   OutLn('  -p<password>    encrypt data; on read, password for the archive');
   OutLn('  -hp[password]   also encrypt the directory/footer');
-  OutLn('  -ae=<alg>       aes (default), blowfish, serpent, twofish');
+  OutLn('  -ae=<alg>       chacha (XChaCha20-Poly1305, default) or aes (AES-256-GCM);');
+  OutLn('                  key derivation Argon2id t3 m64m p4, change with :t<n>:m<n>m:p<n>');
   OutLn('');
   OutLn('Volumes and streams:');
   OutLn('  -v<size>        volumes: -v100m, -v4g, -v700000k');
@@ -1119,6 +1120,7 @@ var
   i, Code, Tries: Integer;
   Retry, ShowProgress, Writing, ToStdout: Boolean;
   DPwd, HPwd: string;
+  Cipher: TCipherChoice;
 begin
   Cmd := '';
   if ArgCount >= 1 then Cmd := Arg(1);
@@ -1169,7 +1171,7 @@ begin
   Excludes := TStringList.Create;
   MO.Excludes := Excludes;
   MO.Recovery := '--';
-  MO.Encryption := 'aes';
+  MO.Encryption := 'chacha';
   DPwd := '--'; HPwd := '--';   // '--' = no se dio la opción (como Cmdline.hs)
   Code := 0;
   ShowProgress := True;
@@ -1325,6 +1327,12 @@ begin
     end;
     if (DPwd <> '--') and (DPwd <> '') then MO.DataPassword := DPwd;
     if (HPwd <> '--') and (HPwd <> '') then MO.HeadersPassword := HPwd;
+    if Writing and not ParseCipherChoice(MO.Encryption, Cipher) then
+    begin
+      ErrLn('ERROR: invalid encryption algorithm "' + MO.Encryption + '" (chacha or aes, ' +
+            'optionally with :t<passes>:m<KiB, or n m/g>:p<lanes>)');
+      Halt(1);
+    end;
     // La principal es la de los datos (con esa se vuelve a cifrar lo que se reempaqueta);
     // la de encabezados, si es otra, se prueba también (-p y -hp distintas)
     if MO.DataPassword <> '' then SetArchivePassword(MO.DataPassword);

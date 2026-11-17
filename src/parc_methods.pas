@@ -12,7 +12,7 @@ uses
 type
   EUnsupportedMethod = class(Exception);
   EPasswordRequired = class(Exception);   // el archivo está cifrado y no hay contraseña
-  EBadPassword = class(Exception);        // el check-code no coincide
+  EBadPassword = class(Exception);        // el valor de comprobación no coincide
 
   TPpmdParams = record
     Order, MRMethod: Integer;
@@ -26,8 +26,8 @@ function ParsePpmdParams(const Params: TStringArray): TPpmdParams;
 procedure SetArchivePassword(const Pwd: RawByteString);
 { La contraseña dada con SetArchivePassword ('' si no hay). }
 function ArchivePassword: RawByteString;
-{ Otra contraseña para probar (p. ej. -p y -hp distintas): como FreeArc, cada bloque cifrado
-  se abre con la primera de la lista cuyo check-code coincide. }
+{ Otra contraseña para probar (p. ej. -p y -hp distintas): cada bloque cifrado se abre con la
+  primera de la lista cuyo valor de comprobación coincide. }
 procedure AddArchivePassword(const Pwd: RawByteString);
 
 { Arma la cadena de decodificadores sobre Source (la cadena pasa a ser dueña de Source). }
@@ -79,96 +79,19 @@ begin
   GExtraPasswords[High(GExtraPasswords)] := Pwd;
 end;
 
-{ ¿La etapa es de cifrado? El nombre va antes de '-' (bits) o '/' (modo): "aes-256/ctr". }
-function IsCipherStage(const Stage: string): Boolean;
+{ Clave de una etapa de cifrado: del caché, o probando las contraseñas dadas (-p, -hp y las que
+  se pidieron por consola) contra el valor de comprobación de la etapa. }
+function ResolveKey(const Par: TCryptParams): TMasterKey;
 var
-  Name: string;
   p: Integer;
 begin
-  Name := Stage.Split([':'])[0];
-  p := Pos('-', Name); if p > 0 then Name := Copy(Name, 1, p - 1);
-  p := Pos('/', Name); if p > 0 then Name := Copy(Name, 1, p - 1);
-  Result := IsCipherName(Name);
-end;
-
-{ Bytes de la contraseña tal como los ve FreeArc 0.67 (Encryption.hs:85 y EncryptionLib.hs:27):
-  - con :f, unicode2utf8: los bytes UTF-8;
-  - sin :f (el caso de siempre), la contraseña llega como caracteres Unicode reales
-    (Charsets.myGetArgs usa CommandLineToArgvW) y withCStringLen de GHC 6.x trunca cada
-    carácter a su byte bajo (castCharToCChar). Para ASCII da lo mismo; para "日" (U+65E5), E5.
-  Nuestra contraseña viene en UTF-8. }
-function PasswordBytes(const Password: RawByteString; Fixed: Boolean): RawByteString;
-var
-  W: UnicodeString;
-  i: Integer;
-begin
-  if Fixed then Exit(Password);
-  W := UTF8Decode(Password);
-  SetLength(Result, Length(W));
-  for i := 1 to Length(W) do Result[i] := Chr(Ord(W[i]) and $FF);
-end;
-
-{ Como generateDecryption (Encryption.hs): cada etapa de cifrado sin clave (:k) se reemplaza
-  por su versión con la clave derivada de la contraseña, después de comprobar el check-code. }
-var
-  GKeyCacheId: string = '';   // la última clave derivada (ApplyKeys)
-  GKeyCache: array of Byte;
-
-function ApplyKeys(const Method: string): string;
-var
-  Stages, Params: TStringArray;
-  k, j: Integer;
-  HasKey: Boolean;
-  Par: TCryptParams;
-  Key: array of Byte;
-  Pwd: RawByteString;
-  p: Integer;
-  Ok: Boolean;
-  CacheId: string;
-begin
-  Result := Method;
-  if Pos('/', Method) = 0 then Exit;   // atajo: toda etapa de cifrado lleva "/modo"
-  Stages := Method.Split(['+']);
-  for k := 0 to High(Stages) do
-  begin
-    if not IsCipherStage(Stages[k]) then Continue;
-    Params := Stages[k].Split([':']);
-    HasKey := False;
-    for j := 1 to High(Params) do
-      if (Params[j] <> '') and (Params[j][1] = 'k') then HasKey := True;
-    if HasKey then Continue;
-    if not GHavePassword then
-      raise EPasswordRequired.Create('archive is encrypted: provide the password with -p<password>');
-    Par := ParseCryptParams(Params);
-    SetLength(Key, Par.KeySize + 2);
-    // Los bloques de un .parc comparten sal: la clave derivada se recuerda (con muchas
-    // iteraciones de PBKDF2, derivarla en cada bloque costaría ~0,6 s por bloque)
-    CacheId := Par.Cipher + IntToStr(Par.KeySize) + ':' + IntToStr(Par.NumIterations) + ':' +
-               BoolToStr(Par.Fixed, 'f', '') + ':' + Par.SaltHex + ':' + Par.CheckHex;
-    Ok := (CacheId = GKeyCacheId) and (Length(GKeyCache) >= Par.KeySize);
-    if Ok then Move(GKeyCache[0], Key[0], Par.KeySize)
-    else
-    begin
-      Pwd := PasswordBytes(GPassword, Par.Fixed);
-      Ok := DeriveKeyAndCheck(Par, PByte(Pwd), Length(Pwd), @Key[0]);
-      p := 0;
-      while not Ok and (p <= High(GExtraPasswords)) do
-      begin
-        Pwd := PasswordBytes(GExtraPasswords[p], Par.Fixed);
-        Ok := DeriveKeyAndCheck(Par, PByte(Pwd), Length(Pwd), @Key[0]);
-        Inc(p);
-      end;
-      if Ok then
-      begin
-        GKeyCacheId := CacheId;
-        GKeyCache := Copy(Key, 0, Par.KeySize);
-      end;
-    end;
-    if not Ok then
-      raise EBadPassword.Create('wrong password');
-    Stages[k] := KeyedMethod(Par, @Key[0]);
-  end;
-  Result := string.Join('+', Stages);
+  if CryptLookup(Par, Result) then Exit;
+  if not GHavePassword then
+    raise EPasswordRequired.Create('archive is encrypted: provide the password with -p<password>');
+  if CryptTryPassword(Par, GPassword, Result) then Exit;
+  for p := 0 to High(GExtraPasswords) do
+    if CryptTryPassword(Par, GExtraPasswords[p], Result) then Exit;
+  raise EBadPassword.Create('wrong password');
 end;
 
 function IsStoring(const Method: string): Boolean;
@@ -477,6 +400,7 @@ end;
 
 function CreateStage(const Stage: string; Source: TInStage): TInStage;
 var
+  Par: TCryptParams;
   Params: TStringArray;
   lz: TLzmaParams;
   pp: TPpmdParams;
@@ -484,7 +408,10 @@ begin
   Params := Stage.Split([':']);
   if Length(Params) = 0 then raise EUnsupportedMethod.Create('empty method');
   if IsCipherStage(Stage) then
-    Exit(TDecryptStage.Create(Source, ParseCryptParams(Params)));
+  begin
+    Par := ParseCipherStage(Stage);
+    Exit(TAeadDecryptStage.Create(Source, Par, ResolveKey(Par)));
+  end;
   case Params[0] of
     'storing':
       Result := Source;
@@ -530,6 +457,11 @@ begin
     'cm':
       Result := TCmDecStage.Create(Source);
   else
+    // el cifrado de PArc 0.0.3 y anteriores (el esquema de FreeArc: "aes-256/ctr:...")
+    if (Pos('/', Params[0]) > 0) and ((Pos('aes', Params[0]) = 1) or (Pos('blowfish', Params[0]) = 1) or
+       (Pos('serpent', Params[0]) = 1) or (Pos('twofish', Params[0]) = 1)) then
+      raise EUnsupportedMethod.Create('encrypted with the scheme of PArc 0.0.3 and earlier, ' +
+        'which is no longer supported (extract it with PArc 0.0.3)');
     raise EUnsupportedMethod.CreateFmt('method not supported yet: "%s"', [Stage]);
   end;
 end;
@@ -541,7 +473,7 @@ var
 begin
   Result := Source;
   try
-    Stages := ApplyKeys(Method).Split(['+']);
+    Stages := Method.Split(['+']);
     for k := High(Stages) downto 0 do
       Result := CreateStage(Stages[k], Result);
   except
@@ -605,6 +537,7 @@ begin
   Stages := Method.Split(['+']);
   for s := 0 to High(Stages) do
   begin
+    if IsCipherStage(Stages[s]) then Continue;   // (la sal y el nonce en hex no son memoria)
     Params := Stages[s].Split([':']);
     StageMax := 0;
     for k := 1 to High(Params) do

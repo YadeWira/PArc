@@ -80,16 +80,103 @@ files), so a compact encoding is not worth a new tag.
 - **Descriptors**: the same fields and the same CRC; only the signature changes.
 - **Methods**: the same strings (`lzma:...`, `rep:...+...`, `4x4:...`).
 - **Footer**: the same fields, including `locked`, `recovery` and `comment`.
-- **Encryption**: the same method string as the base container, plus two parameters that PArc
-  always writes in `.parc` (a reader also accepts old archives without them):
-  - `:f`: the hex of `:s`, `:c`, `:i` and the key decodes correctly and the password is in
-    UTF-8 (in FreeArc, `:f` existed but was unused; without it, hex is decoded with
-    `buggy_decode16`);
-  - `:m`: at the end of a block's encrypted data there are 32 tag bytes:
-    HMAC-SHA512(K_mac, IV ‖ ciphertext) truncated, with K_mac = HMAC-SHA512(key, "PArc-MAC-v1").
-    `compsize` includes the tag.
-  Default is `:n200000`. All blocks of an archive written in one go share the salt (and key);
-  each one carries its own random IV.
+- **Encryption**: its own scheme, not FreeArc's; see §3b.
+
+## 3b. Encryption (scheme 1)
+
+Encryption is the **last stage of a block's method string** (`lzma:...+xchacha20:...`). The stage
+carries every public parameter the reader needs and **never the key**; the stage stored in the
+archive is exactly the one the encoder used. Archives encrypted by PArc 0.0.3 and earlier
+(FreeArc's `aes-256/ctr:...` scheme) are not readable any more (pre-1.0, no compatibility).
+
+### Stage string
+
+```
+xchacha20:t<T>:m<M>:p<P>:s<salt>:c<check>:n<nonce>[:h]     XChaCha20-Poly1305 (default)
+aes256gcm:t<T>:m<M>:p<P>:s<salt>:c<check>:n<nonce>[:h]     AES-256-GCM (-ae=aes)
+```
+
+| param | meaning |
+|---|---|
+| `t`, `m`, `p` | Argon2id passes, memory in KiB and lanes (decimal). Default `t3:m65536:p4` |
+| `s` | Argon2 salt, 16 bytes, lowercase hex. Random per archive (see "Keys") |
+| `c` | password check value, 8 bytes, hex |
+| `n` | block nonce, 16 bytes, hex. Random for **every** block |
+| `h` | (no value) the block is a control block: directory or footer (`-hp`) |
+
+Every parameter except `h` is mandatory; an unknown or repeated parameter, wrong hex length, or a
+cost outside `1 ≤ t ≤ 64`, `1 ≤ p ≤ 64`, `8·p ≤ m ≤ 4194304` (4 GiB) makes the block unreadable
+(a hostile archive cannot ask for unbounded memory or time).
+
+### Keys
+
+```
+master  = Argon2id(password, salt, t, m, p, tag length 32)          RFC 9106, version 0x13, no secret, no AD
+K(label) = BLAKE2b-256(key = master, message = "PArc/1 " || label)  RFC 7693, keyed mode
+check   = K("check")[0..7]
+K_use   = K("data xchacha20") | K("data aes256gcm") | K("header xchacha20") | K("header aes256gcm")
+```
+
+The password is its UTF-8 bytes, as typed (no Unicode normalization). A reader derives `master`
+for each password it has (`-p`, `-hp`, prompts) and compares `check` (constant time): a mismatch is
+reported as **wrong password** (exit code 5), not as damage; a matching check with a failing tag
+is damage. `check` is 64 bits, so a wrong password passes it with probability 2^-64 and then fails
+authentication. Keys are cached per (salt, t, m, p, check): Argon2 runs once per archive.
+
+Default cost: `t = 3`, `m = 64 MiB`, `p = 4` is RFC 9106's second recommended option (for memory
+constrained settings). The four lanes run in parallel (within the thread budget): ~0.12 s on a
+2.6 GHz Xeon E5-2697A v4 with 4 threads (0.37 s with `PARC_THREADS=1`); the i386 build, without
+native 64-bit arithmetic, takes ~0.3 s with 4 threads (1.0 s on one). The parameters
+are stored per block, so they can be raised later without a format change; `-ae=chacha:t4:m256m`
+chooses others.
+
+When writing, PArc reuses the salt of a key already derived **with the same password and costs**
+in the same run, i.e. the salt of the archive being updated; otherwise it draws a new one. All
+blocks written in one go share one salt; each block draws its own 16-byte nonce `n`.
+
+### Chunks
+
+The plaintext of a block (the output of the previous stages) is cut into **64 KiB chunks**; the
+last chunk has 0 to 65,536 bytes (an empty block is one empty final chunk). Each chunk is sealed as
+an independent AEAD message with **empty associated data**, and stored as ciphertext followed by its
+16-byte tag. `compsize` includes the tags: `n + 16·max(1, ⌈n / 65536⌉)` bytes.
+
+| cipher | chunk key | chunk nonce |
+|---|---|---|
+| XChaCha20-Poly1305 (draft-irtf-cfrg-xchacha-03) | `K_use` | 24 bytes: `n` (16) ‖ LE56(i) ‖ `last` |
+| AES-256-GCM (NIST SP 800-38D, 96-bit nonce, 128-bit tag) | `BLAKE2b-256(key = K_use, message = n)` | 12 bytes: LE88(i) ‖ `last` |
+
+`i` is the chunk index (0, 1, ...) and `last` is the byte 1 for the final chunk, 0 otherwise. A
+reader knows a chunk is the final one because the block ends right after it (it reads one byte
+ahead). This is the STREAM construction: dropping, reordering, duplicating, truncating (even at a
+chunk boundary) or appending chunks, or flipping any bit, fails authentication. A chunk's plaintext
+is released only after its tag verifies, so no unauthenticated byte ever reaches a decompressor.
+For AES-GCM the per-block key keeps every (key, nonce) pair unique without random 96-bit nonces.
+
+### What is bound to what
+
+- Nothing depends on the block's absolute position, so blocks are **copied unchanged** when an
+  archive is updated (`a`, `u`, `f`, `d` keep intact solid blocks), with their stage strings.
+- The block nonce lives in the method string, which the directory stores: a block moved to
+  another block's place (or replaced by another block of the same archive) decrypts with the wrong
+  nonce and fails. With `-hp` the directory and footer are themselves authenticated (header key),
+  so the whole archive structure is covered; the HEADER block (signature and version) and the
+  descriptors stay in clear. The footer's descriptor necessarily exposes the footer's stage
+  (salt, check, nonce, costs).
+- With `-p` alone the directory is plaintext and not authenticated: names, sizes, dates and the
+  compression part of each method can be read and changed. A changed method or block list makes
+  decompression or the per-file CRC fail; it cannot reveal or forge encrypted data. An attacker can
+  also replace the whole archive, or roll back the footer of an `-hp` archive to an older one.
+- Data and control blocks use different keys, so a data block cannot stand in for a directory.
+
+### Updating
+
+Updating an encrypted archive needs the password of its data blocks: if `-p` is given and the
+archive already has encrypted data blocks, the password is checked first against their stage; a
+different password is rejected as a **wrong password** (exit 5) and the archive is left untouched,
+so the data of an archive never mixes passwords. Blocks that are recompressed (`d` in a solid block,
+`--recompress`) are encrypted again, with a new nonce, even when `-p` is not repeated. The directory
+and footer are always rewritten, with the `-hp` password given for that run.
 
 ## 4. Writing: invariants PArc must satisfy
 

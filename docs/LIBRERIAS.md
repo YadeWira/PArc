@@ -14,7 +14,6 @@ document records where each one comes from, what it was verified against, and wh
 |---|---|---|---|
 | LZMA SDK (`Compression/LZMA2/C`) | 2009-02 | 26.x | The LZMA stream and x86 BCJ do not change; the new encoder produces valid bytes, not identical ones. `GetOptimumFast` keeps FreeArc's additions (length/distance pruning and relaxed rep-matches) |
 | LZ4 (`Compression/LZ4`) | 2011-2012 | 1.10.0 (BSD-2) | Since 2026-11 the `lz4` stream is a standard LZ4 Frame (readable by the `lz4` tool), no longer FreeArc's framing. LZ4 1.11.1 (2026-11-10) is out: still to review for compressor changes |
-| LibTomCrypt (`_Encryption`) | 1.17 | 1.18.2 | AES/Blowfish/Serpent/Twofish/SHA produce the same output |
 | PPMd (D. Shkarin, modified by FreeArc) | var. H/I | no compatible upstream | Kept as PArc's own port (including the 32-bit layout on x64) |
 | SREP | 3.93 beta (2013) | 3.93a beta (2014-10-11) | freeware by Bulat Ziganshin; v1–v4 format |
 | Tornado, REP, 4x4, Dict, LZP, Delta, MM/TTA, GRZip, DisPack | 0.67 | no maintained upstream | Ported from `Compression/`; that code defines the stream. The Tornado encoder for `tor:10` and `tor:15` (combination 8, and the optimal parser with CachingMatchFinder<6> and rows >= 64) is FreeArc's C++ itself, compiled by `build.sh` with `src/parc_torglue.patch` (repdist match capped at bufend; decoder left out) |
@@ -29,9 +28,7 @@ document records where each one comes from, what it was verified against, and wh
 | x86 BCJ (`exe`) | LZMA SDK 26.03 | against compiled `Bra86.c`, with buffer splits (`tests/bcj.sh`) |
 | LZ4 (decompression) | LZ4 Frame spec + block semantics of `LZ4_decompress_safe` (own code); linked blocks, block/content checksums and content size are read | `tests/lz4frame.sh`: PArc ↔ `lz4` tool both ways, damaged and cut frames |
 | LZ4 (compression) | LZ4 1.10 (`LZ4_compress_default` and `LZ4_compress_HC` level 9), BSD-2 notice kept in `parc_lz4enc.pas`; frame with independent blocks, no checksums | block bytes identical to LZ4 1.10 in C; `tests/lz4frame.sh` |
-| AES, Blowfish, Twofish, SHA-512, PBKDF2 | LibTomCrypt | `tests/crypto_vectors.sh`: 0 differences over thousands of random vectors against FreeArc's 1.17 and official 1.18.2 |
-| Serpent | FreeArc's addition to LibTomCrypt 1.17 | same, against 1.17 |
-| CTR / CFB | LibTomCrypt (little-endian counter) | same |
+| Encryption: BLAKE2b, Argon2id/d/i (`parc_blake2`), ChaCha20, HChaCha20, Poly1305, (X)ChaCha20-Poly1305 (`parc_chacha`), AES-256 and GCM (`parc_aes`), scheme (`parc_crypt`) | own code from RFC 7693, RFC 9106, RFC 8439, draft-irtf-cfrg-xchacha-03, FIPS 197, NIST SP 800-38D (nothing from FreeArc or LibTomCrypt); x86-64 assembler for AVX2 ChaCha20 (stitched with Poly1305), Poly1305 (64-bit MUL), AES-NI and PCLMULQDQ, with Pascal fallbacks giving the same output | `tests/crypto_vectors.sh`: official vectors, NIST CAVP AES-256-GCM (750 cases), thousands of random cases against python-cryptography/OpenSSL, PyNaCl/libsodium and `openssl kdf` (Argon2), each with the asm path, without AVX2/AES-NI and with `-dPARC_NOASM`; a `.parc` block decrypted by an independent Python implementation of the format |
 | PPMd, Tornado, REP, 4x4, Dict, LZP, Delta, MM, TTA, GRZip | FreeArc 0.67 | `tests/run_tornado_tests.sh`, `tests/ppmd`, `tests/mm_tta`, `tests/grzip.sh` and `.parc` round-trips; GRZip raises LZP to l64/h22 adaptively for BWT blocks >=4 MB |
 | DisPack (`dispack070`) | `Compression/DisPack` (0.70) | `tests/dispack.sh`: filter byte-for-byte against C and `.parc` round-trip |
 | SREP (`srep`), decoder | `Compression/SREP/srep.cpp` (3.93 beta) + 3.93a | `tests/srep.sh`: v1–v4 streams (text, repeats, random, >8 MB), synthetic `BASE_LEN=0` cases and lengths that wrap 32 bits; optional interoperability with 3.93a |
@@ -39,8 +36,10 @@ document records where each one comes from, what it was verified against, and wh
 | BCJ2-style filter (`bcj2`) | own implementation (4 streams: main, CALL/JMP, Jcc, service bits) | `tests/bcj2.sh`: round-trip on synthetic x86 markers, random bytes and empty input. **Experimental**: not used by presets yet; compared with 7-Zip BCJ2 on binaries |
 | Context mixing (`cm`) | lpaq1 by Matt Mahoney (GPLv2) | `tests/cm.sh`: round-trip of text/binary/empty data, `-mxx` ratio vs `-m9`, `-mx` fast path, damaged stream (code 2) and encrypted archives |
 
-Historical note: LibTomCrypt rejects Blowfish keys shorter than 8 bytes (and AES/Twofish keys
-that are not 16/24/32 bytes); PArc now rejects them too (`CipherKeySizeValid`).
+Until 0.0.3 PArc used FreeArc's encryption (LibTomCrypt AES/Blowfish/Serpent/Twofish in CTR/CFB
+with PBKDF2-HMAC-SHA512 and keys in the method string). It was replaced by the scheme in
+`docs/formato/FORMATO-PARC.md` §3b, written from the standards; old encrypted archives are no
+longer readable.
 
 ## Out of scope
 

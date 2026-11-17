@@ -31,8 +31,9 @@ The rest of the FreeArc 0.67 tree is in git history (commit `82ea8d9`) and in Fr
 ## What it does today
 
 - `.parc` format: nanosecond timestamps, Windows attributes, Unix permissions and links,
-  Reed-Solomon recovery (`-rr`), volumes (`-v`), authenticated encryption (`-p`/`-hp`),
-  stdin/stdout (`-si`, `-so`, `-`), long paths and cancellation without partial files.
+  Reed-Solomon recovery (`-rr`), volumes (`-v`), authenticated encryption (`-p`/`-hp`:
+  XChaCha20-Poly1305 or AES-256-GCM in 64 KiB chunks, Argon2id; own code, see
+  [FORMATO-PARC.md §3b](formato/FORMATO-PARC.md)), stdin/stdout (`-si`, `-so`, `-`), long paths and cancellation without partial files.
 - Existing self-extractors can be listed, tested and extracted; no new ones are created.
 - Commands: `l`, `lb`, `t`, `x`, `e`, `a`, `u`, `f`, `d`, `r`.
 - Methods: `storing`, `lzma`, `ppmd`, `grzip`, `dict`, `rep`, `delta`, `tor`, `lzp`, `mm`,
