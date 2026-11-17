@@ -79,7 +79,7 @@ implementation
 
 uses
   parc_bytes, parc_crc, parc_stream, parc_outstream, parc_encoders, parc_methods, parc_recovery, parc_progress,
-  parc_volume, parc_parallel, parc_strmap, parc_crypt;
+  parc_volume, parc_parallel, parc_strmap, parc_crypt, parc_canon;
 
 const
   VERSION_PARC: array[0..3] of Byte = (PARC_FORMAT_VERSION, 0, 0, 0);
@@ -896,13 +896,17 @@ begin
     for k := 0 to High(AllGroups[i].Files) do
       if not Entries[AllGroups[i].Files[k]].Meta.IsDir then Inc(Size, Entries[AllGroups[i].Files[k]].Meta.Size);
     if (Size = 0) or IsStoring(AllGroups[i].Method) then Continue;
-    Est[n] := 8 * EstimateDecodeMem(LimitMethodToSize(WithoutCipher(AllGroups[i].Method), Size), Size);
+    // lo que usa de verdad su cadena de codificadores (antes: 8 veces lo del decodificador)
+    Est[n] := EncodeMemEstimate(LimitMethodToSize(WithoutCipher(AllGroups[i].Method), Size), Size);
     Inc(n);
   end;
   SetLength(Est, n);
   Result := BudgetThreads;
   if Result > n then Result := n;
-  Result := ThreadsForMemory(Est, Result);
+  // los que corren a la vez tienen que entrar juntos en el límite de compresión (-lc o el
+  // automático); sin límite, en la mitad de la RAM y del espacio de direcciones
+  Result := ThreadsForMemory(Est, Result, EffectiveCompressLimit);
+  if Result < 1 then Result := 1;
 end;
 
 { Ordena AllGroups[First..] por tamaño de entrada, de mayor a menor (estable; storing cuenta

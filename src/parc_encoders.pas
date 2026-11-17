@@ -107,6 +107,15 @@ function CompressMem(const Method: string; Src: PByte; SrcLen: SizeInt): TBytes;
   archivo, así que el descompresor también reserva solo eso. }
 function LimitMethodToSize(const Method: string; DataSize: Int64): string;
 
+{ Memoria que usa la cadena de codificadores de un bloque de DataSize bytes (todas sus etapas
+  están vivas a la vez): estimación por etapa (ver StageEncodeMem). }
+function EncodeMemEstimate(const Method: string; DataSize: Int64): Int64;
+
+{ Method (canónico) achicado hasta que EncodeMemEstimate entre en Limit: se achica primero la
+  etapa que más usa, de a poco, hasta que entra o ninguna se puede achicar más (como
+  limit_compression_memory de FreeArc). }
+function FitEncodeMem(const Method: string; DataSize, Limit: Int64): string;
+
 { True si CreateEncoderChain sabe comprimir con Method (sin crear nada). }
 function EncoderAvailable(const Method: string): Boolean;
 
@@ -684,10 +693,147 @@ begin
 end;
 
 function LimitMethodToSize(const Method: string; DataSize: Int64): string;
+var
+  Lim: Int64;
 begin
   // limitDictionary + el texto canónico de cada compresor (parc_canon, PA-Lab): el mismo
   // método que guarda FreeArc para un bloque de ese tamaño
   Result := LimitAndCanonize(Balance4x4(Method, DataSize), DataSize);
+  // y la memoria de los codificadores: -lc o el límite automático (75 % de la RAM; en 32 bits
+  // también lo que entra en el espacio de direcciones). Sin esto -m9 en win32 se quedaba sin
+  // memoria (rep:1gb + lzma bt4 de 192 MB + 4x4/bloques en paralelo)
+  Lim := EffectiveCompressLimit;
+  if (Lim > 0) and (EncodeMemEstimate(Result, DataSize) > Lim) then
+    Result := FitEncodeMem(Result, DataSize, Lim);
+end;
+
+const
+  MB_ = Int64(1) shl 20;
+
+{ Primera memoria con sufijo de los parámetros de una etapa (el diccionario o bloque). }
+function FirstMemParam(const Parts: TStringArray; Def: Int64): Int64;
+var
+  j: Integer;
+  m: QWord;
+begin
+  for j := 1 to High(Parts) do
+    if (Parts[j] <> '') and (Parts[j][1] in ['0'..'9']) and (StrToIntDef(Parts[j], -1) < 0) and
+       ParseMem(Parts[j], m) then Exit(Int64(m));
+  Result := Def;
+end;
+
+{ Memoria de una etapa al comprimir un bloque de DataSize bytes. Lo exacto donde el codificador
+  lo sabe (lzma, rep); lo demás, de lo que reserva cada uno:
+  - ppmd: el modelo; tor: búfer + hash + hash auxiliar; lzp: entrada + salida + hash;
+  - dict: ~3 veces el bloque; grzip: ~6 veces el bloque (BWT); dispack: ~3 veces su bloque;
+  - rep: ventana + hash, más media ventana (el búfer crece al doble: copia al crecer);
+  - cm y srep guardan todo el bloque (cm: ~4 veces más sus modelos de 64 MB; srep: ~3 veces);
+  - 4x4: los trabajos en vuelo (hasta los hilos, máx. 16) por (método interno + 2 bloques);
+  - filtros (exe, delta, mm, tta, bcj2) y cifrado: búferes de unos MB. }
+function StageEncodeMem(const Stage: string; DataSize: Int64): Int64;
+var
+  Parts: TStringArray;
+  Inner: string;
+  Bs: SizeInt;
+  TM, TD: TTorMethod;
+  Lz: TLzpParams;
+  Rp: TRepEncParams;
+  J: Integer;
+  B: Int64;
+begin
+  if IsCipherStage(Stage) then Exit(MB_);
+  Parts := Stage.Split([':']);
+  if DataSize < 0 then DataSize := 0;
+  try
+    case StageName(Stage) of
+      'lzma':
+        begin
+          Result := Int64(Min(LzmaEncMemory(ParseLzmaEncParams(Parts)), QWord(High(Int64) div 2)));
+          Inc(Result, 2 * MB_);
+        end;
+      'rep':
+        begin
+          Rp := ParseRepEncParams(Parts);
+          B := Rp.BlockSize;
+          if (DataSize > 0) and (DataSize < B) then B := DataSize;
+          Result := RepEncMemory(Rp) + B div 2 + MB_;
+        end;
+      'ppmd': Result := Int64(ParsePpmdParams(Parts).Mem) + 2 * MB_;
+      'tor':
+        if TorParseWithDefaults(Parts, TM, TD) then
+          Result := Int64(TM.Buffer) + Int64(TM.HashSize) + Int64(TM.AuxHashSize) + 2 * MB_
+        else Result := 64 * MB_;
+      'lzp':
+        begin
+          Lz := ParseLzpParams(Parts);
+          Result := 2 * Int64(Lz.BlockSize) + (Int64(8) shl Lz.HashSizeLog) + MB_;
+        end;
+      'dict': Result := 3 * FirstMemParam(Parts, 64 * MB_) + MB_;
+      'grzip': Result := 6 * FirstMemParam(Parts, 8 * MB_) + MB_;
+      'dispack', 'dispack070': Result := 3 * FirstMemParam(Parts, 8 * MB_) + MB_;
+      'cm': Result := 4 * DataSize + 320 * MB_;
+      'srep': Result := 3 * DataSize + 64 * MB_;
+      'lz4': Result := 3 * FirstMemParam(Parts, MB_) + MB_;
+      '4x4':
+        begin
+          Parse4x4(Stage, Inner, Bs);
+          J := BudgetThreads;
+          if J > T4X4_MAXTHREADS then J := T4X4_MAXTHREADS;
+          if J < 1 then J := 1;
+          Result := Int64(J) * (EncodeMemEstimate(Inner, Bs) + 2 * Int64(Bs)) + Int64(Bs);
+        end;
+    else
+      Result := 4 * MB_;   // exe, delta, mm, tta, bcj2, storing...
+    end;
+  except
+    Result := 64 * MB_;    // parámetros raros: el codificador dará el error
+  end;
+end;
+
+function EncodeMemEstimate(const Method: string; DataSize: Int64): Int64;
+var
+  St: string;
+begin
+  Result := 4 * MB_;
+  for St in Method.Split(['+']) do Inc(Result, StageEncodeMem(St, DataSize));
+end;
+
+function FitEncodeMem(const Method: string; DataSize, Limit: Int64): string;
+var
+  St: TStringArray;
+  Mem: array of Int64;
+  Frozen: array of Boolean;
+  i, j, Iter: Integer;
+  Total, Target: Int64;
+  S2: string;
+begin
+  St := Method.Split(['+']);
+  SetLength(Mem, Length(St));
+  SetLength(Frozen, Length(St));
+  for i := 0 to High(St) do Frozen[i] := IsCipherStage(St[i]);
+  for Iter := 1 to 400 do
+  begin
+    Total := 4 * MB_;
+    for i := 0 to High(St) do
+    begin
+      Mem[i] := StageEncodeMem(St[i], DataSize);
+      Inc(Total, Mem[i]);
+    end;
+    if Total <= Limit then Break;
+    j := -1;
+    for i := 0 to High(St) do
+      if not Frozen[i] and ((j < 0) or (Mem[i] > Mem[j])) then j := i;
+    if j < 0 then Break;   // no entra ni con todo al mínimo: queda lo más chico posible
+    // Lo que sobra, sacado de la más grande, pero de a lo sumo la mitad por paso (el mapeo
+    // memoria -> parámetros de cada etapa es aproximado; se vuelve a medir)
+    Target := Mem[j] - (Total - Limit);
+    if Target < Mem[j] div 2 then Target := Mem[j] div 2;
+    if Target < MB_ then Target := MB_;
+    S2 := CanonStageMem(St[j], Target);
+    if S2 = St[j] then Frozen[j] := True
+    else St[j] := S2;
+  end;
+  Result := string.Join('+', St);
 end;
 
 function EncoderAvailable(const Method: string): Boolean;

@@ -19,18 +19,27 @@ interface
 
 function LimitAndCanonize(const Method: string; BlockSize: Int64): string;
 
+{ Una etapa ya canónica achicada para que su codificador use a lo sumo MemLim bytes (aprox.):
+  lzma con su estimación exacta (LzmaFitDictionary), tor búfer + hash, rep/lzp/dict a la mitad,
+  grzip a 1/8 (BWT), ppmd el modelo, y el método interno de 4x4 con MemLim repartido entre sus
+  hilos. cm, srep y los filtros no cambian. Lo usa el ajuste de la cadena entera
+  (parc_encoders.FitEncodeMem), que mide con la estimación de cada codificador y repite. }
+function CanonStageMem(const Stage: string; MemLim: Int64): string;
+
+{ Límite de memoria de los codificadores que corren a la vez (bytes; 0 = sin límite):
+  -lc<tamaño>, o el automático (CompressMemLimit < 0): 75 % de la RAM; en 32 bits además a lo
+  sumo 1,5 GB y 3/8 del espacio de direcciones (lo demás es para búferes, DLLs y la
+  fragmentación de un proceso de 2 o 4 GB). }
+function EffectiveCompressLimit: Int64;
+
 var
-  { -lc<tamaño>: memoria máxima de cada compresor al comprimir (0 = sin límite). Se fija una vez
-    al leer la línea de comandos, antes de comprimir (después solo se lee, desde varios hilos).
-    Cada etapa de la cadena se achica por separado para entrar en el límite (como
-    limitCompressionMem de FreeArc): lzma con su estimación exacta (LzmaFitDictionary), tor
-    búfer + hash, rep/lzp/dict a la mitad, grzip a 1/8 (BWT), ppmd el modelo, y el método
-    interno de 4x4 con el límite repartido entre sus hilos. cm, srep y los filtros no cambian. }
-  CompressMemLimit: Int64 = 0;
+  { -lc: -1 = automático; 0 = sin límite (-lc-); si no, bytes. Se fija al leer la línea de
+    comandos, antes de comprimir (después solo se lee, desde varios hilos). }
+  CompressMemLimit: Int64 = -1;
 
 implementation
 
-uses SysUtils, Math, parc_methods, parc_torenc, parc_lzmaenc, parc_parallel;
+uses SysUtils, Math, parc_os, parc_methods, parc_torenc, parc_lzmaenc, parc_parallel;
 
 const
   KB = 1024; MB = 1024*1024; GB = Int64(1024)*1024*1024;
@@ -585,7 +594,29 @@ end;
 
 function LimitAndCanonize(const Method: string; BlockSize: Int64): string;
 begin
-  Result := CanonChain(Method, RoundMemUp(BlockSize + BlockSize div 100 + 512), CompressMemLimit);
+  Result := CanonChain(Method, RoundMemUp(BlockSize + BlockSize div 100 + 512), 0);
+end;
+
+function CanonStageMem(const Stage: string; MemLim: Int64): string;
+begin
+  Result := CanonChain(Stage, High(Int64), MemLim);
+end;
+
+function EffectiveCompressLimit: Int64;
+var
+  Ram, Va: Int64;
+begin
+  if CompressMemLimit >= 0 then Exit(CompressMemLimit);
+  Ram := PhysicalMemory;
+  if Ram > 0 then Result := Ram div 4 * 3 else Result := 0;
+  {$IFNDEF CPU64}
+  if (Result = 0) or (Result > Int64(1536) shl 20) then Result := Int64(1536) shl 20;
+  Va := AddressSpaceLimit;
+  if (Va > 0) and (Va div 8 * 3 < Result) then Result := Va div 8 * 3;
+  {$ELSE}
+  Va := AddressSpaceLimit;   // ulimit -v
+  if (Va > 0) and ((Result = 0) or (Va div 4 * 3 < Result)) then Result := Va div 4 * 3;
+  {$ENDIF}
 end;
 
 end.

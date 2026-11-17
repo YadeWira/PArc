@@ -1799,7 +1799,7 @@ begin
         end
         else if (Copy(S, 1, 3) = '-lc') or (Copy(S, 1, 3) = '-ld') then
         begin
-          if Copy(S, 4, MaxInt) = '-' then V := 0
+          if (Copy(S, 4, MaxInt) = '-') or (Copy(S, 4, MaxInt) = '0') then V := 0
           else if not ParseMemLimit(Copy(S, 4, MaxInt), V) then
             Fail('bad memory size in ' + S + ' (e.g. 512m, 2g, 50%; a bare number is MB)');
           if S[3] = 'c' then CompressMemLimit := V else Opt.MemLimit := V;

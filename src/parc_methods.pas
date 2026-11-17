@@ -50,7 +50,7 @@ function DecodeMemNeeded(const Method: string): Int64;
 { Cuántos trabajos con esas estimaciones de memoria pueden correr a la vez: hasta Threads,
   mientras los más grandes entren en la mitad de la memoria física y del espacio de
   direcciones. }
-function ThreadsForMemory(const Est: array of Int64; Threads: Integer): Integer;
+function ThreadsForMemory(const Est: array of Int64; Threads: Integer; Limit: Int64 = 0): Integer;
 
 implementation
 
@@ -573,7 +573,7 @@ end;
 { Cuántos bloques se pueden decodificar a la vez: hasta Threads, mientras los más grandes
   entren en la mitad de la memoria física y del espacio de direcciones (ulimit -v, ~2 GB en
   win32). }
-function ThreadsForMemory(const Est: array of Int64; Threads: Integer): Integer;
+function ThreadsForMemory(const Est: array of Int64; Threads: Integer; Limit: Int64): Integer;
 var
   Sorted: array of Int64;
   i, j: Integer;
@@ -587,6 +587,7 @@ begin
   {$IFNDEF CPU64}
   if Budget > Int64(1) shl 30 then Budget := Int64(1) shl 30;
   {$ENDIF}
+  if Limit > 0 then Budget := Limit;   // -lc / límite automático de compresión
   SetLength(Sorted, Length(Est));
   for i := 0 to High(Est) do Sorted[i] := Est[i];
   // Los Threads más grandes (selección parcial, de mayor a menor)
