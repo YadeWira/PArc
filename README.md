@@ -1,7 +1,7 @@
 # PArc
 
-PArc is a command-line archiver written in Free Pascal for **Windows 7+ (x86/x64)** and
-**Linux x64**. It uses its own archive format, **`.parc`**, designed as a modernized descendant
+PArc is a command-line archiver written in Free Pascal for **Windows 7+ (x86/x64)**,
+**Linux (x86, x64, arm64)** and **macOS (arm64)**. It uses its own archive format, **`.parc`**, designed as a modernized descendant
 of the FreeArc container: nanosecond timestamps, Windows attributes, Unix permissions,
 symlinks, Reed–Solomon recovery, volumes and authenticated encryption.
 
@@ -18,14 +18,27 @@ Documentation: [manual](docs/USO.md) · [format](docs/formato/FORMATO-PARC.md) �
 | Component | Status |
 |---|---|
 | Latest release | [![Release][relBadge]][relLink] (pre-releases until 1.0.0; no format compatibility promised before then) |
-| CI | none yet: the full test suite runs locally before each release (see [Testing](#testing)) |
-| Linux x64 | release binary; full test suite and round-trips at `-m0`…`-mxx` with 1 and 4 threads |
-| Windows x64 / x86 | release binaries (no extra DLLs); cross-built with MinGW, tested under Wine; real-Windows test pending for 0.0.3 |
+| CI | [![CI][ciBadge]][ciLink] Linux x64, Linux arm64 and macOS arm64: build and round trip at every level with 1 and 4 threads |
 | vs FreeArc 0.67.1 | smaller and faster at `-m1`…`-m9` on TILIN.tar with 1 thread; with 4 threads too, except a tie in `-m5` compression ([details](docs/ESTADO.md)) |
-| License | GPL-2.0 |
+| License | GPL-2.0 (moving to MIT: the FreeArc-derived code is being rewritten) |
+
+## Platforms
+
+| OS | Architectures | State |
+|---|---|---|
+| Windows (7 and later) | x86-64, x86 | release binaries (no extra DLLs); cross-built with MinGW, tested under Wine (and by users on Windows) |
+| Linux | x86-64 | release binary; built and tested in CI and on the host (full test battery) |
+| Linux | x86 (32-bit) | release binary; cross-built, tested on the host; archives byte-identical to x86-64 |
+| Linux | arm64 | release binary; built and tested in CI; archives byte-identical to x86-64 |
+| macOS | arm64 (Apple silicon) | release binary (from CI); built and tested in CI |
+
+x86-64 uses assembler hot paths; the other architectures run the portable Pascal code, which
+writes the same bytes.
 
 [relBadge]: https://img.shields.io/github/v/release/YadeWira/PArc?include_prereleases "Latest release"
 [relLink]: https://github.com/YadeWira/PArc/releases
+[ciBadge]: https://github.com/YadeWira/PArc/actions/workflows/ci.yml/badge.svg "Continuous Integration"
+[ciLink]: https://github.com/YadeWira/PArc/actions/workflows/ci.yml
 
 ## Highlights
 
@@ -93,12 +106,15 @@ system DLLs as before, kernel32/user32/shell32/oleaut32/msvcrt).
 
 ```sh
 ./build.sh linux64     # default; produces build/linux64/parc
+./build.sh linux32     # Linux x86: g++ -m32 and the FPC i386 cross compiler (FPC_CROSS)
+./build.sh linuxarm64  # native on arm64, or with aarch64-linux-gnu-g++ and the FPC cross compiler
+./build.sh macos       # on a Mac: clang++ (Xcode) and Homebrew fpc
 ./build.sh win64       # needs the Windows cross toolchain (FPC_CROSS)
 ./build.sh win32
-./build.sh all
+./build.sh all         # every target except macos
 ```
 
-Tested on Linux x64, Windows 10 x64 and Windows 7 SP1 x64 (32- and 64-bit binaries).
+Tested on Linux x64 (full battery), Linux x86 and arm64 (round trips), macOS arm64 (CI), and Windows x64/x86 (Wine; Windows 10 and 7 VMs for earlier releases).
 
 ## Testing
 
