@@ -38,6 +38,9 @@ function GroupOrder(const Group: string): Integer;
   orden: FreeArc numera los grupos por línea (find_group, Cmdline.hs). }
 function ArcGroupLines: TStringArray;
 
+{ La tabla de sustituciones de métodos tal cual (--print-config). }
+function MethodSubstLines: TStringArray;
+
 implementation
 
 {$I parc_presets_data.inc}
@@ -370,6 +373,14 @@ var
 begin
   SetLength(Result, Length(ARC_GROUPS));
   for i := 0 to High(ARC_GROUPS) do Result[i] := ARC_GROUPS[i];
+end;
+
+function MethodSubstLines: TStringArray;
+var
+  i: Integer;
+begin
+  SetLength(Result, Length(BUILTIN_METHOD_SUBSTS));
+  for i := 0 to High(BUILTIN_METHOD_SUBSTS) do Result[i] := BUILTIN_METHOD_SUBSTS[i];
 end;
 
 initialization

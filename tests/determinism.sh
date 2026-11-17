@@ -14,7 +14,11 @@
 #  - lzma ht4 :normal/:max usa con 1 hilo la lista de matches de FreeArc -mt1 y con 2 o más la
 #    del multihilo (más chica), como FreeArc;
 #  - en -m1..-m4 (4x4 con método interno rápido y sin :b explícito) el tamaño de bloque de 4x4
-#    sale de los datos y de N (Adaptive4x4Block: al menos 3 bloques por hilo).
+#    sale de los datos y de N (Adaptive4x4Block: al menos 3 bloques por hilo);
+#  - el límite de memoria de compresión (-lc, o 75 % de la RAM; en 32 bits <= 2,25 GB) achica
+#    diccionarios cuando una cadena no entra, y la memoria de 4x4 cuenta un codificador por
+#    hilo: con datos enormes el método puede cambiar con N (y entre 32 y 64 bits). Con el árbol
+#    de esta prueba (~20 MB) el límite no se alcanza.
 # Fuera de eso ningún codificador depende de los hilos (bt4 multihilo, 4x4, REP, grzip y los
 # bloques en paralelo dan la misma salida que en línea). Como las alternativas llegan hasta
 # 3, también se exige que N=4 y N=8 den el mismo archivo en cada nivel fuera de -m1..-m4

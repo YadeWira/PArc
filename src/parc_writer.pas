@@ -43,6 +43,11 @@ type
     HeadersPassword: RawByteString;  // -hp: cifra también directorio y footer
     VolumeSize: Int64;    // -v: volúmenes de este tamaño (FileName.001, .002...); solo .parc
     Parallel: Boolean;    // comprimir grupos de datos independientes en paralelo
+    Locked: Boolean;      // -k / k: marca de bloqueado en el footer (no se modifica más)
+    { ch con -p/-hp/-p-: la contraseña cambia. Los bloques viejos se leen con las que se dieron
+      (-op, consola) y todo se reempaqueta solo con DataPassword ('' = sin cifrar), sin exigir
+      que sea la de los bloques viejos. }
+    ChangePassword: Boolean;
   end;
 
   TWriteStats = record
@@ -57,8 +62,19 @@ type
 function WriteArchive(const FileName: string; const Entries: TWriteEntryArray;
   const Groups: array of TSolidGroup; const Opt: TWriteOptions; Log: TLogProc): TWriteStats;
 
-{ Reemplaza FileName por el temporal que dejó WriteArchive con KeepTemp. }
+{ Reemplaza FileName por el temporal que dejó WriteArchive con KeepTemp. Si el temporal está
+  en otro sistema de archivos (-w) y no se puede renombrar, se copia primero al lado del final. }
 procedure FinishArchive(const FileName: string; VolumeSize: Int64 = 0);
+
+{ El temporal del archivo que se escribe: FileName.tmp, o con -w <WorkDir>/<nombre>.<pid>.tmp. }
+function TempArchiveName(const FileName: string): string;
+{ Mueve Src a Dst (que no debe existir): rename, o copia y borrado si cruza sistemas de archivos. }
+function MoveFileAcross(const Src, Dst: string): Boolean;
+
+var
+  { -w<dir>: directorio de los temporales (el archivo a medio escribir, los bloques que esperan
+    turno); '' = junto al archivo. }
+  WorkDir: string = '';
 
 { Meta de una entrada que viene de un archivo existente. }
 function MetaFromArchive(const F: TArcFileEntry): TFileMeta;
@@ -67,7 +83,7 @@ implementation
 
 uses
   parc_bytes, parc_crc, parc_stream, parc_outstream, parc_encoders, parc_methods, parc_recovery, parc_progress,
-  parc_volume, parc_parallel, parc_strmap, parc_crypt;
+  parc_volume, parc_parallel, parc_strmap, parc_crypt, parc_canon;
 
 const
   VERSION_PARC: array[0..3] of Byte = (PARC_FORMAT_VERSION, 0, 0, 0);
@@ -444,7 +460,7 @@ end;
 { FOOTER_BLOCK (el formato base de FreeArc §5.1): bloques de control, locked, comentario viejo (0),
   recovery ('') y comentario (0 bytes). }
 function BuildFooter(const Control: array of TBlockInfo; FooterPos: Int64; const Comment: RawByteString;
-  const Recovery: string): TBytes;
+  const Recovery: string; Locked: Boolean): TBytes;
 var
   w: TByteWriter;
   i: Integer;
@@ -460,7 +476,7 @@ begin
     w.VInt(Control[i].CompSize);
     w.U32(Control[i].Crc);
   end;
-  w.U8(0);        // locked
+  w.U8(Ord(Locked));   // locked (-k): a/u/f/d/ch... se niegan a modificarlo
   w.VInt(0);      // comentario viejo (UCS-4)
   w.CStr(Recovery);   // configuración de -rr (para conservarla al actualizar)
   w.VInt(Length(Comment));   // comentario (UTF-8, puede tener NUL)
@@ -574,7 +590,7 @@ begin
   // Un bloque que ya estaba cifrado se vuelve a cifrar aunque no se haya dado -p (con la
   // contraseña con que se leyó): borrar un archivo no tiene que dejar el resto en claro
   Pwd := Opt.DataPassword;
-  if Pwd = '' then
+  if (Pwd = '') and not Opt.ChangePassword then
   begin
     Encrypted := WithoutCipher(G.Method) <> G.Method;
     // o algún archivo viene de un bloque viejo cifrado (al actualizar, el grupo trae el
@@ -884,13 +900,17 @@ begin
     for k := 0 to High(AllGroups[i].Files) do
       if not Entries[AllGroups[i].Files[k]].Meta.IsDir then Inc(Size, Entries[AllGroups[i].Files[k]].Meta.Size);
     if (Size = 0) or IsStoring(AllGroups[i].Method) then Continue;
-    Est[n] := 8 * EstimateDecodeMem(LimitMethodToSize(WithoutCipher(AllGroups[i].Method), Size), Size);
+    // lo que usa de verdad su cadena de codificadores (antes: 8 veces lo del decodificador)
+    Est[n] := EncodeMemEstimate(LimitMethodToSize(WithoutCipher(AllGroups[i].Method), Size), Size);
     Inc(n);
   end;
   SetLength(Est, n);
   Result := BudgetThreads;
   if Result > n then Result := n;
-  Result := ThreadsForMemory(Est, Result);
+  // los que corren a la vez tienen que entrar juntos en el límite de compresión (-lc o el
+  // automático); sin límite, en la mitad de la RAM y del espacio de direcciones
+  Result := ThreadsForMemory(Est, Result, EffectiveCompressLimit);
+  if Result < 1 then Result := 1;
 end;
 
 { Ordena AllGroups[First..] por tamaño de entrada, de mayor a menor (estable; storing cuenta
@@ -985,7 +1005,7 @@ begin
       with Entries[i] do
         if (SrcArc <> nil) and not Meta.IsDir and not Meta.IsLink then
           Look(SrcArc.DataBlocks[SrcArc.Files[SrcIndex].DataBlock].Method);
-    if (Found <> '') and not CryptMethodPasswordOk(Found, Opt.DataPassword) then
+    if (Found <> '') and not Opt.ChangePassword and not CryptMethodPasswordOk(Found, Opt.DataPassword) then
       raise EBadPassword.Create('wrong password (the archive data is encrypted with another password)');
     MakeCipherStage(Opt.Encryption, Opt.DataPassword, False);   // (deriva la clave y la deja en el caché)
   end;
@@ -1030,7 +1050,7 @@ begin
       for n := 0 to High(Groups[i].Files) do
         if not Entries[Groups[i].Files[n]].Meta.IsDir then Inc(Total, Entries[Groups[i].Files[n]].Meta.Size);
 
-  Tmp := FileName + '.tmp';
+  Tmp := TempArchiveName(FileName);
   Ok := False;
   ProgressBegin('Compressing', Total);
   if Opt.VolumeSize > 0 then S := TVolumeStream.CreateWrite(Tmp, Opt.VolumeSize)
@@ -1136,7 +1156,7 @@ begin
             Jobs[i].Entries := Entries;
             Jobs[i].Group := AllGroups[i];
             Jobs[i].Opt := Opt;
-            Jobs[i].Output := TBlockOut.Create(FileName + '.blk' + IntToStr(i));
+            Jobs[i].Output := TBlockOut.Create(Tmp + '.blk' + IntToStr(i));
           end;
           // Ventana de trabajos en vuelo: lo que no es el bloque en curso espera en memoria,
           // así que no se arranca todo de una vez. Además de 2 por hilo, los que entren en
@@ -1215,12 +1235,12 @@ begin
         // Como ArcvProcessRead.hs: primero un footer provisional (encabezado y directorio, sin
         // recovery), que el registro también protege; al final se repite con la lista entera.
         // Sin él, los bloques de recuperación caen en otro lugar y la paridad de la cola cambia
-        WriteControlBlock(S, True, FOOTER_BLOCK, Opt.DirMethod, BuildFooter(Control, S.Position, Opt.Comment, ''),
+        WriteControlBlock(S, True, FOOTER_BLOCK, Opt.DirMethod, BuildFooter(Control, S.Position, Opt.Comment, '', Opt.Locked),
           Opt.Encryption, Opt.HeadersPassword);
         WriteRecovery(S, Opt.Recovery, Control);
       end;
       // Footer (las posiciones de los bloques de control, relativas a la del footer)
-      WriteControlBlock(S, True, FOOTER_BLOCK, Opt.DirMethod, BuildFooter(Control, S.Position, Opt.Comment, Opt.Recovery),
+      WriteControlBlock(S, True, FOOTER_BLOCK, Opt.DirMethod, BuildFooter(Control, S.Position, Opt.Comment, Opt.Recovery, Opt.Locked),
         Opt.Encryption, Opt.HeadersPassword);
       Result.ArcSize := S.Size;
       Ok := True;
@@ -1235,12 +1255,69 @@ begin
   if not Opt.KeepTemp then FinishArchive(FileName, Opt.VolumeSize);
 end;
 
+function TempArchiveName(const FileName: string): string;
+begin
+  if WorkDir = '' then Result := FileName + '.tmp'
+  else Result := IncludeTrailingPathDelimiter(WorkDir) + ExtractFileName(FileName) + Format('.%d.tmp', [GetProcessID]);
+end;
+
+function MoveFileAcross(const Src, Dst: string): Boolean;
+var
+  I, O: TFileStream;
+begin
+  if RenameFile(FsPath(Src), FsPath(Dst)) then Exit(True);
+  Result := False;
+  if not FileExists(FsPath(Src)) or FileExists(FsPath(Dst)) then Exit;
+  try
+    I := TFileStream.Create(FsPath(Src), fmOpenRead or fmShareDenyWrite);
+    try
+      O := TFileStream.Create(FsPath(Dst), fmCreate);
+      try
+        O.CopyFrom(I, 0);
+      finally
+        O.Free;
+      end;
+    finally
+      I.Free;
+    end;
+  except
+    DeleteFile(FsPath(Dst));
+    Exit(False);
+  end;
+  DeleteFile(FsPath(Src));
+  Result := True;
+end;
+
 procedure FinishArchive(const FileName: string; VolumeSize: Int64);
 var
-  Tmp: string;
+  Tmp, Near: string;
   i: Integer;
 begin
-  Tmp := FileName + '.tmp';
+  Tmp := TempArchiveName(FileName);
+  if WorkDir <> '' then
+  begin
+    // -w: primero al lado del destino (copia si es otro disco), y desde ahí el reemplazo de
+    // siempre: si la copia falla, el archivo viejo sigue intacto
+    Near := FileName + '.tmp';
+    if VolumeSize > 0 then
+    begin
+      DeleteVolumesFrom(Near, 1);
+      i := 1;
+      while FileExists(FsPath(VolumeName(Tmp, i))) do
+      begin
+        if not MoveFileAcross(VolumeName(Tmp, i), VolumeName(Near, i)) then
+          raise EFCreateError.CreateFmt('could not move %s to %s', [VolumeName(Tmp, i), VolumeName(Near, i)]);
+        Inc(i);
+      end;
+    end
+    else
+    begin
+      DeleteFile(FsPath(Near));
+      if not MoveFileAcross(Tmp, Near) then
+        raise EFCreateError.CreateFmt('could not move %s to %s', [Tmp, Near]);
+    end;
+    Tmp := Near;
+  end;
   if VolumeSize > 0 then
   begin
     // FileName.tmp.001... -> FileName.001...; fuera la versión anterior (suelta o en

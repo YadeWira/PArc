@@ -18,7 +18,10 @@ procedure DrawProgress(const P: TProgressInfo);
 procedure LogLine(const Msg: string);
 procedure OnCtrlC;
 function FmtTime(t: Int64): string;
-procedure CmdList(A: TArchive);
+procedure CmdList(A: TArchive; const Sel: array of Boolean);
+{ v: listado detallado (fecha con ns, atributos, tamaño, parte comprimida, ratio, CRC, bloque,
+  método). Sel vacío = todo. }
+procedure CmdListVerbose(A: TArchive; const Sel: array of Boolean);
 
 var
   { --verbose: una línea por archivo ("OK ..." al probar, "Extracted ..." al extraer). Sin él,
@@ -189,28 +192,42 @@ begin
     Result := IntToStr(Bytes) + ' B';
 end;
 
-procedure CmdList(A: TArchive);
+procedure CmdList(A: TArchive; const Sel: array of Boolean);
 var
-  i: Integer;
+  i, n: Integer;
   TotalSize, TotalComp: Int64;
   Kind: string;
   Ratio: string;
+  All: Boolean;
 begin
+  // Sel vacío = todo; si no, solo lo elegido (patrones, -n, -x, -sm..., -ap)
+  All := Length(Sel) = 0;
   TotalSize := 0;
-  for i := 0 to High(A.Files) do Inc(TotalSize, A.Files[i].Size);
+  n := 0;
+  for i := 0 to High(A.Files) do
+    if All or Sel[i] then
+    begin
+      Inc(TotalSize, A.Files[i].Size);
+      Inc(n);
+    end;
   TotalComp := 0;
   for i := 0 to High(A.DataBlocks) do Inc(TotalComp, A.DataBlocks[i].CompSize);
   Ratio := '';
   // En archivos diminutos los encabezados dominan y el ratio no significa nada.
-  if TotalSize >= 64 * 1024 then
+  if All and (TotalSize >= 64 * 1024) then
     Ratio := Format('   ratio: %.1f%%', [100.0 * TotalComp / TotalSize]);
   OutLn('Archive: ' + A.FileName);
-  OutLn(Format('  %d file(s)   size: %s   packed: %s%s',
-    [Length(A.Files), FmtSize(TotalSize), FmtSize(TotalComp), Ratio]));
+  if All then
+    OutLn(Format('  %d file(s)   size: %s   packed: %s%s',
+      [Length(A.Files), FmtSize(TotalSize), FmtSize(TotalComp), Ratio]))
+  else
+    OutLn(Format('  %d of %d file(s) selected   size: %s',
+      [n, Length(A.Files), FmtSize(TotalSize)]));
   OutLn('');
   OutLn('  Modified             Size  CRC       Name');
   OutLn('  -------------------  ----  --------  ----');
   for i := 0 to High(A.Files) do
+    if All or Sel[i] then
     with A.Files[i] do
     begin
       if IsDir then Kind := '<DIR>' else if IsLink then Kind := '<LINK>' else Kind := IntToStr(Size);
@@ -220,6 +237,78 @@ begin
         OutLn(Format('  %s  %14s  %.8x  %s', [FmtTime(Time), Kind, Crc, Name]));
     end;
   OutLn('  -------------------  ----  --------  ----');
+  if A.Comment <> '' then OutLn('Comment: ' + A.Comment);
+end;
+
+{ Permisos Unix (rwxr-xr-x, con d/l delante) o atributos de Windows (RHSA); '-' si no hay. }
+function AttrText(const F: TArcFileEntry): string;
+const
+  RWX = 'rwxrwxrwx';
+var
+  i: Integer;
+begin
+  if F.HasUnixMode then
+  begin
+    if F.IsLink then Result := 'l' else if F.IsDir then Result := 'd' else Result := '-';
+    for i := 0 to 8 do
+      if (F.UnixMode and (1 shl (8 - i))) <> 0 then Result := Result + RWX[i + 1] else Result := Result + '-';
+  end
+  else if F.HasWinAttr then
+  begin
+    Result := '';
+    if (F.WinAttr and $01) <> 0 then Result := Result + 'R' else Result := Result + '.';
+    if (F.WinAttr and $02) <> 0 then Result := Result + 'H' else Result := Result + '.';
+    if (F.WinAttr and $04) <> 0 then Result := Result + 'S' else Result := Result + '.';
+    if (F.WinAttr and $10) <> 0 then Result := Result + 'D' else Result := Result + '.';
+    if (F.WinAttr and $20) <> 0 then Result := Result + 'A' else Result := Result + '.';
+  end
+  else if F.IsDir then Result := 'd'
+  else Result := '-';
+end;
+
+procedure CmdListVerbose(A: TArchive; const Sel: array of Boolean);
+var
+  i, n: Integer;
+  PackedB, TotalSize, TotalPacked, Ns: Int64;
+  B: TArcBlock;
+  Ratio, Meth, Kind: string;
+begin
+  OutLn('Archive: ' + A.FileName);
+  OutLn(Format('  %d file(s) in %d data block(s)%s%s', [Length(A.Files), Length(A.DataBlocks),
+    BoolToStr(A.Locked, ', locked', ''), BoolToStr(A.Recovery <> '', ', recovery record ' + A.Recovery, '')]));
+  OutLn('');
+  OutLn('  Modified (UTC)                 Attributes            Size        Packed  Ratio  CRC       Blk  Method / Name');
+  n := 0;
+  TotalSize := 0; TotalPacked := 0;
+  for i := 0 to High(A.Files) do
+  begin
+    if (Length(Sel) > 0) and not Sel[i] then Continue;
+    Inc(n);
+    with A.Files[i] do
+    begin
+      if HasMTimeNs then Ns := MTimeNs else Ns := Time * 1000000000;
+      PackedB := 0;
+      Meth := '';
+      if not IsDir and not IsLink and (DataBlock >= 0) and (DataBlock <= High(A.DataBlocks)) then
+      begin
+        B := A.DataBlocks[DataBlock];
+        if B.OrigSize > 0 then PackedB := Round(B.CompSize * (Size / B.OrigSize));
+        Meth := B.Method;
+      end;
+      if IsDir then Kind := '<DIR>' else if IsLink then Kind := '<LINK>' else Kind := IntToStr(Size);
+      if (Size > 0) and not IsDir then Ratio := Format('%5.1f%%', [100.0 * PackedB / Size]) else Ratio := '     -';
+      Inc(TotalSize, Size);
+      Inc(TotalPacked, PackedB);
+      OutLn(Format('  %s.%.9d  %-10s  %14s  %12s %s  %.8x  %3s  %s',
+        [FmtTime(Ns div 1000000000), ((Ns mod 1000000000) + 1000000000) mod 1000000000, AttrText(A.Files[i]),
+         Kind, IntToStr(PackedB), Ratio, Crc, BoolToStr(Meth <> '', IntToStr(DataBlock), '-'),
+         BoolToStr(Meth <> '', Meth, '')]));
+      if IsLink then OutLn('      ' + Name + ' -> ' + LinkTarget) else OutLn('      ' + Name);
+    end;
+  end;
+  OutLn('');
+  if TotalSize > 0 then Ratio := Format(' · ratio %.1f%%', [100.0 * TotalPacked / TotalSize]) else Ratio := '';
+  OutLn(Format('%d file(s), %s bytes => %s bytes%s', [n, Num(TotalSize), Num(TotalPacked), Ratio]));
   if A.Comment <> '' then OutLn('Comment: ' + A.Comment);
 end;
 

@@ -19,9 +19,27 @@ interface
 
 function LimitAndCanonize(const Method: string; BlockSize: Int64): string;
 
+{ Una etapa ya canónica achicada para que su codificador use a lo sumo MemLim bytes (aprox.):
+  lzma con su estimación exacta (LzmaFitDictionary), tor búfer + hash, rep/lzp/dict a la mitad,
+  grzip a 1/8 (BWT), ppmd el modelo, y el método interno de 4x4 con MemLim repartido entre sus
+  hilos. cm, srep y los filtros no cambian. Lo usa el ajuste de la cadena entera
+  (parc_encoders.FitEncodeMem), que mide con la estimación de cada codificador y repite. }
+function CanonStageMem(const Stage: string; MemLim: Int64): string;
+
+{ Límite de memoria de los codificadores que corren a la vez (bytes; 0 = sin límite):
+  -lc<tamaño>, o el automático (CompressMemLimit < 0): 75 % de la RAM; en 32 bits además a lo
+  sumo 2,25 GB y 9/16 del espacio de direcciones (lo demás es para búferes, DLLs y la
+  fragmentación de un proceso de 2 o 4 GB). }
+function EffectiveCompressLimit: Int64;
+
+var
+  { -lc: -1 = automático; 0 = sin límite (-lc-); si no, bytes. Se fija al leer la línea de
+    comandos, antes de comprimir (después solo se lee, desde varios hilos). }
+  CompressMemLimit: Int64 = -1;
+
 implementation
 
-uses SysUtils, Math, parc_methods, parc_torenc, parc_lzmaenc;
+uses SysUtils, Math, parc_os, parc_methods, parc_torenc, parc_lzmaenc, parc_parallel;
 
 const
   KB = 1024; MB = 1024*1024; GB = Int64(1024)*1024*1024;
@@ -140,9 +158,11 @@ const
   kLzmaEnc32MaxMem = Int64(2) shl 30;
   kLzmaEnc32Headroom = Int64(256) shl 20;
 
-{ Diccionario lzma que entra en la memoria de 32 bits (LzmaFitDictionary); MFi como en
-  CanonStage. }
-function FitLzma32(BS, MFi, Alg, NFB, MC, LC, LP: Int64): Int64;
+{$ENDIF}
+
+{ Diccionario lzma cuyo codificador entra en MaxMem (LzmaFitDictionary): la memoria de 32 bits
+  o el límite de -lc. MFi como en CanonStage. }
+function FitLzma(BS, MFi, Alg, NFB, MC, LC, LP: Int64; MaxMem, Headroom: Int64): Int64;
 var
   P: TLzmaEncParams;
 begin
@@ -161,11 +181,18 @@ begin
   else
     P.MatchFinder := mfHT4;
   end;
-  Result := LzmaFitDictionary(P, kLzmaEnc32MaxMem, kLzmaEnc32Headroom);
+  Result := LzmaFitDictionary(P, MaxMem, Headroom);
 end;
-{$ENDIF}
 
-function CanonChain(const Method: string; Limit: Int64): string;
+
+{ Tamaño para -lc: hacia abajo a MB enteros (a KB por debajo de 4 MB), al menos 1 MB. }
+function FitMem(X: Int64): Int64;
+begin
+  if X >= 4*MB then Result := (X div MB) * MB else Result := (X div KB) * KB;
+  if Result < MB then Result := MB;
+end;
+
+function CanonChain(const Method: string; Limit, MemLim: Int64): string;
 var
   Stages: TStringArray;
   I: Integer;
@@ -203,6 +230,7 @@ begin
     begin
       BS := ParseMem(Pr(1), 64*MB);
       if BS > Limit then BS := Limit;                 { SetDictionary }
+      if (MemLim > 0) and (BS > MemLim div 2) then BS := FitMem(MemLim div 2);
       MC := 100; MML := 512; Bar := INT_MAX;
       Sm := 512; HSL := 0;   Amp := 1;
       for J := 1 to High(Parts) do
@@ -261,8 +289,16 @@ begin
         else if Copy(L,1,2) = 'lp' then LP := Num(Copy(L,3,MaxInt), 0);
       end;
       {$IFDEF CPU32}
-      BS := FitLzma32(BS, MFi, Alg, NFB, MC, LC, LP);
+      // Con el límite de compresión (EffectiveCompressLimit, automático en 32 bits) la cadena
+      // ya entra: sin la prueba de reservar de verdad, que dependía de lo que otros bloques
+      // tenían reservado en ese momento (el método cambiaba entre corridas). Solo con -lc- se
+      // sigue probando.
+      if EffectiveCompressLimit > 0 then
+        BS := FitLzma(BS, MFi, Alg, NFB, MC, LC, LP, kLzmaEnc32MaxMem, 0)
+      else
+        BS := FitLzma(BS, MFi, Alg, NFB, MC, LC, LP, kLzmaEnc32MaxMem, kLzmaEnc32Headroom);
       {$ENDIF}
+      if MemLim > 0 then BS := FitLzma(BS, MFi, Alg, NFB, MC, LC, LP, MemLim, 0);
       Result := 'lzma:' + ShowMem(BS);
       if Hash <> 0 then Result := Result + (':h' + ShowMem(Hash));
       if MFi = 0 then
@@ -306,6 +342,7 @@ begin
       if BS = 0 then BS := 8*MB;
       if BS > Limit then BS := Limit;
       if BS > GRZ_MaxBlockSize then BS := GRZ_MaxBlockSize;
+      if (MemLim > 0) and (BS > MemLim div 8) then BS := FitMem(MemLim div 8);
       if HSL > 1 + LB(BS-1) then HSL := 1 + LB(BS-1);
       Result := 'grzip:' + ShowMem(BS) + ':m' + IntToStr(M) + ':';
       if LZP then Result := Result + ('l' + IntToStr(MML) + ':h' + IntToStr(HSL))
@@ -336,6 +373,7 @@ begin
         else if Copy(L,1,1) = 'r' then MR := Num(Copy(L,2,MaxInt), 4);
       end;
       if BS > Limit then BS := Limit;
+      if (MemLim > 0) and (BS > MemLim div 2) then BS := FitMem(MemLim div 2);
       Result := 'dict:' + ShowMem(BS);
       if MC <> 100 then Result := Result + (':' + IntToStr(MC) + '%');
       if W <> 20 then Result := Result + (':c' + IntToStr(W));
@@ -363,6 +401,7 @@ begin
         else if Copy(L,1,1) = 'd' then Bar := ParseMem(Copy(L,2,MaxInt), INT_MAX)
         else if Copy(L,1,1) = 's' then Sm := Num(Copy(L,2,MaxInt), 32);
       end;
+      if (MemLim > 0) and (BS > MemLim div 2) then BS := FitMem(MemLim div 2);
       if HSL > 1 + LB(BS-1) then HSL := 1 + LB(BS-1);
       Result := 'lzp:' + ShowMem(BS);
       if MC <> 100 then Result := Result + (':' + IntToStr(MC) + '%');
@@ -387,6 +426,10 @@ begin
         HS := 4 * Min(Int64(HS div 4), RoundUpPow2(Limit));  { PtrVal=4, 32-bit }
         BS := Limit;
       end;
+      // -lc: búfer + hash dentro del límite (se achica el mayor de los dos)
+      if MemLim > 0 then
+        while (BS + HS > MemLim) and ((BS > 64*KB) or (HS > 64*KB)) do
+          if (HS >= BS) and (HS > 64*KB) then HS := HS div 2 else BS := BS div 2;
       Result := 'tor';
       if TM.Number <> default_Tornado_method then Result := Result + (':' + IntToStr(TM.Number));
       Result := Result + (':' + ShowMem(BS));
@@ -437,7 +480,9 @@ begin
     if Name = 'ppmd' then
     begin
       PP := ParsePpmdParams(Parts);
-      Result := 'ppmd:' + IntToStr(PP.Order) + ':' + ShowMem(Int64(PP.Mem));
+      M := Int64(PP.Mem);
+      if (MemLim > 0) and (M > MemLim) then M := FitMem(MemLim);
+      Result := 'ppmd:' + IntToStr(PP.Order) + ':' + ShowMem(M);
       if PP.Restore = 1 then Result := Result + ':r'
       else if PP.Restore <> 0 then Result := Result + ':r' + IntToStr(PP.Restore);
       Exit;
@@ -517,7 +562,10 @@ begin
       // ShowCompressionMethod con purify=True no imprime t/i/r (solo afectan a comprimir):
       // quedan el :b propio y el método interno.
       if BS <> 0 then Result := Result + (':b' + ShowMem(BS));
-      Result := Result + (':' + CanonChain(Interno, Limit));
+      if MemLim > 0 then
+        Result := Result + (':' + CanonChain(Interno, Limit, Max(Int64(MB), MemLim div Max(1, BudgetThreads))))
+      else
+        Result := Result + (':' + CanonChain(Interno, Limit, 0));
       Exit;
     end;
 
@@ -546,7 +594,31 @@ end;
 
 function LimitAndCanonize(const Method: string; BlockSize: Int64): string;
 begin
-  Result := CanonChain(Method, RoundMemUp(BlockSize + BlockSize div 100 + 512));
+  Result := CanonChain(Method, RoundMemUp(BlockSize + BlockSize div 100 + 512), 0);
+end;
+
+function CanonStageMem(const Stage: string; MemLim: Int64): string;
+begin
+  Result := CanonChain(Stage, High(Int64), MemLim);
+end;
+
+function EffectiveCompressLimit: Int64;
+var
+  Ram, Va: Int64;
+begin
+  if CompressMemLimit >= 0 then Exit(CompressMemLimit);
+  Ram := PhysicalMemory;
+  if Ram > 0 then Result := Ram div 4 * 3 else Result := 0;
+  {$IFNDEF CPU64}
+  // Medido en win32 (Wine, 4 GB LAA) con TILIN -m9 y 8 hilos: 2304 MB llega a 2,4 GB de RSS
+  // sin quedarse sin memoria; 2560 MB ya fallaba (antes del arreglo de la ventana de rep)
+  if (Result = 0) or (Result > Int64(2304) shl 20) then Result := Int64(2304) shl 20;
+  Va := AddressSpaceLimit;
+  if (Va > 0) and (Va div 16 * 9 < Result) then Result := Va div 16 * 9;
+  {$ELSE}
+  Va := AddressSpaceLimit;   // ulimit -v
+  if (Va > 0) and ((Result = 0) or (Va div 4 * 3 < Result)) then Result := Va div 4 * 3;
+  {$ENDIF}
 end;
 
 end.

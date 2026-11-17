@@ -7,7 +7,7 @@ unit parc_extract;
 interface
 
 uses
-  Classes, SysUtils, parc_archive;
+  Classes, SysUtils, parc_archive, parc_methods;
 
 type
   TOverwriteMode = (owAsk, owAll, owSkip);
@@ -24,12 +24,20 @@ type
     Filter: TStringList;     // nombres/máscaras a incluir (nil = todos)
     UnsafeLinks: Boolean;    // -snld: crear también enlaces absolutos o que salen del destino
     ToStdout: Boolean;       // -so: el contenido de los archivos a stdout (sin crear nada)
+    Sel: array of Boolean;   // <> nil: qué entradas de A.Files se procesan (manda sobre Filter)
+    KeepBroken: Boolean;     // -kb: conservar los archivos con error de CRC o incompletos
+    MemLimit: Int64;         // -ld: no decodificar bloques que declaran más memoria (0 = sin)
+    TempDir: string;         // -w: temporales de la decodificación en paralelo ('' = junto al archivo)
   end;
+
+  { Un bloque pide más memoria que -ld: no se decodifica (código de salida 7). }
+  EMemoryLimit = class(EUnsupportedMethod);
 
   TExtractStats = record
     Files, Dirs, Errors, Skipped: Integer;
     Bytes: Int64;
     Unsupported: Boolean;   // algún bloque usa un método que PArc todavía no sabe leer
+    MemLimited: Boolean;    // algún bloque superaba -ld
   end;
 
   TLogProc = procedure(const Msg: string);
@@ -45,7 +53,7 @@ function MatchesAny(const Name: string; Masks: TStrings): Boolean;
 implementation
 
 uses
-  DateUtils, parc_os, parc_bytes, parc_crc, parc_stream, parc_methods, parc_progress, parc_parallel, parc_volume,
+  DateUtils, parc_os, parc_bytes, parc_crc, parc_stream, parc_progress, parc_parallel, parc_volume,
   parc_strmap;
 
 const
@@ -103,16 +111,39 @@ begin
   Result := False;
 end;
 
-function Wanted(const Opt: TExtractOptions; const Name: string): Boolean;
+function Wanted(const Opt: TExtractOptions; A: TArchive; Idx: Integer): Boolean;
 var
   i: Integer;
+  Name: string;
 begin
+  if Opt.Sel <> nil then Exit(Opt.Sel[Idx]);
+  Name := A.Files[Idx].Name;
   if (Opt.Filter = nil) or (Opt.Filter.Count = 0) then Exit(True);
   for i := 0 to Opt.Filter.Count - 1 do
     if MatchWild(Name, Opt.Filter[i]) or MatchWild(Copy(Name, LastDelimiter('/', Name) + 1, MaxInt), Opt.Filter[i])
        or (Name = Opt.Filter[i]) or (Copy(Name, 1, Length(Opt.Filter[i]) + 1) = Opt.Filter[i] + '/') then
       Exit(True);
   Result := False;
+end;
+
+{ -ld: el bloque declara más memoria que el límite. }
+procedure CheckBlockMem(const Opt: TExtractOptions; const Blk: TArcBlock);
+var
+  Need: Int64;
+begin
+  if Opt.MemLimit <= 0 then Exit;
+  Need := DecodeMemNeeded(Blk.Method);
+  if Need > Opt.MemLimit then
+    raise EMemoryLimit.CreateFmt('block needs %d MB to decompress, more than the -ld limit (%d MB)',
+      [(Need + (1 shl 20) - 1) shr 20, Opt.MemLimit shr 20]);
+end;
+
+{ -kb: sin él, un archivo extraído con error de CRC o a medias se borra (como FreeArc). }
+function DropBroken(const Opt: TExtractOptions; const Name: string): string;
+begin
+  if Opt.KeepBroken then Exit(' (kept: -kb)');
+  DeleteFile(FsPath(Name));
+  Result := ' (deleted; -kb keeps broken files)';
 end;
 
 { Ruta de salida en el disco. Los nombres ya vienen saneados por TArchive (sin "..", sin raíz),
@@ -135,8 +166,9 @@ end;
   fecha: en Windows un archivo de solo lectura ya no aceptaría el cambio de fecha. }
 procedure RestoreMeta(const FileName: string; const F: TArcFileEntry);
 begin
-  if F.HasMTimeNs then SetFileMTimeNs(FileName, F.MTimeNs)
-  else SetFileMTimeNs(FileName, F.Time * 1000000000);
+  // --nodates: el archivo no guarda fecha (0): queda la de la extracción
+  if F.HasMTimeNs and (F.MTimeNs <> 0) then SetFileMTimeNs(FileName, F.MTimeNs)
+  else if not F.HasMTimeNs and (F.Time <> 0) then SetFileMTimeNs(FileName, F.Time * 1000000000);
   SetFileAttrs(FileName, F.HasUnixMode, F.UnixMode, F.HasWinAttr, F.WinAttr);
 end;
 
@@ -236,7 +268,7 @@ var
   var k: Integer;
   begin
     for k := Cur to LastWanted do
-      if not A.Files[k].IsDir and not A.Files[k].IsLink and Wanted(Opt, A.Files[k].Name) then
+      if not A.Files[k].IsDir and not A.Files[k].IsLink and Wanted(Opt, A, k) then
       begin
         Messages.Add('ERROR: ' + A.Files[k].Name + ' could not be verified');
         Inc(Stats.Errors);
@@ -250,7 +282,7 @@ begin
   Blk := A.DataBlocks[BlockIndex];
   LastWanted := -1;
   for i := Blk.FirstFile to Blk.FirstFile + Blk.FileCount - 1 do
-    if not A.Files[i].IsDir and not A.Files[i].IsLink and Wanted(Opt, A.Files[i].Name) then LastWanted := i;
+    if not A.Files[i].IsDir and not A.Files[i].IsLink and Wanted(Opt, A, i) then LastWanted := i;
   Orig := 0;
   for i := Blk.FirstFile to LastWanted do
     if not A.Files[i].IsDir then Inc(Orig, A.Files[i].Size);
@@ -261,6 +293,7 @@ begin
   Cur := Blk.FirstFile;
   try
     try
+      CheckBlockMem(Opt, Blk);
       Chain := CreateDecoderChain(Blk.Method, TFileSliceStage.Create(Stream, Blk.Pos, Blk.CompSize));
       try
       for i := Blk.FirstFile to LastWanted do
@@ -268,7 +301,7 @@ begin
         Cur := i;
         F := A.Files[i];
         if F.IsDir or F.IsLink then Continue;
-        if not Wanted(Opt, F.Name) then
+        if not Wanted(Opt, A, i) then
         begin
           Remaining := F.Size;   // (solo hay que atravesarlo)
           while Remaining > 0 do
@@ -309,7 +342,7 @@ begin
       on E: EUnsupportedMethod do
       begin
         Damaged := True;
-        Stats.Unsupported := True;
+        if E is EMemoryLimit then Stats.MemLimited := True else Stats.Unsupported := True;
         Messages.Add(Format('ERROR: %s (block at %d, %d file(s))', [E.Message, Blk.Pos, Blk.FileCount]));
         MarkRemaining;
       end;
@@ -367,21 +400,21 @@ begin
   begin
     LastWanted := -1;
     for i := A.DataBlocks[b].FirstFile to A.DataBlocks[b].FirstFile + A.DataBlocks[b].FileCount - 1 do
-      if not A.Files[i].IsDir and not A.Files[i].IsLink and Wanted(Opt, A.Files[i].Name) then LastWanted := i;
+      if not A.Files[i].IsDir and not A.Files[i].IsLink and Wanted(Opt, A, i) then LastWanted := i;
     for i := A.DataBlocks[b].FirstFile to LastWanted do
       if not A.Files[i].IsDir then Inc(Total, A.Files[i].Size);
   end;
   ProgressBegin('Verifying', Total);
 
   for i := 0 to High(A.Files) do
-    if A.Files[i].IsDir and Wanted(Opt, A.Files[i].Name) then Inc(Result.Dirs);
+    if A.Files[i].IsDir and Wanted(Opt, A, i) then Inc(Result.Dirs);
 
   Count := 0;
   for b := 0 to High(A.DataBlocks) do
   begin
     LastWanted := -1;
     for i := A.DataBlocks[b].FirstFile to A.DataBlocks[b].FirstFile + A.DataBlocks[b].FileCount - 1 do
-      if not A.Files[i].IsDir and not A.Files[i].IsLink and Wanted(Opt, A.Files[i].Name) then LastWanted := i;
+      if not A.Files[i].IsDir and not A.Files[i].IsLink and Wanted(Opt, A, i) then LastWanted := i;
     if LastWanted >= 0 then Inc(Count);
   end;
   SetLength(Jobs, Count);
@@ -390,7 +423,7 @@ begin
   begin
     LastWanted := -1;
     for i := A.DataBlocks[b].FirstFile to A.DataBlocks[b].FirstFile + A.DataBlocks[b].FileCount - 1 do
-      if not A.Files[i].IsDir and not A.Files[i].IsLink and Wanted(Opt, A.Files[i].Name) then LastWanted := i;
+      if not A.Files[i].IsDir and not A.Files[i].IsLink and Wanted(Opt, A, i) then LastWanted := i;
     if LastWanted < 0 then Continue;
     Jobs[n] := TVerifyJob.Create;
     Jobs[n].A := A;
@@ -438,6 +471,7 @@ begin
       Inc(Result.Errors, Jobs[i].Stats.Errors);
       Inc(Result.Bytes, Jobs[i].Stats.Bytes);
       if Jobs[i].Stats.Unsupported then Result.Unsupported := True;
+      if Jobs[i].Stats.MemLimited then Result.MemLimited := True;
       if Jobs[i].Damaged then Damaged := True;
       Orig := Jobs[i].Orig;
       if Orig > Reported[i] then ProgressAdd(Orig - Reported[i]);
@@ -448,7 +482,7 @@ begin
 
   // Enlaces: no tienen datos, se verifican como en el camino serial.
   for i := 0 to High(A.Files) do
-    if A.Files[i].IsLink and Wanted(Opt, A.Files[i].Name) then
+    if A.Files[i].IsLink and Wanted(Opt, A, i) then
     begin
       Log('OK       ' + A.Files[i].Name + ' -> ' + A.Files[i].LinkTarget);
       Inc(Result.Files);
@@ -546,11 +580,13 @@ begin
   begin
     LastWanted := -1;
     for i := A.DataBlocks[b].FirstFile to A.DataBlocks[b].FirstFile + A.DataBlocks[b].FileCount - 1 do
-      if not A.Files[i].IsDir and not A.Files[i].IsLink and Wanted(Opt, A.Files[i].Name) then LastWanted := i;
+      if not A.Files[i].IsDir and not A.Files[i].IsLink and Wanted(Opt, A, i) then LastWanted := i;
     if LastWanted >= 0 then
     begin
       Inc(Count);
       Inc(Total, A.DataBlocks[b].OrigSize);
+      // -ld: el camino serial informa el bloque que no entra
+      if (Opt.MemLimit > 0) and (DecodeMemNeeded(A.DataBlocks[b].Method) > Opt.MemLimit) then Exit;
     end;
   end;
   if (Count < 2) or (Total > MAX_DECODED) then Exit;
@@ -561,9 +597,12 @@ begin
   begin
     LastWanted := -1;
     for i := A.DataBlocks[b].FirstFile to A.DataBlocks[b].FirstFile + A.DataBlocks[b].FileCount - 1 do
-      if not A.Files[i].IsDir and not A.Files[i].IsLink and Wanted(Opt, A.Files[i].Name) then LastWanted := i;
+      if not A.Files[i].IsDir and not A.Files[i].IsLink and Wanted(Opt, A, i) then LastWanted := i;
     if LastWanted < 0 then Continue;
-    Tmp := A.FileName + Format('.dec-%d-%d', [GetProcessID, b]);
+    if Opt.TempDir <> '' then
+      Tmp := IncludeTrailingPathDelimiter(Opt.TempDir) + ExtractFileName(A.FileName) + Format('.dec-%d-%d', [GetProcessID, b])
+    else
+      Tmp := A.FileName + Format('.dec-%d-%d', [GetProcessID, b]);
     DeleteFile(FsPath(Tmp));
     Temps[b] := Tmp;
     Jobs[n] := TDecodeBlockJob.Create;
@@ -782,10 +821,10 @@ var
   begin
     Damaged := True;
     for k := Cur to LastWanted do
-      if not A.Files[k].IsDir and not A.Files[k].IsLink and Wanted(Opt, A.Files[k].Name) then
+      if not A.Files[k].IsDir and not A.Files[k].IsLink and Wanted(Opt, A, k) then
       begin
         if (k = Cur) and CurWriting then
-          Messages.Add('ERROR: ' + A.Files[k].Name + ' is incomplete (whatever could be recovered was kept)')
+          Messages.Add('ERROR: ' + A.Files[k].Name + ' is incomplete' + DropBroken(Opt, OutName))
         else
           Messages.Add('ERROR: ' + A.Files[k].Name + ' could not be extracted');
         Inc(Stats.Errors);
@@ -800,7 +839,7 @@ begin
   Blk := A.DataBlocks[BlockIndex];
   LastWanted := -1;
   for i := Blk.FirstFile to Blk.FirstFile + Blk.FileCount - 1 do
-    if not A.Files[i].IsDir and not A.Files[i].IsLink and Wanted(Opt, A.Files[i].Name) then LastWanted := i;
+    if not A.Files[i].IsDir and not A.Files[i].IsLink and Wanted(Opt, A, i) then LastWanted := i;
   Orig := 0;
   for i := Blk.FirstFile to LastWanted do
     if not A.Files[i].IsDir then Inc(Orig, A.Files[i].Size);
@@ -811,6 +850,7 @@ begin
   Stream := OpenArchiveStream(A.FileName);
   try
     try
+      CheckBlockMem(Opt, Blk);
       Chain := CreateDecoderChain(Blk.Method, TFileSliceStage.Create(Stream, Blk.Pos, Blk.CompSize));
       try
         for i := Blk.FirstFile to LastWanted do
@@ -819,7 +859,7 @@ begin
           CurWriting := False;
           F := A.Files[i];
           if F.IsDir or F.IsLink then Continue;   // los enlaces se crean al final
-          if not Wanted(Opt, F.Name) then
+          if not Wanted(Opt, A, i) then
           begin
             Skip(F.Size);
             Continue;
@@ -899,7 +939,10 @@ begin
           if Opened then RestoreMeta(OutName, F);
           if ActualCrc <> F.Crc then
           begin
-            Messages.Add(Format('CRC ERROR: %s (expected %.8x, got %.8x)', [F.Name, F.Crc, ActualCrc]));
+            if Opened then
+              Messages.Add(Format('CRC ERROR: %s (expected %.8x, got %.8x)', [F.Name, F.Crc, ActualCrc]) + DropBroken(Opt, OutName))
+            else
+              Messages.Add(Format('CRC ERROR: %s (expected %.8x, got %.8x)', [F.Name, F.Crc, ActualCrc]));
             Inc(Stats.Errors);
           end
           else if DoWrite then
@@ -915,7 +958,7 @@ begin
     except
       on E: EUnsupportedMethod do
       begin
-        Stats.Unsupported := True;
+        if E is EMemoryLimit then Stats.MemLimited := True else Stats.Unsupported := True;
         Messages.Add(Format('ERROR: %s (block at %d, %d file(s))', [E.Message, Blk.Pos, Blk.FileCount]));
         MarkRemaining;
       end;
@@ -1002,7 +1045,7 @@ begin
   begin
     LastWanted := -1;
     for i := A.DataBlocks[b].FirstFile to A.DataBlocks[b].FirstFile + A.DataBlocks[b].FileCount - 1 do
-      if not A.Files[i].IsDir and not A.Files[i].IsLink and Wanted(Opt, A.Files[i].Name) then LastWanted := i;
+      if not A.Files[i].IsDir and not A.Files[i].IsLink and Wanted(Opt, A, i) then LastWanted := i;
     if LastWanted >= 0 then
     begin
       Est[Count] := EstimateDecodeMem(A.DataBlocks[b].Method, A.DataBlocks[b].OrigSize);
@@ -1020,7 +1063,7 @@ begin
   Names.Init(Length(A.Files));
   try
     for i := 0 to High(A.Files) do
-      if not A.Files[i].IsDir and Wanted(Opt, A.Files[i].Name) then
+      if not A.Files[i].IsDir and Wanted(Opt, A, i) then
       begin
         Name := DiskName(Opt, A.Files[i].Name);
         if (Mode = owAsk) and not A.Files[i].IsLink and FileExists(FsPath(Name)) then Exit;
@@ -1040,7 +1083,7 @@ begin
     begin
       LastWanted := -1;
       for i := A.DataBlocks[b].FirstFile to A.DataBlocks[b].FirstFile + A.DataBlocks[b].FileCount - 1 do
-        if not A.Files[i].IsDir and not A.Files[i].IsLink and Wanted(Opt, A.Files[i].Name) then LastWanted := i;
+        if not A.Files[i].IsDir and not A.Files[i].IsLink and Wanted(Opt, A, i) then LastWanted := i;
       if LastWanted < 0 then Continue;
       Jobs[k] := TExtractBlockJob.Create;
       Jobs[k].A := A;
@@ -1089,6 +1132,7 @@ begin
           Inc(Stats.Skipped, Jobs[i].Stats.Skipped);
           Inc(Stats.Bytes, Jobs[i].Stats.Bytes);
           if Jobs[i].Stats.Unsupported then Stats.Unsupported := True;
+          if Jobs[i].Stats.MemLimited then Stats.MemLimited := True;
           if Jobs[i].Damaged then Damaged := True;
           if Jobs[i].Orig > Jobs[i].Reported then ProgressAdd(Jobs[i].Orig - Jobs[i].Reported);
           Jobs[i].Reported := Jobs[i].Orig;
@@ -1145,10 +1189,10 @@ var
     BlockDamaged := True;
     if Cur < 0 then Cur := Blk.FirstFile;
     for k := Cur to LastWanted do
-      if not A.Files[k].IsDir and not A.Files[k].IsLink and Wanted(Opt, A.Files[k].Name) then
+      if not A.Files[k].IsDir and not A.Files[k].IsLink and Wanted(Opt, A, k) then
       begin
         if (k = Cur) and CurWriting then
-          Log('ERROR: ' + A.Files[k].Name + ' is incomplete (whatever could be recovered was kept)')
+          Log('ERROR: ' + A.Files[k].Name + ' is incomplete' + DropBroken(Opt, OutName))
         else if Opt.TestOnly then
           Log('ERROR: ' + A.Files[k].Name + ' could not be verified')
         else
@@ -1169,7 +1213,7 @@ var
   begin
     Result := -1;
     for k := Blk.FirstFile to Blk.FirstFile + Blk.FileCount - 1 do
-      if not A.Files[k].IsDir and not A.Files[k].IsLink and Wanted(Opt, A.Files[k].Name) then Result := k;
+      if not A.Files[k].IsDir and not A.Files[k].IsLink and Wanted(Opt, A, k) then Result := k;
   end;
 
 begin
@@ -1198,7 +1242,7 @@ begin
 
   // Directorios primero (incluye los vacíos, que no tienen datos)
   for i := 0 to High(A.Files) do
-    if A.Files[i].IsDir and Wanted(Opt, A.Files[i].Name) then
+    if A.Files[i].IsDir and Wanted(Opt, A, i) then
     begin
       if not Opt.TestOnly and not Opt.FlatNames and not Opt.ToStdout then
         MakeDirs(DiskName(Opt, A.Files[i].Name));
@@ -1231,7 +1275,10 @@ begin
           Chain := TFileSliceStage.Create(TempStream, 0, Blk.OrigSize);
         end
         else
+        begin
+          CheckBlockMem(Opt, Blk);
           Chain := CreateDecoderChain(Blk.Method, A.OpenBlockData(Blk));
+        end;
         for i := Blk.FirstFile to LastWanted do
         begin
           Cur := i;
@@ -1240,7 +1287,7 @@ begin
           // local y la verificación de CRC comparaba el valor consigo mismo
           F := A.Files[i];
           if F.IsDir or F.IsLink then Continue;   // los enlaces se crean al final
-          if not Wanted(Opt, F.Name) then
+          if not Wanted(Opt, A, i) then
           begin
             SkipBytes(Chain, F.Size, Buf);
             Continue;
@@ -1338,7 +1385,10 @@ begin
           if OutF <> nil then RestoreMeta(OutName, F);
           if ActualCrc <> F.Crc then
           begin
-            Log(Format('CRC ERROR: %s (expected %.8x, got %.8x)', [F.Name, F.Crc, ActualCrc]));
+            if Opened then
+              Log(Format('CRC ERROR: %s (expected %.8x, got %.8x)', [F.Name, F.Crc, ActualCrc]) + DropBroken(Opt, OutName))
+            else
+              Log(Format('CRC ERROR: %s (expected %.8x, got %.8x)', [F.Name, F.Crc, ActualCrc]));
             Inc(Result.Errors);
           end
           else if DoWrite or Opt.TestOnly or Opt.ToStdout then
@@ -1351,7 +1401,7 @@ begin
       except
         on E: EUnsupportedMethod do
         begin
-          Result.Unsupported := True;
+          if E is EMemoryLimit then Result.MemLimited := True else Result.Unsupported := True;
           Log(Format('ERROR: %s (block at %d, %d file(s))', [E.Message, Blk.Pos, Blk.FileCount]));
           ReportLost(Blk, LastWanted);
         end;
@@ -1383,7 +1433,7 @@ begin
   for i := 0 to High(A.Files) do
   begin
     F := A.Files[i];
-    if not F.IsLink or not Wanted(Opt, F.Name) or Opt.ToStdout then Continue;
+    if not F.IsLink or not Wanted(Opt, A, i) or Opt.ToStdout then Continue;
     if Opt.TestOnly then
     begin
       Log('OK       ' + F.Name + ' -> ' + F.LinkTarget);
@@ -1438,7 +1488,7 @@ begin
   // Las fechas de los directorios se ponen al final (escribir adentro las cambia)
   if not Opt.TestOnly and not Opt.FlatNames and not Opt.ToStdout then
     for i := 0 to High(A.Files) do
-      if A.Files[i].IsDir and Wanted(Opt, A.Files[i].Name) then
+      if A.Files[i].IsDir and Wanted(Opt, A, i) then
         RestoreMeta(DiskName(Opt, A.Files[i].Name), A.Files[i]);
   finally
     if Temps <> nil then

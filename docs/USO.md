@@ -30,6 +30,16 @@ the files or patterns the command operates on.
 | `f` | freshen: update only files already in the archive when the disk copy is newer |
 | `d` | delete the given names or patterns from the archive |
 | `r` | repair with the recovery record: writes `fixed.<name>`; the original is untouched |
+| `v` | verbose listing: time with nanoseconds (UTC), Unix mode or Windows attributes, size, share of its packed block, ratio, CRC, block number and method |
+| `lt` | technical listing: the blocks (as `lb`) plus, for every entry, its block, offset in the uncompressed block, size, CRC, mtime in ns and mode |
+| `create` | like `a`, but always starts a new archive: an existing one is replaced (only once the new one is complete) |
+| `m` / `mf` | like `a`, then delete from disk what was archived (`m`: files, then the folders it added if empty; `mf`: files only) |
+| `ch` | rewrite the archive with the options given (method, encryption, recovery record, lock, comment); untouched blocks are copied |
+| `rr<spec>` | add or replace the recovery record: `rr`, `rr5%`, `rr10`… (= `ch -rr<spec>`) |
+| `c` | set the archive comment (`-z<file>`, `-z` for stdin, `--archive-comment=<text>`) |
+| `cw` | write the comment to a file: `parc cw <archive> <file>` (`-` = stdout) |
+| `j` | join: `parc j <archive> <other.parc>...` adds the files of the others; their blocks are copied |
+| `k` | lock the archive: afterwards no command modifies it |
 
 Directories passed to `a`/`u`/`f` are scanned recursively.
 
@@ -56,6 +66,7 @@ Directories passed to `a`/`u`/`f` are scanned recursively.
 | `-dp<dir>` | destination directory |
 | `-o+` | overwrite existing files |
 | `-o-` | skip them (this is what happens when nothing is specified) |
+| `-y` | answer yes to all queries: overwrite (unless `-o-` is given) |
 | `-snld` | also create links that point outside the destination (absolute, or with `..` escaping it) |
 
 Links are created at the end of extraction. For safety, without `-snld` PArc does not create
@@ -91,6 +102,60 @@ When updating (`a`, `u`, `f`), solid blocks that remain intact are copied withou
 `--recompress` forces rebuilding them. With `d` and an explicit `-m`, the whole archive is
 recompressed with that method, just like FreeArc (a "copying" command:
 `is_COPYING_COMMAND` in `Cmdline.hs`).
+
+### Commands that rewrite or extend an archive
+
+**`ch`** rewrites the archive applying the options given; blocks that do not need to change are
+copied byte for byte. FreeArc's "copying command" rules apply: `-m<method>` implies
+`--recompress`. It takes no file names.
+
+| with `ch` | effect |
+|---|---|
+| `-m<method>`, `--recompress` | recompress every block |
+| `-rr<spec>` / `-rr-` | add or replace / remove the recovery record (the `rr<spec>` command is the same) |
+| `-k` | lock (the `k` command is the same) |
+| `-z<file>`, `-z`, `--archive-comment=<text>` | set the comment (the `c` command is the same) |
+| `-v<size>` | turn it into volumes (or change their size) |
+| `-p<new>` | if the password does not open the current data, it is a **new** password: every block is re-encrypted with it (and the headers too if they were encrypted). A `-p` that already opens the data is only used to read and changes nothing |
+| `-hp<new>` | encrypt (or re-encrypt) the directory and footer with it |
+| `-p-` | remove all encryption (data and headers) |
+| `-hp-` | remove only the headers encryption |
+| `-op<old>` | the current password, used only for reading (otherwise it is prompted; without a console the command fails with exit code 5) |
+
+```sh
+parc ch backup.parc -mx                     # recompress everything with -mx
+parc ch backup.parc -pNew -hp -opOld        # change the password (and encrypt the headers)
+parc ch backup.parc -p- -opOld              # decrypt
+parc rr5% backup.parc                       # add a 5% recovery record
+parc c backup.parc -znotes.txt              # comment from a file
+parc cw backup.parc -                       # print it
+parc k backup.parc                          # lock
+```
+
+Updating an archive whose headers are encrypted (`-hp`) keeps them encrypted even if `-hp` is
+not repeated, as long as the password given (or prompted) opens them; before, they were written
+in clear.
+
+**`j`** appends the files of other `.parc` archives to the first one. Blocks are copied as they
+are, encrypted or not: an encrypted block keeps its own password, so the result may need several
+passwords to read (all of them are tried, `-p`, `-hp`, prompts). If `-p` is given, every
+encrypted block must use it (a different one is rejected as a wrong password, exit code 5). A
+name present in several archives is taken from the last one (like `a`: what is joined replaces);
+blocks that lose files because of that are repacked with their method (re-encrypted with the
+main password if they were encrypted). Joining an archive with itself is rejected.
+
+**`m` / `mf`** (and the options `-d` / `-df` with `a`, `u`, `f`) delete from disk what was
+archived, but only after the archive was completely written and, with `-t`, tested without
+errors; on any error nothing is deleted. A file whose size or modification time changed after it
+was read is kept (with a warning, exit code 6). Symbolic links are deleted as links, never their
+targets. `m`/`-d` then removes the folders it archived if they are empty (deepest first); `mf`/
+`-df` leaves folders alone. With `u`, files that were not replaced (the archived copy is as new)
+are not deleted. Files given with `-si` are not on disk and are never deleted.
+
+**`k`** (or `-k` with any writing command) sets the `locked` flag of the footer. Afterwards `a`,
+`u`, `f`, `d`, `m`, `mf`, `create` (it does not replace it), `ch`, `c`, `rr`, `j` and `k` refuse to
+modify the archive (exit code 1, "is locked"); `l`, `v`, `lt`, `lb`, `t`, `x`, `e`, `cw` and `r` still
+work. There is no unlock (as in FreeArc).
 
 ### Solid blocks: `-s`
 
@@ -211,10 +276,138 @@ so stdin is first copied to a temporary file: with `-si`, next to the archive; w
 system temporary directory (`TMPDIR`). Temporary files are deleted on completion, including on
 error or Ctrl-C.
 
+### File selection (a, u, f and l, t, x, e, d)
+
+The same rules apply when adding files from disk and when choosing entries of an archive.
+
+| option | effect |
+|---|---|
+| `-x<pattern>` | exclude matching names (repeatable). Also applies to `l`/`t`/`x`/`e`/`d` |
+| `-n<pattern>` | include only matching names (repeatable). An empty `-n@list` selects nothing |
+| `@listfile` | anywhere a name or pattern is accepted (also `-x@file`, `-n@file`): one name/pattern per line, UTF-8 (BOM allowed), empty lines and lines starting with `#` ignored |
+| `-sm<size>` / `-sl<size>` | only files larger / smaller than size: bytes, or with `k`, `m`, `g` (1024-based) |
+| `-ta<time>` / `-tb<time>` | only files modified at or after / before a local time `YYYYMMDD[hh[mm[ss]]]` (separators `-_:. T/` ignored: `-ta2024-06-01_08:00`) |
+| `-tn<period>` / `-to<period>` | only files newer / older than a period: `<n>w`, `<n>d`, `<n>h`, `<n>m`, `<n>s` combined (`2h30m`); a bare number is days |
+| `--dirs` / `-ed` | include / exclude directory entries (see below) |
+
+A name matches a pattern if the whole name, its last component or a directory prefix matches
+(`-xsrc/tmp` excludes everything below `src/tmp`). Size and time filters look only at files and
+links. Directory entries are included by default; with a content filter (`-n`, `-sm`, `-sl`,
+`-ta`, `-tb`, `-tn`, `-to`) they are left out (so a filter does not leave empty directories of
+what it skipped) unless `--dirs` is given; `-ed` always leaves them out. When adding, `-ed` means
+empty directories are not archived (directories with files come back implicitly on
+extraction, without their own time/permissions); when extracting, directory entries are not
+created.
+
+`d` needs at least one name/pattern or a selection option (`-n`, `-sm`…, `-ap`): `parc d x.parc
+-sm1g` deletes every file larger than 1 GB; `parc d x.parc` alone is an error.
+
+```sh
+parc a src.parc project -n*.pas -n*.inc -x'*/backup/*'
+parc a big.parc /data -sm100m -ta20260101          # large files changed this year
+parc x logs.parc -tn7d -dprecent                   # only what changed in the last week
+parc l backup.parc @wanted.txt
+```
+
+### Paths inside the archive: `-ep`, `-ep1`, `-ap`
+
+| option | effect |
+|---|---|
+| `-ep` | adding: store only file names, without directories (no directory entries; a repeated name is skipped with a warning). `x -ep`: extract without paths, like `e` |
+| `-ep1` | adding: drop the base directory given on the command line (`parc a x.parc /home/me/proj -ep1` stores `a.txt`, `sub/b.txt` instead of `home/me/proj/a.txt`); `dir/*.pas -ep1` stores names relative to `dir/` |
+| `-ep2` | the default: the path as given, without root or `..` |
+| `-ap<dir>` | base directory inside the archive. Adding: every stored name gets `<dir>/` in front. Reading (`l`, `t`, `x`, `e`, `d`): only entries below `<dir>/` are used, and names are relative to it (patterns too) |
+
+FreeArc's `-ep3` (absolute paths) is not supported: absolute names are never stored.
+
+```sh
+parc a site.parc /var/www/site -ep1 -apwww/2026-11      # stored as www/2026-11/...
+parc x site.parc -apwww/2026-11 -dprestore              # restore/index.html, not restore/www/...
+parc x site.parc '*.css' -ep -dpcss                     # all .css files, flat
+```
+
+### Testing around updates: `-t`, `-tp`
+
+| option | effect |
+|---|---|
+| `-t` | after a successful `a`/`u`/`f`/`d`, test the new archive (like `t`); if the test fails the exit code is the test's (2, 3, 5, 7) |
+| `-tp` | before modifying an existing archive, test it; if it fails, stop with its exit code and leave the archive untouched |
+
+### Archive name, times and temporary files
+
+| option | effect |
+|---|---|
+| `-ag[FMT]` | append the local date/time to the archive name, before the extension: `backup.parc -ag` → `backup20261117153000.parc`. FMT: runs of `Y` (`YY` = 2 digits, otherwise 4), `M`, `D`, `h`, `m`, `s` (2 digits); other characters literal (`-ag_YYYY-MM-DD`). It applies to every command, so `parc l backup.parc -agYYYYMMDD` opens today's archive |
+| `--nodates` | do not store file times (stored as 0); extracted files keep the extraction time. With `u`, such files always count as older |
+| `-tk` | when updating, keep the archive file's previous modification time |
+| `-tl` | set the archive file's time to that of the newest file inside |
+| `-w<dir>` | temporary files (the archive being written, blocks waiting their turn, `-si` and `-` copies, parallel-extraction temporaries) go to `<dir>`. At the end the new archive is renamed into place; if `<dir>` is on another file system it is first copied next to the archive, so a failed copy never leaves the old archive missing |
+| `--sync` | `a`/`u`: also delete from the archive the entries that no longer exist on disk, but only inside what the given arguments cover (`parc u x.parc src --sync` touches only `src/...`) and only entries the selection options choose (`-x`, `-n`, filters). Files that exist but could not be read are kept |
+| `-y` | answer yes to every question: extraction overwrites existing files (an explicit `-o-` still wins). PArc never asks for anything else that `-y` could answer (passwords are not "yes") |
+
+### Threads and memory: `-mt`, `-lc`, `-ld`
+
+| option | effect |
+|---|---|
+| `-mt<N>` | thread budget for the whole process, exactly like `PARC_THREADS=N` (which it overrides): it also chooses the preset alternatives (`-mt1 -m1` uses the single-thread `tor:4`). `-mt0` = default |
+| `-lc<size>` | memory limit for compression (bare number = MB; `k`/`m`/`g`; or `N%` of RAM; `-lc-` or `-lc0` = no limit). Default: automatic, see below |
+| `-ld<size>` | `t`/`x`/`e`: do not decompress blocks whose method declares more memory than the limit; their files are reported and the exit code is **7**. `-ld-` = no limit (the default) |
+
+The compression limit applies to the encoders running at the same time. PArc estimates what
+each method chain needs (all stages of a chain run together: lzma by its exact encoder size,
+match finder included; rep window and hash; PPMd model; Tornado buffer and hash; lzp/dict/grzip
+blocks; `4x4` counts one inner encoder per thread plus its blocks; `cm` and `srep` keep the whole
+block in memory) and, if a block's chain does not fit, shrinks the largest consumer first
+(dictionaries, windows, the PPMd model) until it fits, like FreeArc's memory limiting. Blocks
+compressed in parallel are also limited so that their sum fits. The reduced method is what the
+archive stores (`parc lb` shows it), so decompression needs less memory too. `cm`, `srep` and the
+filters cannot be reduced.
+
+Without `-lc` the limit is automatic: 75 % of the physical RAM; in the 32-bit builds (win32,
+linux32) also at most 2.25 GB and 9/16 of the address space (a large-address-aware process on
+64-bit Windows has 4 GB, on 32-bit Windows 2 GB), leaving room for buffers and DLL
+fragmentation (measured: TILIN `-m9` with 8 threads peaks at 2.4 GB in win32). So with huge inputs at `-m7`…`-mx` the 32-bit builds choose smaller dictionaries
+than x86-64 (their archives can differ), and an x86-64 machine with little RAM can too. The
+result only depends on the data, `PARC_THREADS`/`-mt`, the limit and the bitness.
+
+### Removing algorithms from the methods: `-mc`
+
+| option | effect |
+|---|---|
+| `-mc-<alg>` or `-mc<alg>-` | remove the algorithm from every chain (`-mc-rep`, `-mc-exe`, `-mc-delta`, `-mc-lzp`, `-mc-dict`, `-mc-dispack`…); a file group whose special method *ends* with it is dropped (its files use the main method). A chain left empty becomes `storing` |
+| `-mc-$group` | drop that group's special method (`-mc-$text`, `-mc-$wav`) |
+| `-mc$g1,$g2:-<alg>` | only in those groups (`$default` = the main method) |
+| letters | as FreeArc/RAR: `-mcd-` delta, `-mce-` exe, `-mcl-` lzp, `-mcr-` rep, `-mcz-` dict, `-mca-` $wav, `-mcc-` $bmp, `-mct-` $text |
+
+Adding algorithms (`-mc+...`) and replacing them (`-mca/b`) are not supported. `-mcm` is still the
+`cm` method (an operation needs a leading or trailing `-` or a `$`).
+
+### Key file: `-kf`
+
+`-kf<file>` uses the contents of a file as (part of) the password. Alone, it is the password of
+the data (like `-p`); with `-p`/`-hp` both are needed to open the archive. A wrong or missing key
+file is reported as a wrong password (exit code 5). The key file can be anything (an image, a
+random file): only its BLAKE2b-256 hash is used, so it may be large; it must not be empty.
+The exact derivation is in [FORMATO-PARC.md §3b](formato/FORMATO-PARC.md); the archive format does
+not change.
+
+```sh
+parc a secret.parc docs -kf/media/usb/key.bin -pSecret -hp
+parc x secret.parc -kf/media/usb/key.bin -pSecret
+```
+
+### Other
+
+| option | effect |
+|---|---|
+| `-kb` | `x`/`e`: keep broken files. Without it, a file whose CRC does not match, or that could not be completed because its block is damaged, is **deleted** (like FreeArc) and reported; with `-kb` whatever was written stays |
+| `--print-config` | print the built-in method substitution table, what each `-m0`…`-mxx` resolves to with the current thread budget (`-mt<N>` changes it) and the file groups (`arc.groups`), then exit. Works with or without a command |
+
 ### Damaged blocks
 
 If a block is damaged, extraction continues with the others. For that block PArc reports every
-file it could not extract; a file that was being written keeps whatever was recovered. If the
+file it could not extract; a file that was being written, or that came out with a wrong CRC, is
+deleted (FreeArc's behaviour) unless `-kb` is given, which keeps whatever was recovered. If the
 archive has a recovery record, PArc suggests `parc r`.
 
 ### Progress and cancellation
@@ -247,13 +440,14 @@ extracting, the half-written file is deleted. A second Ctrl-C stops immediately.
 | 4 | I/O error (could not open or create a file, for example) |
 | 5 | missing or wrong password |
 | 6 | finished, but some files could not be read and were not added |
+| 7 | some blocks were not decompressed: they need more memory than `-ld` allows |
 | 130 | cancelled with Ctrl-C |
 
 ## Environment variables
 
 | variable | effect |
 |---|---|
-| `PARC_THREADS` | maximum number of threads working at the same time in the whole process (default: CPU cores, at most 64): block compression, 4x4/grzip, REP hashing, the multi-threaded LZMA match finder, `t` verification and parallel extraction all share it. It also picks the preset alternatives, like FreeArc's `-mtN` (e.g. `PARC_THREADS=1 -m1` uses the single-thread `tor:4`) |
+| `PARC_THREADS` | maximum number of threads working at the same time in the whole process (default: CPU cores, at most 64): block compression, 4x4/grzip, REP hashing, the multi-threaded LZMA match finder, `t` verification and parallel extraction all share it. It also picks the preset alternatives, like FreeArc's `-mtN` (e.g. `PARC_THREADS=1 -m1` uses the single-thread `tor:4`). The `-mt<N>` option overrides it |
 | `PARC_BUFMEM` | MB of memory for compressed blocks waiting their turn when compressing in parallel (default min(1024, RAM/4), 256 on 32-bit); the rest goes to temporary files |
 | `PARC_CRC` | `table` disables the PCLMULQDQ CRC-32 (for measurements) |
 

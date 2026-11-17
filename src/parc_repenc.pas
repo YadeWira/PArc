@@ -437,6 +437,9 @@ begin
   NewCap := 2 * Int64(Length(FBuf));
   if NewCap < Need then NewCap := Need;
   if NewCap < 1 shl 20 then NewCap := 1 shl 20;
+  // Pasados 64 MB, directo a la ventana entera: doblando, el último SetLength tenía la mitad
+  // vieja y la ventana nueva a la vez (1,5 veces la ventana; en 32 bits, rep:1gb no entraba)
+  if NewCap > 64 shl 20 then NewCap := FBlockSize;
   if NewCap > FBlockSize then NewCap := FBlockSize;
   if FPool <> nil then DrainTasks;   // SetLength puede mover FBuf
   SetLength(FBuf, NewCap);
