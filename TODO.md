@@ -115,6 +115,24 @@ single 64-bit move in `FindMatchLen`.
 Acceptance: for TILIN, `-m1` should be materially faster without giving up the ~57,8 % ratio;
 otherwise keep the current preset.
 
+## Next — `plz` replaces Tornado (relicensing step)
+
+`plz` (2026-11-17, `src/parc_plz.pas`, `src/parc_plzenc.pas`, format in FORMATO-PARC.md §6.2)
+is PArc's own LZ codec, written without Tornado's code. Measured against every `tor` use of the
+presets (`docs/ESTADO.md`, "plz"): smaller, less compression CPU and about half the
+decompression time. The presets still use `tor`. Pending, in order:
+
+1. Switch the presets: `1binary = plz:2`, `2binary = plz:4`, `ex1binary = xplz:1`,
+   `ex2binary = xplz:3`, `4$compressed = 4rep + eplz:3`, `4x$compressed = eplz:3:8m`,
+   `bmpfastest = mm:d1 + plz:2`, `3xt = dict:64m:80% + plz:5:96m` (with `xplz = 4x4:plz`,
+   `eplz = (|x)plz`); update the expectations in tests that name `tor` (cli, determinism).
+2. Remove the Tornado encoder (`parc_torenc`, `parc_torfast/toropt/torrun.inc`,
+   `parc_torglue.cpp/.patch`, the C++ part of `build.sh`) and then the decoder
+   (`parc_tornado`, `parc_tordec.inc`); `tor` blocks stop decoding (pre-1.0, no format
+   compatibility promised), `tests/run_tornado_tests.sh` goes away.
+3. Possible gains still open: literal coding with context (previous byte), an optimal parser for
+   levels 6-7, and assembler for the 4-stream literal decoder.
+
 ## Done — PPMd from the LZMA SDK (relicensing step)
 
 `ppmd` is now a Pascal port of the LZMA SDK's `Ppmd8` (PPMd var.I rev.1, Igor Pavlov, public

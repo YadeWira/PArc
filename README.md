@@ -50,9 +50,11 @@ writes the same bytes.
 - **Codecs implemented in Pascal** (hot loops in inline assembler), no third-party compression
   libraries linked; the only C/C++ is FreeArc's own Tornado encoder, used for `tor:10` and
   `tor:15` where it measured faster (`src/parc_torglue.cpp`):
-  `storing`, `lzma`, `ppmd`, `grzip`, `dict`, `rep`, `delta`, `tor` (Tornado), `lzp`, `mm`,
+  `storing`, `lzma`, `ppmd`, `grzip`, `dict`, `rep`, `delta`, `tor` (Tornado), `plz`, `lzp`, `mm`,
   `tta`, `4x4`, `exe` (BCJ x86), `lz4`, `dispack070` (DisPack), `srep` (SREP) and `cm` (context mixing), alone or in
-  chains (`exe+dispack070+lzma`, `srep+lzma`, …).
+  chains (`exe+dispack070+lzma`, `srep+lzma`, …). `plz` is PArc's own LZ codec, written to
+  replace Tornado (FreeArc code) in `-m1`…`-m4`: smaller, faster to compress and about twice as
+  fast to decompress (measurements in `docs/ESTADO.md`; the presets still use `tor` for now).
 - **Smaller and faster than FreeArc 0.67.1** at `-m1`…`-m9` on the test corpora. `-mx` gives
   the smallest archives that still decompress fast; `-mxx` adds context mixing (`cm`) for the
   absolute smallest archives, at the cost of decompression speed (see `docs/ESTADO.md`).
@@ -142,6 +144,7 @@ bash tests/stdio.sh tests/volumes.sh
 bash tests/rs_recovery.sh tests/parc_crypt.sh tests/cm.sh
 bash tests/dispack.sh tests/srep.sh tests/bcj.sh
 bash tests/run_tornado_tests.sh tests/crypto_vectors.sh
+bash tests/plz.sh tests/plz_cross.sh
 sudo bash tests/fixes.sh
 python3 tests/fuzz.py build/linux64/parc 100 build/linux64/*.parc
 ```

@@ -38,9 +38,12 @@ The rest of the FreeArc 0.67 tree is in git history (commit `82ea8d9`) and in Fr
 - Commands: `l`, `lb`, `t`, `x`, `e`, `a`, `u`, `f`, `d`, `r`, and FreeArc's `v`, `lt`, `create`,
   `m`, `mf`, `ch`, `rr<spec>`, `c`, `cw`, `j`, `k` (tests/cli_commands.sh). Not implemented: `s`
   (SFX) and `modify`.
-- Methods: `storing`, `lzma`, `ppmd`, `grzip`, `dict`, `rep`, `delta`, `tor`, `lzp`, `mm`,
+- Methods: `storing`, `lzma`, `ppmd`, `grzip`, `dict`, `rep`, `delta`, `tor`, `plz`, `lzp`, `mm`,
   `tta`, `4x4`, `exe` (BCJ), `lz4`, `dispack070`, `srep` and `cm` (context mixing), alone or
   chained.
+- `plz` (2026-11) is PArc's own LZ77 codec (no FreeArc code), meant to replace Tornado in the
+  presets: see "plz" below for the design and the measurements against `tor`; stream format in
+  `formato/FORMATO-PARC.md` §6.2.
 - FreeArc built-in presets ported: `-m0`…`-m9`, `-mx`, `-mxx` and the `d/t/xt/xb/binary/rep` families.
 - `ppmd` (2026-11) is PPMd var.I from the public-domain LZMA SDK (`Ppmd8`), ported to Pascal
   with x86-64 assembler for the symbol coder and `UpdateModel`; it replaced FreeArc's PPMd (a
@@ -308,6 +311,66 @@ on a 64-core Xeon (times are indicative); every PArc archive tested OK with linu
 `-m9` was 834 MB (`rep:407mb+lzma:72mb`), with 2 GB 818 MB; 2.5 GB ran out of memory (before
 rep stopped copying its window when growing). No run ran out of memory.
 
+## plz: own LZ codec to replace Tornado (2026-11-17)
+
+PArc is moving to the MIT license, so the FreeArc-derived code has to go; Tornado (`tor`, ~10k
+lines plus FreeArc's C++ encoder) is the largest piece, and it is the engine of `-m1`…`-m4`
+(alone, inside `4x4`, and for `$compressed` files). `plz` replaces it with PArc's own code,
+written from public LZ77 literature without looking at Tornado's sources
+(`src/parc_plz.pas`: format and decoder; `src/parc_plzenc.pas`: encoder;
+`src/parc_plz_x64.inc`: one x86-64 loop; format in `formato/FORMATO-PARC.md` §6.2).
+
+**Design.**
+
+- *Match finder.* Levels 1–2: a direct-mapped table whose 8-byte entries hold the position and
+  the first 4 data bytes, so a non-matching candidate never touches the window (5/6-byte hash,
+  1 MB / 8 MB table); the scan over positions without matches is a small assembler loop
+  (identical output with `-dPARC_NOASM`). Levels 3–7: hash rows of 4–64 entries in recency
+  order, each with an 8-bit tag; tags, row head and positions share a cache-line-aligned record
+  and are compared 8 at a time (SWAR) before any data is read; rows of the next position are
+  prefetched. The four repeated offsets are tried first at every position; matches are
+  extended backwards over pending literals.
+- *Parser.* Greedy with skip acceleration in incompressible stretches (1–2, inserting two
+  positions per match), lazy with one step (3–4) or two (5–7) using an estimated gain
+  `4·length − log2(offset)` (repeated offsets almost free); long matches insert only their first
+  and last positions (4 at level 3, 16 at 4–5).
+- *Entropy coding.* The input is parsed in blocks of 256 KB; each one is then coded whole or cut
+  (after a sequence) into pieces of 16–128 KB, choosing the cut that minimises an integer
+  entropy estimate of the pieces, so tables follow data that changes (many small files of
+  different kinds one after another) and stay big on uniform data. Each coded block has its own
+  canonical Huffman tables (≤ 11 bits, rebuilt from its histograms) for literals and for four
+  sequence alphabets: a
+  128-symbol token joining the literal and match lengths, overflow codes for long lengths, and
+  an offset alphabet with the 4 repeated offsets and 60 log-slots with a mantissa bit. A table is
+  reused from the previous block, literals are stored raw, or the whole block is stored, whenever
+  that is cheaper. Literals are coded in four interleaved bit streams (decoded in parallel),
+  sequences in a fifth one; extra bits are raw.
+- *Decoder.* Literals first (4 streams, 11-bit lookup tables, 5 symbols per refill), then the
+  sequences with 16-byte copies; every count, length, offset and bit-stream end is checked
+  (damaged input gives `EArcCorrupt`, never an out-of-bounds access or a hang: 2,000 mutated
+  streams per `tests/plz.sh` run, clean under valgrind). Streaming uses a ring of W + 1 MB that
+  grows with the data (W from the stream, ≤ 1 GB); inside `4x4` each block is decoded memory
+  to memory.
+- *Determinism.* Each block is parsed only with the data up to its end and everything is integer
+  arithmetic, so the output is the same in streaming and memory mode, for any write sizes, with or
+  without assembler and on every platform (`tests/plz_cross.sh`: linux64, linux32, linuxarm64
+  under QEMU, win64 and win32 under Wine, 450 identical outputs), and does not depend on the
+  thread count (the encoder is single-threaded; `4x4` gives the parallelism, as with `tor`).
+
+**Levels** (`plz:<1..7>[:<window>][:h<hash>]`, default 3):
+
+| level | window | finder | parser | aimed at | memory to compress (streaming) |
+|---|---|---|---|---|---|
+| 1 | 8 MB | direct table 1 MB, 5-byte hash | greedy | `tor:3:8mb` (4x4 `-m1`) | ~14 MB |
+| 2 | 8 MB | direct table 8 MB, 6-byte hash | greedy | `tor:4:8mb:h4m` (`-m1` one thread) | ~21 MB |
+| 3 | 16 MB | rows of 4 (8 MB), 5-byte hash | lazy 1 | `tor:5`, `tor:c3` (4x4 `-m2`, `$compressed`) | ~33 MB |
+| 4 | 64 MB | rows of 8 (16 MB), 5-byte hash | lazy 1 | `tor:6` (`-m2` one thread) | ~113 MB |
+| 5–7 | 64 MB | rows of 16/32/64 | lazy 2 | slower, smaller (e.g. `3xt`'s `tor:7`) | 130–200 MB |
+
+Decompression needs the window plus ~2 MB.
+
+<!-- PLZ-TABLES -->
+
 ## Verified platforms (0.0.2)
 
 | platform | binary | tests |
@@ -341,6 +404,10 @@ python3 tests/thread_budget.py    # PARC_THREADS=N: <= N hilos trabajando (muest
 bash tests/determinism.sh         # mismo N => mismo archivo (todos los niveles, N=1/2/4/8)
 bash tests/ppmd.sh                # PPMd: ida y vuelta, streams dañados y bit a bit contra el LZMA SDK ($PPMD_SDK)
 bash tests/ppmd_asm.sh            # PPMd: ensamblador == Pascal (-dPARC_NOASM)
+bash tests/plz.sh                 # plz: niveles, ventanas, streaming == memoria, asm == Pascal, dañados
+bash tests/plz_cross.sh           # plz: mismos bytes en linux64/linux32/linuxarm64 (QEMU)/win64/win32 (Wine)
+# plz_bench: cualquier método en memoria por las cadenas (tamaño, CPU y pared)
+fpc -O3 -Fusrc -Fobuild/linux64/units -Flbuild/linux64/units -FUbuild/tests/units -FEbuild/tests tests/plz_bench.lpr
 # liberar/reusar un trabajo del pool apenas termina (ventana ampliada con -dPARC_RACE_TEST)
 fpc -O2 -dPARC_RACE_TEST -Fusrc -FUbuild/tests/race -FEbuild/tests tests/test_jobfree.lpr
 PARC_THREADS=4 build/tests/test_jobfree
