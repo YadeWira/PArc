@@ -463,6 +463,31 @@ The exact 7-Zip BCJ2 comparison was:
 Next: port the exact BCJ2 encoder/decoder (public domain) or improve stream framing/settings;
 only use in presets if it improves size and speed.
 
+## Done — encryption rewrite (MIT relicensing)
+
+FreeArc's scheme (LibTomCrypt ciphers, CTR/CFB, PBKDF2, keys in the method string) was replaced by
+an own scheme written from the standards: Argon2id (t3, 64 MiB, p4) -> master key, BLAKE2b
+subkeys, XChaCha20-Poly1305 (default) or AES-256-GCM in 64 KiB STREAM chunks; format in
+`docs/formato/FORMATO-PARC.md` §3b, code in `parc_blake2`, `parc_chacha`, `parc_aes`, `parc_crypt`.
+Encrypted archives now also compress their blocks in parallel. Old encrypted archives are not
+readable (pre-1.0). x86-64, one core: XChaCha20-Poly1305 ~1.5 GB/s (AVX2 ChaCha20 stitched with
+Poly1305), AES-256-GCM ~1.7 GB/s (AES-NI + PCLMULQDQ). `-m1` with 4 threads on 512 MB of TILIN:
+1.97 -> 2.15 s compressing, 1.33 -> 1.44-1.51 s testing.
+
+Open:
+
+- The cipher stage runs in the thread that writes (or reads) the block, after 4x4 merges its
+  output, so the extra ~0.18 s at `-m1` on TILIN (289 MB of ciphertext) is on the critical path. Encrypting
+  chunks in parallel (they are independent) or in a pipeline thread would hide it, at the cost of
+  a thread token.
+- Portable fallbacks are slow and the portable AES is table based (not constant-time): ~0.24 GB/s
+  ChaCha20 and ~0.07 GB/s AES-GCM on x86-64 without asm; i386/aarch64 always use them. An aarch64
+  NEON/ARMv8-CE path would fix ARM.
+- Windows: win64/win32 encryption verified only under Wine (round trips, cross-reads, `ptest.exe`
+  against the oracle, which exercises the Win64 assembler paths); repeat on the real VMs.
+- Passwords are used as typed (UTF-8, no Unicode normalization): an NFC/NFD difference between
+  systems gives "wrong password".
+
 ## P1 — real Windows test for 0.0.2
 
 0.0.1 was tested on real Windows 10 and Windows 7 (x64 and x86). 0.0.2 only changes the version

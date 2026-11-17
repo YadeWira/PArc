@@ -3,7 +3,7 @@
 set -u
 ROOT=$(cd "$(dirname "$0")/.." && pwd)
 PARC=${PARC_BIN:-$ROOT/build/linux64/parc}
-W=${CLI_WORK:-/tmp/opencode/cli_test}
+W=${CLI_WORK:-${TMPDIR:-/tmp}/parc_cli}
 rm -rf -- "${W:?}"; mkdir -p "$W/src/sub" "$W/src/empty" && cd "$W" || exit 2
 fail=0
 ck() { if eval "$2"; then printf '  ok    %s\n' "$1"; else printf '  FAIL %s\n' "$1"; fail=$((fail+1)); fi; }

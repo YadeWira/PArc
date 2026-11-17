@@ -38,7 +38,7 @@ type
     Recovery: string;     // especificación del registro de recuperación ('' = sin), ya resuelta
     KeepTemp: Boolean;    // no renombrar: el llamador llama a FinishArchive (p. ej. después de
                           // cerrar el archivo viejo, que en Windows no se puede reemplazar abierto)
-    Encryption: string;   // algoritmo (--encryption; "aes" = aes-256/ctr, como FreeArc)
+    Encryption: string;   // -ae=: "chacha" (XChaCha20-Poly1305) o "aes" (AES-256-GCM), con :t/:m/:p
     DataPassword: RawByteString;     // -p: cifra los bloques de datos ('' = sin cifrar)
     HeadersPassword: RawByteString;  // -hp: cifra también directorio y footer
     VolumeSize: Int64;    // -v: volúmenes de este tamaño (FileName.001, .002...); solo .parc
@@ -67,7 +67,7 @@ implementation
 
 uses
   parc_bytes, parc_crc, parc_stream, parc_outstream, parc_encoders, parc_methods, parc_recovery, parc_progress,
-  parc_volume, parc_parallel, parc_strmap;
+  parc_volume, parc_parallel, parc_strmap, parc_crypt;
 
 const
   VERSION_PARC: array[0..3] of Byte = (PARC_FORMAT_VERSION, 0, 0, 0);
@@ -169,17 +169,13 @@ function WriteControlBlock(S: TStream; Parc: Boolean; BlockType: Integer; const 
   const Data: TBytes; const Alg: string; const Pwd: RawByteString): TBlockInfo;
 var
   Comp: TBytes;
-  EncMethod, Stored: string;
+  EncMethod: string;
 begin
   Result.BlockType := BlockType;
-  Result.Method := Method;
   EncMethod := Method;
-  if Pwd <> '' then
-  begin
-    // -hp: como el de datos, pero en el directorio y el footer (ArcvProcessCompress.hs)
-    EncMethod := Method + '+' + MakeCipherStage(Alg, Pwd, Stored, Parc);
-    Result.Method := Method + '+' + Stored;
-  end;
+  // -hp: como el de datos, pero en el directorio y el footer (con la subclave de cabeceras)
+  if Pwd <> '' then EncMethod := Method + '+' + MakeCipherStage(Alg, Pwd, True);
+  Result.Method := EncMethod;
   Result.Pos := S.Position;
   Result.OrigSize := Length(Data);
   Result.Crc := CalcCRC(PByte(Data), Length(Data));
@@ -545,7 +541,7 @@ var
   CurBlock, CurNext, k: Integer;
   CurChain: TInStage;
   Remaining: Int64;
-  EncMethod, Stored: string;
+  EncMethod: string;
   Pwd: RawByteString;
   Encrypted: Boolean;
 
@@ -569,12 +565,12 @@ begin
   Size := 0;
   for i := 0 to High(G.Files) do
     if not Entries[G.Files[i]].Meta.IsDir then Inc(Size, Entries[G.Files[i]].Meta.Size);
-  // Un bloque viejo que se reempaqueta trae su cifrado guardado (sin clave): se saca, y si hay
-  // -p se vuelve a cifrar con sal e IV nuevos
+  // Un bloque viejo que se reempaqueta trae su etapa de cifrado: se saca, y si hay -p se
+  // vuelve a cifrar con un nonce de bloque nuevo
   Result.Method := LimitMethodToSize(WithoutCipher(G.Method), Size);
   EncMethod := Result.Method;
-  // -p: cifrado al final de la cadena, con sal e IV propios del bloque (como FreeArc). En el
-  // archivo queda la etapa sin la clave; el codificador usa la que la trae
+  // -p: cifrado al final de la cadena. La etapa no lleva la clave (está en el caché de
+  // parc_crypt), así que la cadena del codificador es la misma que queda en el archivo.
   // Un bloque que ya estaba cifrado se vuelve a cifrar aunque no se haya dado -p (con la
   // contraseña con que se leyó): borrar un archivo no tiene que dejar el resto en claro
   Pwd := Opt.DataPassword;
@@ -592,8 +588,8 @@ begin
   end;
   if (Pwd <> '') and (Size > 0) then
   begin
-    EncMethod := Result.Method + '+' + MakeCipherStage(Opt.Encryption, Pwd, Stored, True);
-    Result.Method := Result.Method + '+' + Stored;
+    EncMethod := Result.Method + '+' + MakeCipherStage(Opt.Encryption, Pwd, False);
+    Result.Method := EncMethod;
   end;
   Result.Pos := S.Position;
   SetLength(Result.Files, Length(G.Files));
@@ -964,6 +960,38 @@ begin
   AllGroups := Sorted;
 end;
 
+{ Antes de escribir: con -p, si el archivo que se actualiza ya tiene bloques de datos cifrados,
+  la contraseña tiene que ser la de ellos (los datos de un archivo no mezclan contraseñas: se
+  rechaza como contraseña incorrecta). Y las claves se derivan acá, una vez y en este hilo,
+  antes de repartir los bloques entre hilos; si es la del archivo, con su misma sal. }
+procedure PrepareEncryption(const Entries: TWriteEntryArray; const Groups: array of TSolidGroup;
+  const Opt: TWriteOptions);
+var
+  i: Integer;
+  Found: string;
+
+  procedure Look(const Method: string);
+  begin
+    if (Found = '') and (WithoutCipher(Method) <> Method) then Found := Method;
+  end;
+
+begin
+  if Opt.DataPassword <> '' then
+  begin
+    Found := '';
+    for i := 0 to High(Groups) do
+      if Groups[i].CopyFrom <> nil then Look(Groups[i].CopyFrom.DataBlocks[Groups[i].CopyBlock].Method);
+    for i := 0 to High(Entries) do
+      with Entries[i] do
+        if (SrcArc <> nil) and not Meta.IsDir and not Meta.IsLink then
+          Look(SrcArc.DataBlocks[SrcArc.Files[SrcIndex].DataBlock].Method);
+    if (Found <> '') and not CryptMethodPasswordOk(Found, Opt.DataPassword) then
+      raise EBadPassword.Create('wrong password (the archive data is encrypted with another password)');
+    MakeCipherStage(Opt.Encryption, Opt.DataPassword, False);   // (deriva la clave y la deja en el caché)
+  end;
+  if Opt.HeadersPassword <> '' then MakeCipherStage(Opt.Encryption, Opt.HeadersPassword, True);
+end;
+
 function WriteArchive(const FileName: string; const Entries: TWriteEntryArray;
   const Groups: array of TSolidGroup; const Opt: TWriteOptions; Log: TLogProc): TWriteStats;
 var
@@ -991,6 +1019,7 @@ begin
   for i := 0 to High(Groups) do
     if (Groups[i].CopyFrom = nil) and not EncoderAvailable(WithoutCipher(Groups[i].Method)) then
       raise EUnsupportedEncoder.CreateFmt('cannot compress with "%s" yet', [Groups[i].Method]);
+  PrepareEncryption(Entries, Groups, Opt);
 
   // Total para el progreso: bytes a comprimir, más los comprimidos de los bloques que se copian
   Total := 0;
@@ -1060,8 +1089,8 @@ begin
               Inc(Enc4x4TotalHint, Entries[AllGroups[i].Files[k]].Meta.Size);
 
       // (con un solo hilo se escribe directo, sin pasar por el camino de los trabajos)
-      UseParallel := Opt.Parallel and (Length(AllGroups) > 1) and (BudgetThreads >= 2) and
-        (Opt.DataPassword = '') and (Opt.HeadersPassword = '');
+      // (con -p también: las claves ya están derivadas y cada bloque solo saca su nonce)
+      UseParallel := Opt.Parallel and (Length(AllGroups) > 1) and (BudgetThreads >= 2);
       if UseParallel then
       begin
         n := 0;

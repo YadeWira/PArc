@@ -110,15 +110,11 @@ function LimitMethodToSize(const Method: string; DataSize: Int64): string;
 { True si CreateEncoderChain sabe comprimir con Method (sin crear nada). }
 function EncoderAvailable(const Method: string): Boolean;
 
-{ Etapa de cifrado para escribir un bloque, como generateEncryption de FreeArc: Algorithm es
-  el de --encryption ("aes", "blowfish-448/cfb", ...), Password en UTF-8. Devuelve la etapa
-  para el codificador (con :k) y en Stored la que se guarda en el archivo (sal, check-code e
-  IV, sin la clave). Sal e IV son nuevos en cada llamado: uno por bloque, como FreeArc. }
-const
-  PARC_KDF_ITERATIONS = 200000;   // ~0,6 s por derivación (una por archivo)
-
-function MakeCipherStage(const Algorithm: string; const Password: RawByteString; out Stored: string;
-  Parc: Boolean): string;
+{ Etapa de cifrado para un bloque nuevo: Algorithm es el de -ae= ("chacha", "aes", con
+  :t/:m/:p opcionales), Password en UTF-8, Header = bloque de control (-hp). La etapa no lleva
+  la clave (es la misma cadena que queda en el archivo); el nonce del bloque es nuevo en cada
+  llamado. Lanza EUnsupportedEncoder si el algoritmo no vale. }
+function MakeCipherStage(const Algorithm: string; const Password: RawByteString; Header: Boolean): string;
 
 { Method sin sus etapas de cifrado (la de un bloque viejo que se reempaqueta: la que quedó en
   el archivo no trae la clave y no sirve para comprimir). }
@@ -130,18 +126,6 @@ uses
   Math, parc_filters, parc_ppmd, parc_methods, parc_lzp, parc_parallel, parc_lzmaenc,
   parc_repenc, parc_deltaenc, parc_dictenc, parc_ttaenc, parc_mmenc, parc_torenc, parc_grzipenc,
   parc_crypt, parc_canon, parc_lz4enc, parc_dispack, parc_srep, parc_cm, parc_bcj2;
-
-{ ¿La etapa es de cifrado? El nombre va antes de '-' (bits) o '/' (modo): "aes-256/ctr". }
-function IsCipherStage(const Stage: string): Boolean;
-var
-  Name: string;
-  p: Integer;
-begin
-  Name := Stage.Split([':'])[0];
-  p := Pos('-', Name); if p > 0 then Name := Copy(Name, 1, p - 1);
-  p := Pos('/', Name); if p > 0 then Name := Copy(Name, 1, p - 1);
-  Result := IsCipherName(Name);
-end;
 
 function StageName(const Stage: string): string; forward;
 function FastInner4x4(const Inner: string): Boolean; forward;
@@ -731,6 +715,8 @@ end;
 
 function CreateStage(const Stage: string; Target: TOutStage): TOutStage;
 var
+  Par: TCryptParams;
+  Master: TMasterKey;
   pp: TPpmdParams;
   Parts: TStringArray;
   Inner: string;
@@ -738,7 +724,14 @@ var
   mc, k: Integer;
 begin
   Parts := Stage.Split([':']);
-  if IsCipherStage(Stage) then Exit(TEncryptStage.Create(Target, ParseCryptParams(Parts)));
+  if IsCipherStage(Stage) then
+  begin
+    // la clave ya está en el caché: la derivó MakeCipherStage al armar la etapa
+    Par := ParseCipherStage(Stage);
+    if not CryptLookup(Par, Master) then
+      raise EUnsupportedEncoder.Create('encryption: key not derived');
+    Exit(TAeadEncryptStage.Create(Target, Par, Master));
+  end;
   case StageName(Stage) of
     '4x4':
       begin
@@ -919,34 +912,13 @@ begin
   end;
 end;
 
-{ Bytes de la contraseña como los ve FreeArc 0.67 sin :f (como PasswordBytes de
-  parc_methods): el byte bajo de cada carácter Unicode. }
-function MakeCipherStage(const Algorithm: string; const Password: RawByteString; out Stored: string;
-  Parc: Boolean): string;
+function MakeCipherStage(const Algorithm: string; const Password: RawByteString; Header: Boolean): string;
 var
-  W: UnicodeString;
-  Pwd: RawByteString;
-  Alg: string;
-  i: Integer;
+  C: TCipherChoice;
 begin
-  Alg := Algorithm;
-  if Parc then
-  begin
-    // .parc: hex de la clave bien decodificado y contraseña en UTF-8 (:f), etiqueta de
-    // autenticación (:m) y 200000 iteraciones de PBKDF2 si no se pidió otra cantidad
-    Alg := Alg + ':f:m';
-    if Pos(':n', Algorithm) = 0 then Alg := Alg + ':n' + IntToStr(PARC_KDF_ITERATIONS);
-    Pwd := Password;
-  end
-  else
-  begin
-    // .arc: como FreeArc sin :f (cada carácter recortado a su byte bajo)
-    W := UTF8Decode(Password);
-    SetLength(Pwd, Length(W));
-    for i := 1 to Length(W) do Pwd[i] := Chr(Ord(W[i]) and $FF);
-  end;
-  if not IsCipherStage(Algorithm) or not MakeEncryption(Alg, Pwd, Stored, Result) then
-    raise EUnsupportedEncoder.CreateFmt('invalid encryption algorithm: "%s"', [Algorithm]);
+  if not ParseCipherChoice(Algorithm, C) then
+    raise EUnsupportedEncoder.CreateFmt('invalid encryption algorithm: "%s" (chacha or aes)', [Algorithm]);
+  Result := CryptStageForWrite(C, Password, Header);
 end;
 
 function WithoutCipher(const Method: string): string;

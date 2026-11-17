@@ -56,8 +56,8 @@ writes the same bytes.
   absolute smallest archives, at the cost of decompression speed (see `docs/ESTADO.md`).
 - **Reed–Solomon recovery record** (`-rr`): repairs a damaged range or scattered sectors,
   not just single sectors per group.
-- **Volumes** (`-v`), **strong encryption** (`-p`/`-hp`: AES/Blowfish/Serpent/Twofish,
-  authenticated, 200k PBKDF2 iterations), stdin/stdout (`-si`, `-so`, `-`).
+- **Volumes** (`-v`), **authenticated encryption** (`-p`/`-hp`: XChaCha20-Poly1305 or
+  AES-256-GCM in 64 KiB chunks, Argon2id key derivation), stdin/stdout (`-si`, `-so`, `-`).
 - **Long paths** (`\\?\` on Windows), symlinks/junctions, masks and recursion.
 - Cancellation leaves no partial files; writes go to a temporary file that replaces the
   original only on success.
