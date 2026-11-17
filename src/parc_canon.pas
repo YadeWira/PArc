@@ -19,9 +19,18 @@ interface
 
 function LimitAndCanonize(const Method: string; BlockSize: Int64): string;
 
+var
+  { -lc<tamaño>: memoria máxima de cada compresor al comprimir (0 = sin límite). Se fija una vez
+    al leer la línea de comandos, antes de comprimir (después solo se lee, desde varios hilos).
+    Cada etapa de la cadena se achica por separado para entrar en el límite (como
+    limitCompressionMem de FreeArc): lzma con su estimación exacta (LzmaFitDictionary), tor
+    búfer + hash, rep/lzp/dict a la mitad, grzip a 1/8 (BWT), ppmd el modelo, y el método
+    interno de 4x4 con el límite repartido entre sus hilos. cm, srep y los filtros no cambian. }
+  CompressMemLimit: Int64 = 0;
+
 implementation
 
-uses SysUtils, Math, parc_methods, parc_torenc, parc_lzmaenc;
+uses SysUtils, Math, parc_methods, parc_torenc, parc_lzmaenc, parc_parallel;
 
 const
   KB = 1024; MB = 1024*1024; GB = Int64(1024)*1024*1024;
@@ -140,9 +149,11 @@ const
   kLzmaEnc32MaxMem = Int64(2) shl 30;
   kLzmaEnc32Headroom = Int64(256) shl 20;
 
-{ Diccionario lzma que entra en la memoria de 32 bits (LzmaFitDictionary); MFi como en
-  CanonStage. }
-function FitLzma32(BS, MFi, Alg, NFB, MC, LC, LP: Int64): Int64;
+{$ENDIF}
+
+{ Diccionario lzma cuyo codificador entra en MaxMem (LzmaFitDictionary): la memoria de 32 bits
+  o el límite de -lc. MFi como en CanonStage. }
+function FitLzma(BS, MFi, Alg, NFB, MC, LC, LP: Int64; MaxMem, Headroom: Int64): Int64;
 var
   P: TLzmaEncParams;
 begin
@@ -161,11 +172,18 @@ begin
   else
     P.MatchFinder := mfHT4;
   end;
-  Result := LzmaFitDictionary(P, kLzmaEnc32MaxMem, kLzmaEnc32Headroom);
+  Result := LzmaFitDictionary(P, MaxMem, Headroom);
 end;
-{$ENDIF}
 
-function CanonChain(const Method: string; Limit: Int64): string;
+
+{ Tamaño para -lc: hacia abajo a MB enteros (a KB por debajo de 4 MB), al menos 1 MB. }
+function FitMem(X: Int64): Int64;
+begin
+  if X >= 4*MB then Result := (X div MB) * MB else Result := (X div KB) * KB;
+  if Result < MB then Result := MB;
+end;
+
+function CanonChain(const Method: string; Limit, MemLim: Int64): string;
 var
   Stages: TStringArray;
   I: Integer;
@@ -202,6 +220,7 @@ begin
     begin
       BS := ParseMem(Pr(1), 64*MB);
       if BS > Limit then BS := Limit;                 { SetDictionary }
+      if (MemLim > 0) and (BS > MemLim div 2) then BS := FitMem(MemLim div 2);
       MC := 100; MML := 512; Bar := INT_MAX;
       Sm := 512; HSL := 0;   Amp := 1;
       for J := 1 to High(Parts) do
@@ -260,8 +279,9 @@ begin
         else if Copy(L,1,2) = 'lp' then LP := Num(Copy(L,3,MaxInt), 0);
       end;
       {$IFDEF CPU32}
-      BS := FitLzma32(BS, MFi, Alg, NFB, MC, LC, LP);
+      BS := FitLzma(BS, MFi, Alg, NFB, MC, LC, LP, kLzmaEnc32MaxMem, kLzmaEnc32Headroom);
       {$ENDIF}
+      if MemLim > 0 then BS := FitLzma(BS, MFi, Alg, NFB, MC, LC, LP, MemLim, 0);
       Result := 'lzma:' + ShowMem(BS);
       if Hash <> 0 then Result := Result + (':h' + ShowMem(Hash));
       if MFi = 0 then
@@ -305,6 +325,7 @@ begin
       if BS = 0 then BS := 8*MB;
       if BS > Limit then BS := Limit;
       if BS > GRZ_MaxBlockSize then BS := GRZ_MaxBlockSize;
+      if (MemLim > 0) and (BS > MemLim div 8) then BS := FitMem(MemLim div 8);
       if HSL > 1 + LB(BS-1) then HSL := 1 + LB(BS-1);
       Result := 'grzip:' + ShowMem(BS) + ':m' + IntToStr(M) + ':';
       if LZP then Result := Result + ('l' + IntToStr(MML) + ':h' + IntToStr(HSL))
@@ -335,6 +356,7 @@ begin
         else if Copy(L,1,1) = 'r' then MR := Num(Copy(L,2,MaxInt), 4);
       end;
       if BS > Limit then BS := Limit;
+      if (MemLim > 0) and (BS > MemLim div 2) then BS := FitMem(MemLim div 2);
       Result := 'dict:' + ShowMem(BS);
       if MC <> 100 then Result := Result + (':' + IntToStr(MC) + '%');
       if W <> 20 then Result := Result + (':c' + IntToStr(W));
@@ -362,6 +384,7 @@ begin
         else if Copy(L,1,1) = 'd' then Bar := ParseMem(Copy(L,2,MaxInt), INT_MAX)
         else if Copy(L,1,1) = 's' then Sm := Num(Copy(L,2,MaxInt), 32);
       end;
+      if (MemLim > 0) and (BS > MemLim div 2) then BS := FitMem(MemLim div 2);
       if HSL > 1 + LB(BS-1) then HSL := 1 + LB(BS-1);
       Result := 'lzp:' + ShowMem(BS);
       if MC <> 100 then Result := Result + (':' + IntToStr(MC) + '%');
@@ -386,6 +409,10 @@ begin
         HS := 4 * Min(Int64(HS div 4), RoundUpPow2(Limit));  { PtrVal=4, 32-bit }
         BS := Limit;
       end;
+      // -lc: búfer + hash dentro del límite (se achica el mayor de los dos)
+      if MemLim > 0 then
+        while (BS + HS > MemLim) and ((BS > 64*KB) or (HS > 64*KB)) do
+          if (HS >= BS) and (HS > 64*KB) then HS := HS div 2 else BS := BS div 2;
       Result := 'tor';
       if TM.Number <> default_Tornado_method then Result := Result + (':' + IntToStr(TM.Number));
       Result := Result + (':' + ShowMem(BS));
@@ -445,6 +472,7 @@ begin
         else if Got = 0 then begin Order := Num(L, 10); Got := 1 end
         else Mem := ParseMem(L, 48*MB);
       end;
+      if (MemLim > 0) and (Mem > MemLim) then Mem := FitMem(MemLim);
       Result := 'ppmd:' + IntToStr(Order) + ':' + ShowMem(Mem);
       if MR = 1 then Result := Result + ':r' else if MR = 2 then Result := Result + ':r2';
       if Chunk <> 0 then Result := Result + (':c' + ShowMem(Chunk));
@@ -525,7 +553,10 @@ begin
       // ShowCompressionMethod con purify=True no imprime t/i/r (solo afectan a comprimir):
       // quedan el :b propio y el método interno.
       if BS <> 0 then Result := Result + (':b' + ShowMem(BS));
-      Result := Result + (':' + CanonChain(Interno, Limit));
+      if MemLim > 0 then
+        Result := Result + (':' + CanonChain(Interno, Limit, Max(Int64(MB), MemLim div Max(1, BudgetThreads))))
+      else
+        Result := Result + (':' + CanonChain(Interno, Limit, 0));
       Exit;
     end;
 
@@ -554,7 +585,7 @@ end;
 
 function LimitAndCanonize(const Method: string; BlockSize: Int64): string;
 begin
-  Result := CanonChain(Method, RoundMemUp(BlockSize + BlockSize div 100 + 512));
+  Result := CanonChain(Method, RoundMemUp(BlockSize + BlockSize div 100 + 512), CompressMemLimit);
 end;
 
 end.

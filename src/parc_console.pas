@@ -18,7 +18,7 @@ procedure DrawProgress(const P: TProgressInfo);
 procedure LogLine(const Msg: string);
 procedure OnCtrlC;
 function FmtTime(t: Int64): string;
-procedure CmdList(A: TArchive);
+procedure CmdList(A: TArchive; const Sel: array of Boolean);
 
 var
   { --verbose: una línea por archivo ("OK ..." al probar, "Extracted ..." al extraer). Sin él,
@@ -189,28 +189,42 @@ begin
     Result := IntToStr(Bytes) + ' B';
 end;
 
-procedure CmdList(A: TArchive);
+procedure CmdList(A: TArchive; const Sel: array of Boolean);
 var
-  i: Integer;
+  i, n: Integer;
   TotalSize, TotalComp: Int64;
   Kind: string;
   Ratio: string;
+  All: Boolean;
 begin
+  // Sel vacío = todo; si no, solo lo elegido (patrones, -n, -x, -sm..., -ap)
+  All := Length(Sel) = 0;
   TotalSize := 0;
-  for i := 0 to High(A.Files) do Inc(TotalSize, A.Files[i].Size);
+  n := 0;
+  for i := 0 to High(A.Files) do
+    if All or Sel[i] then
+    begin
+      Inc(TotalSize, A.Files[i].Size);
+      Inc(n);
+    end;
   TotalComp := 0;
   for i := 0 to High(A.DataBlocks) do Inc(TotalComp, A.DataBlocks[i].CompSize);
   Ratio := '';
   // En archivos diminutos los encabezados dominan y el ratio no significa nada.
-  if TotalSize >= 64 * 1024 then
+  if All and (TotalSize >= 64 * 1024) then
     Ratio := Format('   ratio: %.1f%%', [100.0 * TotalComp / TotalSize]);
   OutLn('Archive: ' + A.FileName);
-  OutLn(Format('  %d file(s)   size: %s   packed: %s%s',
-    [Length(A.Files), FmtSize(TotalSize), FmtSize(TotalComp), Ratio]));
+  if All then
+    OutLn(Format('  %d file(s)   size: %s   packed: %s%s',
+      [Length(A.Files), FmtSize(TotalSize), FmtSize(TotalComp), Ratio]))
+  else
+    OutLn(Format('  %d of %d file(s) selected   size: %s',
+      [n, Length(A.Files), FmtSize(TotalSize)]));
   OutLn('');
   OutLn('  Modified             Size  CRC       Name');
   OutLn('  -------------------  ----  --------  ----');
   for i := 0 to High(A.Files) do
+    if All or Sel[i] then
     with A.Files[i] do
     begin
       if IsDir then Kind := '<DIR>' else if IsLink then Kind := '<LINK>' else Kind := IntToStr(Size);

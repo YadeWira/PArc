@@ -40,6 +40,14 @@ The rest of the FreeArc 0.67 tree is in git history (commit `82ea8d9`) and in Fr
   `tta`, `4x4`, `exe` (BCJ), `lz4`, `dispack070`, `srep` and `cm` (context mixing), alone or
   chained.
 - FreeArc built-in presets ported: `-m0`…`-m9`, `-mx`, `-mxx` and the `d/t/xt/xb/binary/rep` families.
+- FreeArc 0.67 command-line options (own implementation, see [USO.md](USO.md)): `-mt<N>`,
+  `-t`/`-tp`, `-y`, `-n<pattern>` and `@listfile`, `-ep`/`-ep1`/`-ap<dir>`, `-ag[FMT]`,
+  `-sm`/`-sl`/`-ta`/`-tb`/`-tn`/`-to`, `--dirs`/`-ed`, `--nodates`, `-tk`/`-tl`, `-w<dir>`,
+  `-lc`/`-ld`, `-kb`, `--sync`, `-mc-<alg>`, `--print-config` and `-kf<file>`
+  (tests/cli_options.sh). Differences from FreeArc: `-x`/`-n` and the size/time filters also
+  apply to `l`/`t`/`x`/`e`/`d`; `-ep3` (absolute paths) and `-mc+`/`-mca/b` are not supported;
+  without `-kb` broken extracted files are deleted (before, they were kept); `-ld` refuses
+  blocks (exit code 7) instead of FreeArc's reduction when compressing.
 
 ## Performance vs FreeArc 0.67.1
 
@@ -274,7 +282,7 @@ SREP with the 32-bit binary was verified under Wine and with an archive cross-ch
 
 ```sh
 ./build.sh linux64
-bash tests/cli.sh
+bash tests/cli.sh tests/cli_options.sh
 bash tests/stdio.sh tests/volumes.sh
 bash tests/rs_recovery.sh tests/parc_crypt.sh tests/cm.sh tests/grzip.sh tests/bcj2.sh
 bash tests/dispack.sh tests/srep.sh tests/bcj.sh

@@ -44,6 +44,9 @@ function IsStoring(const Method: string): Boolean;
 { Memoria que estima el decodificador de un bloque (aproximada: solo decide cuántos bloques
   se procesan a la vez). }
 function EstimateDecodeMem(const Method: string; OrigSize: Int64): Int64;
+{ Memoria que declara el método de un bloque para decodificarlo (suma de los parámetros de
+  memoria de sus etapas, sin búferes): lo que compara -ld<tamaño>. }
+function DecodeMemNeeded(const Method: string): Int64;
 { Cuántos trabajos con esas estimaciones de memoria pueden correr a la vez: hasta Threads,
   mientras los más grandes entren en la mitad de la memoria física y del espacio de
   direcciones. }
@@ -523,17 +526,17 @@ end;
   un mínimo, por los modelos que no dependen de él), más los búferes. Es aproximada: solo
   decide cuántos bloques se decodifican a la vez; si se queda corta, el trabajo al que le falte
   memoria se rehace solo. }
-function EstimateDecodeMem(const Method: string; OrigSize: Int64): Int64;
+{ Mayor parámetro de memoria de cada etapa (diccionario, ventana de rep, modelo de ppmd...),
+  sin pasar de Cap. }
+function StageMemSum(const Method: string; Cap: Int64): Int64;
 var
   Stages, Params: TStringArray;
   s, k: Integer;
   p: string;
   m: QWord;
-  StageMax, Cap: Int64;
+  StageMax: Int64;
 begin
-  Result := 8 shl 20;
-  Cap := OrigSize;
-  if Cap < 64 shl 20 then Cap := 64 shl 20;
+  Result := 0;
   Stages := Method.Split(['+']);
   for s := 0 to High(Stages) do
   begin
@@ -551,6 +554,20 @@ begin
     if StageMax > Cap then StageMax := Cap;
     Inc(Result, StageMax);
   end;
+end;
+
+function EstimateDecodeMem(const Method: string; OrigSize: Int64): Int64;
+var
+  Cap: Int64;
+begin
+  Cap := OrigSize;
+  if Cap < 64 shl 20 then Cap := 64 shl 20;
+  Result := (8 shl 20) + StageMemSum(Method, Cap);
+end;
+
+function DecodeMemNeeded(const Method: string): Int64;
+begin
+  Result := StageMemSum(Method, High(Int64));
 end;
 
 { Cuántos bloques se pueden decodificar a la vez: hasta Threads, mientras los más grandes

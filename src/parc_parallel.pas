@@ -153,6 +153,9 @@ type
 
 { N: PARC_THREADS, o los núcleos (1..64). }
 function BudgetThreads: Integer;
+{ -mt<N>: cambia el presupuesto (como PARC_THREADS, al que reemplaza); N <= 0 = el de
+  PARC_THREADS o los núcleos. Solo desde el hilo principal y antes de crear cualquier pool. }
+procedure SetBudgetThreads(N: Integer);
 { Fichas libres que nadie está esperando ahora (aproximado: sin lock). }
 function BudgetIdle: Integer;
 { Antes de bloquearse esperando a otro hilo: suelta la ficha de este hilo, si tiene una.
@@ -400,6 +403,15 @@ begin
   for i := 0 to Count - 1 do N[i] := Q[(Head + i) mod Length(Q)];
   Q := N;
   Head := 0;
+end;
+
+procedure SetBudgetThreads(N: Integer);
+begin
+  if N <= 0 then N := StrToIntDef(GetEnvironmentVariable('PARC_THREADS'), 0);
+  if N <= 0 then N := CpuCount;
+  if N > 64 then N := 64;
+  BTotal := N;
+  BAvail := N - 1;      // la del hilo principal
 end;
 
 procedure InitBudget;

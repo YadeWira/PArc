@@ -79,7 +79,9 @@ files), so a compact encoding is not worth a new tag.
 - **Blocks**: HEADER, DATA, DIR, FOOTER and RECOVERY, with the same type numbers.
 - **Descriptors**: the same fields and the same CRC; only the signature changes.
 - **Methods**: the same strings (`lzma:...`, `rep:...+...`, `4x4:...`).
-- **Footer**: the same fields, including `locked`, `recovery` and `comment`.
+- **Footer**: the same fields, including `locked`, `recovery` and `comment`. `locked` (one byte,
+  0 or 1) is written as 1 by `-k`/`k`; PArc then refuses every command that would modify the
+  archive.
 - **Encryption**: its own scheme, not FreeArc's; see §3b.
 
 ## 3b. Encryption (scheme 1)
@@ -117,7 +119,18 @@ check   = K("check")[0..7]
 K_use   = K("data xchacha20") | K("data aes256gcm") | K("header xchacha20") | K("header aes256gcm")
 ```
 
-The password is its UTF-8 bytes, as typed (no Unicode normalization). A reader derives `master`
+The password is its UTF-8 bytes, as typed (no Unicode normalization). With a key file
+(`-kf<file>`) the bytes given to Argon2id are
+
+```
+password || 0x00 || "PArc/1 keyfile:" || hex(BLAKE2b-256(contents of the key file))
+```
+
+(`hex` = 64 lowercase hexadecimal ASCII characters; unkeyed BLAKE2b with a 32-byte digest). With
+`-kf` alone the password part is empty; with `-p`/`-hp` each of them is combined with the key
+file the same way. A password typed on the command line cannot contain 0x00, so a key-file
+password never equals a plain one. This changes only the password input: salt, costs, check value
+and stage string are as above, and nothing in the archive says that a key file was used. A reader derives `master`
 for each password it has (`-p`, `-hp`, prompts) and compares `check` (constant time): a mismatch is
 reported as **wrong password** (exit code 5), not as damage; a matching check with a failing tag
 is damage. `check` is 64 bits, so a wrong password passes it with probability 2^-64 and then fails

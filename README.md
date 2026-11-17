@@ -94,7 +94,12 @@ parc r backup.parc                         # repair -> fixed.backup.parc
 
 Exit codes: `0` OK, `1` usage error, `2` damaged data, `3` unsupported method/parameter,
 `4` other I/O error, `5` missing/wrong password, `6` finished but some files were unreadable,
-`130` cancelled.
+`7` a block needs more memory than `-ld` allows, `130` cancelled.
+
+Most FreeArc 0.67 options work the same way: `-x`/`-n` and `@listfile`, size and time filters
+(`-sm`, `-sl`, `-ta`, `-tb`, `-tn`, `-to`), `-ep`/`-ep1`/`-ap`, `-t`/`-tp`, `-y`, `-ag`, `--sync`,
+`-w`, `-mt`, `-lc`/`-ld`, `-mc-<alg>`, `-kb`, `-kf`, `--print-config`… (see the
+[manual](docs/USO.md)).
 
 ## Build
 
@@ -122,7 +127,7 @@ The suite runs against `.parc` archives and the C reference sources kept in
 `reference/freearc-0.67/Compression/` for the codecs.
 
 ```sh
-bash tests/cli.sh
+bash tests/cli.sh tests/cli_options.sh
 bash tests/stdio.sh tests/volumes.sh
 bash tests/rs_recovery.sh tests/parc_crypt.sh tests/cm.sh
 bash tests/dispack.sh tests/srep.sh tests/bcj.sh
