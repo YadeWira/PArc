@@ -25,11 +25,11 @@ with tempfile.TemporaryDirectory() as d:
             codes[r.returncode] = codes.get(r.returncode, 0) + 1
             if r.returncode not in (0, 2, 3, 5):
                 crashes += 1
-                keep = f'/mnt/IA_LAB/agentes/PArc/fuzz_crash_{it}.parc'; open(keep, 'wb').write(data)
+                keep = os.path.join(os.environ.get('TMPDIR', '/tmp'), f'fuzz_crash_{it}.parc'); open(keep, 'wb').write(data)
                 print(f'CRASH it={it} rc={r.returncode} src={os.path.basename(src)} -> {keep}\n  {r.stderr.decode(errors="replace")[-300:]}')
         except subprocess.TimeoutExpired:
             hangs += 1
-            keep = f'/mnt/IA_LAB/agentes/PArc/fuzz_hang_{it}.parc'; open(keep, 'wb').write(data)
+            keep = os.path.join(os.environ.get('TMPDIR', '/tmp'), f'fuzz_hang_{it}.parc'); open(keep, 'wb').write(data)
             print(f'HANG it={it} src={os.path.basename(src)} -> {keep}')
 print(f'{n} iteraciones: códigos {codes}, crashes {crashes}, cuelgues {hangs}')
 sys.exit(1 if crashes or hangs else 0)

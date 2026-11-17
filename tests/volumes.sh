@@ -3,7 +3,7 @@
 set -u
 ROOT=$(cd "$(dirname "$0")/.." && pwd)
 PARC=${PARC_BIN:-$ROOT/build/linux64/parc}
-W=${VOL_WORK:-/mnt/IA_LAB/agentes/PArc/volumes}
+W=${VOL_WORK:-${TMPDIR:-/tmp}/parc_volumes}
 rm -rf -- "${W:?}"; mkdir -p "$W/c/sub" && cd "$W" || exit 2
 seq 1 300000 > c/texto.txt; head -c 3000000 /dev/urandom > c/azar.bin; cp c/azar.bin c/sub/copia.bin
 head -c 1500000 /dev/urandom > c/sub/otro.bin; : > c/vacio
