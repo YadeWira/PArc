@@ -1,0 +1,61 @@
+name: CI
+
+# Compila PArc en cada plataforma que corre en un runner de GitHub y prueba ida y vuelta en
+# todos los niveles (tests/smoke.sh). Windows x86/x64 y Linux i386 se compilan con los cross
+# del entorno de desarrollo y se prueban en VMs antes de cada release.
+
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  linux-x64:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - name: Herramientas
+        run: sudo apt-get update && sudo apt-get install -y fpc g++
+      - name: Compilar
+        run: ./build.sh linux64
+      - name: Ida y vuelta (todos los niveles, 1 y 4 hilos)
+        run: bash tests/smoke.sh build/linux64/parc
+      - name: Tests de la CLI y de formato
+        run: |
+          for t in cli stdio volumes rs_recovery bcj crc lz4frame; do
+            bash tests/$t.sh || exit 1
+          done
+      - uses: actions/upload-artifact@v4
+        with:
+          name: parc-linux-x86_64
+          path: build/linux64/parc
+
+  linux-arm64:
+    runs-on: ubuntu-24.04-arm
+    steps:
+      - uses: actions/checkout@v4
+      - name: Herramientas
+        run: sudo apt-get update && sudo apt-get install -y fpc g++
+      - name: Compilar
+        run: ./build.sh linuxarm64
+      - name: Ida y vuelta (todos los niveles, 1 y 4 hilos)
+        run: bash tests/smoke.sh build/linuxarm64/parc
+      - uses: actions/upload-artifact@v4
+        with:
+          name: parc-linux-arm64
+          path: build/linuxarm64/parc
+
+  macos-arm64:
+    runs-on: macos-14
+    steps:
+      - uses: actions/checkout@v4
+      - name: Herramientas
+        run: brew install fpc
+      - name: Compilar
+        run: ./build.sh macos
+      - name: Ida y vuelta (todos los niveles, 1 y 4 hilos)
+        run: bash tests/smoke.sh build/macos/parc
+      - uses: actions/upload-artifact@v4
+        with:
+          name: parc-macos-arm64
+          path: build/macos/parc

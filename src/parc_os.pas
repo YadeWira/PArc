@@ -97,7 +97,7 @@ function AddressSpaceLimit: Int64;
 implementation
 
 uses
-  {$IFDEF WINDOWS}Windows,{$ENDIF}{$IFDEF UNIX}BaseUnix, Unix, TermIO, Linux,{$ENDIF} Classes, SysUtils;
+  {$IFDEF WINDOWS}Windows,{$ENDIF}{$IFDEF UNIX}BaseUnix, Unix, TermIO,{$ENDIF} Classes, SysUtils;
 
 var
   Args: array of string;
@@ -147,11 +147,17 @@ begin
 end;
 {$ENDIF}
 
-{$IFDEF LINUX}
+{$IF DEFINED(LINUX) OR DEFINED(DARWIN)}
 const
+  {$IFDEF DARWIN}
+  _SC_NPROCESSORS_ONLN = 58;   // <unistd.h> de macOS
+  _SC_PAGESIZE = 29;
+  _SC_PHYS_PAGES = 200;
+  {$ELSE}
   _SC_NPROCESSORS_ONLN = 84;   // glibc
   _SC_PAGESIZE = 30;
   _SC_PHYS_PAGES = 85;
+  {$ENDIF}
 function sysconf(name: LongInt): PtrInt; cdecl; external 'c';
 {$ENDIF}
 {$IFDEF WINDOWS}
@@ -172,7 +178,7 @@ var
 {$ENDIF}
 begin
   Result := 0;
-  {$IFDEF LINUX}
+  {$IF DEFINED(LINUX) OR DEFINED(DARWIN)}
   if (sysconf(_SC_PHYS_PAGES) > 0) and (sysconf(_SC_PAGESIZE) > 0) then
     Result := Int64(sysconf(_SC_PHYS_PAGES)) * sysconf(_SC_PAGESIZE);
   {$ENDIF}
@@ -208,7 +214,7 @@ end;
 
 function CpuCount: Integer;
 begin
-  {$IFDEF LINUX}
+  {$IF DEFINED(LINUX) OR DEFINED(DARWIN)}
   Result := sysconf(_SC_NPROCESSORS_ONLN);
   {$ELSE}
   Result := TThread.ProcessorCount;
@@ -380,7 +386,7 @@ begin
   if not Result then Exit;
   Meta.IsDir := FpS_ISDIR(St.st_mode);
   if not Meta.IsDir then Meta.Size := St.st_size;
-  Meta.MTimeNs := Int64(St.st_mtime) * 1000000000 + St.st_mtime_nsec;
+  Meta.MTimeNs := Int64(St.st_mtime) * 1000000000 + {$IFDEF DARWIN}St.st_mtimensec{$ELSE}St.st_mtime_nsec{$ENDIF};
   Meta.HasUnixMode := True;
   Meta.UnixMode := St.st_mode;
 end;
@@ -399,7 +405,7 @@ begin
   SetString(Meta.LinkTarget, PChar(@Buf[0]), n);
   Meta.IsLink := True;
   Meta.LinkToDir := (FpStat(Path, Tgt) = 0) and FpS_ISDIR(Tgt.st_mode);
-  Meta.MTimeNs := Int64(St.st_mtime) * 1000000000 + St.st_mtime_nsec;
+  Meta.MTimeNs := Int64(St.st_mtime) * 1000000000 + {$IFDEF DARWIN}St.st_mtimensec{$ELSE}St.st_mtime_nsec{$ENDIF};
   Meta.HasUnixMode := True;
   Meta.UnixMode := St.st_mode;
   Result := True;
@@ -447,7 +453,7 @@ end;
 type
   TTimeSpec2 = array[0..1] of timespec;
 const
-  AT_FDCWD = -100;
+  AT_FDCWD = {$IFDEF DARWIN}-2{$ELSE}-100{$ENDIF};
 function utimensat(dirfd: LongInt; path: PChar; times: Pointer; flags: LongInt): LongInt; cdecl; external 'c';
 
 function SetFileMTimeNs(const Path: string; Ns: Int64): Boolean;
@@ -607,7 +613,11 @@ begin
   Result := (W = 'FAT') or (W = 'FAT32');
 {$ELSE}
   if fpStatFS(PChar(P), @Fs) <> 0 then Exit;
+  {$IFDEF DARWIN}
+  Result := StrPas(PChar(@Fs.fstypename[0])) = 'msdos';
+  {$ELSE}
   Result := Fs.fstype = $4D44;   // MSDOS_SUPER_MAGIC: vfat/msdos
+  {$ENDIF}
 {$ENDIF}
 end;
 
@@ -775,11 +785,13 @@ var
   FirstSigMs: Int64 = 0;
 
 function MonoMs: Int64;
+const
+  CLOCK_MONOTONIC = {$IFDEF DARWIN}6{$ELSE}1{$ENDIF};
 var
-  T: TTimeSpec;
+  T: record Sec, NSec: PtrInt; end;   // struct timespec
 begin
   clock_gettime(CLOCK_MONOTONIC, @T);
-  Result := Int64(T.tv_sec) * 1000 + T.tv_nsec div 1000000;
+  Result := Int64(T.Sec) * 1000 + T.NSec div 1000000;
 end;
 
 procedure SigIntHandler(Sig: CInt); cdecl;

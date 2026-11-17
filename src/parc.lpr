@@ -484,7 +484,7 @@ var
           Meta := Default(TFileMeta);
           Meta.IsDir := FpS_ISDIR(St.st_mode);
           if not Meta.IsDir then Meta.Size := St.st_size;
-          Meta.MTimeNs := Int64(St.st_mtime) * 1000000000 + St.st_mtime_nsec;
+          Meta.MTimeNs := Int64(St.st_mtime) * 1000000000 + {$IFDEF DARWIN}St.st_mtimensec{$ELSE}St.st_mtime_nsec{$ENDIF};
           Meta.HasUnixMode := True;
           Meta.UnixMode := St.st_mode;
         end

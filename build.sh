@@ -1,5 +1,5 @@
 #!/bin/sh
-# Compila PArc. Uso: ./build.sh [linux64|linux32|linuxarm64|win64|win32|all] (default: linux64)
+# Compila PArc. Uso: ./build.sh [linux64|linux32|linuxarm64|macos|win64|win32|all] (default: linux64)
 # win32 (y win64 con todos los packages) usan el cross de PA-Lab en $FPC_CROSS.
 # El codificador Tornado es el C++ de FreeArc (reference/freearc-0.67/Compression/Tornado),
 # compilado acá con g++ / mingw-g++ y llamado desde Pascal por src/parc_torglue.cpp.
@@ -46,9 +46,19 @@ case "${1:-linux64}" in
   # Linux i386: el g++ del sistema con -m32 (lib32stdc++/multilib) y el cross de FPC
   linux32) ctor build/linux32 g++ -m32 -DFREEARC_UNIX -fno-pie -msse2 -mfpmath=sse -mstackrealign
            build linux32 "$FPC_CROSS/bin/fpc-linux32" -Fl/usr/lib32 -Fl"$(dirname "$(g++ -m32 -print-libgcc-file-name)")" ;;
-  # Linux aarch64: aarch64-linux-gnu-g++ y el cross de FPC (Common.h detecta 64 bits por el parche)
-  linuxarm64) ctor build/linuxarm64 aarch64-linux-gnu-g++ -DFREEARC_UNIX -fno-pie
-           build linuxarm64 "$FPC_CROSS/bin/fpc-linuxarm64" -Fl"$(dirname "$(aarch64-linux-gnu-gcc -print-libgcc-file-name)")" ;;
+  # Linux aarch64: el cross de FPC y aarch64-linux-gnu-g++ (Common.h detecta 64 bits por el parche)
+  linuxarm64)
+           if [ "$(uname -m)" = aarch64 ]; then
+             # nativo (p. ej. el runner ARM de CI): el g++ y el fpc del sistema
+             ctor build/linuxarm64 g++ -DFREEARC_UNIX -fno-pie
+             build linuxarm64 fpc -Tlinux -Paarch64
+           else
+             ctor build/linuxarm64 aarch64-linux-gnu-g++ -DFREEARC_UNIX -fno-pie
+             build linuxarm64 "$FPC_CROSS/bin/fpc-linuxarm64" -Fl"$(dirname "$(aarch64-linux-gnu-gcc -print-libgcc-file-name)")"
+           fi ;;
+  # macOS arm64 (solo en un Mac: clang++ de Xcode y el fpc de Homebrew), contra el SDK de xcrun
+  macos)   ctor build/macos clang++ -DFREEARC_UNIX
+           build macos fpc -Tdarwin -Paarch64 -XR"$(xcrun --show-sdk-path)" ;;
   # i686: SSE2 para los precios (log2) igual que en x86_64, y la pila realineada (FPC la deja a 4)
   win32)   ctor build/win32 i686-w64-mingw32-g++ $WINCXX -msse2 -mfpmath=sse -mstackrealign
            build win32 "$FPC_CROSS/bin/fpc-win32" $(winlibs i686-w64-mingw32-gcc) ;;
