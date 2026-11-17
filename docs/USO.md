@@ -350,13 +350,25 @@ parc x site.parc '*.css' -ep -dpcss                     # all .css files, flat
 | option | effect |
 |---|---|
 | `-mt<N>` | thread budget for the whole process, exactly like `PARC_THREADS=N` (which it overrides): it also chooses the preset alternatives (`-mt1 -m1` uses the single-thread `tor:4`). `-mt0` = default |
-| `-lc<size>` | memory limit for compression (bare number = MB; `k`/`m`/`g`; or `N%` of RAM; `-lc-` = no limit). See below |
+| `-lc<size>` | memory limit for compression (bare number = MB; `k`/`m`/`g`; or `N%` of RAM; `-lc-` or `-lc0` = no limit). Default: automatic, see below |
 | `-ld<size>` | `t`/`x`/`e`: do not decompress blocks whose method declares more memory than the limit; their files are reported and the exit code is **7**. `-ld-` = no limit (the default) |
 
-`-lc` shrinks each compressor of the chain to fit: lzma's dictionary by its exact encoder
-estimate (match finder included), Tornado's buffer and hash, rep/lzp/dict windows, grzip blocks,
-the PPMd model size; the 4x4 inner method gets the limit divided by its threads. `cm`, `srep`
-and filters are not changed. The reduced method is what the archive stores (`parc lb` shows it).
+The compression limit applies to the encoders running at the same time. PArc estimates what
+each method chain needs (all stages of a chain run together: lzma by its exact encoder size,
+match finder included; rep window and hash; PPMd model; Tornado buffer and hash; lzp/dict/grzip
+blocks; `4x4` counts one inner encoder per thread plus its blocks; `cm` and `srep` keep the whole
+block in memory) and, if a block's chain does not fit, shrinks the largest consumer first
+(dictionaries, windows, the PPMd model) until it fits, like FreeArc's memory limiting. Blocks
+compressed in parallel are also limited so that their sum fits. The reduced method is what the
+archive stores (`parc lb` shows it), so decompression needs less memory too. `cm`, `srep` and the
+filters cannot be reduced.
+
+Without `-lc` the limit is automatic: 75 % of the physical RAM; in the 32-bit builds (win32,
+linux32) also at most 2.25 GB and 9/16 of the address space (a large-address-aware process on
+64-bit Windows has 4 GB, on 32-bit Windows 2 GB), leaving room for buffers and DLL
+fragmentation (measured: TILIN `-m9` with 8 threads peaks at 2.4 GB in win32). So with huge inputs at `-m7`…`-mx` the 32-bit builds choose smaller dictionaries
+than x86-64 (their archives can differ), and an x86-64 machine with little RAM can too. The
+result only depends on the data, `PARC_THREADS`/`-mt`, the limit and the bitness.
 
 ### Removing algorithms from the methods: `-mc`
 

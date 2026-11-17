@@ -266,6 +266,44 @@ What makes this possible (all inside `.parc`; the codecs are unchanged):
   directories with random nanoseconds.
 - Recovery is Reed-Solomon only; the `.arc` XOR scheme is gone.
 
+## Compression memory limit (2026-11-17)
+
+Before, PArc only limited dictionaries to the data size: win32 `a -m9` over TILIN (1.86 GB,
+10k files) became `rep:1gb+exe+delta+lzma:192mb:bt4` (+ 4x4 and parallel blocks) and died with
+"Out of memory". Now every block's chain is estimated (`EncodeMemEstimate`) and shrunk to fit
+the compression limit (`FitEncodeMem`: largest consumer first, not below the next one), and
+the blocks compressed in parallel are limited so that their sum fits. Limit: `-lc`, or 75 % of
+the RAM; 32-bit also 2.25 GB and 9/16 of the address space (`-lc-` disables it).
+
+**The 32-bit builds can therefore choose smaller dictionaries than x86-64 on huge inputs**
+(`-m5` with 8 threads, `-m9`/`-mx` below): their archives can differ from x86-64 ones at
+`-m5`…`-mx` on big data. The method only depends on (data, `PARC_THREADS`, limit, bitness):
+linux32 and win32 give the same method (sizes differ by a few hundred bytes: Windows
+attributes vs Unix modes). x86-64 with the same `-lc` can still choose differently, because the
+32-bit lzma encoder is first capped at 2 GB (`-m9` on TILIN with `-lc2304m`: x86-64
+`rep:597mb+lzma:112mb`, 785.5 MB; 32-bit `rep:965mb+lzma:104mb`, 753.0 MB).
+
+TILIN.tar extracted (1,865,122,242 bytes), PArc win32 under Wine (4 GB large-address-aware),
+linux32 native, linux64 without limit (`-lc-`) and FreeArc 0.67 32-bit (`Arc.exe -cfg- -mtN`,
+under Wine). Size in bytes, real time in s, peak RSS (`/usr/bin/time %M`). Two runs at a time
+on a 64-core Xeon (times are indicative); every PArc archive tested OK with linux64.
+
+| N | level | PArc win32 | PArc linux32 | PArc linux64 `-lc-` | FreeArc 0.67 32-bit |
+|---|---|---|---|---|---|
+| 4 | `-m5` | 973,109,312 · 106 s · 1.48 GB | 973,108,868 · 99 s · 1.41 GB | 973,108,868 · 58 s · 1.49 GB | 980,442,171 · 64 s · 1.54 GB |
+| 4 | `-m7` | 821,490,429 · 422 s · 1.44 GB | 821,489,910 · 466 s · 1.41 GB | 821,489,910 · 260 s · 1.67 GB | 821,606,890 · 348 s · 1.37 GB |
+| 4 | `-m9` | 753,013,493 · 389 s · 2.42 GB | 753,012,979 · 383 s · 2.39 GB | 752,941,926 · 245 s · 6.26 GB | 753,215,338 · 345 s · 1.97 GB |
+| 4 | `-mx` | 753,013,493 · 388 s · 2.42 GB | 753,012,979 · 385 s · 2.39 GB | 752,941,926 · 235 s · 6.26 GB | 753,215,338 · 350 s · 1.97 GB |
+| 8 | `-m5` | 973,928,759 · 59 s · 1.72 GB | 973,928,232 · 52 s · 1.71 GB | 973,108,868 · 36 s · 2.37 GB | 980,442,171 · 60 s · 1.72 GB |
+| 8 | `-m7` | 821,490,429 · 413 s · 1.44 GB | 821,489,910 · 420 s · 1.41 GB | 821,489,910 · 240 s · 1.67 GB | 821,606,890 · 331 s · 1.37 GB |
+| 8 | `-m9` | 753,013,493 · 375 s · 2.42 GB | 753,012,979 · 366 s · 2.39 GB | 752,941,926 · 239 s · 6.26 GB | 753,215,338 · 340 s · 1.98 GB |
+| 8 | `-mx` | 753,013,493 · 381 s · 2.42 GB | 753,012,979 · 359 s · 2.39 GB | 752,941,926 · 252 s · 6.26 GB | 753,215,338 · 349 s · 1.99 GB |
+
+32-bit methods chosen: `-m5` N=4 as x86-64; N=8 `4x4:lzma:16mb` instead of 24mb; `-m9`/`-mx`
+`rep:965mb+exe+delta+lzma:104mb` (x86-64: `rep:1787mb+…+lzma:254mb`). With a 1.5 GB limit
+`-m9` was 834 MB (`rep:407mb+lzma:72mb`), with 2 GB 818 MB; 2.5 GB ran out of memory (before
+rep stopped copying its window when growing). No run ran out of memory.
+
 ## Verified platforms (0.0.2)
 
 | platform | binary | tests |
