@@ -3,7 +3,7 @@
 Updated: 2026-10-30 (phase 3b merged to main: presets + sched + determinism)  
 Updated: 2026-10-29 (output determinism, PPMd asm fix)  
 Updated: 2026-10-29 (block scheduling under the thread budget)  
-Current release: **0.0.3** (`v0.0.3`, GitHub pre-release).  
+Current release: **0.0.4** (`v0.0.4`, GitHub pre-release).  
 Format: `.parc` only. License: GPL-2.0.
 
 This file is the project backlog. It records decisions, measurements and acceptance criteria so
