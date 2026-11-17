@@ -726,7 +726,7 @@ end;
   lo sabe (lzma, rep); lo demás, de lo que reserva cada uno:
   - ppmd: el modelo; tor: búfer + hash + hash auxiliar; lzp: entrada + salida + hash;
   - dict: ~3 veces el bloque; grzip: ~6 veces el bloque (BWT); dispack: ~3 veces su bloque;
-  - rep: ventana + hash, más media ventana (el búfer crece al doble: copia al crecer);
+  - rep: ventana + hash, más hasta 64 MB de la copia al crecer (EnsureCap);
   - cm y srep guardan todo el bloque (cm: ~4 veces más sus modelos de 64 MB; srep: ~3 veces);
   - 4x4: los trabajos en vuelo (hasta los hilos, máx. 16) por (método interno + 2 bloques);
   - filtros (exe, delta, mm, tta, bcj2) y cifrado: búferes de unos MB. }
@@ -756,7 +756,7 @@ begin
           Rp := ParseRepEncParams(Parts);
           B := Rp.BlockSize;
           if (DataSize > 0) and (DataSize < B) then B := DataSize;
-          Result := RepEncMemory(Rp) + B div 2 + MB_;
+          Result := RepEncMemory(Rp) + Min(B, 64 * MB_) + MB_;   // + la copia al crecer (EnsureCap)
         end;
       'ppmd': Result := Int64(ParsePpmdParams(Parts).Mem) + 2 * MB_;
       'tor':

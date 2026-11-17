@@ -28,7 +28,7 @@ function CanonStageMem(const Stage: string; MemLim: Int64): string;
 
 { Límite de memoria de los codificadores que corren a la vez (bytes; 0 = sin límite):
   -lc<tamaño>, o el automático (CompressMemLimit < 0): 75 % de la RAM; en 32 bits además a lo
-  sumo 1,5 GB y 3/8 del espacio de direcciones (lo demás es para búferes, DLLs y la
+  sumo 2,25 GB y 9/16 del espacio de direcciones (lo demás es para búferes, DLLs y la
   fragmentación de un proceso de 2 o 4 GB). }
 function EffectiveCompressLimit: Int64;
 
@@ -617,9 +617,11 @@ begin
   Ram := PhysicalMemory;
   if Ram > 0 then Result := Ram div 4 * 3 else Result := 0;
   {$IFNDEF CPU64}
-  if (Result = 0) or (Result > Int64(1536) shl 20) then Result := Int64(1536) shl 20;
+  // Medido en win32 (Wine, 4 GB LAA) con TILIN -m9 y 8 hilos: 2304 MB llega a 2,4 GB de RSS
+  // sin quedarse sin memoria; 2560 MB ya fallaba (antes del arreglo de la ventana de rep)
+  if (Result = 0) or (Result > Int64(2304) shl 20) then Result := Int64(2304) shl 20;
   Va := AddressSpaceLimit;
-  if (Va > 0) and (Va div 8 * 3 < Result) then Result := Va div 8 * 3;
+  if (Va > 0) and (Va div 16 * 9 < Result) then Result := Va div 16 * 9;
   {$ELSE}
   Va := AddressSpaceLimit;   // ulimit -v
   if (Va > 0) and ((Result = 0) or (Va div 4 * 3 < Result)) then Result := Va div 4 * 3;
