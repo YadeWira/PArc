@@ -177,7 +177,8 @@ var
     J: Integer;
     BS, MC, MML, Bar, Sm, HSL, Amp, Hash, Alg, MFi, NFB, PB, LC, LP, HS: Int64;
     MFSet: Boolean;
-    M, MR, W, MM, MS, Num9, Enc, Order, Mem, Chunk, Got, Lvl, BPos: Int64;
+    M, MR, W, MM, MS, Num9, Enc, Lvl, BPos: Int64;
+    PP: TPpmdParams;
     StartI: Integer;
     L: string;
     LZP, A, C3, Ext: Boolean;
@@ -431,23 +432,14 @@ begin
       Exit;
     end;
 
-    { --- ppmd (C_PPMD.cpp): defaults order10, 48mb, mr0, c0. Sin límite. }
+    { --- ppmd (parc_ppmd, LZMA SDK var.I): orden, memoria y método de recuperación, con la
+      misma lectura que el codificador y el decodificador (ParsePpmdParams). Sin límite. }
     if Name = 'ppmd' then
     begin
-      Order := 10; Mem := 48*MB; MR := 0; Chunk := Int64(0);
-      Got := 0;
-      for J := 1 to High(Parts) do
-      begin
-        L := LowerCase(Parts[J]);
-        if L = 'r' then MR := 1
-        else if L = 'r2' then MR := 2
-        else if Copy(L,1,1) = 'c' then Chunk := ParseMem(Copy(L,2,MaxInt), 0)
-        else if Got = 0 then begin Order := Num(L, 10); Got := 1 end
-        else Mem := ParseMem(L, 48*MB);
-      end;
-      Result := 'ppmd:' + IntToStr(Order) + ':' + ShowMem(Mem);
-      if MR = 1 then Result := Result + ':r' else if MR = 2 then Result := Result + ':r2';
-      if Chunk <> 0 then Result := Result + (':c' + ShowMem(Chunk));
+      PP := ParsePpmdParams(Parts);
+      Result := 'ppmd:' + IntToStr(PP.Order) + ':' + ShowMem(Int64(PP.Mem));
+      if PP.Restore = 1 then Result := Result + ':r'
+      else if PP.Restore <> 0 then Result := Result + ':r' + IntToStr(PP.Restore);
       Exit;
     end;
 

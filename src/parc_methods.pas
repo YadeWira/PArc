@@ -15,11 +15,11 @@ type
   EBadPassword = class(Exception);        // el valor de comprobación no coincide
 
   TPpmdParams = record
-    Order, MRMethod: Integer;
-    Mem, Chunk: QWord;
+    Order, Restore: Integer;
+    Mem: QWord;
   end;
 
-{ Parámetros de ppmd como parse_PPMD (compartido por el decodificador y el codificador). }
+{ Parámetros de ppmd (compartido por el decodificador y el codificador). }
 function ParsePpmdParams(const Params: TStringArray): TPpmdParams;
 
 { Contraseña para los archivos cifrados (bytes tal como los escribió el usuario, UTF-8). }
@@ -166,8 +166,9 @@ begin
   end;
 end;
 
-{ Parámetros como parse_PPMD (C_PPMD.cpp): o<N>, m<mem> (o "mem<mem>"), r / r<N>, c<mem>;
-  sin nombre: entero = orden, memoria = mem. Defaults: orden 10, 48mb. }
+{ Parámetros de ppmd: o<N>, m<mem> (o "mem<mem>"), r / r<N> (método de recuperación:
+  0 = restart, 1 = cut-off); sin nombre: entero = orden, memoria = mem. Defaults: orden 10,
+  48mb, restart. c<mem> (el "chunk" de FreeArc) ya no significa nada y se ignora. }
 function ParsePpmdParams(const Params: TStringArray): TPpmdParams;
 var
   k, n: Integer;
@@ -176,20 +177,19 @@ var
 begin
   Result.Order := 10;
   Result.Mem := 48 shl 20;
-  Result.MRMethod := 0;
-  Result.Chunk := 0;
+  Result.Restore := 0;
   for k := 1 to High(Params) do
   begin
     p := Params[k];
     if Copy(p, 1, 3) = 'mem' then Delete(p, 1, 2);   // "mem..." como "m..."
     if p = '' then Continue;
-    if p = 'r' then begin Result.MRMethod := 1; Continue; end;
+    if p = 'r' then begin Result.Restore := 1; Continue; end;
     if Length(p) > 1 then
       case p[1] of
         'm': begin if ParseMem(Copy(p, 2, MaxInt), m) then Result.Mem := m; Continue; end;
         'o': begin Result.Order := StrToIntDef(Copy(p, 2, MaxInt), -1); Continue; end;
-        'r': begin Result.MRMethod := StrToIntDef(Copy(p, 2, MaxInt), 0); Continue; end;
-        'c': begin if ParseMem(Copy(p, 2, MaxInt), m) then Result.Chunk := m; Continue; end;
+        'r': begin Result.Restore := StrToIntDef(Copy(p, 2, MaxInt), -1); Continue; end;
+        'c': Continue;
       end;
     n := StrToIntDef(p, -1);
     if n >= 0 then Result.Order := n
@@ -448,7 +448,7 @@ begin
     'ppmd':
       begin
         pp := ParsePpmdParams(Params);
-        Result := TPpmdStage.Create(Source, pp.Order, pp.Mem, pp.MRMethod, pp.Chunk);
+        Result := TPpmdStage.Create(Source, pp.Order, pp.Mem, pp.Restore);
       end;
     'dispack', 'dispack070':
       Result := TDisPackStage.Create(Source, DispackBlockSize(Params));
