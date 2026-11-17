@@ -35,6 +35,11 @@ function ErrIsConsole: Boolean;
 function InIsConsole: Boolean;
 { Ancho de la consola en columnas (80 si no se sabe). }
 function ConsoleWidth: Integer;
+{ Tiempo de CPU del proceso (todos los hilos, usuario + sistema), en milisegundos. }
+function ProcessCpuMs: Int64;
+{ ¿Se pueden usar colores ANSI en los mensajes? Solo si van a una terminal, sin NO_COLOR, y en
+  Windows si la consola acepta secuencias VT (Windows 10 en adelante; en Win7, no). }
+function UseColors: Boolean;
 
 type
   TCancelProc = procedure;
@@ -685,6 +690,61 @@ begin
   else Result := 80;
 end;
 {$ENDIF}
+
+{$IFDEF UNIX}
+function clock_gettime(Clock: LongInt; Ts: Pointer): LongInt; cdecl; external 'c';
+{$ENDIF}
+
+function ProcessCpuMs: Int64;
+{$IFDEF WINDOWS}
+var
+  C, E, K, U: TFileTime;
+begin
+  if not GetProcessTimes(GetCurrentProcess, C, E, K, U) then Exit(0);
+  // en Pascal 'or' y '+' tienen la misma precedencia: cada FILETIME va entre paréntesis
+  Result := ((Int64(K.dwHighDateTime) shl 32 or K.dwLowDateTime) +
+             (Int64(U.dwHighDateTime) shl 32 or U.dwLowDateTime)) div 10000;
+end;
+{$ELSE}
+const
+  CLOCK_PROCESS_CPUTIME_ID = {$IFDEF DARWIN}12{$ELSE}2{$ENDIF};
+var
+  T: record Sec, NSec: PtrInt; end;   // struct timespec
+begin
+  if clock_gettime(CLOCK_PROCESS_CPUTIME_ID, @T) <> 0 then Exit(0);
+  Result := Int64(T.Sec) * 1000 + T.NSec div 1000000;
+end;
+{$ENDIF}
+
+var
+  ColorState: Integer = -1;   // -1 sin decidir, 0 no, 1 sí
+
+function UseColors: Boolean;
+{$IFDEF WINDOWS}
+const
+  ENABLE_VIRTUAL_TERMINAL_PROCESSING = $0004;
+var
+  H: THandle;
+  Mode: DWORD;
+{$ENDIF}
+begin
+  if ColorState < 0 then
+  begin
+    ColorState := 0;
+    if GetEnvironmentVariable('NO_COLOR') = '' then
+    begin
+      {$IFDEF WINDOWS}
+      if OutToStderr then H := GetStdHandle(STD_ERROR_HANDLE) else H := GetStdHandle(STD_OUTPUT_HANDLE);
+      if GetConsoleMode(H, Mode) and
+         ((Mode and ENABLE_VIRTUAL_TERMINAL_PROCESSING <> 0) or
+          SetConsoleMode(H, Mode or ENABLE_VIRTUAL_TERMINAL_PROCESSING)) then ColorState := 1;
+      {$ELSE}
+      if (IsATTY(Ord(OutToStderr) + 1) = 1) and (GetEnvironmentVariable('TERM') <> 'dumb') then ColorState := 1;
+      {$ENDIF}
+    end;
+  end;
+  Result := ColorState = 1;
+end;
 
 var
   CancelProc: TCancelProc = nil;

@@ -20,6 +20,22 @@ procedure OnCtrlC;
 function FmtTime(t: Int64): string;
 procedure CmdList(A: TArchive);
 
+var
+  { --verbose: una línea por archivo ("OK ..." al probar, "Extracted ..." al extraer). Sin él,
+    como FreeArc, solo el progreso, los errores y el resumen. }
+  ListFiles: Boolean = False;
+
+{ 1865122242 -> '1,865,122,242' (como FreeArc). }
+function Num(n: Int64): string;
+{ '1 file', '155 files' (Word en singular; plural con 's'). }
+function Count(n: Int64; const Word: string): string;
+{ S con un color ANSI (Code: '1' negrita, '32' verde, '31' rojo, '2' tenue...) si hay colores. }
+function Paint(const S, Code: string): string;
+{ "<What> time: cpu 8.47 s / real 3.14 s = 270% · speed 594.4 MB/s" (FreeArc + toques). }
+procedure PrintTimes(const What: string; T0, T1: QWord; Cpu0, Cpu1, Bytes: Int64);
+{ "All OK" en verde, o los errores en rojo. }
+procedure PrintResult(Errors: Integer);
+
 { Pregunta por consola si se sobrescribe Name: [s]í, [n]o, [t]odos, n[i]nguno. Sin consola en
   la entrada, no. }
 function AskOverwriteConsole(const Name: string): TOverwriteAnswer;
@@ -86,6 +102,37 @@ begin
   else Result := Format('%.2d:%.2d', [Secs div 60, Secs mod 60]);
 end;
 
+{ Barra de Width celdas con octavos de celda (█▉▊▋▌▍▎▏). En Windows la consola sin fuente
+  TrueType (Win7 por defecto: fuentes de mapa de bits) no tiene esos glifos: ahí, '#' y '-'. }
+function Bar(Frac: Double; Width: Integer): string;
+const
+  Eighths: array[1..7] of string = ('▏', '▎', '▍', '▌', '▋', '▊', '▉');
+var
+  n, Full, Part, i: Integer;
+begin
+  if Frac < 0 then Frac := 0;
+  if Frac > 1 then Frac := 1;
+  n := Round(Frac * Width * 8);
+  Full := n div 8;
+  Part := n mod 8;
+  Result := '';
+  if not UseColors then
+  begin
+    // sin VT (Win7, redirigido...): ASCII puro
+    for i := 1 to Width do
+      if i <= Full then Result := Result + '#' else Result := Result + '-';
+    Exit('[' + Result + ']');
+  end;
+  for i := 1 to Full do Result := Result + '█';
+  if Full < Width then
+  begin
+    if Part > 0 then Result := Result + Eighths[Part] else Result := Result + ' ';
+    for i := Full + 2 to Width do Result := Result + ' ';
+  end;
+  Result := #27'[36m' + Result + #27'[0m' + '▕';
+  Result := '▕' + Result;
+end;
+
 { Una línea en stderr que se reescribe: fase, %, MB, velocidad, tiempo restante y archivo. }
 procedure DrawProgress(const P: TProgressInfo);
 var
@@ -100,7 +147,8 @@ begin
   end;
   L := P.Phase;
   if P.Total > 0 then
-    L := L + Format(' %5.1f%%  %s/%s MB', [100.0 * P.Done / P.Total, FmtMB(P.Done), FmtMB(P.Total)])
+    L := L + ' ' + Bar(P.Done / P.Total, 20) +
+         Format(' %5.1f%%  %s/%s MB', [100.0 * P.Done / P.Total, FmtMB(P.Done), FmtMB(P.Total)])
   else
     L := L + '  ' + FmtMB(P.Done) + ' MB';
   Rate := '';
@@ -109,7 +157,7 @@ begin
     Speed := P.Done / (P.ElapsedMs / 1000);   // bytes/s
     Rate := '  ' + FormatFloat('0.0', Speed / 1048576) + ' MB/s';
     if (Speed > 0) and (P.Total > P.Done) and (P.ElapsedMs >= 1000) then
-      Rate := Rate + '  ' + FmtSecs(Round((P.Total - P.Done) / Speed)) + ' restante';
+      Rate := Rate + '  ' + 'ETA ' + FmtSecs(Round((P.Total - P.Done) / Speed));
   end;
   L := L + Rate;
   Width := ConsoleWidth - 1;
@@ -177,8 +225,60 @@ end;
 
 procedure LogLine(const Msg: string);
 begin
+  if not ListFiles and ((Copy(Msg, 1, 9) = 'OK       ') or (Copy(Msg, 1, 10) = 'Extracted ')) then Exit;
   ClearProgress;
-  OutLn(Msg);
+  if Copy(Msg, 1, 5) = 'ERROR' then OutLn(Paint(Msg, '31'))
+  else if Copy(Msg, 1, 9) = 'CRC ERROR' then OutLn(Paint(Msg, '31'))
+  else if Copy(Msg, 1, 8) = 'Warning:' then OutLn(Paint(Msg, '33'))
+  else OutLn(Msg);
+end;
+
+function Num(n: Int64): string;
+var
+  i: Integer;
+begin
+  Result := IntToStr(Abs(n));
+  i := Length(Result) - 2;
+  while i > 1 do
+  begin
+    Insert(',', Result, i);
+    Dec(i, 3);
+  end;
+  if n < 0 then Result := '-' + Result;
+end;
+
+function Count(n: Int64; const Word: string): string;
+begin
+  Result := Num(n) + ' ' + Word;
+  if n <> 1 then Result := Result + 's';
+end;
+
+function Paint(const S, Code: string): string;
+begin
+  if UseColors then Result := #27'[' + Code + 'm' + S + #27'[0m' else Result := S;
+end;
+
+procedure PrintTimes(const What: string; T0, T1: QWord; Cpu0, Cpu1, Bytes: Int64);
+var
+  Real, Cpu: Double;
+  L: string;
+begin
+  Real := (T1 - T0) / 1000.0;
+  Cpu := (Cpu1 - Cpu0) / 1000.0;
+  L := Format('%s time: cpu %.2f s / real %.2f s', [What, Cpu, Real]);
+  if Real > 0 then
+  begin
+    L := L + Format(' = %d%%', [Round(100 * Cpu / Real)]);
+    if Bytes > 0 then
+      L := L + ' · speed ' + Paint(Format('%.1f MB/s', [Bytes / Real / 1048576.0]), '1');
+  end;
+  OutLn(L);
+end;
+
+procedure PrintResult(Errors: Integer);
+begin
+  if Errors = 0 then OutLn(Paint('All OK', '1;32'))
+  else OutLn(Paint(Format('Errors: %d', [Errors]), '1;31'));
 end;
 
 

@@ -17,7 +17,7 @@ import struct
 b=open("grande.parc","rb").read(); h=struct.unpack_from("<7I",b,31)
 m=h[1]; assert (m//65536)%32767==64 and (m//256)%256==22, m
 PY' 
-check "bloque grande verifica"    '"$PARC" t grande.parc --no-progress | tail -1 | grep -q "Errors: 0"'
+check "bloque grande verifica"    '"$PARC" t grande.parc --no-progress | tail -1 | grep -q "All OK"'
 rm -rf outg; "$PARC" x grande.parc -dpoutg --no-progress >/dev/null 2>&1
 check "bloque grande extrae"      'cmp grande.txt outg/grande.txt'
 
@@ -30,12 +30,12 @@ import struct
 b=open("chico.parc","rb").read(); h=struct.unpack_from("<7I",b,31)
 m=h[1]; assert (m//65536)%32767!=64 or (m//256)%256!=22, m
 PY' 
-check "bloque chico verifica"     '"$PARC" t chico.parc --no-progress | tail -1 | grep -q "Errors: 0"'
+check "bloque chico verifica"     '"$PARC" t chico.parc --no-progress | tail -1 | grep -q "All OK"'
 
 # Datos incompresibles: no debe fallar.
 head -c 3000000 /dev/urandom > azar.bin
 "$PARC" a azar.parc azar.bin -mgrzip --no-progress >/dev/null 2>&1
-check "GRZip con datos aleatorios" '"$PARC" t azar.parc --no-progress | tail -1 | grep -q "Errors: 0"'
+check "GRZip con datos aleatorios" '"$PARC" t azar.parc --no-progress | tail -1 | grep -q "All OK"'
 
 echo "== grzip: $fail failures"
 [ $fail -eq 0 ]

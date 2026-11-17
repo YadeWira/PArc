@@ -20,8 +20,8 @@ xsame() {   # xsame <archivo o primer volumen>: extrae y compara con c/
 "$PARC" a v.parc c -m4 -v1m --no-progress >/dev/null 2>&1
 n=$(ls v.parc.[0-9][0-9][0-9] 2>/dev/null | wc -l)
 check "crea volúmenes ($n de 1 MB, el último más chico)" '[ $n -ge 4 ] && [ ! -e v.parc ] && [ $(stat -c %s v.parc.001) = 1048576 ] && [ $(stat -c %s $(ls v.parc.[0-9]* | tail -1)) -le 1048576 ]'
-check "parc t por la base (v.parc)"        '"$PARC" t v.parc --no-progress 2>&1 | tail -1 | grep -q "Errors: 0"'
-check "parc t por el primero (v.parc.001)" '"$PARC" t v.parc.001 --no-progress 2>&1 | tail -1 | grep -q "Errors: 0"'
+check "parc t por la base (v.parc)"        '"$PARC" t v.parc --no-progress 2>&1 | tail -1 | grep -q "All OK"'
+check "parc t por el primero (v.parc.001)" '"$PARC" t v.parc.001 --no-progress 2>&1 | tail -1 | grep -q "All OK"'
 check "parc x idéntico"                    'xsame v.parc.001'
 check "parc l"                             '"$PARC" l v.parc | grep -q "sub/otro.bin"'
 cat v.parc.[0-9][0-9][0-9] > junto.parc

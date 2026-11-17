@@ -40,7 +40,7 @@ for t in 1 4; do
   ck "a -s- -m2 N=$t"              'PARC_THREADS=$t "$PARC" a o$t.parc src -s- -m2 --no-progress >/dev/null 2>&1'
   ck "orden mayor a menor, estable N=$t" 'names o$t.parc > got$t.lst; cmp -s got$t.lst want.lst'
   ck "lb tamaños no crecen N=$t"   '"$PARC" lb o$t.parc | lb_desc'
-  ck "t N=$t"                      '"$PARC" t o$t.parc --no-progress | grep -q "Errors: 0"'
+  ck "t N=$t"                      '"$PARC" t o$t.parc --no-progress | grep -q "All OK"'
   ck "x + diff N=$t"               'mkdir x$t && "$PARC" x o$t.parc -dpx$t --no-progress >/dev/null 2>&1 && diff -r src x$t/src'
 done
 # (con 1 y 4 hilos el archivo puede diferir: -m2 elige otro método según N; misma N => mismo

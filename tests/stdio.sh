@@ -12,11 +12,11 @@ seq 1 100000 > d/a.txt; head -c 50000 /dev/urandom > d/b.bin
 seq 1 200000 | "$PARC" a s.parc -sidatos.txt --no-progress >/dev/null 2>&1
 check "-si: un archivo con el nombre pedido" '"$PARC" l s.parc | grep -q " datos.txt$"'
 check "-so: el contenido idéntico, nada más"  '"$PARC" x s.parc -so --no-progress 2>/dev/null | cmp -s - <(seq 1 200000)'
-check "-so: los mensajes a stderr"            '"$PARC" x s.parc -so --no-progress 2>&1 >/dev/null | grep -q "Extracted datos.txt" && ! "$PARC" x s.parc -so --no-progress 2>/dev/null | grep -q "Extracted"'
+check "-so: los mensajes a stderr"            '"$PARC" x s.parc -so --no-progress --verbose 2>&1 >/dev/null | grep -q "Extracted datos.txt" && ! "$PARC" x s.parc -so --no-progress 2>/dev/null | grep -q "Extracted"'
 tar cf - d | "$PARC" a t.parc -sid.tar -m5 --no-progress >/dev/null 2>&1
 check "tar | parc -si y parc -so | tar"       '[ "$("$PARC" x t.parc -so 2>/dev/null | tar tf - | tr "\n" " ")" = "d/ d/a.txt d/b.bin " ]'
 "$PARC" a - d --no-progress > o.parc 2>/dev/null
-check "a -: el archivo por stdout"            '"$PARC" t o.parc --no-progress | tail -1 | grep -q "Errors: 0"'
+check "a -: el archivo por stdout"            '"$PARC" t o.parc --no-progress | tail -1 | grep -q "All OK"'
 rm -rf ox; "$PARC" x - -dpox --no-progress < o.parc >/dev/null 2>&1
 check "x -: desde stdin"                      'diff -rq d ox/d >/dev/null'
 check "l -"                                   '"$PARC" l - < o.parc | grep -q "d/a.txt"'

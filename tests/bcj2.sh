@@ -32,7 +32,7 @@ for f in x86.bin random.bin empty.bin; do
   rm -f a.parc; rm -rf out
   "$PARC" a a.parc "$f" -mbcj2 --no-progress >/dev/null 2>&1
   check "$f comprime"      '[ -s a.parc ]'
-  check "$f verifica"      '"$PARC" t a.parc --no-progress | tail -1 | grep -q "Errors: 0"'
+  check "$f verifica"      '"$PARC" t a.parc --no-progress | tail -1 | grep -q "All OK"'
   "$PARC" x a.parc -dpout -o+ --no-progress >/dev/null 2>&1
   check "$f extrae"        'cmp "$f" "out/$f"'
 done

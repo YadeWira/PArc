@@ -36,7 +36,7 @@ for ext in ('parc',):
 EOF
 for f in burst scatter tail; do
   rm -f "fixed.$f.parc"; "$PARC" r "$f.parc" >/dev/null 2>&1
-  check ".parc $f: reparado e íntegro"       '[ -f fixed.'"$f"'.parc ] && "$PARC" t fixed.'"$f"'.parc --no-progress | tail -1 | grep -q "Errors: 0"'
+  check ".parc $f: reparado e íntegro"       '[ -f fixed.'"$f"'.parc ] && "$PARC" t fixed.'"$f"'.parc --no-progress | tail -1 | grep -q "All OK"'
 done
 rm -f fixed.heavy.parc
 check ".parc heavy: irrecuperable, código 2"  '{ "$PARC" r heavy.parc >/dev/null 2>&1; [ $? = 2 ]; }'
@@ -54,7 +54,7 @@ for o in random.sample(range(0, 6000000, 512), 25):
     f.seek(o); f.write(bytes(random.randrange(256) for _ in range(64)))
 EOF
 rm -f fixed.g2.parc; "$PARC" r g2.parc >/dev/null 2>&1
-check "3%, varias franjas, 25 daños sueltos"  '"$PARC" t fixed.g2.parc --no-progress | tail -1 | grep -q "Errors: 0"'
+check "3%, varias franjas, 25 daños sueltos"  '"$PARC" t fixed.g2.parc --no-progress | tail -1 | grep -q "All OK"'
 echo nuevo > d/nuevo.txt; "$PARC" a a.parc d/nuevo.txt --no-progress >/dev/null 2>&1
 check "actualizar conserva el registro RS"    '"$PARC" r a.parc | grep -q "parc-rs1"'
 

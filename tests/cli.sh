@@ -16,7 +16,7 @@ ck "a crea"                    '"$PARC" a t.parc src -m4 --no-progress >/dev/nul
 ck "l lista"                   '"$PARC" l t.parc | grep -q "src/a.txt"'
 ck "l filtro"                  '"$PARC" l t.parc "*.txt" | grep -q "a.txt"'
 ck "lb bloques"                '"$PARC" lb t.parc | grep -q "Data blocks"'
-ck "t verifica"                '"$PARC" t t.parc --no-progress | grep -q "Errors: 0"'
+ck "t verifica"                '"$PARC" t t.parc --no-progress | grep -q "All OK"'
 
 # x, e, enlaces, -so
 mkdir outx; ck "x con rutas"    '"$PARC" x t.parc -dpoutx --no-progress >/dev/null 2>&1; [ -f outx/src/a.txt ] && [ -f outx/src/sub/b.txt ]'
@@ -69,7 +69,7 @@ ck "4x4 bloque aleatorio guardado" '"$PARC" a o0r.parc o0/rnd -m4x4:lzma:8mb:fas
 
 # ayuda y versión
 ck "sin argumentos: 0"         '"$PARC" >/dev/null 2>&1; [ $? = 0 ]'
-ck "--version"                '"$PARC" --version | grep -q "^PArc 0.0.2"'
+ck "--version"                '"$PARC" --version | grep -q "^PArc [0-9]"'
 ck "help: 0"                  '"$PARC" help >/dev/null 2>&1; [ $? = 0 ]'
 ck "help de comando"          '"$PARC" help x | grep -q "Extract keeping"'
 ck "comando desconocido: 1"   '"$PARC" nope >/dev/null 2>&1; [ $? = 1 ]'

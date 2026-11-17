@@ -29,7 +29,7 @@ head -c 100000000 /dev/urandom > fat/a
 for f in b c d; do head -c 1000000 /dev/urandom > fat/$f; done
 (cd fat && "$PARC" a ../f.parc -s- -m1 a b c d --no-progress >/dev/null 2>&1)
 mkdir -p outf/b
-PARC_THREADS=4 "$PARC" x f.parc -o+ -dpoutf --no-progress > f.log 2>&1; rc=$?
+PARC_THREADS=4 "$PARC" x f.parc -o+ -dpoutf --no-progress --verbose > f.log 2>&1; rc=$?
 ck "error fatal: rc 4"         '[ $rc = 4 ]'
 ok=1
 for f in a c d; do

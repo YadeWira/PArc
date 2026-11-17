@@ -74,6 +74,7 @@ begin
   OutLn('  -o+ / -o-   overwrite / skip existing files');
   OutLn('  -p<pass>    encrypt or read an encrypted archive');
   OutLn('  --no-progress   hide the progress line');
+  OutLn('  --verbose       list each file tested or extracted');
   OutLn('');
   OutLn('Examples:');
   OutLn('  parc a backup.parc ~/Documents -m6');
@@ -114,6 +115,7 @@ begin
   OutLn('  -r              patterns also match files in subdirectories');
   OutLn('  --recompress    rebuild intact blocks instead of copying them');
   OutLn('  --no-progress   hide the progress line');
+  OutLn('  --verbose       list each file tested or extracted');
   OutLn('');
   OutLn('Compression:');
   OutLn('  -m<method>      preset -m0..-m9 (default -m4), -mx (max, fast decode),');
@@ -281,19 +283,32 @@ var
   Opt: TExtractOptions;
   St: TExtractStats;
   T0, T1: QWord;
+  Cpu0: Int64;
+  i: Integer;
+  PackedBytes: Int64;
+  L: string;
 begin
   Opt := Opt0;
   Opt.TestOnly := Cmd = 't';
   Opt.FlatNames := Cmd = 'e';
+  if Opt.TestOnly then L := 'testing' else L := 'extracting from';
+  OutLn(Paint('PArc ' + PARC_VERSION, '1') + Paint(' · ', '2') + L + ' archive: ' + A.FileName);
   T0 := GetTickCount64;
+  Cpu0 := ProcessCpuMs;
   St := ExtractArchive(A, Opt, @LogLine);
   T1 := GetTickCount64;
-  if Opt.TestOnly then
-    OutLn(Format('Verified %d file(s), %d bytes. Errors: %d%s',
-      [St.Files, St.Bytes, St.Errors, TimingText(T0, T1, St.Bytes)]))
-  else
-    OutLn(Format('Extracted %d file(s) and %d director(ies), %d bytes. Skipped: %d. Errors: %d%s',
-      [St.Files, St.Dirs, St.Bytes, St.Skipped, St.Errors, TimingText(T0, T1, St.Bytes)]));
+  PackedBytes := 0;
+  for i := 0 to High(A.DataBlocks) do Inc(PackedBytes, A.DataBlocks[i].CompSize);
+  if Opt.TestOnly then L := 'Tested ' else L := 'Extracted ';
+  L := L + Count(St.Files, 'file');
+  if not Opt.TestOnly and (St.Dirs > 0) then L := L + ' and ' + Count(St.Dirs, 'folder');
+  L := L + ', ' + Num(St.Bytes) + ' bytes';
+  if (St.Bytes > 0) and (PackedBytes > 0) then L := L + Format(' · ratio %.2f%%', [100.0 * PackedBytes / St.Bytes]);
+  if St.Skipped > 0 then L := L + ' · skipped ' + Num(St.Skipped);
+  OutLn(L);
+  if Opt.TestOnly then L := 'Testing' else L := 'Extraction';
+  PrintTimes(L, T0, T1, Cpu0, ProcessCpuMs, St.Bytes);
+  PrintResult(St.Errors);
   if St.Unsupported then Result := 3
   else if St.Errors > 0 then Result := 2
   else Result := 0;
@@ -864,7 +879,8 @@ var
   St: TWriteStats;
   i, j, n, Removed, Replaced, Added: Integer;
   T0, T1: QWord;
-  Missing, Verb, OldRR, VolBase, VolInfo, FinalName: string;
+  Missing, Verb, OldRR, VolBase, VolInfo, FinalName, L: string;
+  Cpu0: Int64;
   SfxPrefix: TBytes;
   NVol: Integer;
   RRSize: Int64;
@@ -894,6 +910,9 @@ begin
     ErrLn('ERROR: does not exist: ' + ArcName);
     Exit(1);
   end;
+  if Exists then Verb := 'updating' else Verb := 'creating';
+  OutLn(Paint('PArc ' + PARC_VERSION, '1') + Paint(' · ', '2') + Verb + ' archive: ' +
+    BoolToStr(MO.ShownName <> '', MO.ShownName, ArcName));
   A := nil;
   if Exists then A := TArchive.Open(ArcName);
   try
@@ -1047,6 +1066,7 @@ begin
     if (Opt.VolumeSize = 0) and IsVolumeSet(ArcName, VolBase) then
       Opt.VolumeSize := FileSizeOf(VolumeName(ArcName, 1));
     T0 := GetTickCount64;
+    Cpu0 := ProcessCpuMs;
     St := WriteArchive(ArcName, Entries, Groups, Opt, @LogLine);
     T1 := GetTickCount64;
   finally
@@ -1054,7 +1074,6 @@ begin
   end;
   FinishArchive(ArcName, Opt.VolumeSize);
   FinalName := ArcName;
-  if not Exists then Verb := 'Created' else Verb := 'Updated';
   // PArc ya no crea autoextraíbles; si el archivo ya traía un módulo delante, se conserva
   if Length(SfxPrefix) > 0 then
   begin
@@ -1070,19 +1089,17 @@ begin
     VolInfo := Format(', %d volume(s) of %d bytes: %s ...', [NVol, Opt.VolumeSize, VolumeName(ArcName, 1)]);
   end;
   if MO.ShownName <> '' then FinalName := MO.ShownName;
-  OutLn(Format('%s %s (%s%s): %d file(s) and %d director(ies), %d bytes -> %d bytes',
-    [Verb, FinalName, 'parc' + BoolToStr(Length(SfxPrefix) > 0, ', self-extracting', ''), VolInfo, St.Files, St.Dirs, St.Bytes, St.ArcSize]));
-  if St.Bytes > 0 then
-  begin
-    if T1 > T0 then
-      OutLn(Format('  ratio: %.2f%%   time: %.2f s   speed: %.1f MB/s',
-        [100.0 * St.ArcSize / St.Bytes, (T1 - T0) / 1000.0,
-         St.Bytes / ((T1 - T0) / 1000.0) / 1048576.0]))
-    else
-      OutLn(Format('  ratio: %.2f%%', [100.0 * St.ArcSize / St.Bytes]));
-  end;
+  if Length(SfxPrefix) > 0 then OutLn('(self-extracting stub kept)');
+  if VolInfo <> '' then OutLn(Copy(VolInfo, 3, MaxInt));
+  L := 'Compressed ' + Count(St.Files, 'file');
+  if St.Dirs > 0 then L := L + ' and ' + Count(St.Dirs, 'folder');
+  L := L + ', ' + Num(St.Bytes) + ' => ' + Num(St.ArcSize) + ' bytes';
+  if St.Bytes > 0 then L := L + ' · ratio ' + Paint(Format('%.2f%%', [100.0 * St.ArcSize / St.Bytes]), '1');
+  OutLn(L);
   if Exists then
-    OutLn(Format('  added %d, replaced %d, deleted %d', [Added, Replaced, Removed]));
+    OutLn(Format('Added %s, replaced %s, deleted %s', [Num(Added), Num(Replaced), Num(Removed)]));
+  PrintTimes('Compression', T0, T1, Cpu0, ProcessCpuMs, St.Bytes);
+  PrintResult(0);
   Result := 0;
   if (Unreadable <> nil) and (Unreadable.Count > 0) then
   begin
@@ -1172,6 +1189,7 @@ begin
           Opt.DestDir := Copy(S, 4, MaxInt);
         end
         else if S = '--no-progress' then ShowProgress := False
+        else if S = '--verbose' then ListFiles := True
         else if (Copy(S, 1, 2) = '-v') and ParseVolumeSize(Copy(S, 3, MaxInt), VolSize) then
           MO.VolumeSize := VolSize
         else if S = '-o+' then Opt.Overwrite := owAll

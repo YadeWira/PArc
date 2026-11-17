@@ -21,7 +21,7 @@ meth=$("$PARC" lb c.parc -pClave 2>/dev/null | grep -o 'aes-256/ctr[^ +]*' | hea
 check "método con :f, :m y 200000 iteraciones" '[[ "$meth" == aes-256/ctr:f:m:n200000:* ]]'
 check "una sola derivación al crear 21 bloques (${ta} ms)" '[ "$ta" -lt 3000 ]'
 t0=$(date +%s%N)
-"$PARC" t c.parc -pClave --no-progress 2>/dev/null | tail -1 | grep -q 'Errors: 0'; ok=$?
+"$PARC" t c.parc -pClave --no-progress 2>/dev/null | tail -1 | grep -q 'All OK'; ok=$?
 tt=$(ms "$t0")
 check "t sin errores"                      '[ $ok = 0 ]'
 check "una sola derivación al leer (${tt} ms)" '[ "$tt" -lt 3000 ]'
@@ -32,7 +32,7 @@ check "-hp: sin contraseña no lista"       '! "$PARC" l c.parc </dev/null >/dev
 
 for m in -m1 -m2 -m5 -mx -mtor -mppmd -m0; do
   rm -f q.parc; "$PARC" a q.parc d -pClave -hp "$m" --no-progress >/dev/null 2>&1
-  check "método $m con etiqueta"            '"$PARC" t q.parc -pClave --no-progress 2>/dev/null | tail -1 | grep -q "Errors: 0"'
+  check "método $m con etiqueta"            '"$PARC" t q.parc -pClave --no-progress 2>/dev/null | tail -1 | grep -q "All OK"'
 done
 
 # Un bit cambiado en los datos cifrados: lo detecta la etiqueta (CTR + CRC no alcanza)
@@ -43,19 +43,19 @@ EOF
 check "dato alterado: falla la autenticación" '"$PARC" t alt.parc -pClave --no-progress 2>&1 | grep -q "authentication failed"'
 
 "$PARC" a u.parc d/f1.txt -p'contraseña日本' --no-progress >/dev/null 2>&1
-check "contraseña Unicode (UTF-8)"         '"$PARC" t u.parc -p"contraseña日本" --no-progress 2>/dev/null | tail -1 | grep -q "Errors: 0"'
+check "contraseña Unicode (UTF-8)"         '"$PARC" t u.parc -p"contraseña日本" --no-progress 2>/dev/null | tail -1 | grep -q "All OK"'
 "$PARC" a n.parc d/f1.txt -pClave -ae=serpent:n5000 --no-progress >/dev/null 2>&1
 check "-ae con :n propio se respeta"       '"$PARC" lb n.parc -pClave 2>/dev/null | grep -q "serpent-256/ctr:f:m:n5000"'
 
 # Actualizar un .parc cifrado: los bloques nuevos con el esquema nuevo, y se sigue leyendo
 echo nuevo > d/nuevo.txt; "$PARC" a c.parc d/nuevo.txt -pClave -hp --no-progress >/dev/null 2>&1
-check "actualizar un .parc cifrado"        '"$PARC" t c.parc -pClave --no-progress 2>/dev/null | tail -1 | grep -q "Errors: 0"'
+check "actualizar un .parc cifrado"        '"$PARC" t c.parc -pClave --no-progress 2>/dev/null | tail -1 | grep -q "All OK"'
 
 if [ -n "$OLD" ]; then
   "$OLD" a old.parc d -pClave -hp --no-progress >/dev/null 2>&1
-  check ".parc cifrado con el esquema anterior: se lee" '"$PARC" t old.parc -pClave --no-progress 2>/dev/null | tail -1 | grep -q "Errors: 0"'
+  check ".parc cifrado con el esquema anterior: se lee" '"$PARC" t old.parc -pClave --no-progress 2>/dev/null | tail -1 | grep -q "All OK"'
   "$PARC" a old.parc d/nuevo.txt -pClave -hp --no-progress >/dev/null 2>&1
-  check "y se actualiza (mezcla de esquemas)" '"$PARC" t old.parc -pClave --no-progress 2>/dev/null | tail -1 | grep -q "Errors: 0"'
+  check "y se actualiza (mezcla de esquemas)" '"$PARC" t old.parc -pClave --no-progress 2>/dev/null | tail -1 | grep -q "All OK"'
 fi
 
 echo "== .parc encryption: $fail failures"

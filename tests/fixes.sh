@@ -40,7 +40,7 @@ mkdir -p s/sub && echo hola > s/real.txt && ln -s real.txt s/rel && ln -s sub s/
   && ln -s /etc/passwd s/abs && ln -s noexiste s/roto
 timeout 60 "$PARC" a l.parc s --no-progress >/dev/null 2>&1
 check ".parc: guarda los enlaces sin recorrerlos" '[ "$("$PARC" l l.parc | grep -c "<LINK>")" = 5 ]'
-check "t con enlaces"                      '"$PARC" t l.parc --no-progress | tail -1 | grep -q "Errors: 0"'
+check "t con enlaces"                      '"$PARC" t l.parc --no-progress | tail -1 | grep -q "All OK"'
 rm -rf o; "$PARC" x l.parc -dpo --no-progress >/dev/null 2>&1
 check "x: recrea los enlaces"              '[ "$(readlink o/s/rel)" = real.txt ] && [ "$(readlink o/s/dir)" = sub ] && [ "$(cat o/s/rel)" = hola ]'
 check "x: no crea el enlace absoluto"      '[ ! -L o/s/abs ]'
