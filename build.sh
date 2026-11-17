@@ -57,7 +57,7 @@ case "${1:-linux64}" in
              build linuxarm64 "$FPC_CROSS/bin/fpc-linuxarm64" -Fl"$(dirname "$(aarch64-linux-gnu-gcc -print-libgcc-file-name)")"
            fi ;;
   # macOS arm64 (solo en un Mac: clang++ de Xcode y el fpc de Homebrew), contra el SDK de xcrun
-  macos)   ctor build/macos clang++ -DFREEARC_UNIX
+  macos)   ctor build/macos clang++ -DFREEARC_UNIX -Wno-c++11-narrowing
            build macos fpc -Tdarwin -Paarch64 -XR"$(xcrun --show-sdk-path)" ;;
   # i686: SSE2 para los precios (log2) igual que en x86_64, y la pila realineada (FPC la deja a 4)
   win32)   ctor build/win32 i686-w64-mingw32-g++ $WINCXX -msse2 -mfpmath=sse -mstackrealign

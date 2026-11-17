@@ -18,9 +18,22 @@
 // Estado de la llamada en curso (uno por hilo): el salto de CHECK y compress_all_at_once.
 // El hilo lo encuentra por un puntero thread-local: __thread en Linux; en Windows TlsAlloc
 // (mingw implementa __thread con emutls de libgcc, que espera el arranque de mingw).
+// clang no tiene __builtin_setjmp en arm64: ahí (macOS) va el setjmp de la libc, que en Darwin
+// no pasa por ningún desenrollado
+#if defined(__clang__) && defined(__aarch64__)
+#  include <setjmp.h>
+#  define PARC_SETJMP(b)     setjmp (b)
+#  define PARC_LONGJMP(b)    longjmp (b, 1)
+   typedef jmp_buf parc_jmp_buf;
+#else
+#  define PARC_SETJMP(b)     __builtin_setjmp (b)
+#  define PARC_LONGJMP(b)    __builtin_longjmp (b, 1)
+   typedef void *parc_jmp_buf[5];
+#endif
+
 struct ParcCall
 {
-  void *jb[5];   // __builtin_setjmp (sin libc ni el desenrollado SEH del longjmp de msvcrt)
+  parc_jmp_buf jb;   // __builtin_setjmp (sin libc ni el desenrollado SEH del longjmp de msvcrt)
   int   code;    // código de error de CHECK
   int   aao;     // compress_all_at_once: 1 en 4x4 (memoria a memoria), 0 en el stream
 };
@@ -32,7 +45,7 @@ static ParcCall *parc_cur ();
   ParcCall *c = parc_cur();
   if (!c)  abort();   // fuera de parc_run (parc_tor_init): no puede fallar
   c->code = code;
-  __builtin_longjmp (c->jb, 1);
+  PARC_LONGJMP (c->jb);
 }
 #define CHECK(e,a,b)  {if (!(a))  parc_check_fail(e);}
 
@@ -96,7 +109,7 @@ static int parc_run (PackMethod m, CALLBACK_FUNC *cb, void *aux, int aao)
   call.code = FREEARC_ERRCODE_INTERNAL;
   call.aao  = aao;
   parc_set_cur (&call);
-  if (__builtin_setjmp (call.jb) != 0)  r = call.code < 0? call.code : FREEARC_ERRCODE_INTERNAL;
+  if (PARC_SETJMP (call.jb) != 0)  r = call.code < 0? call.code : FREEARC_ERRCODE_INTERNAL;
   else                                  r = tor_compress (m, cb, aux, NULL, -1);
   parc_set_cur (saved);
   return r;

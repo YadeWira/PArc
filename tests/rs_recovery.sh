@@ -5,7 +5,7 @@
 set -u
 ROOT=$(cd "$(dirname "$0")/.." && pwd)
 PARC=${PARC_BIN:-$ROOT/build/linux64/parc}
-W=${RS_WORK:-/mnt/IA_LAB/agentes/PArc/rs_recovery}
+W=${RS_WORK:-${TMPDIR:-/tmp}/parc_rs_recovery}
 rm -rf -- "${W:?}"; mkdir -p "$W/d" && cd "$W" || exit 2
 fail=0
 check() { if eval "$2"; then printf '  ok    %s\n' "$1"; else printf '  FAIL %s\n' "$1"; fail=$((fail+1)); fi; }
