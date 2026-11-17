@@ -1,30 +1,48 @@
-{ LZ4 (codificador): método `lz4` de FreeArc (Compression/LZ4/C_LZ4.cpp, LZ4_METHOD::compress y
-  DeCompressMem(COMPRESS)). Decodificador: parc_lz4.
+{ LZ4 (codificador). Decodificador y formato del stream (LZ4 Frame): parc_lz4.
 
-  Stream: byte de versión (=1), escrito recién al leer el primer trozo (con entrada vacía no
-  sale NADA, ni siquiera ese byte, como READ_LEN_OR_EOF del C); después, por cada trozo de
-  BlockSize bytes (el último, lo que quede): Int32 LE largo comprimido + bloque LZ4, o si no
-  comprime lo suficiente (OutSize >= InSize*MinCompression/100) Int32 LE -InSize + el trozo
-  tal cual. Cada bloque se comprime por separado (sin diccionario del anterior).
+  Escribe un frame LZ4 con bloques independientes, sin checksums (el contenedor ya lleva el
+  CRC de cada archivo) y Block MaxSize = el menor de 64 KB/256 KB/1 MB/4 MB que contiene el
+  tamaño de bloque. Cada trozo de BlockSize bytes (el último, lo que quede) va comprimido, o
+  tal cual (bit 31 del largo) si no comprime lo suficiente. Con entrada vacía sale un frame
+  vacío (cabecera + EndMark). Lo lee cualquier `lz4`.
 
-  Los compresores NO son los de 2012 que trae FreeArc sino los de LZ4 1.10.0:
+  Los compresores de bloque son traducciones a Pascal de los de LZ4 1.10.0:
     c0 (default): LZ4_compress_default (aceleración 1): LZ4_compress_generic sin diccionario,
       tabla byU16 (hash4, 2^13) si el bloque tiene < 64KB+11 bytes, si no byU32 (hash5, 2^12).
       El hash5 es el de los builds de 64 bits; se usa también en 32 bits para que el archivo
       salga igual en todas las plataformas (el formato no depende del hash).
     hc / c<N> con N<>0: LZ4_compress_HC nivel 9 (LZ4HC_CLEVEL_DEFAULT): LZ4HC_compress_hashChain
       con 256 intentos y "pattern analysis" (sin chainSwap, sin diccionario, favorCompressionRatio).
-  Ambos respetan las reglas del formato que exige también el decodificador de 2012 de FreeArc:
-  los últimos 5 bytes son literales (LASTLITERALS) y el último match empieza al menos 12 bytes
-  antes del final (MFLIMIT).
 
-  Parámetros (parse_LZ4): hc, c<int>, b<mem> (BlockSize, 1mb), h<mem> (HashSize: solo lo usaba
-  la implementación vieja; se acepta e ignora), N% (MinCompression, 100).
+  Parámetros: hc, c<int>, b<mem> (tamaño de bloque, 1mb; hasta 4mb), N% (comprimido se guarda
+  solo si queda por debajo del N% de la entrada; 100 por defecto).
 
-  Una diferencia deliberada con el C: un bloque comprimido más largo que su entrada se guarda
-  siempre (el C solo lo hace con MinCompression>0; con lz4:hc:0% escribiría un bloque más
-  grande que BlockSize, que su propio decodificador lee en un buffer de BlockSize bytes).
-  Se asume little-endian (x86/x64): las lecturas de 16/32/64 bits son directas. }
+  Licencia de LZ4 (la de los compresores traducidos acá):
+
+    LZ4 Library
+    Copyright (c) 2011-2020, Yann Collet
+    All rights reserved.
+
+    Redistribution and use in source and binary forms, with or without modification,
+    are permitted provided that the following conditions are met:
+
+    * Redistributions of source code must retain the above copyright notice, this
+      list of conditions and the following disclaimer.
+
+    * Redistributions in binary form must reproduce the above copyright notice, this
+      list of conditions and the following disclaimer in the documentation and/or
+      other materials provided with the distribution.
+
+    THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS "AS IS" AND
+    ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT LIMITED TO, THE IMPLIED
+    WARRANTIES OF MERCHANTABILITY AND FITNESS FOR A PARTICULAR PURPOSE ARE
+    DISCLAIMED. IN NO EVENT SHALL THE COPYRIGHT HOLDER OR CONTRIBUTORS BE LIABLE FOR
+    ANY DIRECT, INDIRECT, INCIDENTAL, SPECIAL, EXEMPLARY, OR CONSEQUENTIAL DAMAGES
+    (INCLUDING, BUT NOT LIMITED TO, PROCUREMENT OF SUBSTITUTE GOODS OR SERVICES;
+    LOSS OF USE, DATA, OR PROFITS; OR BUSINESS INTERRUPTION) HOWEVER CAUSED AND ON
+    ANY THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT LIABILITY, OR TORT
+    (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE OF THIS
+    SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE. }
 unit parc_lz4enc;
 
 {$mode objfpc}{$H+}
@@ -53,8 +71,9 @@ type
     FBuf: array of Byte;       // trozo actual (crece con los datos hasta BlockSize)
     FLen: SizeInt;
     FOut: array of Byte;
-    FStarted: Boolean;         // ya se escribió el byte de versión
+    FStarted: Boolean;         // ya se escribió la cabecera del frame
     FCtx: Pointer;             // tablas del compresor (se reusan entre bloques)
+    procedure WriteHeader;
     procedure FlushBlock;
   protected
     procedure DoWrite(Buf: PByte; Count: SizeInt); override;
@@ -65,14 +84,14 @@ type
     destructor Destroy; override;
   end;
 
-{ parse_LZ4; invalid parameters -> ELz4EncParams }
+{ Parámetros inválidos -> ELz4EncParams }
 function ParseLz4EncParams(const Params: TStringArray): TLz4EncParams;
 
 { True si la etapa ("lz4:..") tiene parámetros válidos. }
 function Lz4EncAvailable(const Stage: string): Boolean;
 
-{ LZ4_METHOD::DeCompressMem(COMPRESS) como lo llama 4x4 (*outputSize = SrcLen): Dst = byte de
-  versión + UN bloque LZ4 con todo Src. False = no comprime (4x4 guarda el bloque tal cual). }
+{ Para 4x4: Dst = un frame LZ4 con todo Src (en bloques de BlockSize). False = no queda más
+  chico que Src (4x4 guarda el bloque tal cual). }
 function Lz4EncodeMem(const Params: TStringArray; Src: PByte; SrcLen: SizeInt; out Dst: TBytes): Boolean;
 
 { LZ4_compressBound }
@@ -86,10 +105,9 @@ function Lz4CompressHCBlock(Src: PByte; N: SizeInt; Dst: PByte; DstCap: SizeInt)
 implementation
 
 uses
-  parc_methods;
+  parc_methods, parc_lz4;
 
 const
-  LZ4_VERSION = 1;              // versión del formato de FreeArc (C_LZ4.cpp)
   MINMATCH = 4;
   LASTLITERALS = 5;
   MFLIMIT = 12;
@@ -819,7 +837,7 @@ end;
 
 { Parámetros }
 
-{ parseInt de FreeArc: '=' inicial opcional y solo dígitos (al menos uno) }
+{ Entero decimal ('=' inicial opcional), hasta High(LongInt). }
 function FaParseInt(const S: string; out V: Int64): Boolean;
 var
   i: Integer;
@@ -849,7 +867,6 @@ var
 begin
   if (Length(Params) = 0) or (Params[0] <> 'lz4') then
     raise ELz4EncParams.Create('lz4: not the method lz4');
-  // LZ4_METHOD::LZ4_METHOD
   Result.Compressor := 0;
   Result.BlockSize := 1 shl 20;
   Result.MinCompression := 100;
@@ -870,13 +887,11 @@ begin
     else if (p <> '') and (p[1] = 'b') then
     begin
       ok := ParseMem(Copy(p, 2, MaxInt), m);
-      // BlockSize=0: el C lee 0 bytes, lo toma como fin y descarta todo el stream
-      if ok and ((m = 0) or (m > LZ4_MAX_INPUT_SIZE)) then
+      // el frame admite bloques de hasta 4 MB
+      if ok and ((m = 0) or (Lz4BlockCode(m) < 0)) then
         raise ELz4EncParams.CreateFmt('lz4: invalid block size "%s"', [p]);
       if ok then Result.BlockSize := SizeInt(m);
     end
-    else if (p <> '') and (p[1] = 'h') then
-      ok := ParseMem(Copy(p, 2, MaxInt), m)      // HashSize: no lo usa LZ4 1.10
     else if (p <> '') and (p[Length(p)] = '%') then
     begin
       ok := FaParseInt(Copy(p, 1, Length(p) - 1), n);
@@ -896,41 +911,79 @@ begin
   end;
 end;
 
-{ ¿No comprimió lo suficiente? (la condición del C, en double) }
+{ ¿No comprimió lo suficiente? (falló, no quedó por debajo del N% o no ganó nada) }
 function TooBig(OutSize, InSize: SizeInt; MinCompression: Integer): Boolean;
 begin
-  Result := (OutSize <= 0) or
-            ((MinCompression > 0) and (OutSize >= (Double(InSize) * MinCompression) / 100)) or
-            (OutSize > InSize);   // ver el comentario de la unidad
+  Result := (OutSize <= 0) or (OutSize >= InSize) or
+            ((MinCompression > 0) and (OutSize >= (Double(InSize) * MinCompression) / 100));
+end;
+
+{ Lugar para el bloque comprimido: el rápido se corta solo al pasar de N-1 (limitedOutput);
+  HC escribe con el peor caso y después se mira si convino. }
+function CapFor(Compressor: Integer; N: SizeInt): SizeInt;
+begin
+  if Compressor <> 0 then Result := Lz4CompressBound(N) else Result := N - 1;
+end;
+
+{ Cabecera del frame: magic, FLG (versión 01, bloques independientes), BD y HC. }
+function FrameHeader(BlockSize: SizeInt): TBytes;
+begin
+  SetLength(Result, 7);
+  Result[0] := $04; Result[1] := $22; Result[2] := $4D; Result[3] := $18;
+  Result[4] := $60;
+  Result[5] := Lz4BlockCode(BlockSize) shl 4;
+  Result[6] := (Xxh32(@Result[4], 2, 0) shr 8) and $FF;
+end;
+
+procedure PutU32(var B: TBytes; var n: SizeInt; V: LongWord);
+begin
+  B[n] := V and $FF; B[n + 1] := (V shr 8) and $FF; B[n + 2] := (V shr 16) and $FF; B[n + 3] := V shr 24;
+  Inc(n, 4);
 end;
 
 function Lz4EncodeMem(const Params: TStringArray; Src: PByte; SrcLen: SizeInt; out Dst: TBytes): Boolean;
 var
   Par: TLz4EncParams;
   Ctx: Pointer;
-  Cap, OutSize: SizeInt;
+  Hdr: TBytes;
+  Pos, n, OutSize, Limit, Len: SizeInt;
 begin
   Dst := nil;
   Par := ParseLz4EncParams(Params);
   if (SrcLen <= 0) or (SrcLen > LZ4_MAX_INPUT_SIZE) then Exit(False);
-  // DeCompressMem: rápido = LZ4_compress_limitedOutput(.., *outputSize-1) con *outputSize=SrcLen;
-  // HC = LZ4_compressHC sin límite (el control de tamaño viene después)
-  if Par.Compressor <> 0 then Cap := Lz4CompressBound(SrcLen) else Cap := SrcLen - 1;
-  SetLength(Dst, 1 + Lz4CompressBound(SrcLen));
+  Hdr := FrameHeader(Par.BlockSize);
+  SetLength(Dst, SrcLen + 7 + 4 + 4 * (SrcLen div Par.BlockSize + 1) + Lz4CompressBound(Par.BlockSize));
+  Move(Hdr[0], Dst[0], 7);
+  n := 7;
+  Limit := SrcLen;   // si el frame no queda más chico que Src, no sirve
   Ctx := NewCtx(Par.Compressor);
   try
-    OutSize := CompressBlock(Par.Compressor, Ctx, Src, SrcLen, @Dst[1], Cap);
+    Pos := 0;
+    while Pos < SrcLen do
+    begin
+      if SrcLen - Pos < Par.BlockSize then OutSize := SrcLen - Pos else OutSize := Par.BlockSize;
+      if n > Limit then Exit(False);   // ya no puede quedar más chico
+      Len := OutSize;
+      OutSize := CompressBlock(Par.Compressor, Ctx, Src + Pos, Len, @Dst[n + 4], CapFor(Par.Compressor, Len));
+      if TooBig(OutSize, Len, Par.MinCompression) then
+      begin
+        PutU32(Dst, n, LongWord(Len) or $80000000);
+        Move(Src[Pos], Dst[n], Len);
+        Inc(n, Len);
+      end
+      else
+      begin
+        PutU32(Dst, n, LongWord(OutSize));
+        Inc(n, OutSize);
+      end;
+      Inc(Pos, Len);
+    end;
   finally
     FreeMem(Ctx);
   end;
-  // El C compara con el byte de versión incluido
-  if (OutSize <= 0) or TooBig(OutSize + 1, SrcLen, Par.MinCompression) then
-  begin
-    Dst := nil;
-    Exit(False);
-  end;
-  Dst[0] := LZ4_VERSION;
-  SetLength(Dst, OutSize + 1);
+  if n + 4 >= Limit then Exit(False);
+  PutU32(Dst, n, 0);
+  SetLength(Dst, n);
   Result := True;
 end;
 
@@ -952,29 +1005,28 @@ begin
   inherited Destroy;
 end;
 
+procedure TLz4EncStage.WriteHeader;
+var
+  Hdr: TBytes;
+begin
+  FStarted := True;
+  Hdr := FrameHeader(FPar.BlockSize);
+  Emit(@Hdr[0], Length(Hdr));
+end;
+
 procedure TLz4EncStage.FlushBlock;
 var
-  OutSize, Cap: SizeInt;
+  OutSize: SizeInt;
 begin
   if FLen = 0 then Exit;
-  if not FStarted then
-  begin
-    // el C escribe la versión recién después de leer el primer trozo
-    FStarted := True;
-    FOut := nil;
-    SetLength(FOut, 1);
-    FOut[0] := LZ4_VERSION;
-    Emit(@FOut[0], 1);
-  end;
+  if not FStarted then WriteHeader;
   if FCtx = nil then FCtx := NewCtx(FPar.Compressor);
   if Length(FOut) < Lz4CompressBound(FLen) then SetLength(FOut, Lz4CompressBound(FLen));
-  // rápido: LZ4_compress_limitedOutput(In, Out, InSize, InSize); HC: LZ4_compressHC sin límite
-  if FPar.Compressor <> 0 then Cap := Lz4CompressBound(FLen) else Cap := FLen;
-  OutSize := CompressBlock(FPar.Compressor, FCtx, @FBuf[0], FLen, @FOut[0], Cap);
+  // comprimido solo si queda más chico que el trozo; si no, guardado (bit 31 del largo)
+  OutSize := CompressBlock(FPar.Compressor, FCtx, @FBuf[0], FLen, @FOut[0], CapFor(FPar.Compressor, FLen));
   if TooBig(OutSize, FLen, FPar.MinCompression) then
   begin
-    // bloque guardado: largo negativo
-    EmitU32(LongWord(-LongInt(FLen)));
+    EmitU32(LongWord(FLen) or $80000000);
     Emit(@FBuf[0], FLen);
   end
   else
@@ -1012,6 +1064,8 @@ end;
 procedure TLz4EncStage.DoFinish;
 begin
   FlushBlock;
+  if not FStarted then WriteHeader;
+  EmitU32(0);   // EndMark
 end;
 
 end.

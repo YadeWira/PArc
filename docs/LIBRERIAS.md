@@ -13,7 +13,7 @@ document records where each one comes from, what it was verified against, and wh
 | Component | In FreeArc 0.67 | Ported version | Notes |
 |---|---|---|---|
 | LZMA SDK (`Compression/LZMA2/C`) | 2009-02 | 26.x | The LZMA stream and x86 BCJ do not change; the new encoder produces valid bytes, not identical ones. `GetOptimumFast` keeps FreeArc's additions (length/distance pruning and relaxed rep-matches) |
-| LZ4 (`Compression/LZ4`) | 2011-2012 | 1.10.0 | The block format is stable; the old version has CVE-2014-4611 |
+| LZ4 (`Compression/LZ4`) | 2011-2012 | 1.10.0 (BSD-2) | Since 2026-11 the `lz4` stream is a standard LZ4 Frame (readable by the `lz4` tool), no longer FreeArc's framing. LZ4 1.11.1 (2026-11-10) is out: still to review for compressor changes |
 | LibTomCrypt (`_Encryption`) | 1.17 | 1.18.2 | AES/Blowfish/Serpent/Twofish/SHA produce the same output |
 | PPMd (D. Shkarin, modified by FreeArc) | var. H/I | no compatible upstream | Kept as PArc's own port (including the 32-bit layout on x64) |
 | SREP | 3.93 beta (2013) | 3.93a beta (2014-10-11) | freeware by Bulat Ziganshin; v1–v4 format |
@@ -27,8 +27,8 @@ document records where each one comes from, what it was verified against, and wh
 | LZMA (decompression) | reference specification (LzmaSpec) | streams generated with Python and the SDK; `tests/run_lzma_tests.py` |
 | LZMA (compression) | LZMA SDK 26.03 + FreeArc's `fast` additions | valid streams verified with liblzma (`tests/run_lzma_tests.py`) and round-trip in `.parc` |
 | x86 BCJ (`exe`) | LZMA SDK 26.03 | against compiled `Bra86.c`, with buffer splits (`tests/bcj.sh`) |
-| LZ4 (decompression) | LZ4 1.10 semantics (`LZ4_decompress_safe`), without CVE-2014-4611 | reference streams |
-| LZ4 (compression) | LZ4 1.10 (`LZ4_compress_default` and `LZ4_compress_HC` level 9) | byte-for-byte against LZ4 1.10 in C; round-trip in `.parc` |
+| LZ4 (decompression) | LZ4 Frame spec + block semantics of `LZ4_decompress_safe` (own code); linked blocks, block/content checksums and content size are read | `tests/lz4frame.sh`: PArc ↔ `lz4` tool both ways, damaged and cut frames |
+| LZ4 (compression) | LZ4 1.10 (`LZ4_compress_default` and `LZ4_compress_HC` level 9), BSD-2 notice kept in `parc_lz4enc.pas`; frame with independent blocks, no checksums | block bytes identical to LZ4 1.10 in C; `tests/lz4frame.sh` |
 | AES, Blowfish, Twofish, SHA-512, PBKDF2 | LibTomCrypt | `tests/crypto_vectors.sh`: 0 differences over thousands of random vectors against FreeArc's 1.17 and official 1.18.2 |
 | Serpent | FreeArc's addition to LibTomCrypt 1.17 | same, against 1.17 |
 | CTR / CFB | LibTomCrypt (little-endian counter) | same |

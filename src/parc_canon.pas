@@ -465,11 +465,10 @@ begin
       Exit;
     end;
 
-    { --- lz4 (C_LZ4.cpp/.h). Defaults: c0, b1mb, h0, 100%. Sin SetDictionary propio, así
-          que el límite no lo toca; "hc" es c2. showMem del C: unidad exacta. }
+    { --- lz4 (parc_lz4enc). Defaults: c0, b1mb, 100%; "hc" es c2. El límite de memoria no lo toca. }
     if Name = 'lz4' then
     begin
-      MC := 0; BS := MB; HS := 0; M := 100;
+      MC := 0; BS := MB; M := 100;
       for J := 1 to High(Parts) do
       begin
         L := LowerCase(Parts[J]);
@@ -477,13 +476,11 @@ begin
         if L = 'hc' then MC := 2
         else if L[1] = 'c' then MC := Num(Copy(L,2,MaxInt), 0)
         else if L[1] = 'b' then BS := CMem(Copy(L,2,MaxInt), MB)
-        else if L[1] = 'h' then HS := CMem(Copy(L,2,MaxInt), 0)
         else if L[Length(L)] = '%' then M := Num(Copy(L,1,Length(L)-1), 100);
       end;
       Result := 'lz4';
       if MC <> 0 then Result := Result + ':c' + IntToStr(MC);
       if BS <> MB then Result := Result + ':b' + CShowMem(BS);
-      if HS <> 0 then Result := Result + ':h' + CShowMem(HS);
       if M <> 100 then Result := Result + ':' + IntToStr(M) + '%';
       Exit;
     end;

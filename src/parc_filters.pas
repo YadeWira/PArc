@@ -1,8 +1,10 @@
-{ Filtros de preprocesamiento de FreeArc (lado decodificador):
-  - exe:   BCJ x86. Núcleo portado de Bra86.c del LZMA SDK 26.03 (2023-04-02, Igor Pavlov,
-           dominio público); envoltorio por bloques igual a bcj_x86_de_compress de FreeArc
-           (Compression/LZMA2/C_BCJ.cpp).
-  - delta: Compression/Delta/Delta.cpp (delta_decompress) de Bulat Ziganshin. }
+{ Filtros de preprocesamiento (lado decodificador):
+  - exe:   BCJ x86 del LZMA SDK 26.03 (Bra86.c, Igor Pavlov, dominio público). El stream es
+           el de los filtros x86 de 7-Zip/xz: los datos convertidos tal cual, sin cabecera; la
+           posición (ip) y el estado siguen de un buffer al otro, y los últimos bytes que no
+           alcanzan para una instrucción quedan sin convertir.
+  - delta: Compression/Delta/Delta.cpp (delta_decompress) de Bulat Ziganshin (FreeArc, GPL;
+           pendiente de reemplazo). }
 unit parc_filters;
 
 {$mode objfpc}{$H+}
@@ -178,9 +180,9 @@ begin
   SetLength(FBuf, BCJ_BUFFER_SIZE);
 end;
 
-{ Igual que bcj_x86_de_compress: se convierte lo que haya en el buffer; lo que el filtro no
-  llegó a procesar (el final, que podría ser el inicio de una instrucción) se guarda y se
-  completa con la próxima lectura. Un tramo de 5 bytes o menos se entrega sin convertir. }
+{ Se convierte lo que haya en el buffer; lo que el filtro no llegó a procesar (el final, que
+  podría ser el inicio de una instrucción) se guarda y se completa con la próxima lectura. Un
+  tramo de 5 bytes o menos (menos que una instrucción E8/E9 entera) sale sin convertir. }
 procedure TBcjX86Stage.Fill;
 var
   n, Rem: SizeInt;

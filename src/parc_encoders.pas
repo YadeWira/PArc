@@ -12,9 +12,9 @@ uses
 type
   EUnsupportedEncoder = class(Exception);
 
-  { exe (BCJ x86) al comprimir: como bcj_x86_de_compress con encoding=1, convierte buffers
-    llenos y guarda para el próximo lo que el filtro no llegó a procesar; un tramo final de
-    <=5 bytes sale sin convertir. }
+  { exe (BCJ x86 del LZMA SDK, parc_filters) al comprimir: convierte buffers llenos y guarda
+    para el próximo lo que el filtro no llegó a procesar; un tramo final de <=5 bytes sale
+    sin convertir. }
   TBcjEncStage = class(TOutStage)
   private
     FBuf: array of Byte;
@@ -517,7 +517,7 @@ var
 begin
   if FLen = 0 then Exit;
   if FLen <= 5 then
-    Done := FLen    // FreeArc: menos de 5 bytes el filtro no los toca
+    Done := FLen    // menos que una instrucción E8/E9 entera: no hay nada que convertir
   else
   begin
     Done := BcjX86Code(@FBuf[0], FLen, FIp, FState, True);
@@ -548,8 +548,7 @@ end;
 
 procedure TBcjEncStage.DoFinish;
 begin
-  // Como el bucle de FreeArc al llegar al final: convertir lo que quede hasta que el
-  // remanente sea <=5 bytes (que sale sin convertir)
+  // Al final: convertir lo que quede hasta que el remanente sea <=5 bytes (sale tal cual)
   while FLen > 0 do Convert(True);
 end;
 

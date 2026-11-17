@@ -274,18 +274,6 @@ begin
   end;
 end;
 
-{ Parámetros de lz4 (parse_LZ4): solo b<mem> (tamaño de bloque) le importa al decodificador. }
-function ParseLz4BlockSize(const Params: TStringArray): SizeInt;
-var
-  k: Integer;
-  m: QWord;
-begin
-  Result := 1 shl 20;
-  for k := 1 to High(Params) do
-    if (Params[k] <> '') and (Params[k][1] = 'b') and ParseMem(Copy(Params[k], 2, MaxInt), m) then
-      Result := m;
-end;
-
 { Método interno de 4x4 (parse_4x4): los parámetros propios de 4x4 empiezan con dígito o con
   letra+dígito (t4, b7mb, i2, r99, 8mb); el primero que no cumple eso arranca el método interno. }
 function Inner4x4Method(const Params: TStringArray): string;
@@ -512,7 +500,7 @@ begin
     'delta':
       Result := TDeltaStage.Create(Source);
     'lz4':
-      Result := TLz4Stage.Create(Source, ParseLz4BlockSize(Params));
+      Result := TLz4Stage.Create(Source);   // el frame dice su tamaño de bloque
     'rep':
       Result := TRepStage.Create(Source);
     '4x4':
