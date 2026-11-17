@@ -830,6 +830,15 @@ begin
     if Target < Mem[j] div 2 then Target := Mem[j] div 2;
     if Target < MB_ then Target := MB_;
     S2 := CanonStageMem(St[j], Target);
+    // El mapeo memoria -> parámetros de cada etapa es aproximado (4x4 reparte entre sus hilos
+    // sin contar sus búferes): si con ese objetivo no cambia, se insiste más abajo antes de
+    // darla por imposible (si no, se achicaba de más la siguiente: TILIN -m5 en win32 dejaba
+    // 4x4:lzma:24mb y bajaba rep:96m a 55mb)
+    while (S2 = St[j]) and (Target > 2 * MB_) do
+    begin
+      Target := Target div 4 * 3;
+      S2 := CanonStageMem(St[j], Target);
+    end;
     if S2 = St[j] then Frozen[j] := True
     else St[j] := S2;
   end;
