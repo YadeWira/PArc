@@ -203,6 +203,11 @@ begin
   {$IFDEF UNIX}
   // Sin límite es RLIM_INFINITY (todos los bits en 1): da negativo y queda en 0
   if FpGetRLimit(RLIMIT_AS, @R) = 0 then Result := Int64(R.rlim_cur);
+  {$IFNDEF CPU64}
+  // i386: el getrlimit viejo devuelve "sin límite" como 0x7FFFFFFF (o 0xFFFFFFFF): no es un
+  // límite de 2 GB (con eso el límite automático de compresión quedaba en 768 MB)
+  if Result >= $7FFFFFFF then Result := 0;
+  {$ENDIF}
   {$ENDIF}
   {$IFDEF WINDOWS}
   M := Default(TParcMemStatusEx);

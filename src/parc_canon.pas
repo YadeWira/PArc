@@ -288,7 +288,14 @@ begin
         else if Copy(L,1,2) = 'lp' then LP := Num(Copy(L,3,MaxInt), 0);
       end;
       {$IFDEF CPU32}
-      BS := FitLzma(BS, MFi, Alg, NFB, MC, LC, LP, kLzmaEnc32MaxMem, kLzmaEnc32Headroom);
+      // Con el límite de compresión (EffectiveCompressLimit, automático en 32 bits) la cadena
+      // ya entra: sin la prueba de reservar de verdad, que dependía de lo que otros bloques
+      // tenían reservado en ese momento (el método cambiaba entre corridas). Solo con -lc- se
+      // sigue probando.
+      if EffectiveCompressLimit > 0 then
+        BS := FitLzma(BS, MFi, Alg, NFB, MC, LC, LP, kLzmaEnc32MaxMem, 0)
+      else
+        BS := FitLzma(BS, MFi, Alg, NFB, MC, LC, LP, kLzmaEnc32MaxMem, kLzmaEnc32Headroom);
       {$ENDIF}
       if MemLim > 0 then BS := FitLzma(BS, MFi, Alg, NFB, MC, LC, LP, MemLim, 0);
       Result := 'lzma:' + ShowMem(BS);
