@@ -85,7 +85,7 @@ ck "mensaje de apertura"       '"$PARC" l noexiste.parc 2>&1 | grep -q "could no
 ck ".arc rechazado"            '"$PARC" a x.arc src >/dev/null 2>&1; [ $? = 1 ] && "$PARC" a x.arc src 2>&1 | grep -q "only .parc"'
 ck "-fmt Unknown option"          '"$PARC" a x.parc src -fmt=arc >/dev/null 2>&1; [ $? = 1 ] && "$PARC" a x.parc src -fmt=arc 2>&1 | grep -q "Unknown option"'
 ck "-sfx Unknown option"          '"$PARC" a x.parc src -sfx >/dev/null 2>&1; [ $? = 1 ] && "$PARC" a x.parc src -sfx 2>&1 | grep -q "Unknown option"'
-ck "opción Unknown option"        '"$PARC" a x.parc src -zzz >/dev/null 2>&1; [ $? = 1 ] && "$PARC" a x.parc src -zzz 2>&1 | grep -q "Unknown option"'
+ck "opción Unknown option"        '"$PARC" a x.parc src -qqq >/dev/null 2>&1; [ $? = 1 ] && "$PARC" a x.parc src -qqq 2>&1 | grep -q "Unknown option"'
 ck "sin archivos"              '"$PARC" a vacio.parc >/dev/null 2>&1; [ $? = 1 ]'
 ck "-si solo con a"            '"$PARC" l t.parc -si >/dev/null 2>&1; [ $? = 1 ]'
 ck "-x sin máscara: 1"         '"$PARC" a x.parc src -x >/dev/null 2>&1; [ $? = 1 ]'

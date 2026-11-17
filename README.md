@@ -80,6 +80,14 @@ parc <command> <archive.parc> [files/patterns...] [options]
 | `f` | freshen: update only files already in the archive |
 | `d` | delete names or masks from the archive |
 | `r` | repair with the recovery record (writes `fixed.<name>`) |
+| `v` / `lt` | verbose / technical listing |
+| `create` | like `a`, but always a new archive |
+| `m` / `mf` | move into the archive (delete from disk afterwards) |
+| `ch` | rewrite with new options (method, password, recovery record, lock, comment) |
+| `rr<spec>` | add a recovery record |
+| `c` / `cw` | set / write the archive comment |
+| `j` | join other archives into the first |
+| `k` | lock the archive |
 
 ```sh
 parc a backup.parc project/ -m5 -rr        # 5% recovery record
@@ -127,7 +135,7 @@ The suite runs against `.parc` archives and the C reference sources kept in
 `reference/freearc-0.67/Compression/` for the codecs.
 
 ```sh
-bash tests/cli.sh tests/cli_options.sh
+bash tests/cli.sh tests/cli_options.sh tests/cli_commands.sh
 bash tests/stdio.sh tests/volumes.sh
 bash tests/rs_recovery.sh tests/parc_crypt.sh tests/cm.sh
 bash tests/dispack.sh tests/srep.sh tests/bcj.sh

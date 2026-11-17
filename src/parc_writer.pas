@@ -44,6 +44,10 @@ type
     VolumeSize: Int64;    // -v: volúmenes de este tamaño (FileName.001, .002...); solo .parc
     Parallel: Boolean;    // comprimir grupos de datos independientes en paralelo
     Locked: Boolean;      // -k / k: marca de bloqueado en el footer (no se modifica más)
+    { ch con -p/-hp/-p-: la contraseña cambia. Los bloques viejos se leen con las que se dieron
+      (-op, consola) y todo se reempaqueta solo con DataPassword ('' = sin cifrar), sin exigir
+      que sea la de los bloques viejos. }
+    ChangePassword: Boolean;
   end;
 
   TWriteStats = record
@@ -586,7 +590,7 @@ begin
   // Un bloque que ya estaba cifrado se vuelve a cifrar aunque no se haya dado -p (con la
   // contraseña con que se leyó): borrar un archivo no tiene que dejar el resto en claro
   Pwd := Opt.DataPassword;
-  if Pwd = '' then
+  if (Pwd = '') and not Opt.ChangePassword then
   begin
     Encrypted := WithoutCipher(G.Method) <> G.Method;
     // o algún archivo viene de un bloque viejo cifrado (al actualizar, el grupo trae el
@@ -1001,7 +1005,7 @@ begin
       with Entries[i] do
         if (SrcArc <> nil) and not Meta.IsDir and not Meta.IsLink then
           Look(SrcArc.DataBlocks[SrcArc.Files[SrcIndex].DataBlock].Method);
-    if (Found <> '') and not CryptMethodPasswordOk(Found, Opt.DataPassword) then
+    if (Found <> '') and not Opt.ChangePassword and not CryptMethodPasswordOk(Found, Opt.DataPassword) then
       raise EBadPassword.Create('wrong password (the archive data is encrypted with another password)');
     MakeCipherStage(Opt.Encryption, Opt.DataPassword, False);   // (deriva la clave y la deja en el caché)
   end;

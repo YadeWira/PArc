@@ -30,6 +30,16 @@ the files or patterns the command operates on.
 | `f` | freshen: update only files already in the archive when the disk copy is newer |
 | `d` | delete the given names or patterns from the archive |
 | `r` | repair with the recovery record: writes `fixed.<name>`; the original is untouched |
+| `v` | verbose listing: time with nanoseconds (UTC), Unix mode or Windows attributes, size, share of its packed block, ratio, CRC, block number and method |
+| `lt` | technical listing: the blocks (as `lb`) plus, for every entry, its block, offset in the uncompressed block, size, CRC, mtime in ns and mode |
+| `create` | like `a`, but always starts a new archive: an existing one is replaced (only once the new one is complete) |
+| `m` / `mf` | like `a`, then delete from disk what was archived (`m`: files, then the folders it added if empty; `mf`: files only) |
+| `ch` | rewrite the archive with the options given (method, encryption, recovery record, lock, comment); untouched blocks are copied |
+| `rr<spec>` | add or replace the recovery record: `rr`, `rr5%`, `rr10`… (= `ch -rr<spec>`) |
+| `c` | set the archive comment (`-z<file>`, `-z` for stdin, `--archive-comment=<text>`) |
+| `cw` | write the comment to a file: `parc cw <archive> <file>` (`-` = stdout) |
+| `j` | join: `parc j <archive> <other.parc>...` adds the files of the others; their blocks are copied |
+| `k` | lock the archive: afterwards no command modifies it |
 
 Directories passed to `a`/`u`/`f` are scanned recursively.
 
@@ -92,6 +102,60 @@ When updating (`a`, `u`, `f`), solid blocks that remain intact are copied withou
 `--recompress` forces rebuilding them. With `d` and an explicit `-m`, the whole archive is
 recompressed with that method, just like FreeArc (a "copying" command:
 `is_COPYING_COMMAND` in `Cmdline.hs`).
+
+### Commands that rewrite or extend an archive
+
+**`ch`** rewrites the archive applying the options given; blocks that do not need to change are
+copied byte for byte. FreeArc's "copying command" rules apply: `-m<method>` implies
+`--recompress`. It takes no file names.
+
+| with `ch` | effect |
+|---|---|
+| `-m<method>`, `--recompress` | recompress every block |
+| `-rr<spec>` / `-rr-` | add or replace / remove the recovery record (the `rr<spec>` command is the same) |
+| `-k` | lock (the `k` command is the same) |
+| `-z<file>`, `-z`, `--archive-comment=<text>` | set the comment (the `c` command is the same) |
+| `-v<size>` | turn it into volumes (or change their size) |
+| `-p<new>` | if the password does not open the current data, it is a **new** password: every block is re-encrypted with it (and the headers too if they were encrypted). A `-p` that already opens the data is only used to read and changes nothing |
+| `-hp<new>` | encrypt (or re-encrypt) the directory and footer with it |
+| `-p-` | remove all encryption (data and headers) |
+| `-hp-` | remove only the headers encryption |
+| `-op<old>` | the current password, used only for reading (otherwise it is prompted; without a console the command fails with exit code 5) |
+
+```sh
+parc ch backup.parc -mx                     # recompress everything with -mx
+parc ch backup.parc -pNew -hp -opOld        # change the password (and encrypt the headers)
+parc ch backup.parc -p- -opOld              # decrypt
+parc rr5% backup.parc                       # add a 5% recovery record
+parc c backup.parc -znotes.txt              # comment from a file
+parc cw backup.parc -                       # print it
+parc k backup.parc                          # lock
+```
+
+Updating an archive whose headers are encrypted (`-hp`) keeps them encrypted even if `-hp` is
+not repeated, as long as the password given (or prompted) opens them; before, they were written
+in clear.
+
+**`j`** appends the files of other `.parc` archives to the first one. Blocks are copied as they
+are, encrypted or not: an encrypted block keeps its own password, so the result may need several
+passwords to read (all of them are tried, `-p`, `-hp`, prompts). If `-p` is given, every
+encrypted block must use it (a different one is rejected as a wrong password, exit code 5). A
+name present in several archives is taken from the last one (like `a`: what is joined replaces);
+blocks that lose files because of that are repacked with their method (re-encrypted with the
+main password if they were encrypted). Joining an archive with itself is rejected.
+
+**`m` / `mf`** (and the options `-d` / `-df` with `a`, `u`, `f`) delete from disk what was
+archived, but only after the archive was completely written and, with `-t`, tested without
+errors; on any error nothing is deleted. A file whose size or modification time changed after it
+was read is kept (with a warning, exit code 6). Symbolic links are deleted as links, never their
+targets. `m`/`-d` then removes the folders it archived if they are empty (deepest first); `mf`/
+`-df` leaves folders alone. With `u`, files that were not replaced (the archived copy is as new)
+are not deleted. Files given with `-si` are not on disk and are never deleted.
+
+**`k`** (or `-k` with any writing command) sets the `locked` flag of the footer. Afterwards `a`,
+`u`, `f`, `d`, `m`, `mf`, `create` (it does not replace it), `ch`, `c`, `rr`, `j` and `k` refuse to
+modify the archive (exit code 1, "is locked"); `l`, `v`, `lt`, `lb`, `t`, `x`, `e`, `cw` and `r` still
+work. There is no unlock (as in FreeArc).
 
 ### Solid blocks: `-s`
 

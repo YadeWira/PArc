@@ -35,7 +35,9 @@ The rest of the FreeArc 0.67 tree is in git history (commit `82ea8d9`) and in Fr
   XChaCha20-Poly1305 or AES-256-GCM in 64 KiB chunks, Argon2id; own code, see
   [FORMATO-PARC.md §3b](formato/FORMATO-PARC.md)), stdin/stdout (`-si`, `-so`, `-`), long paths and cancellation without partial files.
 - Existing self-extractors can be listed, tested and extracted; no new ones are created.
-- Commands: `l`, `lb`, `t`, `x`, `e`, `a`, `u`, `f`, `d`, `r`.
+- Commands: `l`, `lb`, `t`, `x`, `e`, `a`, `u`, `f`, `d`, `r`, and FreeArc's `v`, `lt`, `create`,
+  `m`, `mf`, `ch`, `rr<spec>`, `c`, `cw`, `j`, `k` (tests/cli_commands.sh). Not implemented: `s`
+  (SFX) and `modify`.
 - Methods: `storing`, `lzma`, `ppmd`, `grzip`, `dict`, `rep`, `delta`, `tor`, `lzp`, `mm`,
   `tta`, `4x4`, `exe` (BCJ), `lz4`, `dispack070`, `srep` and `cm` (context mixing), alone or
   chained.
@@ -282,7 +284,7 @@ SREP with the 32-bit binary was verified under Wine and with an archive cross-ch
 
 ```sh
 ./build.sh linux64
-bash tests/cli.sh tests/cli_options.sh
+bash tests/cli.sh tests/cli_options.sh tests/cli_commands.sh
 bash tests/stdio.sh tests/volumes.sh
 bash tests/rs_recovery.sh tests/parc_crypt.sh tests/cm.sh tests/grzip.sh tests/bcj2.sh
 bash tests/dispack.sh tests/srep.sh tests/bcj.sh

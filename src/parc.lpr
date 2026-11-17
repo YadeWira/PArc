@@ -67,6 +67,12 @@ begin
   OutLn('  t    test archive               a    add / update archive');
   OutLn('  u    update newer files         f    freshen existing files');
   OutLn('  d    delete files               r    repair with recovery record');
+  OutLn('  v    verbose listing            lt   technical listing');
+  OutLn('  m    move files into archive    mf   move files only (keep folders)');
+  OutLn('  ch   rewrite with new options   j    join archives into the first');
+  OutLn('  c    set the archive comment    cw   write the comment to a file');
+  OutLn('  k    lock the archive           rr<spec> add a recovery record');
+  OutLn('  create   new archive (replaces an existing one)');
   OutLn('');
   OutLn('Common options:');
   OutLn('  -m<level>   -m0..-m9, -mx, -mxx (default -m4)');
@@ -108,6 +114,16 @@ begin
   OutLn('  f    freshen only files already in the archive');
   OutLn('  d    delete files matching the given names/patterns');
   OutLn('  r    repair with the recovery record; writes fixed.<name>');
+  OutLn('  v    verbose listing (ns times, attributes, packed size, ratio, block, method)');
+  OutLn('  lt   technical listing: blocks (like lb) and each file''s block and offset');
+  OutLn('  create   like a, but always starts a new archive (replaces an existing one)');
+  OutLn('  m / mf   like a, then delete the archived files from disk (m: also empty folders)');
+  OutLn('  ch   rewrite the archive with the options given (-m, -p/-hp/-p-, -rr, -k, -z)');
+  OutLn('  rr<spec> add or replace the recovery record (rr, rr5%, rr10...): ch -rr<spec>');
+  OutLn('  c    set the comment (-z<file>, -z for stdin, --archive-comment=<text>)');
+  OutLn('  cw   write the comment to a file: parc cw <archive> <file|->');
+  OutLn('  j    join: parc j <archive> <other.parc>... appends their files (blocks copied)');
+  OutLn('  k    lock the archive: no command can modify it afterwards');
   OutLn('');
   OutLn('General options:');
   OutLn('  -dp<dir>        extraction destination (attached: -dpout)');
@@ -118,6 +134,10 @@ begin
   OutLn('  -si[name]       a: add stdin as that name (default: stdin)');
   OutLn('  -r              patterns also match files in subdirectories');
   OutLn('  -kb             x/e: keep broken files (CRC error, incomplete)');
+  OutLn('  -k              lock the archive being written (like command k)');
+  OutLn('  -d / -df        a/u/f: delete archived files from disk (like m / mf)');
+  OutLn('  -z[file]        archive comment from a file, or stdin with plain -z');
+  OutLn('  --archive-comment=<text>  archive comment');
   OutLn('  -w<dir>         directory for temporary files');
   OutLn('  -mt<N>          thread budget (overrides PARC_THREADS; -mt0 = default)');
   OutLn('  --recompress    rebuild intact blocks instead of copying them');
@@ -162,6 +182,8 @@ begin
   OutLn('  -ae=<alg>       chacha (XChaCha20-Poly1305, default) or aes (AES-256-GCM);');
   OutLn('                  key derivation Argon2id t3 m64m p4, change with :t<n>:m<n>m:p<n>');
   OutLn('  -kf<file>       key file: alone, or together with -p (both needed)');
+  OutLn('  -op<password>   old password, only for reading (ch changing or removing it)');
+  OutLn('  -p- / -hp-      ch: remove all encryption / only the headers encryption');
   OutLn('');
   OutLn('Volumes and streams:');
   OutLn('  -v<size>        volumes: -v100m, -v4g, -v700000k');
@@ -185,6 +207,13 @@ var C: string;
 begin
   C := LowerCase(Name);
   Result := True;
+  if (Copy(C, 1, 2) = 'rr') then
+  begin
+    OutLn('parc rr<spec> <archive>');
+    OutLn('  Add or replace the recovery record (same spec as -rr: rr, rr5%, rr10, rr4k...);');
+    OutLn('  data blocks are copied. Same as ch -rr<spec>; ch -rr- removes it.');
+    Exit;
+  end;
   case C of
     'l':
       begin
@@ -240,6 +269,68 @@ begin
         OutLn('parc r <archive>');
         OutLn('  Repair using the recovery record; writes fixed.<name>.');
       end;
+    'v':
+      begin
+        OutLn('parc v <archive> [patterns...] [options]');
+        OutLn('  Verbose listing: time with nanoseconds (UTC), Unix mode or Windows attributes,');
+        OutLn('  size, share of the packed block, ratio, CRC, block number and its method.');
+        OutLn('  Selection options as in l.');
+      end;
+    'lt':
+      begin
+        OutLn('parc lt <archive>');
+        OutLn('  Technical listing: control and data blocks (as lb) plus, for every entry, its');
+        OutLn('  block, offset inside the uncompressed block, size, CRC, mtime in ns and mode.');
+      end;
+    'create':
+      begin
+        OutLn('parc create <archive> <files...> [options]');
+        OutLn('  Like a, but the archive is always created from scratch: an existing one is');
+        OutLn('  replaced (only after the new one is complete).');
+      end;
+    'm', 'mf':
+      begin
+        OutLn('parc ' + C + ' <archive> <files...> [options]');
+        OutLn('  Like a, then delete from disk what was archived: m deletes the files and then');
+        OutLn('  the folders it added if they are empty; mf deletes files only. Nothing is');
+        OutLn('  deleted unless the archive was written (and, with -t, tested) without errors;');
+        OutLn('  a file that changed after being read is kept. Links are deleted, never their');
+        OutLn('  targets. Options -d / -df do the same with a, u, f.');
+      end;
+    'ch':
+      begin
+        OutLn('parc ch <archive> [options]');
+        OutLn('  Rewrite the archive with the options given; untouched blocks are copied.');
+        OutLn('  -m<method> (implies --recompress), --recompress, -rr<spec> / -rr-, -k, -z,');
+        OutLn('  --archive-comment=, -v<size>. Encryption: -p<new> re-encrypts everything with a');
+        OutLn('  new password (headers too if they were encrypted), -hp<new> encrypts the headers,');
+        OutLn('  -p- removes all encryption, -hp- only the headers one. The current password goes');
+        OutLn('  in -op<old> (or is prompted); a -p that already opens the data changes nothing.');
+      end;
+    'c':
+      begin
+        OutLn('parc c <archive> -z<file> | -z | --archive-comment=<text>');
+        OutLn('  Set or replace the archive comment (empty text removes it). Same as ch -z.');
+      end;
+    'cw':
+      begin
+        OutLn('parc cw <archive> <file|->');
+        OutLn('  Write the archive comment to a file, or to stdout with "-".');
+      end;
+    'j':
+      begin
+        OutLn('parc j <archive> <other.parc>... [options]');
+        OutLn('  Join: add the files of the other archives to the first. Their blocks are copied');
+        OutLn('  as they are (encrypted blocks stay encrypted with their own password). A name');
+        OutLn('  present in several archives: the last one wins (like a); blocks that lose files');
+        OutLn('  are repacked with their method. -m implies --recompress.');
+      end;
+    'k':
+      begin
+        OutLn('parc k <archive>');
+        OutLn('  Lock the archive: a, u, f, d, m, ch, c, rr, j and k refuse to modify it');
+        OutLn('  afterwards (exit code 1); l, v, t, x, e and r still work. Same as ch -k.');
+      end;
   else
     Result := False;
   end;
@@ -248,7 +339,10 @@ end;
 function IsCommand(const C: string): Boolean;
 begin
   Result := (C = 'l') or (C = 'lb') or (C = 't') or (C = 'x') or (C = 'e') or
-            (C = 'a') or (C = 'u') or (C = 'f') or (C = 'd') or (C = 'r');
+            (C = 'a') or (C = 'u') or (C = 'f') or (C = 'd') or (C = 'r') or
+            (C = 'c') or (C = 'cw') or (C = 'ch') or (C = 'create') or (C = 'j') or
+            (C = 'm') or (C = 'mf') or (C = 'v') or (C = 'lt') or (C = 'k') or
+            (Copy(C, 1, 2) = 'rr');
 end;
 
 procedure Usage;
@@ -277,6 +371,28 @@ begin
     PrintBlock(A.DataBlocks[i]);
     OutLn(Format('             %d file(s) from #%d', [A.DataBlocks[i].FileCount, A.DataBlocks[i].FirstFile]));
   end;
+end;
+
+{ lt: el listado técnico: los bloques (como lb) y, por archivo, su bloque, su posición dentro
+  del bloque descomprimido, tamaño, CRC y los campos propios de .parc. }
+procedure CmdTechList(A: TArchive);
+var
+  i: Integer;
+  F: string;
+begin
+  CmdBlocks(A);
+  if A.Comment <> '' then OutLn('Comment: ' + A.Comment);
+  OutLn('Files:');
+  OutLn('  #      block  offset        size          CRC       mtime (ns since 1970)  mode/attr  name');
+  for i := 0 to High(A.Files) do
+    with A.Files[i] do
+    begin
+      if IsDir then F := 'dir' else if IsLink then F := 'link' else F := IntToStr(DataBlock);
+      OutLn(Format('  %-6d %-6s %-13d %-13d %.8x  %-21s  %-9s  %s%s',
+        [i, F, Offset, Size, Crc, BoolToStr(HasMTimeNs, IntToStr(MTimeNs), IntToStr(Time) + '000000000'),
+         BoolToStr(HasUnixMode, '0' + OctStr(UnixMode and $FFF, 4), BoolToStr(HasWinAttr, '$' + IntToHex(WinAttr, 4), '-')),
+         Name, BoolToStr(IsLink, ' -> ' + LinkTarget, '')]));
+    end;
 end;
 
 { r: como "arc r": busca sectores dañados con el registro de recuperación y, si todos se
@@ -773,7 +889,116 @@ type
     Encryption: string;      // -ae= / --encryption=
     VolumeSize: Int64;       // -v<tamaño>: volúmenes (solo .parc); 0 = como estaba
     DataPassword, HeadersPassword: RawByteString;   // '' = sin cifrar
+    Comment: RawByteString;  // -z / --archive-comment / c: el comentario nuevo
+    CommentGiven: Boolean;
+    Lock: Boolean;           // -k / k: el archivo queda bloqueado
+    NoDataPwd, NoHeadPwd: Boolean;   // ch -p- (quitar todo el cifrado) / -hp- (el de los encabezados)
+    ForceNew: Boolean;       // create: empezar de cero aunque exista
+    MoveMode: Integer;       // m / -d: 1 (archivos y directorios); mf / -df: 2 (solo archivos)
   end;
+
+var
+  { m/mf/-d/-df: lo que salió del disco y quedó en el archivo (se borra después de escribirlo
+    y, con -t, de probarlo). }
+  MovedEntries: TWriteEntryArray = nil;
+  { j: los otros archivos (quedan abiertos hasta escribir el resultado). }
+  JoinArcs: array of TArchive = nil;
+
+{ j: los archivos de A y de JoinArcs, en ese orden. Un nombre repetido lo gana el último que lo
+  trae (como a: lo que se junta reemplaza). Los bloques que quedan enteros se copian tal cual
+  (cifrados o no); los que pierden archivos se reempaquetan con su método (y, si estaban
+  cifrados, se vuelven a cifrar con la contraseña principal). }
+procedure PlanJoin(A: TArchive; Recompress: Boolean; var Entries: TWriteEntryArray;
+  var Groups: TSolidGroupArray; out Added, Replaced: Integer);
+var
+  Arcs: array of TArchive;
+  Win: TStringList;
+  k, f, b, n, g, idx, total: Integer;
+  Keep: array of array of Boolean;
+  EIdx: array of array of Integer;
+  Files: array of Integer;
+  E: TWriteEntry;
+begin
+  SetLength(Arcs, 1 + Length(JoinArcs));
+  Arcs[0] := A;
+  for k := 0 to High(JoinArcs) do Arcs[k + 1] := JoinArcs[k];
+  Added := 0; Replaced := 0;
+  // El dueño de cada nombre: el último archivo que lo trae
+  Win := TStringList.Create;
+  try
+    Win.Sorted := True;
+    Win.Duplicates := dupIgnore;
+    SetLength(Keep, Length(Arcs));
+    SetLength(EIdx, Length(Arcs));
+    for k := High(Arcs) downto 0 do
+    begin
+      SetLength(Keep[k], Length(Arcs[k].Files));
+      SetLength(EIdx[k], Length(Arcs[k].Files));
+      for f := 0 to High(Arcs[k].Files) do
+      begin
+        idx := Win.IndexOf(NameKeyOf(Arcs[k].Files[f].Name));
+        Keep[k][f] := (idx < 0) or (PtrInt(Win.Objects[idx]) = k);
+        if idx < 0 then Win.AddObject(NameKeyOf(Arcs[k].Files[f].Name), TObject(PtrInt(k)))
+        else if (PtrInt(Win.Objects[idx]) <> k) and not Arcs[k].Files[f].IsDir then Inc(Replaced);
+        EIdx[k][f] := -1;
+      end;
+    end;
+  finally
+    Win.Free;
+  end;
+  // Entradas, en el orden de cada archivo
+  n := 0;
+  SetLength(Entries, 0);
+  for k := 0 to High(Arcs) do
+    for f := 0 to High(Arcs[k].Files) do
+      if Keep[k][f] then
+      begin
+        E := Default(TWriteEntry);
+        E.StoredName := Arcs[k].Files[f].Name;
+        E.Meta := MetaFromArchive(Arcs[k].Files[f]);
+        E.SrcArc := Arcs[k];
+        E.SrcIndex := f;
+        if n >= Length(Entries) then SetLength(Entries, 2 * n + 64);
+        Entries[n] := E;
+        EIdx[k][f] := n;
+        Inc(n);
+        if (k > 0) and not E.Meta.IsDir and not E.Meta.IsLink then Inc(Added);
+      end;
+  SetLength(Entries, n);
+  Dec(Added, Replaced);
+  if Added < 0 then Added := 0;
+  // Bloques: enteros se copian; con huecos (o --recompress / -m) se reempaquetan
+  for k := 0 to High(Arcs) do
+    for b := 0 to High(Arcs[k].DataBlocks) do
+    begin
+      Files := nil;
+      total := 0;
+      for f := Arcs[k].DataBlocks[b].FirstFile to Arcs[k].DataBlocks[b].FirstFile + Arcs[k].DataBlocks[b].FileCount - 1 do
+      begin
+        if Arcs[k].Files[f].IsDir or Arcs[k].Files[f].IsLink then Continue;
+        Inc(total);
+        if Keep[k][f] then
+        begin
+          SetLength(Files, Length(Files) + 1);
+          Files[High(Files)] := EIdx[k][f];
+        end;
+      end;
+      if Length(Files) = 0 then Continue;
+      g := Length(Groups);
+      SetLength(Groups, g + 1);
+      Groups[g] := Default(TSolidGroup);
+      Groups[g].Files := Files;
+      if (Length(Files) = total) and not Recompress then
+      begin
+        Groups[g].CopyFrom := Arcs[k];
+        Groups[g].CopyBlock := b;
+        Groups[g].Method := Arcs[k].DataBlocks[b].Method;
+      end
+      else
+        Groups[g].Method := WithoutCipher(Arcs[k].DataBlocks[b].Method);
+    end;
+end;
+
 
 { Como ArcRecover.hs: sin -rr se conserva lo que tenía el archivo; -rr/-rr+ usa eso o el
   recomendado por tamaño (4%/2%/1%); -rr- ninguno; -rr0.1% y -rr0.01% solo CRCs. }
@@ -1120,6 +1345,28 @@ begin
   end;
 end;
 
+{ ¿Cambia el cifrado de los datos? (entonces se reempaqueta todo con la contraseña nueva, o sin
+  ninguna). -p- lo quita; una -p que no abre los datos cifrados (o datos en claro con -p) es
+  una contraseña nueva. Una -p que sí los abre es solo para leer: nada cambia. }
+function DataPasswordChanges(A: TArchive; const MO: TModifyOptions): Boolean;
+var
+  b: Integer;
+  Enc: string;
+begin
+  Result := False;
+  if A = nil then Exit;
+  Enc := '';
+  for b := 0 to High(A.DataBlocks) do
+    if WithoutCipher(A.DataBlocks[b].Method) <> A.DataBlocks[b].Method then
+    begin
+      Enc := A.DataBlocks[b].Method;
+      Break;
+    end;
+  if MO.NoDataPwd then Exit(Enc <> '');
+  if MO.DataPassword = '' then Exit(False);
+  Result := (Enc = '') or not CryptMethodPasswordOk(Enc, MO.DataPassword);
+end;
+
 { Fecha (ns) del archivo o de su primer volumen; 0 si no se puede leer. }
 function ArchiveMTime(const ArcName: string): Int64;
 var
@@ -1170,6 +1417,8 @@ var
   Old: array of Integer;         // índice en Entries de cada archivo viejo conservado (-1 si no)
   EntCount: Integer;
   Scopes: TCollectScopes;
+  S: string;
+  ChangeData: Boolean;
   DelSel: TBoolArray;
   DSel: TSelectOptions;
   OldTime, Newest: Int64;
@@ -1185,9 +1434,14 @@ var
   end;
 
 begin
-  if (Cmd <> 'd') and (Paths.Count = 0) and (MO.StdinFile = '') then
+  if ((Cmd = 'a') or (Cmd = 'u') or (Cmd = 'f') or (Cmd = 'j')) and (Paths.Count = 0) and (MO.StdinFile = '') then
   begin
-    ErrLn('ERROR: no files specified');
+    if Cmd = 'j' then ErrLn('ERROR: no archives to join specified') else ErrLn('ERROR: no files specified');
+    Exit(1);
+  end;
+  if (Cmd = 'ch') and (Paths.Count > 0) then
+  begin
+    ErrLn('ERROR: this command takes no file names (it rewrites the whole archive)');
     Exit(1);
   end;
   // d sin nombres ni filtros: FreeArc lo rechaza (borraría todo con "*")
@@ -1196,8 +1450,26 @@ begin
     ErrLn('ERROR: no files specified (d needs names, patterns or a selection option)');
     Exit(1);
   end;
-  Exists := ArchiveExists(ArcName);
-  if not Exists and ((Cmd = 'd') or (Cmd = 'f')) then
+  // create tampoco reemplaza uno bloqueado (si no se puede abrir, p. ej. -hp sin contraseña,
+  // no se sabe: se reemplaza)
+  if MO.ForceNew and ArchiveExists(ArcName) then
+  begin
+    A := nil;
+    try
+      A := TArchive.Open(ArcName);
+      Newer := A.Locked;
+    except
+      Newer := False;
+    end;
+    A.Free;
+    if Newer then
+    begin
+      ErrLn('ERROR: ' + ArcName + ' is locked (k / -k): it cannot be replaced');
+      Exit(1);
+    end;
+  end;
+  Exists := ArchiveExists(ArcName) and not MO.ForceNew;   // create: como si no existiera
+  if not Exists and ((Cmd = 'd') or (Cmd = 'f') or (Cmd = 'ch') or (Cmd = 'j')) then
   begin
     ErrLn('ERROR: does not exist: ' + ArcName);
     Exit(1);
@@ -1218,12 +1490,26 @@ begin
     if (A <> nil) and (A.SFXSize > 0) then SfxPrefix := ReadWholeFile(ArcName, A.SFXSize);
     if (A <> nil) and A.Locked then
     begin
-      ErrLn('ERROR: ' + ArcName + ' is locked against changes (FreeArc -k)');
+      ErrLn('ERROR: ' + ArcName + ' is locked (k / -k): it cannot be modified');
       Exit(1);
+    end;
+    // j: abrir los otros (antes de nada: si alguno falta o está dañado, no se escribe nada)
+    if Cmd = 'j' then
+    begin
+      SetLength(JoinArcs, Paths.Count);
+      for i := 0 to Paths.Count - 1 do JoinArcs[i] := nil;
+      for i := 0 to Paths.Count - 1 do
+      begin
+        if ExpandFileName(Paths[i]) = ExpandFileName(ArcName) then
+          raise EFOpenError.CreateFmt('cannot join an archive with itself: %s', [Paths[i]]);
+        S := Paths[i];
+        if IsVolumeSet(S, VolBase) then S := VolBase;
+        JoinArcs[i] := TArchive.Open(S);
+      end;
     end;
     Disk := nil;
     Scopes := nil;
-    if Cmd <> 'd' then
+    if (Cmd = 'a') or (Cmd = 'u') or (Cmd = 'f') then
     begin
       CollectEntries(Paths, ExpandFileName(ArcName), MO.Sel, MO.Recursive, MO.EpMode, Disk, Scopes);
     end;
@@ -1231,7 +1517,7 @@ begin
     if UnreadableStored <> nil then
       for i := 0 to UnreadableStored.Count - 1 do Skipped.Add(NameKeyOf(UnreadableStored[i]));
     // -si: lo que llegó por stdin, ya volcado a un temporal, con el nombre pedido
-    if (Cmd <> 'd') and (MO.StdinFile <> '') then
+    if (Cmd = 'a') and (MO.StdinFile <> '') then
     begin
       n := Length(Disk);
       SetLength(Disk, n + 1);
@@ -1245,7 +1531,7 @@ begin
     // --nodates: lo nuevo va sin fecha (al extraerlo queda la de la extracción)
     if MO.NoDates then
       for i := 0 to High(Disk) do Disk[i].Meta.MTimeNs := 0;
-    if (Cmd <> 'd') and (Length(Disk) = 0) and not Exists then
+    if ((Cmd = 'a') or (Cmd = 'u') or (Cmd = 'f')) and (Length(Disk) = 0) and not Exists then
     begin
       // como FreeArc ("No files to archive"): no se crea un archivo vacío
       ErrLn('ERROR: no files to add');
@@ -1256,6 +1542,17 @@ begin
     EntCount := 0;
     NewIdx := nil;
     Removed := 0; Replaced := 0; Added := 0;
+    Groups := nil;
+    // Cmdline.hs: con los comandos que copian (d, ch, j), un -m explícito implica
+    // --recompress: los bloques viejos se rehacen con ese método en vez de copiarse. Cambiar
+    // la contraseña (ch -p/-hp/-p-) también rehace todo.
+    ChangeData := DataPasswordChanges(A, MO);
+    Recompress := MO.Recompress or (((Cmd = 'd') or (Cmd = 'ch') or (Cmd = 'j')) and MO.MethodGiven)
+                  or ChangeData;
+    if Cmd = 'j' then
+      PlanJoin(A, Recompress, Entries, Groups, Added, Replaced)
+    else
+    begin
     // Archivos viejos: cuáles se conservan
     if A <> nil then
     begin
@@ -1349,14 +1646,20 @@ begin
     Dec(Added, Replaced);
     if Added < 0 then Added := 0;
     SetLength(Entries, EntCount);
-    Groups := nil;
-    // Cmdline.hs: con los comandos que copian (d entre ellos), un -m explícito implica
-    // --recompress: los bloques viejos se rehacen con ese método en vez de copiarse.
-    Recompress := MO.Recompress or ((Cmd = 'd') and MO.MethodGiven);
     if A = nil then
       GroupNewEntries(Entries, NewIdx, MO, Groups)
     else
       PlanUpdate(A, Keep, Old, Entries, NewIdx, MO, Recompress, Groups);
+    end;
+    // m/mf/-d/-df: lo que viene del disco (no -si) y entra en el archivo
+    MovedEntries := nil;
+    if MO.MoveMode > 0 then
+      for i := 0 to High(Entries) do
+        if (Entries[i].SrcArc = nil) and (Entries[i].DiskPath <> '') and (Entries[i].DiskPath <> MO.StdinFile) then
+        begin
+          SetLength(MovedEntries, Length(MovedEntries) + 1);
+          MovedEntries[High(MovedEntries)] := Entries[i];
+        end;
 
     // Avisar de una vez qué métodos todavía no se pueden comprimir
     Missing := '';
@@ -1374,6 +1677,9 @@ begin
     Opt.Parallel := True;
     Opt.KeepTemp := True;            // el original se cierra antes de reemplazarlo (Windows)
     if A <> nil then Opt.Comment := A.Comment;
+    if MO.CommentGiven then Opt.Comment := MO.Comment;
+    Opt.Locked := MO.Lock;
+    Opt.ChangePassword := ChangeData;
     // El tamaño para el % recomendado es el de los datos (aproximado: lo de entrada)
     OldRR := '';
     if A <> nil then OldRR := A.Recovery;
@@ -1383,6 +1689,18 @@ begin
     Opt.Encryption := MO.Encryption;
     Opt.DataPassword := MO.DataPassword;
     Opt.HeadersPassword := MO.HeadersPassword;
+    // Un archivo con -hp sigue con los encabezados cifrados aunque al actualizarlo no se repita
+    // -hp (antes quedaban en claro): con la contraseña principal, si es la que los abre
+    if (A <> nil) and (MO.HeadersPassword = '') and not MO.NoDataPwd and not MO.NoHeadPwd and
+       (WithoutCipher(A.Footer.Method) <> A.Footer.Method) then
+    begin
+      if ChangeData and (MO.DataPassword <> '') then
+        Opt.HeadersPassword := MO.DataPassword    // ch -p<nueva>: los encabezados también
+      else if (ArchivePassword <> '') and CryptMethodPasswordOk(A.Footer.Method, ArchivePassword) then
+        Opt.HeadersPassword := ArchivePassword
+      else
+        ErrLn('Warning: the archive headers were encrypted with another password; give it with -hp to keep them encrypted');
+    end;
     // Volúmenes: -v, o el tamaño que ya tenían (el del primero) si se actualiza uno partido
     Opt.VolumeSize := MO.VolumeSize;
     if (Opt.VolumeSize = 0) and IsVolumeSet(ArcName, VolBase) then
@@ -1397,6 +1715,8 @@ begin
   finally
     A.Free;
     Skipped.Free;
+    for i := 0 to High(JoinArcs) do JoinArcs[i].Free;
+    JoinArcs := nil;
   end;
   FinishArchive(ArcName, Opt.VolumeSize);
   FinalName := ArcName;
@@ -1436,6 +1756,55 @@ begin
       [Unreadable.Count]));
     Result := EXIT_WARNINGS;
   end;
+end;
+
+{ m/mf/-d/-df: borra del disco lo que quedó en el archivo, solo si no cambió desde que se leyó
+  (tamaño y fecha). Enlaces: se borra el enlace, nunca su destino. Con m también los
+  directorios agregados que quedaron vacíos (los más profundos primero). Devuelve cuántos no se
+  pudieron borrar. }
+function DeleteMoved(Mode: Integer): Integer;
+var
+  i, Files, Dirs: Integer;
+  M: TFileMeta;
+  DirList: TStringList;
+  Same: Boolean;
+begin
+  Result := 0; Files := 0; Dirs := 0;
+  DirList := TStringList.Create;
+  try
+    for i := 0 to High(MovedEntries) do
+      with MovedEntries[i] do
+      begin
+        if Meta.IsDir and not Meta.IsLink then
+        begin
+          if Mode = 1 then DirList.Add(DiskPath);
+          Continue;
+        end;
+        if Meta.IsLink then Same := GetLinkMeta(DiskPath, M) and M.IsLink
+        else Same := not GetLinkMeta(DiskPath, M) and GetFileMeta(DiskPath, M) and not M.IsDir and
+                     (M.Size = Meta.Size) and (M.MTimeNs = Meta.MTimeNs);
+        if not Same then
+        begin
+          ErrLn('Warning: ' + DiskPath + ' changed after it was archived: not deleted');
+          Inc(Result);
+          Continue;
+        end;
+        // un enlace a un directorio en Windows es un directorio: RemoveDir quita el enlace
+        if DeleteFile(FsPath(DiskPath)) or (Meta.IsLink and RemoveDir(FsPath(DiskPath))) then Inc(Files)
+        else
+        begin
+          ErrLn('Warning: could not delete ' + DiskPath);
+          Inc(Result);
+        end;
+      end;
+    // los más largos (más profundos) primero; uno con algo adentro (no archivado) queda
+    DirList.Sort;
+    for i := DirList.Count - 1 downto 0 do
+      if RemoveDir(FsPath(DirList[i])) then Inc(Dirs);
+  finally
+    DirList.Free;
+  end;
+  OutLn(Format('Deleted from disk: %s%s', [Count(Files, 'file'), BoolToStr(Mode = 1, ' and ' + Count(Dirs, 'folder'), '')]));
 end;
 
 var
@@ -1608,7 +1977,11 @@ var
   TestAfter, PreTest, PrintCfg: Boolean;
   DPwd, HPwd: string;
   Cipher: TCipherChoice;
-  Rel: string;
+  Rel, BaseCmd, OldPwd: string;
+  MoveOpt: Integer;
+  PwdOpt, NoDataPwd, NoHeadPwd: Boolean;
+  F: TFileStream;
+  CommentBytes: TBytes;
 begin
   Cmd := '';
   if ArgCount >= 1 then Cmd := Arg(1);
@@ -1685,6 +2058,8 @@ begin
   OverwriteGiven := False; YesAll := False;
   TestAfter := False; PreTest := False;
   KeyFile := '';
+  MoveOpt := 0; OldPwd := '';
+  NoDataPwd := False; NoHeadPwd := False;
   try
     try
     for i := 2 to ArgCount do
@@ -1718,6 +2093,32 @@ begin
         else if S = '--dirs' then MO.Sel.Dirs := dmAlways
         else if S = '-ed' then MO.Sel.Dirs := dmNever
         else if S = '-kb' then Opt.KeepBroken := True
+        else if S = '-k' then MO.Lock := True
+        else if S = '-d' then MoveOpt := 1
+        else if S = '-df' then MoveOpt := 2
+        else if Copy(S, 1, 18) = '--archive-comment=' then
+        begin
+          MO.Comment := Copy(S, 19, MaxInt);
+          MO.CommentGiven := True;
+        end
+        else if S = '-z' then
+        begin
+          // -z: el comentario por stdin (hasta EOF)
+          if InIsConsole then ErrLn('Enter the archive comment, end with Ctrl-D (Ctrl-Z on Windows):');
+          S := IncludeTrailingPathDelimiter(GetTempDir) + Format('parc-cmt-%d.tmp', [GetProcessID]);
+          RegisterTempFile(S);
+          StdinToFile(S);
+          MO.Comment := RawByteString(StringOf(ReadWholeFile(S)));
+          DeleteFile(FsPath(S));
+          MO.CommentGiven := True;
+        end
+        else if Copy(S, 1, 2) = '-z' then
+        begin
+          CommentBytes := ReadWholeFile(Copy(S, 3, MaxInt), 1 shl 20);
+          SetString(MO.Comment, PAnsiChar(CommentBytes), Length(CommentBytes));
+          MO.CommentGiven := True;
+        end
+        else if Copy(S, 1, 3) = '-op' then OldPwd := Copy(S, 4, MaxInt)
         else if S = '-tk' then MO.KeepTime := True
         else if S = '-tl' then MO.TimeToLast := True
         else if S = '-t' then TestAfter := True
@@ -1828,7 +2229,7 @@ begin
       else AddItemOrList(S, Filter);   // @lista: un nombre o patrón por línea
     end;
     except
-      on E: EFOpenError do begin ErrLn('ERROR: ' + E.Message); Halt(4); end;
+      on E: EFOpenError do begin ErrLn('ERROR: ' + FileErrorText(E.Message, True)); Halt(4); end;
     end;
     if ArcName = '' then
     begin
@@ -1842,12 +2243,38 @@ begin
       ErrLn('ERROR: PArc no longer reads or writes .arc (only .parc). For .arc use FreeArc-ex.');
       Halt(1);
     end;
-    Writing := (Cmd = 'a') or (Cmd = 'u') or (Cmd = 'f') or (Cmd = 'd');
+    // Los comandos nuevos son formas de a / ch (como en FreeArc):
+    //   m, mf = a + borrar del disco; create = a desde cero; c = ch con comentario;
+    //   k = ch con -k; rr<spec> = ch -rr<spec>; j = juntar archivos
+    BaseCmd := Cmd;
+    if (Cmd = 'm') or (Cmd = 'mf') then
+    begin
+      BaseCmd := 'a';
+      if Cmd = 'm' then MO.MoveMode := 1 else MO.MoveMode := 2;
+    end
+    else if Cmd = 'create' then begin BaseCmd := 'a'; MO.ForceNew := True; end
+    else if Cmd = 'c' then
+    begin
+      BaseCmd := 'ch';
+      if not MO.CommentGiven then Fail('c needs the comment: -z<file>, -z (stdin) or --archive-comment=<text>');
+    end
+    else if Cmd = 'k' then begin BaseCmd := 'ch'; MO.Lock := True; end
+    else if Copy(Cmd, 1, 2) = 'rr' then begin BaseCmd := 'ch'; MO.Recovery := Copy(Cmd, 3, MaxInt); end;
+    if MoveOpt > 0 then
+    begin
+      if (BaseCmd <> 'a') and (BaseCmd <> 'u') and (BaseCmd <> 'f') then Fail('-d and -df are only valid with a, u, f');
+      if MO.MoveMode = 0 then MO.MoveMode := MoveOpt;
+    end;
+    Writing := (BaseCmd = 'a') or (BaseCmd = 'u') or (BaseCmd = 'f') or (BaseCmd = 'd') or
+               (BaseCmd = 'ch') or (BaseCmd = 'j');
+    if (MO.Lock or MO.CommentGiven) and not Writing then Fail('-k, -z and --archive-comment are only valid with commands that write');
+    if MO.ForceNew and (ArcName = '-') then MO.ForceNew := False;
     if (WorkDir <> '') and not DirectoryExists(FsPath(WorkDir)) then
       Fail('-w: directory does not exist: ' + WorkDir);
     Opt.TempDir := WorkDir;
-    if MO.Sync and (Cmd <> 'a') and (Cmd <> 'u') then Fail('--sync is only valid with commands a and u');
-    if (TestAfter or PreTest) and not Writing then Fail('-t and -tp are only valid with a, u, f and d');
+    if MO.Sync and (BaseCmd <> 'a') and (BaseCmd <> 'u') then Fail('--sync is only valid with commands a and u');
+    if (TestAfter or PreTest) and not Writing then Fail('-t and -tp are only valid with commands that write');
+    if (MO.MoveMode > 0) and (ArcName = '-') then Fail('m/mf/-d/-df cannot be used with an archive on stdout');
     // -y: sí a todo (sobrescribir), salvo que se haya pedido -o- explícitamente
     if YesAll and not OverwriteGiven then Opt.Overwrite := owAll;
     // -ep al leer: como e (sin rutas); -ep1 solo tiene sentido al agregar (al leer, -ap)
@@ -1871,13 +2298,14 @@ begin
     if ArcName = '-' then
     begin
       if WorkDir <> '' then S := WorkDir else S := GetTempDir;
-      if (Cmd = 'l') or (Cmd = 'lb') or (Cmd = 't') or (Cmd = 'x') or (Cmd = 'e') then
+      if (Cmd = 'l') or (Cmd = 'lb') or (Cmd = 't') or (Cmd = 'x') or (Cmd = 'e') or (Cmd = 'v') or
+         (Cmd = 'lt') or (Cmd = 'cw') then
       begin
         ArcName := IncludeTrailingPathDelimiter(S) + Format('parc-stdin-%d.tmp', [GetProcessID]);
         RegisterTempFile(ArcName);
         StdinToFile(ArcName);
       end
-      else if Cmd = 'a' then
+      else if (Cmd = 'a') or (Cmd = 'create') then
       begin
         if MO.VolumeSize > 0 then
         begin
@@ -1915,6 +2343,16 @@ begin
       except
         on E: Exception do begin ErrLn('ERROR: ' + E.Message); Halt(4); end;
       end;
+    // -p- / -hp-: sin contraseña (ch: quitar el cifrado)
+    if DPwd = '-' then begin DPwd := '--'; NoDataPwd := True; end;
+    if HPwd = '-' then begin HPwd := '--'; NoHeadPwd := True; end;
+    // ch con alguna opción de contraseña: el cifrado se rehace entero con lo que se dio
+    PwdOpt := (DPwd <> '--') or (HPwd <> '--') or NoDataPwd or NoHeadPwd or (KeyFile <> '');
+    if BaseCmd = 'ch' then
+    begin
+      MO.NoDataPwd := NoDataPwd;
+      MO.NoHeadPwd := NoHeadPwd or NoDataPwd;
+    end;
     // Contraseñas como Cmdline.hs: -p solo cifra datos; -hp (con o sin -p) cifra también
     // los encabezados; -p y -hp con valores distintos, uno para cada cosa
     if HPwd <> '--' then
@@ -1961,6 +2399,8 @@ begin
     if MO.DataPassword <> '' then SetArchivePassword(MO.DataPassword);
     if (MO.HeadersPassword <> '') and (MO.HeadersPassword <> MO.DataPassword) then
       AddArchivePassword(MO.HeadersPassword);
+    // -op: la contraseña vieja, solo para leer (ch al cambiar o quitar el cifrado)
+    if OldPwd <> '' then AddArchivePassword(OldPwd);
 
 
     if ShowProgress and ErrIsConsole then ProgressHandler := @DrawProgress;
@@ -1991,7 +2431,7 @@ begin
       repeat
       Retry := False;
       try
-        Code := CmdModify(Cmd, ArcName, Filter, MO);
+        Code := CmdModify(BaseCmd, ArcName, Filter, MO);
         // -t: probar el archivo recién escrito; el código de salida es el del test si falla
         if TestAfter and ((Code = 0) or (Code = EXIT_WARNINGS)) then
         begin
@@ -2004,6 +2444,8 @@ begin
           end;
         end;
         if ToStdout and ((Code = 0) or (Code = EXIT_WARNINGS)) then FileToStdout(ArcName);
+        // m/mf/-d/-df: solo con todo bien (escrito y, con -t, probado)
+        if (MO.MoveMode > 0) and (Code = 0) and (DeleteMoved(MO.MoveMode) > 0) then Code := EXIT_WARNINGS;
       except
         // El archivo viejo está cifrado y no se dio -p: pedirla, como en x/t
         on E: EPasswordRequired do
@@ -2045,6 +2487,28 @@ begin
         A := TArchive.Open(ArcName);
         try
           if Cmd = 'lb' then CmdBlocks(A)
+          else if Cmd = 'lt' then CmdTechList(A)
+          else if Cmd = 'cw' then
+          begin
+            // cw <archivo> <destino>: el comentario a un archivo, o a stdout con "-"
+            if Filter.Count <> 1 then Fail('cw needs one output file name (or "-" for stdout)');
+            if Filter[0] = '-' then
+            begin
+              F := nil;
+              if A.Comment <> '' then
+                with THandleStream.Create(StdoutHandle) do
+                  try WriteBuffer(A.Comment[1], Length(A.Comment)); finally Free; end;
+            end
+            else
+            begin
+              F := TFileStream.Create(FsPath(Filter[0]), fmCreate);
+              try
+                if A.Comment <> '' then F.WriteBuffer(A.Comment[1], Length(A.Comment));
+              finally
+                F.Free;
+              end;
+            end;
+          end
           else
           begin
             // Selección (patrones, -n, -x, -sm/-sl, -t*, --dirs/-ed, -ap); con -ap los nombres
@@ -2055,7 +2519,8 @@ begin
               for i := 0 to High(A.Files) do
                 if Sel[i] and UnderArcPath(MO.Sel, A.Files[i].Name, Rel) then A.Files[i].Name := Rel;
             Opt.Sel := Sel;
-            if Cmd = 'l' then
+            if Cmd = 'v' then CmdListVerbose(A, Sel)
+            else if Cmd = 'l' then
             begin
               if (Filter.Count = 0) and (MO.Sel.ArcPath = '') and not ContentFilters(MO.Sel)
                  and (Excludes.Count = 0) and (MO.Sel.Dirs = dmAuto) then CmdList(A, [])
