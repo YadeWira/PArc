@@ -3687,8 +3687,8 @@ procedure TTorEncStage.CStart;
 begin
   FStarted := True;
   FReq := 0;
-  FTid := 0;
-  if BeginThread(@CTorThread, Pointer(Self), FTid, CTOR_STACK) = 0 then
+  FTid := TThreadID(0);
+  if BeginThread(@CTorThread, Pointer(Self), FTid, CTOR_STACK) = TThreadID(0) then
   begin
     FStarted := False;
     raise ETorEncoder.Create('tor: no se pudo crear el hilo del codificador');
