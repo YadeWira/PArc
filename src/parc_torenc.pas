@@ -3532,7 +3532,7 @@ end;
 
 {$L parc_torglue.o}
 {$IFDEF UNIX}{$LINKLIB m}{$ENDIF}
-{$IF DEFINED(UNIX) AND NOT DEFINED(CPUX86_64)}{$LINKLIB gcc}{$ENDIF}   // i386: __udivdi3 y compañía
+{$IF DEFINED(LINUX) AND DEFINED(CPU386)}{$LINKLIB gcc}{$ENDIF}   // i386: __udivdi3 y compañía
 {$IFDEF MSWINDOWS}{$LINKLIB gcc}{$LINKLIB mingwex}{$LINKLIB msvcrt}{$LINKLIB kernel32}{$ENDIF}
 
 type
