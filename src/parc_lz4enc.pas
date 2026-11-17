@@ -6,7 +6,8 @@
   tal cual (bit 31 del largo) si no comprime lo suficiente. Con entrada vacía sale un frame
   vacío (cabecera + EndMark). Lo lee cualquier `lz4`.
 
-  Los compresores de bloque son traducciones a Pascal de los de LZ4 1.10.0:
+  Los compresores de bloque son traducciones a Pascal de los de LZ4 1.11.1 (el HC da lo mismo
+  que en 1.10.0):
     c0 (default): LZ4_compress_default (aceleración 1): LZ4_compress_generic sin diccionario,
       tabla byU16 (hash4, 2^13) si el bloque tiene < 64KB+11 bytes, si no byU32 (hash5, 2^12).
       El hash5 es el de los builds de 64 bits; se usa también en 32 bits para que el archivo
@@ -213,7 +214,7 @@ var
   ByU16: Boolean;
   ip, anchor, forwardIp, match, mflimitPlusOne, matchlimit, iend: PByte;
   op, olimit, token: PByte;
-  h, forwardH, cur, matchIndex: LongWord;
+  h, hPrev, forwardH, cur, matchIndex: LongWord;
   step, searchMatchNb: LongInt;
   litLength, len, matchCode, lastRun: SizeInt;
 label
@@ -324,13 +325,16 @@ next_match:
     anchor := ip;
     if ip >= mflimitPlusOne then Break;
 
-    // Llenar la tabla
-    Ctx^.Table[HashFast(ip - 2, ByU16)] := LongWord(ip - 2 - Src);
-
-    // Probar la posición siguiente
+    // Llenar la tabla y probar la posición siguiente (LZ4 1.11): primero la que sigue a la
+    // aparición anterior de ip-1, si coincide en 8 bytes o más; corta las cadenas de matches
+    // cortos que la tabla sola arma en datos periódicos. Si no, la candidata de la tabla.
     h := HashFast(ip, ByU16);
     cur := LongWord(ip - Src);
-    matchIndex := Ctx^.Table[h];
+    hPrev := HashFast(ip - 1, ByU16);
+    matchIndex := Ctx^.Table[hPrev] + 1;
+    Ctx^.Table[hPrev] := cur - 1;
+    if not ((ByU16 or (matchIndex + DISTANCE_MAX >= cur)) and (Read64(Src + matchIndex) = Read64(ip))) then
+      matchIndex := Ctx^.Table[h];
     match := Src + matchIndex;
     Ctx^.Table[h] := cur;
     if (ByU16 or (matchIndex + DISTANCE_MAX >= cur)) and (Read32(match) = Read32(ip)) then

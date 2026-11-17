@@ -3,6 +3,8 @@
 # la herramienta `lz4`, y PArc lee lo que escribe `lz4` (bloques enlazados, checksums, tamaño
 # de contenido). También frames dañados: tienen que dar error, no un cuelgue ni un crash.
 # Uso: tests/lz4frame.sh   (salta lo de la herramienta si no hay `lz4` en el PATH)
+#   LZ4_LIB_DIR=<lz4>/lib: además, los compresores de bloque tienen que dar los mismos bytes
+#   que LZ4 en C (1.11.1: la versión traducida en parc_lz4enc).
 set -u
 ROOT=$(cd "$(dirname "$0")/.." && pwd)
 T=$ROOT/build/tests/test_lz4frame
@@ -31,6 +33,13 @@ for f in text rnd mix empty one; do
     done
   fi
 done
+if [ -n "${LZ4_LIB_DIR:-}" ]; then
+  gcc -O2 -I"$LZ4_LIB_DIR" "$ROOT/tests/lz4_ref.c" "$LZ4_LIB_DIR/lz4.c" "$LZ4_LIB_DIR/lz4hc.c" -o ref || exit 2
+  head -c 30000 text > small; head -c 65547 text > edge; cat rnd text > big
+  for f in text mix small edge big rnd one; do for m in fast hc; do
+    ck "$f $m: mismos bytes que LZ4 en C" "[ \"\$(./ref $m $f)\" = \"\$('$T' blocks $m $f | tr A-F a-f)\" ]"
+  done; done
+fi
 # dañados: cada byte del frame cambiado (en un archivo chico) y frames cortados
 "$T" enc lz4 one one.lz4
 "$T" enc lz4:b64kb mix mix.lz4

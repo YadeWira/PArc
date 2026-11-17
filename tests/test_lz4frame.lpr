@@ -1,7 +1,9 @@
 { test_lz4frame: codifica o decodifica un frame LZ4 suelto con las etapas de PArc, para
   compararlas con la herramienta `lz4` (tests/lz4frame.sh).
     test_lz4frame enc <método lz4:...> <entrada> <salida>
-    test_lz4frame dec <entrada> <salida>      (rc 2 si el frame está dañado) }
+    test_lz4frame dec <entrada> <salida>      (rc 2 si el frame está dañado)
+    test_lz4frame blocks <fast|hc> <entrada>   bloques de 1 MB: "<modo> <bytes> <FNV-1a hex>",
+                                               para compararlo con LZ4 en C (mismos bytes) }
 program test_lz4frame;
 
 {$mode objfpc}{$H+}
@@ -16,6 +18,10 @@ var
   Dec: TLz4Stage;
   Buf: array[0..65535] of Byte;
   n: SizeInt;
+  Src, Dst: TBytes;
+  p, k, r, i: SizeInt;
+  Tot: Int64;
+  H: LongWord;
 begin
   if (ParamCount = 4) and (ParamStr(1) = 'enc') then
   begin
@@ -55,6 +61,28 @@ begin
       Fo.Free;
       Fi.Free;
     end;
+  end
+  else if (ParamCount = 3) and (ParamStr(1) = 'blocks') then
+  begin
+    Fi := TFileStream.Create(ParamStr(3), fmOpenRead);
+    SetLength(Src, Fi.Size);
+    if Fi.Size > 0 then Fi.ReadBuffer(Src[0], Fi.Size);
+    Fi.Free;
+    SetLength(Dst, Lz4CompressBound(1 shl 20));
+    Tot := 0;
+    H := 2166136261;
+    p := 0;
+    while p < Length(Src) do
+    begin
+      k := Length(Src) - p;
+      if k > 1 shl 20 then k := 1 shl 20;
+      if ParamStr(2) = 'hc' then r := Lz4CompressHCBlock(@Src[p], k, @Dst[0], Length(Dst))
+      else r := Lz4CompressFastBlock(@Src[p], k, @Dst[0], Length(Dst));
+      Inc(Tot, r);
+      for i := 0 to r - 1 do H := (H xor Dst[i]) * 16777619;
+      Inc(p, k);
+    end;
+    WriteLn(Format('%s %d %.8x', [ParamStr(2), Tot, H]));
   end
   else
   begin
