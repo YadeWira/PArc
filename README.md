@@ -15,6 +15,18 @@ symlinks, Reed–Solomon recovery, volumes and authenticated encryption.
 Documentation: [manual](docs/USO.md) · [format](docs/formato/FORMATO-PARC.md) ·
 [status](docs/ESTADO.md) · [**wiki**](https://github.com/YadeWira/PArc/wiki).
 
+| Component | Status |
+|---|---|
+| Latest release | [![Release][relBadge]][relLink] (pre-releases until 1.0.0; no format compatibility promised before then) |
+| CI | none yet: the full test suite runs locally before each release (see [Testing](#testing)) |
+| Linux x64 | release binary; full test suite and round-trips at `-m0`…`-mxx` with 1 and 4 threads |
+| Windows x64 / x86 | release binaries (no extra DLLs); cross-built with MinGW, tested under Wine; real-Windows test pending for 0.0.3 |
+| vs FreeArc 0.67.1 | smaller and faster at `-m1`…`-m9` on TILIN.tar with 1 thread; with 4 threads too, except a tie in `-m5` compression ([details](docs/ESTADO.md)) |
+| License | GPL-2.0 |
+
+[relBadge]: https://img.shields.io/github/v/release/YadeWira/PArc?include_prereleases "Latest release"
+[relLink]: https://github.com/YadeWira/PArc/releases
+
 ## Highlights
 
 - **Own format**: `.parc` keeps names, sizes, CRCs and solid blocks from the FreeArc layout,
