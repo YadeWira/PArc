@@ -804,7 +804,7 @@ var
   Mem: array of Int64;
   Frozen: array of Boolean;
   i, j, Iter: Integer;
-  Total, Target: Int64;
+  Total, Target, Second: Int64;
   S2: string;
 begin
   St := Method.Split(['+']);
@@ -828,6 +828,13 @@ begin
     // memoria -> parámetros de cada etapa es aproximado; se vuelve a medir)
     Target := Mem[j] - (Total - Limit);
     if Target < Mem[j] div 2 then Target := Mem[j] div 2;
+    // y no por debajo de la que le sigue: así se reparten el recorte en vez de vaciar una
+    // sola (TILIN -m9 en 1,5 GB: rep:290mb+lzma:88mb daba 856 MB, peor que -m7 con
+    // rep:512mb+lzma:64mb, 821 MB)
+    Second := 0;
+    for i := 0 to High(St) do
+      if (i <> j) and not Frozen[i] and (Mem[i] > Second) then Second := Mem[i];
+    if (Second < Mem[j]) and (Target < Second) then Target := Second;
     if Target < MB_ then Target := MB_;
     S2 := CanonStageMem(St[j], Target);
     // El mapeo memoria -> parámetros de cada etapa es aproximado (4x4 reparte entre sus hilos
