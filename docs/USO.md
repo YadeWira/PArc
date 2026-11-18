@@ -98,6 +98,13 @@ the archive; blocks that finish ahead of their turn wait in memory (at most min(
 in total, 256 MB on 32-bit) and only what does not fit goes to a temporary file next to the
 archive.
 
+`plz` is PArc's own fast LZ codec (it is meant to replace FreeArc's Tornado, `tor`, in the
+presets): `-mplz:<level>[:<window>]`, levels 1–7 (1–2 greedy, about `tor:3`/`tor:4`; 3–4 lazy,
+about `tor:5`/`tor:6`; 5–7 slower and smaller), default level 3; the window defaults to 8 MB
+(levels 1–2), 16 MB (3) or 64 MB (4–7), e.g. `-morep:96m:l256+exe+delta+plz:4` or
+`-m4x4:plz:1` (blocks of the window size in parallel). It decompresses about twice as fast as
+`tor`. Stream format in [FORMATO-PARC.md §6.3](formato/FORMATO-PARC.md).
+
 **Long-range matching: `orep`.** The presets put `orep` (OREP, MIT, written for PArc) in front
 of the binary chains; it replaces FreeArc's `rep`, which no longer exists (`-mrep` fails with a
 hint, and `rep` blocks of archives from PArc 0.0.5 or earlier do not decode). Syntax:

@@ -134,7 +134,7 @@ implementation
 uses
   Math, parc_filters, parc_ppmd, parc_methods, parc_lzp, parc_parallel, parc_lzmaenc,
   parc_orep, parc_deltaenc, parc_dictenc, parc_ttaenc, parc_mmenc, parc_torenc, parc_grzipenc,
-  parc_crypt, parc_canon, parc_lz4enc, parc_dispack, parc_srep, parc_cm, parc_bcj2;
+  parc_crypt, parc_canon, parc_lz4enc, parc_dispack, parc_srep, parc_cm, parc_bcj2, parc_plzenc;
 
 function StageName(const Stage: string): string; forward;
 function FastInner4x4(const Inner: string): Boolean; forward;
@@ -248,6 +248,8 @@ begin
   else if StageName(Inner) = 'tor' then
     // TORNADO_METHOD::DeCompressMem con compress_all_at_once=1; OutputSize = InSize
     Result := TorEncodeMem(Inner.Split([':']), Src, Len, Len, Data, TorCache)
+  else if StageName(Inner) = 'plz' then
+    Result := PlzEncodeMem(Inner.Split([':']), Src, Len, Data, TorCache)
   else
   begin
     Data := CompressMem(Inner, Src, Len);
@@ -346,6 +348,7 @@ begin
   if Threads > 0 then SetLength(FQueue, Threads + 1) else SetLength(FQueue, 1);
   FPool := TJobPool.Create(Threads, Length(FQueue));
   if StageName(AInner) = 'tor' then FTorCache := TTorEncCache.Create;
+  if StageName(AInner) = 'plz' then FTorCache := TPlzEncCache.Create;
   if (BudgetThreads >= 2) and FastInner4x4(AInner) then FHint := Enc4x4BlockHint;
   EmitU32(0);   // versión del formato 4x4 (se escribe aunque no haya datos, como el C)
 end;
@@ -586,6 +589,8 @@ begin
     end;
   if (BlockSize = 0) and (StageName(Inner) = 'tor') then
     BlockSize := TorDictionary(Inner.Split([':']));    // cmethod->GetDictionary()
+  if (BlockSize = 0) and (StageName(Inner) = 'plz') and PlzEncAvailable(Inner) then
+    BlockSize := PlzDictionary(Inner.Split([':']));      // la ventana
   if (BlockSize = 0) and (StageName(Inner) = 'lz4') and Lz4EncAvailable(Inner) then
     BlockSize := ParseLz4EncParams(Inner.Split([':'])).BlockSize;   // LZ4_METHOD::GetDictionary
   if BlockSize = 0 then
@@ -674,7 +679,7 @@ end;
 function FastInner4x4(const Inner: string): Boolean;
 begin
   case StageName(Inner) of
-    'tor', 'lz4': Result := True;
+    'tor', 'lz4', 'plz': Result := True;
     'lzma': Result := ParseLzmaEncParams(Inner.Split([':'])).Algorithm = 0;
   else
     Result := False;
@@ -784,6 +789,7 @@ begin
       'cm': Result := 4 * DataSize + 320 * MB_;
       'srep': Result := 3 * DataSize + 64 * MB_;
       'lz4': Result := 3 * FirstMemParam(Parts, MB_) + MB_;
+      'plz': Result := PlzEncMemory(ParsePlzEncParams(Parts), True) + MB_;
       '4x4':
         begin
           Parse4x4(Stage, Inner, Bs);
@@ -877,6 +883,7 @@ begin
         end;
       'tor': if not TorEncAvailable(Stage) then Exit(False);
       'lz4': if not Lz4EncAvailable(Stage) then Exit(False);
+      'plz': if not PlzEncAvailable(Stage) then Exit(False);
       'storing', 'exe', 'ppmd', 'lzp', 'lzma', 'orep', 'delta', 'dict', 'tta', 'mm', 'grzip', 'cm',
       'dispack', 'dispack070', 'srep', 'bcj2', 'exe2': ;
     else
@@ -925,6 +932,7 @@ begin
     'dict':    Result := TDictEncStage.Create(Target, Parts);
     'tor':     Result := TTorEncStage.Create(Target, Parts);
     'lz4':     Result := TLz4EncStage.Create(Target, Parts);
+    'plz':     Result := TPlzEncStage.Create(Target, Parts);
     'grzip':   Result := TGrzipEncStage.Create(Target, Parts);
     'tta':     Result := TTtaEncStage.Create(Target, Parts);
     'mm':      Result := TMmEncStage.Create(Target, Parts);

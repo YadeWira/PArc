@@ -40,7 +40,7 @@ var
 
 implementation
 
-uses SysUtils, Math, parc_os, parc_methods, parc_torenc, parc_lzmaenc, parc_parallel, parc_orep;
+uses SysUtils, Math, parc_os, parc_methods, parc_torenc, parc_lzmaenc, parc_parallel, parc_orep, parc_plzenc;
 
 const
   KB = 1024; MB = 1024*1024; GB = Int64(1024)*1024*1024;
@@ -442,6 +442,10 @@ begin
       if TM.FastBytes <> TD.FastBytes then Result := Result + (':fb' + IntToStr(TM.FastBytes));
       Exit;
     end;
+
+    { --- plz (parc_plzenc): nivel y ventana siempre; h<mem> si no es el del nivel. La ventana
+          no pasa del bloque (redondeada a 64 KB) y -lc achica ventana y hash. }
+    if Name = 'plz' then Exit(PlzCanon(Parts, Limit, MemLim));
 
     { --- srep: compresor externo; el método guardado es siempre "srep". }
     if Name = 'srep' then Exit('srep');
