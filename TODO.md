@@ -130,7 +130,11 @@ decompression time. The presets still use `tor`. Pending, in order:
    `parc_torglue.cpp/.patch`, the C++ part of `build.sh`) and then the decoder
    (`parc_tornado`, `parc_tordec.inc`); `tor` blocks stop decoding (pre-1.0, no format
    compatibility promised), `tests/run_tornado_tests.sh` goes away.
-3. Possible gains still open: literal coding with context (previous byte), an optimal parser for
+3. Before switching (owner's condition: beat `tor` in every cell): compression time of the lazy
+   levels on text/small-file/font/video data (`plz:3` vs `tor:5`, `plz:4` vs `tor:6`, up to
+   ×1.5) and `audio` `-m2` 4 threads size (+0.21 %); see ESTADO "Second round". Ideas: a lazy
+   parser that evaluates fewer positions on text blocks, assembler for the row finder.
+4. Possible gains still open: literal coding with context (previous byte), an optimal parser for
    levels 6-7, and assembler for the 4-stream literal decoder.
 
 ## Done — PPMd from the LZMA SDK (relicensing step)
