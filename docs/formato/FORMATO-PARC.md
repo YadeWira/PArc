@@ -265,3 +265,71 @@ orders above 16 are allowed (the SDK limits them to 16 only for the zip format; 
 `CreateSuccessors` stack array is sized for 64); and in cut-off mode, when a `CutOff` +
 `ExpandTextArea` pass changes nothing while the memory is still above 3/4 (the SDK would loop
 forever, e.g. with very small memories), the model is restarted instead.
+
+### 6.2 `plz` (since 2026-11)
+
+`plz` is PArc's own LZ77 codec (`src/parc_plz.pas` decoder and format, `src/parc_plzenc.pas`
+encoder), written to replace Tornado (`tor`), which comes from FreeArc. It is not derived from
+Tornado; it uses textbook techniques: LZ77 with four repeated offsets, length-limited canonical
+Huffman codes rebuilt per block, literals in four interleaved streams.
+
+Method string: `plz[:<level>][:<window>][:h<hash>]` plus tuning options that only the encoder
+reads (`w<ways>`, `z<lazy>`, `n<nice>`, `i<insert>`, `k<skip>`, `x<hash bytes>`, `b<block>`).
+The stored (canonical) string is `plz:<level>:<window>` followed by the options that differ from
+the level's defaults; the window is limited to the block size (rounded up to 64 KB). The decoder
+takes everything it needs from the stream.
+
+Stream:
+
+| Offset | Size | Value |
+|---|---|---|
+| 0 | 1 | version (1) |
+| 1 | 4 | window W, U32 LE, 1 KB ≤ W ≤ 1 GB: no match reaches further back than W bytes |
+| 5 | … | blocks, each starting with a type byte: 0 = end of stream; 1 = stored (`VInt n`, n bytes); 2 = repeated byte (`VInt n`, 1 byte); 3 = compressed (`VInt n`, `VInt c`, c bytes of content) |
+
+`VInt` here is LEB128 (7 bits per byte, low group first, bit 7 = more), at most 5 bytes, value
+< 2^31. Every block has 1 ≤ n ≤ 1 MiB original bytes. The stream ends at the end-of-stream byte;
+the decoder needs no original size.
+
+Compressed block content:
+
+1. `VInt nSeq`, `VInt nLit` (literal bytes in the block, ≤ n).
+2. Two mode bytes. First: bits 0-1 literals, 2-3 TOK, 4-5 LLX, 6-7 MLX; second: bits 0-1 OFS,
+   bits 2-7 zero. Table modes: 0 = new table (described below), 1 = the table of the same
+   alphabet from the last block that sent one, 2 = unused in this block. Literal mode: 0/1 =
+   Huffman with a new/the previous table, 2 = no literals (nLit = 0), 3 = stored literals.
+3. If any table is new: a bit stream with the descriptions of the new tables in the order
+   LIT, TOK, LLX, MLX, OFS, padded to a byte.
+4. Literals: stored (nLit bytes), or `VInt` section length followed by, for nLit ≥ 1024, four
+   `VInt` stream lengths and four bit streams (stream k holds literals `[k·q, min((k+1)·q, nLit))`,
+   q = ⌈nLit/4⌉), otherwise one `VInt` length and one stream.
+5. The rest of the block is the sequence bit stream (absent when nSeq = 0).
+
+Each sequence is: a TOK symbol (alphabet 128: `LLt·16 + MLt`), an OFS symbol, an LLX symbol if
+LLt = 7, an MLX symbol if MLt = 15, then the extra bits of LLX, MLX and OFS in that order. The
+literal length is LLt (< 7) or 7 + LLX value; the match length is 3 + MLt (< 15) or 18 + MLX
+value. The decoder copies that many literals, then the match. After nSeq sequences the remaining
+literals are appended; the block must then be exactly n bytes and every literal used.
+
+- LLX/MLX values (alphabet 48): v < 8 is code v; otherwise b = ⌊log2 v⌋, code 8 + 2(b−3) + bit
+  b−1 of v, followed by the low b−1 bits of v.
+- OFS (alphabet 64): 0..3 = repeated offsets rep0..rep3 (the one used moves to the front);
+  4 + slot = a new offset d+1, slot = d for d < 4, else 2b + bit b−1 of d (b = ⌊log2 d⌋),
+  followed by the low b−1 bits of d; the new offset is pushed in front of the reps. The reps
+  start as 1, 2, 3, 4 at the start of the stream and carry across blocks (stored and repeated
+  blocks leave them unchanged).
+
+Bits are read LSB first. Huffman codes are canonical (by length, then by symbol), at most 11
+bits, stored bit-reversed so the first code bit is the lowest. A table with exactly one used
+symbol codes it with 0 bits; otherwise the lengths must form a complete code (Kraft sum 1).
+
+Table description: 8 bits (number of described symbols − 1, trailing ones are 0), 15 × 3 bits
+lengths of the code-length (CL) code, then CL symbols with that code (lengths ≤ 7): 0..11 =
+a code length, 12 = repeat the previous length 3–6 times (2 extra bits), 13 = 3–10 zeros
+(3 bits), 14 = 11–138 zeros (7 bits).
+
+Decoder checks: every count, length, offset (≤ W and ≤ bytes produced so far), table and bit
+stream is bounded; each bit stream must end exactly at its last byte; anything else is a damaged
+block (`EArcCorrupt`). Memory comes from W, never more than W + 1 MiB (allocated as the data
+arrives), plus fixed buffers. Inside `4x4` each 4x4 block is a complete `plz` stream decoded
+memory to memory, which must produce exactly the block's original size and end at its last byte.

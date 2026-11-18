@@ -57,7 +57,7 @@ implementation
 uses
   parc_crypt, StrUtils, parc_os, parc_lzma, parc_filters, parc_lz4, parc_rep, parc_lzp, parc_ppmd,
   parc_dict, parc_tornado, parc_grzip, parc_parallel, parc_tta, parc_mm, parc_dispack, parc_srep, parc_cm,
-  parc_bcj2;
+  parc_bcj2, parc_plz;
 
 var
   GPassword: RawByteString;
@@ -242,6 +242,8 @@ begin
       // Dentro de 4x4 FreeArc usa compress_all_at_once, que cambia cuándo se deshacen las tablas
       if not TornadoDecodeMem(Src, SrcLen, Dst, DstLen, Written) or (Written <> DstLen) then
         Corrupt('4x4: tornado decompression failed');
+    'plz':
+      if not PlzDecodeMem(Src, SrcLen, Dst, DstLen) then Corrupt('4x4: plz decompression failed');
   else
     begin
       Chain := CreateDecoderChain(Method, TMemStage.Create(Src, SrcLen));
@@ -442,6 +444,9 @@ begin
     'tor':
       // El stream de Tornado describe su propio formato: los parámetros son del compresor
       Result := TTornadoStage.Create(Source);
+    'plz':
+      // El stream dice su ventana: los parámetros son del compresor
+      Result := TPlzStage.Create(Source);
     'grzip':
       Result := TGrzipStage.Create(Source, Params);
     'tta':

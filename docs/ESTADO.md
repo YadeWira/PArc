@@ -38,9 +38,12 @@ The rest of the FreeArc 0.67 tree is in git history (commit `82ea8d9`) and in Fr
 - Commands: `l`, `lb`, `t`, `x`, `e`, `a`, `u`, `f`, `d`, `r`, and FreeArc's `v`, `lt`, `create`,
   `m`, `mf`, `ch`, `rr<spec>`, `c`, `cw`, `j`, `k` (tests/cli_commands.sh). Not implemented: `s`
   (SFX) and `modify`.
-- Methods: `storing`, `lzma`, `ppmd`, `grzip`, `dict`, `rep`, `delta`, `tor`, `lzp`, `mm`,
+- Methods: `storing`, `lzma`, `ppmd`, `grzip`, `dict`, `rep`, `delta`, `tor`, `plz`, `lzp`, `mm`,
   `tta`, `4x4`, `exe` (BCJ), `lz4`, `dispack070`, `srep` and `cm` (context mixing), alone or
   chained.
+- `plz` (2026-11) is PArc's own LZ77 codec (no FreeArc code), meant to replace Tornado in the
+  presets: see "plz" below for the design and the measurements against `tor`; stream format in
+  `formato/FORMATO-PARC.md` §6.2.
 - FreeArc built-in presets ported: `-m0`…`-m9`, `-mx`, `-mxx` and the `d/t/xt/xb/binary/rep` families.
 - `ppmd` (2026-11) is PPMd var.I from the public-domain LZMA SDK (`Ppmd8`), ported to Pascal
   with x86-64 assembler for the symbol coder and `UpdateModel`; it replaced FreeArc's PPMd (a
@@ -308,6 +311,371 @@ on a 64-core Xeon (times are indicative); every PArc archive tested OK with linu
 `-m9` was 834 MB (`rep:407mb+lzma:72mb`), with 2 GB 818 MB; 2.5 GB ran out of memory (before
 rep stopped copying its window when growing). No run ran out of memory.
 
+## plz: own LZ codec to replace Tornado (2026-11-17)
+
+PArc is moving to the MIT license, so the FreeArc-derived code has to go; Tornado (`tor`, ~10k
+lines plus FreeArc's C++ encoder) is the largest piece, and it is the engine of `-m1`…`-m4`
+(alone, inside `4x4`, and for `$compressed` files). `plz` replaces it with PArc's own code,
+written from public LZ77 literature without looking at Tornado's sources
+(`src/parc_plz.pas`: format and decoder; `src/parc_plzenc.pas`: encoder;
+`src/parc_plz_x64.inc`: one x86-64 loop; format in `formato/FORMATO-PARC.md` §6.2).
+
+**Design.**
+
+- *Match finder.* Levels 1–2: a direct-mapped table whose 8-byte entries hold the position and
+  the first 4 data bytes, so a non-matching candidate never touches the window (5/6-byte hash,
+  1 MB / 8 MB table); the scan over positions without matches is a small assembler loop
+  (identical output with `-dPARC_NOASM`). Levels 3–7: hash rows of 4–64 entries in recency
+  order, each with an 8-bit tag; tags, row head and positions share a cache-line-aligned record
+  and are compared 8 at a time (SWAR) before any data is read; rows of the next position are
+  prefetched. The four repeated offsets are tried first at every position; matches are
+  extended backwards over pending literals.
+- *Parser.* Greedy with skip acceleration in incompressible stretches (1–2, inserting two
+  positions per match), lazy with one step (3–4) or two (5–7) using an estimated gain
+  `4·length − log2(offset)` (repeated offsets almost free); long matches insert only their first
+  and last positions (4 at level 3, 16 at 4–5).
+- *Entropy coding.* The input is parsed in blocks of 256 KB; each one is then coded whole or cut
+  (after a sequence) into pieces of 16–128 KB, choosing the cut that minimises an integer
+  entropy estimate of the pieces, so tables follow data that changes (many small files of
+  different kinds one after another) and stay big on uniform data. Each coded block has its own
+  canonical Huffman tables (≤ 11 bits, rebuilt from its histograms) for literals and for four
+  sequence alphabets: a
+  128-symbol token joining the literal and match lengths, overflow codes for long lengths, and
+  an offset alphabet with the 4 repeated offsets and 60 log-slots with a mantissa bit. A table is
+  reused from the previous block, literals are stored raw, or the whole block is stored, whenever
+  that is cheaper. Literals are coded in four interleaved bit streams (decoded in parallel),
+  sequences in a fifth one; extra bits are raw.
+- *Decoder.* Literals first (4 streams, 11-bit lookup tables, 5 symbols per refill), then the
+  sequences with 16-byte copies; every count, length, offset and bit-stream end is checked
+  (damaged input gives `EArcCorrupt`, never an out-of-bounds access or a hang: 2,000 mutated
+  streams per `tests/plz.sh` run, clean under valgrind). Streaming uses a ring of W + 1 MB that
+  grows with the data (W from the stream, ≤ 1 GB); inside `4x4` each block is decoded memory
+  to memory.
+- *Determinism.* Each block is parsed only with the data up to its end and everything is integer
+  arithmetic, so the output is the same in streaming and memory mode, for any write sizes, with or
+  without assembler and on every platform (`tests/plz_cross.sh`: linux64, linux32, linuxarm64
+  under QEMU, win64 and win32 under Wine, 450 identical outputs), and does not depend on the
+  thread count (the encoder is single-threaded; `4x4` gives the parallelism, as with `tor`).
+
+**Levels** (`plz:<1..7>[:<window>][:h<hash>]`, default 3):
+
+| level | window | finder | parser | aimed at | memory to compress (streaming) |
+|---|---|---|---|---|---|
+| 1 | 8 MB | direct table 1 MB, 5-byte hash | greedy | `tor:3:8mb` (4x4 `-m1`) | ~14 MB |
+| 2 | 8 MB | direct table 8 MB, 6-byte hash | greedy | `tor:4:8mb:h4m` (`-m1` one thread) | ~21 MB |
+| 3 | 16 MB | rows of 4 (8 MB), 5-byte hash | lazy 1 | `tor:5`, `tor:c3` (4x4 `-m2`, `$compressed`) | ~33 MB |
+| 4 | 64 MB | rows of 8 (16 MB), 5-byte hash | lazy 1 | `tor:6` (`-m2` one thread) | ~113 MB |
+| 5–7 | 64 MB | rows of 16/32/64 | lazy 2 | slower, smaller (e.g. `3xt`'s `tor:7`) | 130–200 MB |
+
+Decompression needs the window plus ~2 MB.
+
+**Measurements** (2026-11-17, one `parc` binary containing both codecs; a 64-core Xeon
+E5-2697A v4 shared with other jobs, `nice -n10`, best of 2 runs; CPU = user + system of the
+process, so the 4-thread rows show total work; decompression = `parc t`). Data:
+`tilin_512m.tar` (first 512 MB of TILIN), `TILIN.tar` (1.876 GB), and the broad-sweep sets
+(directories of 17–150 MB). Methods are the chains the presets use today for `-m1`/`-m2` with
+`PARC_THREADS=1` (`tor:4:8mb:h4m`, `tor:6`) and ≥ 2 (`4x4:tor:3:8mb`, `4x4:tor:5`) and the
+`$compressed` chain of `-m4` (`4x4:tor:c3`), each against its `plz` level. Logs and CSV:
+`/mnt/IA_LAB/agentes/PArc/lz-new/logs/final/`.
+
+**Codec alone** (`tests/plz_bench.lpr`: the stage in memory, one thread, best of 2; CPU = process CPU; sizes in MB)
+
+| file | tor | size | comp CPU | dec CPU | plz | size | Δ | comp CPU | dec CPU |
+|---|---|---:|---:|---:|---|---:|---:|---:|---:|
+| tilin_512m.tar | `tor:3:8mb` | 299.40 | 4.756 | 3.878 | `plz:1` | 288.83 | -3.53 % | 4.385 | 1.639 |
+| tilin_512m.tar | `tor:4:8mb:h4m` | 290.26 | 6.556 | 4.171 | `plz:2` | 284.87 | -1.85 % | 4.695 | 1.753 |
+| tilin_512m.tar | `tor:5` | 278.61 | 12.042 | 5.411 | `plz:3` | 272.70 | -2.12 % | 11.574 | 1.805 |
+| tilin_512m.tar | `tor:c3` | 278.80 | 12.952 | 3.966 | `plz:3` | 272.70 | -2.19 % | 11.574 | 1.805 |
+| tilin_512m.tar | `tor:6` | 273.77 | 19.330 | 5.592 | `plz:4` | 269.94 | -1.40 % | 11.808 | 1.643 |
+| tilin_512m.tar | `tor:7:96m:h64m` | 269.16 | 53.103 | 5.025 | `plz:5:96m` | 267.52 | -0.61 % | 16.224 | 1.595 |
+| set_exe.tar | `tor:3:8mb` | 84.94 | 1.205 | 0.936 | `plz:1` | 83.02 | -2.26 % | 0.807 | 0.275 |
+| set_exe.tar | `tor:4:8mb:h4m` | 83.10 | 1.410 | 0.951 | `plz:2` | 82.22 | -1.06 % | 0.854 | 0.272 |
+| set_exe.tar | `tor:5` | 81.89 | 3.021 | 1.390 | `plz:3` | 80.92 | -1.18 % | 1.872 | 0.290 |
+| set_exe.tar | `tor:c3` | 81.92 | 3.058 | 0.915 | `plz:3` | 80.92 | -1.22 % | 1.872 | 0.290 |
+| set_exe.tar | `tor:6` | 81.32 | 4.095 | 1.463 | `plz:4` | 80.11 | -1.49 % | 2.186 | 0.359 |
+| set_exe.tar | `tor:7:96m:h64m` | 80.86 | 12.821 | 1.368 | `plz:5:96m` | 78.68 | -2.69 % | 2.858 | 0.370 |
+| set_text.tar | `tor:3:8mb` | 32.45 | 0.659 | 0.476 | `plz:1` | 32.09 | -1.10 % | 0.877 | 0.314 |
+| set_text.tar | `tor:4:8mb:h4m` | 32.25 | 0.785 | 0.454 | `plz:2` | 31.26 | -3.09 % | 0.885 | 0.296 |
+| set_text.tar | `tor:5` | 30.13 | 1.603 | 0.601 | `plz:3` | 28.74 | -4.63 % | 2.382 | 0.307 |
+| set_text.tar | `tor:c3` | 30.32 | 1.601 | 0.449 | `plz:3` | 28.74 | -5.21 % | 2.382 | 0.307 |
+| set_text.tar | `tor:6` | 29.62 | 2.157 | 0.629 | `plz:4` | 28.41 | -4.11 % | 2.893 | 0.406 |
+| set_text.tar | `tor:7:96m:h64m` | 28.62 | 6.117 | 0.554 | `plz:5:96m` | 27.82 | -2.81 % | 4.303 | 0.383 |
+| set_document.tar | `tor:3:8mb` | 52.00 | 0.892 | 0.653 | `plz:1` | 49.57 | -4.68 % | 0.792 | 0.274 |
+| set_document.tar | `tor:4:8mb:h4m` | 49.79 | 1.061 | 0.622 | `plz:2` | 49.00 | -1.59 % | 0.853 | 0.269 |
+| set_document.tar | `tor:5` | 48.28 | 2.204 | 0.884 | `plz:3` | 47.28 | -2.07 % | 1.939 | 0.279 |
+| set_document.tar | `tor:c3` | 48.48 | 2.069 | 0.590 | `plz:3` | 47.28 | -2.47 % | 1.939 | 0.279 |
+| set_document.tar | `tor:6` | 47.90 | 2.740 | 0.912 | `plz:4` | 47.06 | -1.77 % | 2.544 | 0.390 |
+| set_document.tar | `tor:7:96m:h64m` | 47.32 | 8.177 | 0.854 | `plz:5:96m` | 46.82 | -1.05 % | 2.879 | 0.340 |
+| set_small.tar | `tor:3:8mb` | 4.82 | 0.133 | 0.073 | `plz:1` | 4.75 | -1.44 % | 0.165 | 0.068 |
+| set_small.tar | `tor:4:8mb:h4m` | 4.76 | 0.180 | 0.083 | `plz:2` | 4.71 | -0.96 % | 0.192 | 0.075 |
+| set_small.tar | `tor:5` | 4.43 | 0.306 | 0.105 | `plz:3` | 4.37 | -1.40 % | 0.390 | 0.073 |
+| set_small.tar | `tor:c3` | 4.45 | 0.307 | 0.083 | `plz:3` | 4.37 | -1.77 % | 0.390 | 0.073 |
+| set_small.tar | `tor:6` | 4.38 | 0.388 | 0.099 | `plz:4` | 4.33 | -1.19 % | 0.482 | 0.076 |
+| set_small.tar | `tor:7:96m:h64m` | 4.29 | 0.990 | 0.101 | `plz:5:96m` | 4.28 | -0.09 % | 0.715 | 0.087 |
+| set_large.tar | `tor:3:8mb` | 80.91 | 1.264 | 0.970 | `plz:1` | 79.99 | -1.15 % | 1.153 | 0.445 |
+| set_large.tar | `tor:4:8mb:h4m` | 80.17 | 1.730 | 0.981 | `plz:2` | 78.60 | -1.96 % | 1.184 | 0.401 |
+| set_large.tar | `tor:5` | 76.93 | 3.513 | 1.398 | `plz:3` | 76.61 | -0.42 % | 2.700 | 0.421 |
+| set_large.tar | `tor:c3` | 76.97 | 3.911 | 1.072 | `plz:3` | 76.61 | -0.47 % | 2.700 | 0.421 |
+| set_large.tar | `tor:6` | 76.16 | 4.962 | 1.406 | `plz:4` | 76.15 | -0.01 % | 3.320 | 0.526 |
+| set_large.tar | `tor:7:96m:h64m` | 74.60 | 13.826 | 1.402 | `plz:5:96m` | 75.60 | +1.34 % | 5.277 | 0.530 |
+| set_archive.tar | `tor:3:8mb` | 68.71 | 1.173 | 0.810 | `plz:1` | 67.52 | -1.73 % | 0.734 | 0.291 |
+| set_archive.tar | `tor:4:8mb:h4m` | 67.74 | 1.223 | 0.767 | `plz:2` | 67.13 | -0.90 % | 0.805 | 0.288 |
+| set_archive.tar | `tor:5` | 66.33 | 2.698 | 1.165 | `plz:3` | 65.80 | -0.79 % | 1.773 | 0.305 |
+| set_archive.tar | `tor:c3` | 66.61 | 2.649 | 0.780 | `plz:3` | 65.80 | -1.21 % | 1.773 | 0.305 |
+| set_archive.tar | `tor:6` | 66.15 | 3.282 | 1.182 | `plz:4` | 65.64 | -0.76 % | 2.208 | 0.394 |
+| set_archive.tar | `tor:7:96m:h64m` | 65.78 | 10.823 | 1.171 | `plz:5:96m` | 65.53 | -0.38 % | 2.809 | 0.381 |
+| set_image.tar | `tor:3:8mb` | 61.64 | 0.960 | 0.751 | `plz:1` | 59.28 | -3.84 % | 0.765 | 0.315 |
+| set_image.tar | `tor:4:8mb:h4m` | 58.91 | 1.165 | 0.708 | `plz:2` | 59.12 | +0.35 % | 0.850 | 0.304 |
+| set_image.tar | `tor:5` | 57.04 | 2.664 | 1.042 | `plz:3` | 57.08 | +0.07 % | 2.189 | 0.330 |
+| set_image.tar | `tor:c3` | 57.33 | 2.587 | 0.724 | `plz:3` | 57.08 | -0.42 % | 2.189 | 0.330 |
+| set_image.tar | `tor:6` | 56.84 | 3.178 | 1.049 | `plz:4` | 56.84 | +0.00 % | 2.862 | 0.438 |
+| set_image.tar | `tor:7:96m:h64m` | 56.27 | 10.257 | 1.085 | `plz:5:96m` | 56.70 | +0.76 % | 3.615 | 0.422 |
+| set_audio.tar | `tor:3:8mb` | 84.15 | 1.384 | 0.959 | `plz:1` | 83.97 | -0.21 % | 0.778 | 0.322 |
+| set_audio.tar | `tor:4:8mb:h4m` | 83.88 | 1.716 | 0.974 | `plz:2` | 83.95 | +0.09 % | 0.909 | 0.330 |
+| set_audio.tar | `tor:5` | 82.86 | 3.610 | 1.435 | `plz:3` | 82.89 | +0.04 % | 2.144 | 0.353 |
+| set_audio.tar | `tor:c3` | 83.03 | 4.146 | 1.132 | `plz:3` | 82.89 | -0.17 % | 2.144 | 0.353 |
+| set_audio.tar | `tor:6` | 82.74 | 4.789 | 1.572 | `plz:4` | 82.77 | +0.04 % | 2.535 | 0.415 |
+| set_audio.tar | `tor:7:96m:h64m` | 82.39 | 13.032 | 1.417 | `plz:5:96m` | 82.64 | +0.30 % | 3.334 | 0.428 |
+| set_font.tar | `tor:3:8mb` | 7.89 | 0.187 | 0.109 | `plz:1` | 7.93 | +0.56 % | 0.179 | 0.072 |
+| set_font.tar | `tor:4:8mb:h4m` | 7.72 | 0.243 | 0.119 | `plz:2` | 7.80 | +0.97 % | 0.218 | 0.081 |
+| set_font.tar | `tor:5` | 7.25 | 0.504 | 0.170 | `plz:3` | 7.29 | +0.54 % | 0.530 | 0.082 |
+| set_font.tar | `tor:c3` | 7.31 | 0.410 | 0.111 | `plz:3` | 7.29 | -0.37 % | 0.530 | 0.082 |
+| set_font.tar | `tor:6` | 7.17 | 0.664 | 0.168 | `plz:4` | 7.25 | +1.13 % | 0.634 | 0.093 |
+| set_font.tar | `tor:7:96m:h64m` | 7.03 | 1.542 | 0.165 | `plz:5:96m` | 7.22 | +2.74 % | 0.865 | 0.089 |
+
+Totals over the files:
+
+| tor | size | comp CPU | dec CPU | plz | size | Δ | comp CPU | dec CPU |
+|---|---:|---:|---:|---|---:|---:|---:|---:|
+| `tor:3:8mb` | 776.91 | 12.61 | 9.61 | `plz:1` | 756.95 | -2.57 % | 10.64 | 4.01 |
+| `tor:4:8mb:h4m` | 758.58 | 16.07 | 9.83 | `plz:2` | 748.66 | -1.31 % | 11.45 | 4.07 |
+| `tor:5` | 733.75 | 32.16 | 13.60 | `plz:3` | 723.68 | -1.37 % | 27.49 | 4.24 |
+| `tor:c3` | 735.21 | 33.69 | 9.82 | `plz:3` | 723.68 | -1.57 % | 27.49 | 4.24 |
+| `tor:6` | 726.06 | 45.58 | 14.07 | `plz:4` | 718.51 | -1.04 % | 31.47 | 4.74 |
+| `tor:7:96m:h64m` | 716.31 | 130.69 | 13.14 | `plz:5:96m` | 712.80 | -0.49 % | 42.88 | 4.62 |
+
+**tilin_512m.tar through parc (best of 2 runs, nice -n10)**
+
+| data | thr | tor method | size MB | comp wall/CPU s | dec wall/CPU s | plz method | size MB | Δ size | comp wall/CPU s | dec wall/CPU s |
+|---|---:|---|---:|---:|---:|---|---:|---:|---:|---:|
+| tilin512 | 1 | `rep:96m:256:c256+tor:4:8mb:h4m` | 284.63 | 6.91 / 6.75 | 4.04 / 4.04 | `rep:96m:256:c256+plz:2` | 282.24 | -0.84 % | 5.05 / 5.04 | 1.66 / 1.66 |
+| tilin512 | 1 | `rep:96m:256:c256+exe+delta+tor:6` | 270.57 | 19.52 / 19.52 | 5.77 / 5.77 | `rep:96m:256:c256+exe+delta+plz:4` | 265.84 | -1.75 % | 14.79 / 14.76 | 2.20 / 2.20 |
+| tilin512 | 4 | `rep:96m:256:c256+4x4:tor:3:8mb` | 289.01 | 1.97 / 7.36 | 1.17 / 4.52 | `rep:96m:256:c256+4x4:plz:1` | 285.73 | -1.13 % | 1.78 / 6.58 | 0.68 / 2.21 |
+| tilin512 | 4 | `rep:96m:256:c256+exe+4x4:tor:5` | 274.58 | 4.14 / 15.46 | 1.74 / 6.60 | `rep:96m:256:c256+exe+4x4:plz:3` | 270.30 | -1.56 % | 3.57 / 12.69 | 1.00 / 2.53 |
+| tilin512 | 4 | `rep:96m+4x4:tor:c3` | 276.65 | 3.98 / 14.73 | 1.25 / 4.54 | `rep:96m+4x4:plz:3` | 272.00 | -1.68 % | 3.34 / 11.96 | 0.65 / 2.15 |
+| tilin512 | 1 | `tor:4:8mb:h4m` | 290.26 | 5.34 / 5.33 | 3.60 / 3.58 | `plz:2` | 284.87 | -1.85 % | 3.73 / 3.70 | 1.50 / 1.50 |
+| tilin512 | 1 | `tor:6` | 273.77 | 14.89 / 14.85 | 5.10 / 5.07 | `plz:4` | 269.94 | -1.40 % | 10.28 / 10.28 | 1.59 / 1.58 |
+| tilin512 | 4 | `4x4:tor:3:8mb` | 299.07 | 1.60 / 6.14 | 1.20 / 4.65 | `4x4:plz:1` | 292.86 | -2.08 % | 1.22 / 4.61 | 0.56 / 2.18 |
+| tilin512 | 4 | `4x4:tor:5` | 280.53 | 3.76 / 13.90 | 1.63 / 6.17 | `4x4:plz:3` | 275.44 | -1.82 % | 3.07 / 10.76 | 0.55 / 2.05 |
+
+**TILIN.tar through parc**
+
+| data | thr | tor method | size MB | comp wall/CPU s | dec wall/CPU s | plz method | size MB | Δ size | comp wall/CPU s | dec wall/CPU s |
+|---|---:|---|---:|---:|---:|---|---:|---:|---:|---:|
+| TILIN | 1 | `rep:96m:256:c256+tor:4:8mb:h4m` | 1,078.74 | 20.76 / 20.75 | 12.51 / 12.50 | `rep:96m:256:c256+plz:2` | 1,073.91 | -0.45 % | 13.18 / 13.18 | 3.62 / 3.61 |
+| TILIN | 1 | `rep:96m:256:c256+exe+delta+tor:6` | 1,055.48 | 57.15 / 57.11 | 21.39 / 21.14 | `rep:96m:256:c256+exe+delta+plz:4` | 1,046.57 | -0.84 % | 37.62 / 37.62 | 5.26 / 5.25 |
+| TILIN | 4 | `rep:96m:256:c256+4x4:tor:3:8mb` | 1,091.77 | 5.66 / 21.73 | 3.08 / 9.64 | `rep:96m:256:c256+4x4:plz:1` | 1,089.33 | -0.22 % | 4.87 / 18.45 | 2.06 / 5.03 |
+| TILIN | 4 | `rep:96m:256:c256+exe+4x4:tor:5` | 1,071.31 | 8.73 / 32.72 | 4.34 / 13.39 | `rep:96m:256:c256+exe+4x4:plz:3` | 1,067.24 | -0.38 % | 8.24 / 31.11 | 3.02 / 6.23 |
+| TILIN | 4 | `rep:96m+4x4:tor:c3` | 1,072.97 | 9.38 / 35.78 | 3.42 / 10.89 | `rep:96m+4x4:plz:3` | 1,068.44 | -0.42 % | 7.82 / 30.10 | 2.18 / 5.32 |
+| TILIN | 1 | `tor:4:8mb:h4m` | 1,384.77 | 22.26 / 21.64 | 14.25 / 14.25 | `plz:2` | 1,310.80 | -5.34 % | 10.66 / 10.36 | 3.95 / 3.95 |
+| TILIN | 1 | `tor:6` | 1,257.31 | 55.28 / 55.04 | 20.98 / 20.99 | `plz:4` | 1,223.63 | -2.68 % | 28.40 / 28.39 | 3.97 / 3.97 |
+| TILIN | 4 | `4x4:tor:3:8mb` | 1,493.71 | 5.28 / 20.61 | 4.10 / 13.33 | `4x4:plz:1` | 1,456.85 | -2.47 % | 3.99 / 15.49 | 2.05 / 5.70 |
+| TILIN | 4 | `4x4:tor:5` | 1,419.31 | 10.60 / 40.46 | 5.54 / 17.73 | `4x4:plz:3` | 1,411.97 | -0.52 % | 7.68 / 29.18 | 2.10 / 5.76 |
+
+**Sets through parc (preset chains)**
+
+| data | thr | tor method | size MB | comp wall/CPU s | dec wall/CPU s | plz method | size MB | Δ size | comp wall/CPU s | dec wall/CPU s |
+|---|---:|---|---:|---:|---:|---|---:|---:|---:|---:|
+| text | 1 | `rep:96m:256:c256+tor:4:8mb:h4m` | 32.08 | 1.19 / 1.17 | 0.55 / 0.54 | `rep:96m:256:c256+plz:2` | 31.15 | -2.89 % | 1.32 / 1.31 | 0.41 / 0.38 |
+| text | 1 | `rep:96m:256:c256+exe+delta+tor:6` | 29.43 | 3.16 / 3.16 | 0.80 / 0.76 | `rep:96m:256:c256+exe+delta+plz:4` | 28.18 | -4.24 % | 4.09 / 4.08 | 0.57 / 0.56 |
+| text | 4 | `rep:96m:256:c256+4x4:tor:3:8mb` | 32.21 | 0.58 / 1.53 | 0.23 / 0.74 | `rep:96m:256:c256+4x4:plz:1` | 31.90 | -0.96 % | 0.60 / 1.60 | 0.21 / 0.55 |
+| text | 4 | `rep:96m:256:c256+exe+4x4:tor:5` | 30.06 | 0.87 / 2.48 | 0.32 / 0.93 | `rep:96m:256:c256+exe+4x4:plz:3` | 28.67 | -4.63 % | 1.07 / 3.21 | 0.27 / 0.60 |
+| text | 4 | `rep:96m+4x4:tor:c3` | 30.28 | 0.78 / 2.26 | 0.21 / 0.60 | `rep:96m+4x4:plz:3` | 28.73 | -5.11 % | 1.04 / 3.05 | 0.20 / 0.49 |
+| exe | 1 | `rep:96m:256:c256+tor:4:8mb:h4m` | 80.57 | 1.55 / 1.55 | 1.00 / 0.98 | `rep:96m:256:c256+plz:2` | 80.13 | -0.55 % | 1.03 / 1.02 | 0.32 / 0.31 |
+| exe | 1 | `rep:96m:256:c256+exe+delta+tor:6` | 79.06 | 4.14 / 4.14 | 1.50 / 1.50 | `rep:96m:256:c256+exe+delta+plz:4` | 78.23 | -1.04 % | 2.69 / 2.68 | 0.49 / 0.48 |
+| exe | 4 | `rep:96m:256:c256+4x4:tor:3:8mb` | 81.46 | 0.52 / 1.70 | 0.29 / 0.89 | `rep:96m:256:c256+4x4:plz:1` | 80.94 | -0.64 % | 0.50 / 1.46 | 0.20 / 0.42 |
+| exe | 4 | `rep:96m:256:c256+exe+4x4:tor:5` | 79.48 | 1.03 / 3.11 | 0.46 / 1.26 | `rep:96m:256:c256+exe+4x4:plz:3` | 79.25 | -0.29 % | 0.81 / 2.44 | 0.27 / 0.54 |
+| exe | 4 | `rep:96m+4x4:tor:c3` | 79.92 | 1.00 / 2.80 | 0.32 / 0.82 | `rep:96m+4x4:plz:3` | 79.61 | -0.39 % | 0.72 / 2.35 | 0.19 / 0.48 |
+| small | 1 | `rep:96m:256:c256+tor:4:8mb:h4m` | 4.69 | 0.53 / 0.52 | 0.14 / 0.13 | `rep:96m:256:c256+plz:2` | 4.66 | -0.60 % | 0.52 / 0.51 | 0.14 / 0.12 |
+| small | 1 | `rep:96m:256:c256+exe+delta+tor:6` | 4.30 | 0.75 / 0.75 | 0.19 / 0.18 | `rep:96m:256:c256+exe+delta+plz:4` | 4.26 | -0.87 % | 0.83 / 0.83 | 0.15 / 0.15 |
+| small | 4 | `rep:96m:256:c256+4x4:tor:3:8mb` | 4.73 | 0.44 / 0.65 | 0.10 / 0.19 | `rep:96m:256:c256+4x4:plz:1` | 4.70 | -0.63 % | 0.44 / 0.63 | 0.10 / 0.15 |
+| small | 4 | `rep:96m:256:c256+exe+4x4:tor:5` | 4.40 | 0.59 / 0.97 | 0.12 / 0.21 | `rep:96m:256:c256+exe+4x4:plz:3` | 4.37 | -0.61 % | 0.58 / 0.96 | 0.11 / 0.19 |
+| small | 4 | `rep:96m+4x4:tor:c3` | 4.41 | 0.52 / 0.84 | 0.10 / 0.17 | `rep:96m+4x4:plz:3` | 4.37 | -1.03 % | 0.58 / 0.91 | 0.10 / 0.15 |
+| document | 1 | `rep:96m:256:c256+tor:4:8mb:h4m` | 41.79 | 1.21 / 1.17 | 0.67 / 0.67 | `rep:96m:256:c256+plz:2` | 41.14 | -1.57 % | 1.06 / 1.05 | 0.33 / 0.31 |
+| document | 1 | `rep:96m:256:c256+exe+delta+tor:6` | 39.95 | 3.01 / 3.00 | 0.99 / 0.99 | `rep:96m:256:c256+exe+delta+plz:4` | 39.11 | -2.11 % | 3.12 / 3.11 | 0.48 / 0.47 |
+| document | 4 | `rep:96m:256:c256+4x4:tor:3:8mb` | 42.62 | 0.49 / 1.43 | 0.25 / 0.80 | `rep:96m:256:c256+4x4:plz:1` | 41.83 | -1.86 % | 0.49 / 1.47 | 0.20 / 0.46 |
+| document | 4 | `rep:96m:256:c256+exe+4x4:tor:5` | 40.56 | 0.92 / 2.93 | 0.35 / 1.10 | `rep:96m:256:c256+exe+4x4:plz:3` | 39.89 | -1.66 % | 0.88 / 2.76 | 0.24 / 0.51 |
+| document | 4 | `rep:96m+4x4:tor:c3` | 40.67 | 0.87 / 2.53 | 0.27 / 0.82 | `rep:96m+4x4:plz:3` | 39.74 | -2.29 % | 0.82 / 2.54 | 0.18 / 0.46 |
+| large | 1 | `rep:96m:256:c256+tor:4:8mb:h4m` | 79.57 | 1.84 / 1.83 | 0.99 / 0.99 | `rep:96m:256:c256+plz:2` | 78.50 | -1.34 % | 1.39 / 1.38 | 0.46 / 0.46 |
+| large | 1 | `rep:96m:256:c256+exe+delta+tor:6` | 75.66 | 6.26 / 6.25 | 1.58 / 1.58 | `rep:96m:256:c256+exe+delta+plz:4` | 74.14 | -2.01 % | 5.07 / 5.06 | 0.75 / 0.75 |
+| large | 4 | `rep:96m:256:c256+4x4:tor:3:8mb` | 80.10 | 0.71 / 2.30 | 0.39 / 1.36 | `rep:96m:256:c256+4x4:plz:1` | 79.74 | -0.45 % | 0.63 / 1.93 | 0.25 / 0.76 |
+| large | 4 | `rep:96m:256:c256+exe+4x4:tor:5` | 76.72 | 1.55 / 5.13 | 0.56 / 1.93 | `rep:96m:256:c256+exe+4x4:plz:3` | 76.65 | -0.08 % | 1.15 / 3.51 | 0.33 / 0.83 |
+| large | 4 | `rep:96m+4x4:tor:c3` | 76.83 | 1.34 / 4.43 | 0.40 / 1.39 | `rep:96m+4x4:plz:3` | 76.69 | -0.18 % | 1.09 / 3.39 | 0.24 / 0.71 |
+| archive | 1 | `rep:96m:256:c256+tor:4:8mb:h4m` | 67.65 | 1.68 / 1.67 | 0.88 / 0.87 | `rep:96m:256:c256+plz:2` | 67.13 | -0.76 % | 1.13 / 1.12 | 0.35 / 0.33 |
+| archive | 1 | `rep:96m:256:c256+exe+delta+tor:6` | 65.91 | 4.14 / 4.13 | 1.35 / 1.34 | `rep:96m:256:c256+exe+delta+plz:4` | 65.36 | -0.83 % | 2.96 / 2.96 | 0.51 / 0.51 |
+| archive | 4 | `rep:96m:256:c256+4x4:tor:3:8mb` | 68.34 | 0.59 / 1.87 | 0.36 / 0.99 | `rep:96m:256:c256+4x4:plz:1` | 67.68 | -0.97 % | 0.47 / 1.43 | 0.20 / 0.50 |
+| archive | 4 | `rep:96m:256:c256+exe+4x4:tor:5` | 66.31 | 1.08 / 3.53 | 0.53 / 1.47 | `rep:96m:256:c256+exe+4x4:plz:3` | 65.93 | -0.58 % | 0.82 / 2.62 | 0.25 / 0.58 |
+| archive | 4 | `rep:96m+4x4:tor:c3` | 66.53 | 1.10 / 3.54 | 0.36 / 1.11 | `rep:96m+4x4:plz:3` | 65.84 | -1.03 % | 0.86 / 2.62 | 0.20 / 0.53 |
+| image | 1 | `rep:96m:256:c256+tor:4:8mb:h4m` | 58.75 | 1.51 / 1.50 | 0.83 / 0.82 | `rep:96m:256:c256+plz:2` | 59.02 | +0.47 % | 1.14 / 1.13 | 0.39 / 0.39 |
+| image | 1 | `rep:96m:256:c256+exe+delta+tor:6` | 56.86 | 4.49 / 4.48 | 1.23 / 1.23 | `rep:96m:256:c256+exe+delta+plz:4` | 56.44 | -0.75 % | 3.80 / 3.80 | 0.57 / 0.56 |
+| image | 4 | `rep:96m:256:c256+4x4:tor:3:8mb` | 59.55 | 0.58 / 1.84 | 0.31 / 1.01 | `rep:96m:256:c256+4x4:plz:1` | 59.60 | +0.09 % | 0.50 / 1.41 | 0.22 / 0.55 |
+| image | 4 | `rep:96m:256:c256+exe+4x4:tor:5` | 57.42 | 1.12 / 3.61 | 0.40 / 1.36 | `rep:96m:256:c256+exe+4x4:plz:3` | 57.50 | +0.14 % | 0.97 / 3.04 | 0.28 / 0.60 |
+| image | 4 | `rep:96m+4x4:tor:c3` | 57.25 | 1.11 / 3.54 | 0.34 / 1.07 | `rep:96m+4x4:plz:3` | 57.06 | -0.33 % | 0.90 / 3.03 | 0.19 / 0.55 |
+| audio | 1 | `rep:96m:256:c256+tor:4:8mb:h4m` | 83.83 | 2.02 / 2.01 | 1.17 / 1.16 | `rep:96m:256:c256+plz:2` | 83.96 | +0.15 % | 1.21 / 1.19 | 0.38 / 0.38 |
+| audio | 1 | `rep:96m:256:c256+exe+delta+tor:6` | 82.52 | 5.51 / 5.50 | 1.66 / 1.65 | `rep:96m:256:c256+exe+delta+plz:4` | 81.78 | -0.90 % | 3.85 / 3.85 | 0.61 / 0.61 |
+| audio | 4 | `rep:96m:256:c256+4x4:tor:3:8mb` | 84.17 | 0.66 / 2.07 | 0.35 / 1.17 | `rep:96m:256:c256+4x4:plz:1` | 84.18 | +0.01 % | 0.52 / 1.53 | 0.20 / 0.54 |
+| audio | 4 | `rep:96m:256:c256+exe+4x4:tor:5` | 82.87 | 1.29 / 4.29 | 0.45 / 1.60 | `rep:96m:256:c256+exe+4x4:plz:3` | 83.04 | +0.20 % | 0.98 / 2.78 | 0.27 / 0.62 |
+| audio | 4 | `rep:96m+4x4:tor:c3` | 83.04 | 1.13 / 4.01 | 0.34 / 1.22 | `rep:96m+4x4:plz:3` | 83.02 | -0.03 % | 1.01 / 2.80 | 0.20 / 0.55 |
+| video | 1 | `rep:96m:256:c256+tor:4:8mb:h4m` | 64.75 | 1.66 / 1.61 | 0.88 / 0.86 | `rep:96m:256:c256+plz:2` | 64.85 | +0.17 % | 1.35 / 1.35 | 0.43 / 0.43 |
+| video | 1 | `rep:96m:256:c256+exe+delta+tor:6` | 62.64 | 4.82 / 4.78 | 1.40 / 1.40 | `rep:96m:256:c256+exe+delta+plz:4` | 62.22 | -0.66 % | 4.65 / 4.65 | 0.64 / 0.60 |
+| video | 4 | `rep:96m:256:c256+4x4:tor:3:8mb` | 66.76 | 0.56 / 1.84 | 0.33 / 1.14 | `rep:96m:256:c256+4x4:plz:1` | 66.38 | -0.58 % | 0.50 / 1.50 | 0.18 / 0.59 |
+| video | 4 | `rep:96m:256:c256+exe+4x4:tor:5` | 63.26 | 1.13 / 3.99 | 0.47 / 1.59 | `rep:96m:256:c256+exe+4x4:plz:3` | 63.04 | -0.34 % | 1.19 / 3.92 | 0.24 / 0.64 |
+| video | 4 | `rep:96m+4x4:tor:c3` | 63.61 | 1.09 / 3.76 | 0.30 / 1.08 | `rep:96m+4x4:plz:3` | 63.26 | -0.54 % | 1.13 / 3.81 | 0.18 / 0.59 |
+| font | 1 | `rep:96m:256:c256+tor:4:8mb:h4m` | 7.67 | 0.33 / 0.32 | 0.15 / 0.14 | `rep:96m:256:c256+plz:2` | 7.76 | +1.19 % | 0.31 / 0.30 | 0.11 / 0.11 |
+| font | 1 | `rep:96m:256:c256+exe+delta+tor:6` | 6.93 | 0.77 / 0.76 | 0.21 / 0.21 | `rep:96m:256:c256+exe+delta+plz:4` | 6.75 | -2.53 % | 0.77 / 0.74 | 0.11 / 0.10 |
+| font | 4 | `rep:96m:256:c256+4x4:tor:3:8mb` | 7.75 | 0.19 / 0.45 | 0.07 / 0.20 | `rep:96m:256:c256+4x4:plz:1` | 7.87 | +1.61 % | 0.17 / 0.40 | 0.05 / 0.14 |
+| font | 4 | `rep:96m:256:c256+exe+4x4:tor:5` | 7.25 | 0.30 / 0.73 | 0.10 / 0.24 | `rep:96m:256:c256+exe+4x4:plz:3` | 7.30 | +0.58 % | 0.30 / 0.81 | 0.06 / 0.12 |
+| font | 4 | `rep:96m+4x4:tor:c3` | 7.29 | 0.27 / 0.72 | 0.10 / 0.21 | `rep:96m+4x4:plz:3` | 7.30 | +0.10 % | 0.31 / 0.79 | 0.06 / 0.12 |
+
+**Whole presets -m1..-m4** (`tor` = today's presets; `plz` = proposed mapping)
+
+| data | thr | level | tor size MB | comp wall/CPU | dec wall/CPU | plz size MB | Δ | comp wall/CPU | dec wall/CPU |
+|---|---:|---|---:|---:|---:|---:|---:|---:|---:|
+| tilin512 | 1 | -m1 | 284.63 | 6.48 / 6.45 | 3.99 / 3.99 | 282.24 | -0.84 % | 5.03 / 5.03 | 1.62 / 1.62 |
+| tilin512 | 1 | -m2 | 270.57 | 18.67 / 18.66 | 5.59 / 5.58 | 265.84 | -1.75 % | 14.85 / 14.60 | 2.19 / 2.19 |
+| tilin512 | 4 | -m1 | 289.01 | 1.94 / 7.22 | 1.24 / 4.77 | 285.73 | -1.13 % | 1.76 / 6.46 | 0.66 / 2.15 |
+| tilin512 | 4 | -m2 | 274.58 | 4.20 / 15.31 | 1.79 / 6.69 | 270.30 | -1.56 % | 3.62 / 12.77 | 0.94 / 2.54 |
+| TILIN | 1 | -m1 | 1,078.74 | 20.14 / 20.14 | 12.33 / 12.33 | 1,073.91 | -0.45 % | 13.22 / 13.22 | 3.66 / 3.63 |
+| TILIN | 1 | -m2 | 1,055.48 | 59.66 / 59.47 | 20.33 / 20.29 | 1,046.57 | -0.84 % | 37.81 / 37.79 | 5.32 / 5.32 |
+| TILIN | 4 | -m1 | 1,091.77 | 5.54 / 21.16 | 3.10 / 9.73 | 1,089.33 | -0.22 % | 5.30 / 20.17 | 2.09 / 5.08 |
+| TILIN | 4 | -m2 | 1,071.31 | 8.96 / 33.44 | 4.33 / 13.14 | 1,067.24 | -0.38 % | 8.21 / 30.19 | 2.90 / 5.89 |
+| text | 1 | -m1 | 32.08 | 1.21 / 1.20 | 0.56 / 0.55 | 31.15 | -2.89 % | 1.33 / 1.33 | 0.41 / 0.40 |
+| text | 1 | -m2 | 28.84 | 3.94 / 3.94 | 1.58 / 1.53 | 27.78 | -3.67 % | 4.63 / 4.60 | 1.40 / 1.39 |
+| text | 1 | -m3 | 27.39 | 7.52 / 7.52 | 2.77 / 2.76 | 27.42 | +0.09 % | 7.56 / 7.53 | 3.32 / 3.23 |
+| text | 1 | -m4 | 25.56 | 14.51 / 14.35 | 3.21 / 3.13 | 25.60 | +0.15 % | 14.32 / 14.31 | 2.93 / 2.93 |
+| text | 4 | -m1 | 32.21 | 0.58 / 1.51 | 0.24 / 0.75 | 31.90 | -0.96 % | 0.62 / 1.69 | 0.22 / 0.58 |
+| text | 4 | -m2 | 29.37 | 1.19 / 3.78 | 0.57 / 1.94 | 28.20 | -3.98 % | 1.29 / 4.38 | 0.50 / 1.61 |
+| text | 4 | -m3 | 25.96 | 5.83 / 14.58 | 0.77 / 2.52 | 25.96 | +0.00 % | 5.44 / 14.12 | 0.82 / 2.57 |
+| text | 4 | -m4 | 25.57 | 7.90 / 15.95 | 0.97 / 3.23 | 25.57 | -0.00 % | 8.24 / 15.80 | 0.99 / 3.14 |
+| exe | 1 | -m1 | 80.57 | 1.62 / 1.57 | 1.05 / 0.98 | 80.13 | -0.55 % | 1.05 / 1.03 | 0.31 / 0.30 |
+| exe | 1 | -m2 | 79.00 | 3.02 / 3.02 | 1.25 / 1.25 | 78.26 | -0.94 % | 2.34 / 2.33 | 0.42 / 0.42 |
+| exe | 1 | -m3 | 77.59 | 7.04 / 7.04 | 2.10 / 2.07 | 77.40 | -0.26 % | 5.96 / 5.95 | 1.72 / 1.70 |
+| exe | 1 | -m4 | 77.12 | 10.38 / 10.37 | 1.95 / 1.95 | 76.93 | -0.26 % | 9.79 / 9.79 | 1.71 / 1.71 |
+| exe | 4 | -m1 | 81.46 | 0.52 / 1.70 | 0.26 / 0.83 | 80.94 | -0.64 % | 0.47 / 1.43 | 0.19 / 0.42 |
+| exe | 4 | -m2 | 79.54 | 0.91 / 2.56 | 0.29 / 0.91 | 79.38 | -0.19 % | 0.95 / 2.51 | 0.19 / 0.48 |
+| exe | 4 | -m3 | 77.82 | 3.56 / 9.16 | 0.99 / 1.83 | 77.82 | +0.00 % | 3.58 / 9.28 | 0.98 / 1.82 |
+| exe | 4 | -m4 | 77.40 | 5.72 / 10.10 | 0.87 / 1.80 | 77.41 | +0.02 % | 5.26 / 9.97 | 0.94 / 1.92 |
+| small | 1 | -m1 | 4.69 | 0.50 / 0.48 | 0.14 / 0.12 | 4.66 | -0.60 % | 0.49 / 0.48 | 0.12 / 0.11 |
+| small | 1 | -m2 | 4.35 | 1.40 / 1.39 | 0.43 / 0.43 | 4.33 | -0.42 % | 1.65 / 1.65 | 0.39 / 0.39 |
+| small | 1 | -m3 | 4.06 | 1.99 / 1.95 | 0.77 / 0.76 | 4.06 | -0.01 % | 1.97 / 1.97 | 0.83 / 0.83 |
+| small | 1 | -m4 | 3.88 | 2.53 / 2.51 | 0.76 / 0.74 | 3.88 | +0.02 % | 2.53 / 2.51 | 0.75 / 0.73 |
+| small | 4 | -m1 | 4.73 | 0.45 / 0.62 | 0.08 / 0.17 | 4.70 | -0.63 % | 0.46 / 0.61 | 0.07 / 0.12 |
+| small | 4 | -m2 | 4.41 | 0.74 / 1.84 | 0.21 / 0.59 | 4.41 | -0.03 % | 0.77 / 1.83 | 0.19 / 0.55 |
+| small | 4 | -m3 | 4.03 | 1.74 / 2.93 | 0.23 / 0.64 | 4.03 | -0.00 % | 1.69 / 2.88 | 0.23 / 0.63 |
+| small | 4 | -m4 | 3.98 | 1.80 / 3.11 | 0.31 / 0.94 | 3.98 | +0.00 % | 1.73 / 3.07 | 0.32 / 0.96 |
+| document | 1 | -m1 | 41.79 | 1.22 / 1.19 | 0.60 / 0.59 | 41.14 | -1.57 % | 1.07 / 1.07 | 0.34 / 0.33 |
+| document | 1 | -m2 | 39.94 | 2.85 / 2.82 | 1.08 / 1.06 | 39.24 | -1.74 % | 3.07 / 3.06 | 0.72 / 0.71 |
+| document | 1 | -m3 | 38.29 | 5.35 / 5.34 | 1.80 / 1.80 | 38.26 | -0.08 % | 5.26 / 5.26 | 1.64 / 1.63 |
+| document | 1 | -m4 | 37.26 | 10.63 / 10.63 | 1.87 / 1.86 | 37.25 | -0.03 % | 10.28 / 10.27 | 1.70 / 1.69 |
+| document | 4 | -m1 | 42.62 | 0.49 / 1.48 | 0.24 / 0.76 | 41.83 | -1.86 % | 0.50 / 1.38 | 0.20 / 0.46 |
+| document | 4 | -m2 | 40.79 | 1.00 / 2.86 | 0.33 / 1.10 | 40.11 | -1.66 % | 1.10 / 3.07 | 0.27 / 0.83 |
+| document | 4 | -m3 | 38.01 | 5.49 / 9.80 | 0.69 / 1.64 | 38.00 | -0.03 % | 5.40 / 9.79 | 0.74 / 1.61 |
+| document | 4 | -m4 | 37.68 | 5.08 / 10.79 | 0.62 / 1.95 | 37.67 | -0.01 % | 5.01 / 10.79 | 0.62 / 1.86 |
+| large | 1 | -m1 | 79.57 | 1.90 / 1.90 | 1.00 / 1.00 | 78.50 | -1.34 % | 1.37 / 1.37 | 0.46 / 0.46 |
+| large | 1 | -m2 | 75.66 | 6.35 / 6.34 | 1.73 / 1.73 | 74.14 | -2.01 % | 5.38 / 5.37 | 0.83 / 0.82 |
+| large | 1 | -m3 | 72.17 | 15.88 / 15.87 | 3.53 / 3.48 | 72.17 | +0.00 % | 15.89 / 15.88 | 3.44 / 3.43 |
+| large | 1 | -m4 | 69.01 | 28.46 / 28.46 | 3.64 / 3.55 | 69.01 | +0.00 % | 28.19 / 28.18 | 3.87 / 3.76 |
+| large | 4 | -m1 | 80.10 | 0.67 / 2.25 | 0.40 / 1.36 | 79.74 | -0.45 % | 0.59 / 1.77 | 0.25 / 0.73 |
+| large | 4 | -m2 | 76.72 | 1.54 / 4.98 | 0.55 / 1.89 | 76.65 | -0.08 % | 1.20 / 3.71 | 0.35 / 0.84 |
+| large | 4 | -m3 | 69.69 | 6.86 / 24.85 | 1.34 / 4.18 | 69.69 | +0.00 % | 6.96 / 25.16 | 1.29 / 4.14 |
+| large | 4 | -m4 | 68.83 | 8.85 / 27.17 | 1.36 / 3.95 | 68.83 | +0.00 % | 9.76 / 27.74 | 1.38 / 3.96 |
+| archive | 1 | -m1 | 67.65 | 1.68 / 1.66 | 0.87 / 0.83 | 67.13 | -0.76 % | 1.08 / 1.08 | 0.37 / 0.36 |
+| archive | 1 | -m2 | 65.87 | 3.78 / 3.78 | 1.24 / 1.23 | 65.38 | -0.74 % | 3.16 / 3.15 | 0.59 / 0.59 |
+| archive | 1 | -m3 | 64.00 | 8.02 / 8.01 | 2.51 / 2.49 | 63.91 | -0.14 % | 7.70 / 7.70 | 2.06 / 2.05 |
+| archive | 1 | -m4 | 63.08 | 13.63 / 13.62 | 2.25 / 2.24 | 63.02 | -0.09 % | 12.43 / 12.42 | 2.03 / 2.03 |
+| archive | 4 | -m1 | 68.34 | 0.57 / 1.78 | 0.37 / 1.01 | 67.68 | -0.97 % | 0.49 / 1.45 | 0.22 / 0.51 |
+| archive | 4 | -m2 | 66.35 | 1.19 / 3.77 | 0.47 / 1.28 | 66.00 | -0.52 % | 1.03 / 3.37 | 0.24 / 0.76 |
+| archive | 4 | -m3 | 63.40 | 4.81 / 11.67 | 1.07 / 2.35 | 63.40 | -0.00 % | 4.38 / 11.17 | 1.03 / 2.29 |
+| archive | 4 | -m4 | 63.21 | 6.39 / 12.09 | 1.26 / 2.36 | 63.21 | -0.00 % | 6.55 / 12.06 | 1.10 / 2.34 |
+| image | 1 | -m1 | 58.75 | 1.48 / 1.48 | 0.86 / 0.81 | 59.02 | +0.47 % | 1.16 / 1.15 | 0.38 / 0.36 |
+| image | 1 | -m2 | 56.47 | 4.26 / 4.26 | 1.14 / 1.12 | 56.01 | -0.82 % | 4.41 / 4.40 | 0.72 / 0.72 |
+| image | 1 | -m3 | 52.73 | 9.88 / 9.87 | 3.18 / 3.18 | 52.66 | -0.13 % | 9.53 / 9.53 | 2.97 / 2.97 |
+| image | 1 | -m4 | 51.16 | 17.79 / 17.78 | 4.24 / 4.24 | 51.08 | -0.15 % | 17.17 / 17.15 | 4.17 / 4.18 |
+| image | 4 | -m1 | 59.55 | 0.55 / 1.69 | 0.32 / 1.01 | 59.60 | +0.09 % | 0.50 / 1.47 | 0.18 / 0.52 |
+| image | 4 | -m2 | 55.34 | 1.41 / 5.28 | 0.67 / 2.64 | 55.44 | +0.19 % | 1.36 / 5.14 | 0.56 / 2.16 |
+| image | 4 | -m3 | 51.33 | 7.82 / 17.72 | 1.23 / 4.78 | 51.33 | +0.00 % | 7.67 / 17.38 | 1.20 / 4.77 |
+| image | 4 | -m4 | 51.25 | 11.57 / 18.12 | 1.21 / 4.79 | 51.25 | +0.00 % | 11.83 / 18.30 | 1.21 / 4.72 |
+| audio | 1 | -m1 | 83.83 | 1.85 / 1.85 | 1.10 / 1.07 | 83.96 | +0.15 % | 1.10 / 1.10 | 0.39 / 0.38 |
+| audio | 1 | -m2 | 78.61 | 3.65 / 3.65 | 2.03 / 1.97 | 78.31 | -0.38 % | 3.02 / 3.01 | 1.24 / 1.24 |
+| audio | 1 | -m3 | 77.12 | 6.27 / 6.27 | 3.94 / 3.94 | 76.91 | -0.27 % | 6.11 / 6.10 | 3.40 / 3.40 |
+| audio | 1 | -m4 | 76.38 | 9.59 / 9.59 | 3.77 / 3.68 | 76.11 | -0.35 % | 8.48 / 8.48 | 3.31 / 3.31 |
+| audio | 4 | -m1 | 84.17 | 0.67 / 2.13 | 0.37 / 1.15 | 84.18 | +0.01 % | 0.48 / 1.43 | 0.21 / 0.54 |
+| audio | 4 | -m2 | 78.75 | 1.07 / 3.86 | 0.49 / 1.93 | 78.79 | +0.05 % | 0.88 / 3.22 | 0.38 / 1.48 |
+| audio | 4 | -m3 | 76.36 | 5.61 / 8.74 | 0.98 / 3.83 | 76.35 | -0.01 % | 5.74 / 8.71 | 0.94 / 3.73 |
+| audio | 4 | -m4 | 76.35 | 6.02 / 9.81 | 0.98 / 3.79 | 76.32 | -0.05 % | 5.62 / 9.43 | 0.98 / 3.77 |
+| video | 1 | -m1 | 64.75 | 1.65 / 1.61 | 0.94 / 0.90 | 64.85 | +0.17 % | 1.39 / 1.37 | 0.42 / 0.41 |
+| video | 1 | -m2 | 62.67 | 4.65 / 4.65 | 1.33 / 1.32 | 62.27 | -0.62 % | 4.83 / 4.71 | 0.67 / 0.66 |
+| video | 1 | -m3 | 59.47 | 11.51 / 11.48 | 2.60 / 2.58 | 59.45 | -0.03 % | 12.37 / 12.08 | 2.53 / 2.53 |
+| video | 1 | -m4 | 57.47 | 20.34 / 20.34 | 2.67 / 2.67 | 57.46 | -0.02 % | 20.41 / 20.40 | 2.52 / 2.51 |
+| video | 4 | -m1 | 66.76 | 0.57 / 1.87 | 0.31 / 1.13 | 66.38 | -0.58 % | 0.49 / 1.51 | 0.19 / 0.60 |
+| video | 4 | -m2 | 63.35 | 1.23 / 4.13 | 0.47 / 1.60 | 63.17 | -0.28 % | 1.21 / 4.10 | 0.24 / 0.71 |
+| video | 4 | -m3 | 57.81 | 6.55 / 17.77 | 1.36 / 2.83 | 57.80 | -0.03 % | 6.50 / 17.51 | 1.16 / 2.83 |
+| video | 4 | -m4 | 57.49 | 6.90 / 18.70 | 1.61 / 2.92 | 57.49 | +0.00 % | 6.99 / 18.90 | 1.57 / 2.76 |
+| font | 1 | -m1 | 7.67 | 0.33 / 0.33 | 0.14 / 0.12 | 7.76 | +1.19 % | 0.30 / 0.28 | 0.09 / 0.08 |
+| font | 1 | -m2 | 6.91 | 0.79 / 0.78 | 0.26 / 0.26 | 6.75 | -2.32 % | 0.92 / 0.89 | 0.18 / 0.18 |
+| font | 1 | -m3 | 6.44 | 1.38 / 1.37 | 0.47 / 0.47 | 6.44 | -0.02 % | 1.40 / 1.35 | 0.42 / 0.41 |
+| font | 1 | -m4 | 6.17 | 3.26 / 3.24 | 0.44 / 0.41 | 6.17 | -0.02 % | 2.85 / 2.84 | 0.45 / 0.45 |
+| font | 4 | -m1 | 7.75 | 0.19 / 0.45 | 0.07 / 0.21 | 7.87 | +1.61 % | 0.17 / 0.39 | 0.05 / 0.14 |
+| font | 4 | -m2 | 7.26 | 0.35 / 0.96 | 0.10 / 0.35 | 7.24 | -0.26 % | 0.40 / 1.10 | 0.08 / 0.24 |
+| font | 4 | -m3 | 6.23 | 2.62 / 2.95 | 0.33 / 0.44 | 6.22 | -0.16 % | 2.50 / 2.81 | 0.37 / 0.48 |
+| font | 4 | -m4 | 6.16 | 2.72 / 3.07 | 0.35 / 0.53 | 6.16 | +0.01 % | 2.77 / 3.11 | 0.31 / 0.48 |
+
+**FreeArc 0.67 (Wine, private prefix), reference**
+
+| data | level | threads | size MB | comp wall/CPU s | dec wall/CPU s |
+|---|---|---|---:|---:|---:|
+| tilin512 | `arc -m1` | mt1 | 285.44 | 14.28 / 14.77 | 5.86 / 5.84 |
+| tilin512 | `arc -m1` | mt4 | 289.39 | 7.42 / 14.28 | 1.84 / 7.15 |
+| tilin512 | `arc -m2` | mt1 | 271.55 | 45.52 / 46.38 | 8.56 / 8.49 |
+| tilin512 | `arc -m2` | mt4 | 274.72 | 11.02 / 32.53 | 2.71 / 9.91 |
+| tilin512 | `arc -m3` | mt1 | 258.90 | 91.13 / 91.63 | 21.92 / 21.89 |
+| tilin512 | `arc -m3` | mt4 | 259.22 | 34.50 / 91.06 | 8.60 / 22.42 |
+| tilin512 | `arc -m4` | mt1 | 253.47 | 131.54 / 131.88 | 21.65 / 21.60 |
+| tilin512 | `arc -m4` | mt4 | 253.60 | 29.17 / 148.22 | 9.23 / 23.08 |
+| TILIN | `arc -m1` | mt1 | 1,081.10 | 36.73 / 41.61 | 19.08 / 19.06 |
+| TILIN | `arc -m1` | mt4 | 1,103.12 | 9.34 / 28.03 | 4.47 / 11.55 |
+| TILIN | `arc -m2` | mt1 | 1,058.24 | 118.14 / 122.19 | 27.73 / 27.72 |
+| TILIN | `arc -m2` | mt4 | 1,083.68 | 19.50 / 54.13 | 6.08 / 15.88 |
+| TILIN | `arc -m3` | mt1 | 1,028.40 | 327.86 / 328.15 | 84.25 / 84.18 |
+| TILIN | `arc -m3` | mt4 | 1,058.92 | 64.70 / 185.43 | 16.48 / 47.29 |
+| TILIN | `arc -m4` | mt1 | 1,023.01 | 417.97 / 422.87 | 82.88 / 82.90 |
+| TILIN | `arc -m4` | mt4 | 1,050.24 | 63.76 / 291.14 | 16.80 / 48.04 |
+
+**Summary.** Against every `tor` use of the presets, on TILIN, tilin_512m and the
+text/exe/small/document/large/archive/video sets, `plz` is smaller (−0.1 % to −5 %), uses less
+compression CPU and decompresses in about half the time (one third to one fifth of the CPU
+inside `4x4`). Where parity is **not** reached:
+
+- **Size**, chains with `rep` in front: `font` (+1.2 % `-m1` 1 thread, +1.6 % `-m1` 4 threads,
+  +0.6 % `-m2` 4 threads), `image` (+0.5 % `-m1` 1 thread, +0.1/+0.2 % 4 threads), `audio`
+  (+0.15 % `-m1` 1 thread, +0.0–0.2 % 4 threads), `video` (+0.17 % `-m1` 1 thread). These are
+  binary formats with short (3–4 byte) repeats where the 5/6-byte hashes of levels 1–3 miss
+  matches (4-byte hashing fixes font but costs 20–35 % time on TILIN). In the presets `.wav`
+  and `.bmp` go to `tta`/`mm` anyway.
+- **Compression time**: level 1 is 10–33 % slower than `tor:3` on text (`set_text` codec
+  alone 0.88 s vs 0.66 s; `-m1` on the text set 1.33 vs 1.20 s CPU), level 3 is ~50 % slower
+  than `tor:5` on pure text (2.38 vs 1.60 s; the presets send text to grzip at that level), and
+  `-m2` with one thread is 5–20 % slower than `tor:6` on the small/text/document/image/video
+  sets (e.g. small 1.65 vs 1.39 s) while 25–40 % faster on TILIN and exe. Everything else is
+  faster.
+
+**Proposed preset mapping** (not applied; the `plz-presets` columns above use it):
+`1binary = plz:2`, `2binary = plz:4`, `ex1binary = xplz:1` (`4x4:plz:1`, 8 MB blocks),
+`ex2binary = xplz:3` (16 MB blocks), `4$compressed = 4rep + eplz:3`, `4x$compressed = eplz:3:8m`,
+`bmpfastest = mm:d1 + plz:2`, `3xt = dict:64m:80% + plz:5:96m`, with `xplz = 4x4:plz` and
+`eplz = (|x)plz`.
+
+
 ## Verified platforms (0.0.2)
 
 | platform | binary | tests |
@@ -341,6 +709,10 @@ python3 tests/thread_budget.py    # PARC_THREADS=N: <= N hilos trabajando (muest
 bash tests/determinism.sh         # mismo N => mismo archivo (todos los niveles, N=1/2/4/8)
 bash tests/ppmd.sh                # PPMd: ida y vuelta, streams dañados y bit a bit contra el LZMA SDK ($PPMD_SDK)
 bash tests/ppmd_asm.sh            # PPMd: ensamblador == Pascal (-dPARC_NOASM)
+bash tests/plz.sh                 # plz: niveles, ventanas, streaming == memoria, asm == Pascal, dañados
+bash tests/plz_cross.sh           # plz: mismos bytes en linux64/linux32/linuxarm64 (QEMU)/win64/win32 (Wine)
+# plz_bench: cualquier método en memoria por las cadenas (tamaño, CPU y pared)
+fpc -O3 -Fusrc -Fobuild/linux64/units -Flbuild/linux64/units -FUbuild/tests/units -FEbuild/tests tests/plz_bench.lpr
 # liberar/reusar un trabajo del pool apenas termina (ventana ampliada con -dPARC_RACE_TEST)
 fpc -O2 -dPARC_RACE_TEST -Fusrc -FUbuild/tests/race -FEbuild/tests tests/test_jobfree.lpr
 PARC_THREADS=4 build/tests/test_jobfree
