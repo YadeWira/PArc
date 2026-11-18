@@ -1,6 +1,6 @@
 # PArc — pending work and details
 
-Updated: 2026-11-18 (REP replaced by OREP 0.0.3, MIT)  
+Updated: 2026-11-18 (REP replaced by OREP 0.0.5, MIT)  
 Updated: 2026-10-30 (phase 3b merged to main: presets + sched + determinism)  
 Updated: 2026-10-29 (output determinism, PPMd asm fix)  
 Updated: 2026-10-29 (block scheduling under the thread budget)  
@@ -119,36 +119,24 @@ otherwise keep the current preset.
 ## Done — REP replaced by OREP (MIT relicensing step, 2026-11-18)
 
 `rep` (FreeArc REP, GPL: `parc_rep.pas`, `parc_repenc.pas`) is gone; the long-range stage is
-`orep` (OREP 0.0.3, MIT, vendored in `src/orep/`, stages in `src/parc_orep.pas`). Removed tests:
+`orep` (OREP 0.0.5, MIT, vendored in `src/orep/`, stages in `src/parc_orep.pas`). Removed tests:
 `rep_threads.sh`, `repcopy.sh`, `test_repcopy.lpr`, `test_repdelta.lpr`; new `tests/orep.sh` +
 `tests/test_orep.lpr`. Numbers and preset choice: docs/ESTADO.md ("REP replaced by OREP").
 
-Open points / requests for OREP's author:
+Open points (for OREP's author where noted):
 
-- **Threads vs the global budget.** OREP's own threads (`P.Threads >= 2`: a coordinator and
-  helpers) work in bursts PArc cannot see, and its helpers spin/yield ~ms after each job, so
-  they cannot hold `PARC_THREADS` tokens only while busy. PArc runs OREP with one thread (inline,
-  like REP's search). Tried and dropped: OREP_FLUSH per block with tokens taken for the call
-  (0.0.2: 2.1 s with 4 threads vs 1.9 s with 1 on 512 MB, twice the CPU: the parallel search
-  alone hardly scales) and OREP on a stage thread of its own (slower than inline at -m1…-m5).
-  Wanted from OREP: begin/end-busy callbacks per thread (or caller-supplied wait/start
-  functions), then `P.Threads` could follow `ThreadShare`.
-- **Ring growth doubles peak memory.** The encoder grows its ring by doubling with
-  `ReAllocMem`; the last step holds both copies: `orep:512m:l512` alone on 512 MB of TILIN peaks
-  at 1128 MB RSS (REP `rep:512m`: 599 MB) while `OrepEncMemory` says ~640 MB. PArc's estimator
-  adds the window for it (`StageEncodeMem`). Wanted: allocate the ring once (the window is known)
-  or grow it without copying.
-- The decoder is ~20 % slower than REP's on the stage alone (0.51 vs 0.43 s per 512 MB);
-  irrelevant behind lzma but visible at `-m1`.
-- OREP's default `l64` (and `l32`) lose 0.1–0.4 % against REP in front of lzma on TILIN; the
-  presets use `l256`/`l512`. Many small solid blocks pay the fixed stream cost (28-byte header,
-  end marker, per-block CRC): the `small` set is +0.017 % at `-m5`…`-m9`.
-- `OrepEncReset` (0.0.3) is not used: PArc builds the chain per solid block and the window is
-  clipped to each block, so states would rarely match; a cache keyed by parameters could use it.
-- The format is still a draft upstream: a new OREP may change it again (0.0.2 streams are
-  already rejected by 0.0.3).
-- Speed: at `-m1`/`-m2` with 4 threads OREP (one thread) is slower than REP (search + 2 hash
-  threads); see the timing table in ESTADO.md.
+- **Speed at `-m1`/`-m2` with several threads** (the only real loss): about +20 % / +8 % wall
+  with 4 threads, because OREP runs on the writing thread while REP had two hashing threads.
+  OREP's own threads now take budget tokens (0.0.5 hooks, `PARC_OREP_THREADS=k`) but were slower:
+  its workers spin/yield between jobs holding their token, and the writing thread waits for the
+  coordinator holding its own. OREP: an option to sleep at once (no spin) when hooks are set, or
+  a way for the caller's wait inside `OrepEncRun` to release its token (a hook around that wait).
+- Small solid blocks pay OREP's fixed per-stream cost: `small` +0.017 % at `-m5`…`-m9`.
+- `OrepEncReset` is not used: PArc builds the chain per solid block and the window is clipped to
+  each block; a cache keyed by parameters could use it.
+- The format is still a draft upstream (version 3 in 0.0.4/0.0.5; earlier streams are rejected).
+- Fixed upstream meanwhile: ring growth by `ReAllocMem` doubled peak memory in 0.0.2/0.0.3
+  (0.0.4 allocates slots), and the 0.0.3 decoder was ~20 % slower than REP's.
 
 ## Next — `plz` replaces Tornado (relicensing step)
 

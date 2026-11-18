@@ -9,7 +9,7 @@ and the other containers (`.zip`/`.7z`/`.rar`) lives in
 
 ```
 src/                     Pascal sources (+ parc_torglue.cpp/.patch: bridge to FreeArc's Tornado encoder)
-src/orep/                OREP 0.0.4 (MIT, vendored unchanged): orep.pas + orep_core.c, the long-range matcher
+src/orep/                OREP 0.0.5 (MIT, vendored unchanged): orep.pas + orep_core.c, the long-range matcher
 docs/                    manual (USO.md), format (formato/FORMATO-PARC.md), codecs
 tests/                   tests, codec oracles and fuzzers
 reference/freearc-0.67/  only Compression/: C codec sources and test oracle
@@ -277,104 +277,146 @@ What makes this possible (all inside `.parc`; the codecs are unchanged):
 
 ## REP replaced by OREP (2026-11-18)
 
-FreeArc's REP (GPL) is gone; the long-range stage is now `orep`: OREP 0.0.3 (MIT), written for
+FreeArc's REP (GPL) is gone; the long-range stage is now `orep`: OREP 0.0.5 (MIT), written for
 PArc by osrep and vendored unchanged in `src/orep/` (version and commit in `src/orep/VERSION`;
 `build.sh` compiles its C core for every target). Syntax in [USO.md](USO.md), stream in
 [FORMATO-PARC.md §6.2](formato/FORMATO-PARC.md). `rep` blocks of older archives no longer decode
 (the error says so); `-mrep` fails with a hint; `-mc-rep`/`-mcr-` remove `orep`.
 
-Presets: `-m1`/`-m2` `orep:96m:l256`, `-m3`…`-m5` `orep:96m:l512`, `-m6`…`-m9` `orep:<window>:l512`
-(256m/512m/1024m/2040m); `-mxx` `orep:64m:l512:a1`. Chosen on TILIN and a 128 MB mix: OREP's own
-default `l64` (and `l32`) lost 0.1–0.4 % in front of lzma on TILIN (it won ~0.1–0.2 % on the
-mix), `l512` won everywhere; `c1` (one candidate) and `l512:c1` at `-m1`/`-m2` lost up to 0.19 %
-on the sets; `s16` saved 0.003 % for four times the anchor table.
+Presets: `-m1` `orep:96m:l256:c1`, `-m2` `orep:96m:l256`, `-m3`…`-m5` `orep:96m:l512`, `-m6`…`-m9`
+`orep:<window>:l512` (256m/512m/1024m/2040m); `-mxx` `orep:64m:l512:a1`. How they were chosen
+(TILIN, a 128 MB mix and the broad-sweep sets, every option run at the same time as REP):
 
-Threads: OREP runs with one thread, on the thread that writes the block (like REP's search).
-OREP's own threads cannot be accounted in the global budget (`PARC_THREADS`): see the comment in
-`src/parc_orep.pas` and TODO.md. A 4x4 scheduling quirk that the smaller OREP output exposed
-(the last blocks of a solid block ran one after another when there were fewer jobs than the
-queue: exe `-m4` with 4 threads 10 s instead of 6) was fixed in `T4x4EncStage.SubmitBlock`.
+- `-m1`/`-m2` with 4 threads, totals over 13 inputs: `l256` −0.025 %/−0.021 % size, +29 %/+8 %
+  wall; `l256:c1` −0.011 %/−0.030 %, +22 %/+8 % (worst single input +0.08 %); `l128:c1`
+  −0.21 %/−0.06 % but +59 %/+13 %. `-m1` takes `c1` (time), `-m2` keeps `l256` (`c1` saved no
+  time there).
+- In front of lzma, OREP's default `l64` (and `l32`) lost 0.1–0.4 % on TILIN; `l512` won
+  everywhere. `-m6`…`-m9`: `l512:s8:a4` lost 0.04 % on `text` (forced alignment), `s16` saved
+  0.003 % with four times the anchor table.
 
-Measured on the sets of `broad-sweep` (≈100 MB each), `tilin_512m.tar` and `TILIN.tar` (1.8 GB;
-with one thread only `-m1`…`-m5`), every level, 2 runs, `nice -n10` on the shared machine. `-mx`
-is `-m9` (same methods), not measured separately.
+Threads: OREP runs on the thread that writes the block (like REP's search). Since 0.0.5 its own
+threads can take `PARC_THREADS` tokens (hooks `OnWorkerBusy`/`OnWorkerIdle`), enabled with
+`PARC_OREP_THREADS=k`; `tests/thread_budget.py` passes with them and the output is the same, but
+it is off by default because it measured slower with 4 threads:
 
-Size, OREP vs REP (T1; negative = OREP smaller):
+| `-m1`, 4 threads, wall | REP | inline | k=2 | k=3 | k=4 |
+|---|---:|---:|---:|---:|---:|
+| tilin_512m, alone | 2.0 s | 2.3 s | 3.0 s | 3.4 s | — |
+| 13 inputs, all variants running at once (loaded) | 24.9 s | 28.7 s | 26.1 s | 27.2 s | 28.0 s |
+| same, `-m2` | 73.6 s | 78.4 s | 79.7 s | 80.9 s | 82.1 s |
+
+(`large` `-m3` alone: 7.6 s inline, 10.1 s with k=2 or 4.) OREP's threads spin between jobs
+holding their token and the writing thread waits for the coordinator holding its own, so 4x4/lzma
+get fewer tokens. Without the budget (threads not counted, for reference only) `-m1` was 4–10 %
+faster than REP with 17–28 % more CPU. Also: a 4x4 scheduling quirk exposed by OREP's smaller
+output (the last blocks of a solid block ran one after another when there were fewer jobs than
+the queue: exe `-m4` with 4 threads 10 s instead of 6) was fixed in `T4x4EncStage.SubmitBlock`.
+
+Measured against `main` (REP) on the broad-sweep sets (≈100 MB each), `tilin_512m.tar` and
+`TILIN.tar` (1.8 GB; with one thread only `-m1`…`-m5`), every level, 2 runs, REP and OREP of
+each configuration at the same time (three configurations in parallel, `nice -n10`, shared
+machine). `-mx` is `-m9`.
+
+Size, OREP vs REP, % (T1; negative = OREP smaller):
 
 | set | `-m1` | `-m2` | `-m3` | `-m4` | `-m5` | `-m6` | `-m7` | `-m8` | `-m9` |
 |---|---:|---:|---:|---:|---:|---:|---:|---:|---:|
-| TILIN.tar | -0.001 | -0.002 | -0.011 | -0.014 | -0.009 | — | — | — | — |
-| tilin_512m.tar | -0.003 | -0.009 | -0.010 | -0.004 | -0.033 | -0.011 | -0.039 | -0.096 | -0.093 |
-| archive | -0.016 | -0.007 | -0.009 | -0.009 | -0.004 | -0.011 | -0.011 | -0.011 | -0.011 |
-| audio | -0.012 | -0.002 | -0.024 | -0.010 | -0.010 | -0.014 | +0.004 | +0.004 | +0.004 |
-| document | -0.012 | -0.019 | -0.012 | -0.008 | +0.001 | -0.015 | -0.014 | -0.014 | -0.014 |
-| exe | -0.016 | -0.012 | -0.008 | -0.009 | -0.004 | -0.002 | -0.001 | -0.002 | -0.002 |
-| font | -0.041 | -0.051 | -0.040 | -0.044 | -0.029 | -0.009 | -0.009 | -0.009 | -0.009 |
-| image | -0.013 | -0.010 | -0.181 | -0.113 | -0.114 | -0.130 | -0.133 | -0.133 | -0.133 |
-| large | +0.007 | +0.006 | -0.051 | -1.026 | -1.146 | -1.231 | -1.217 | -1.222 | -1.222 |
-| small | -0.028 | -0.001 | -0.000 | -0.002 | +0.016 | +0.017 | +0.017 | +0.017 | +0.017 |
-| text | +0.006 | -0.008 | -0.007 | -0.020 | -0.005 | -0.024 | +0.002 | +0.001 | +0.001 |
-| video | +0.006 | +0.008 | -0.149 | -0.120 | -0.123 | -0.157 | -0.158 | -0.157 | -0.157 |
+| TILIN.tar | +0.004 | -0.002 | -0.012 | -0.013 | -0.019 | — | — | — | — |
+| tilin_512m.tar | +0.010 | -0.009 | -0.011 | -0.006 | -0.034 | -0.010 | -0.039 | -0.094 | -0.093 |
+| archive | -0.015 | -0.008 | -0.009 | -0.001 | -0.008 | -0.016 | -0.018 | -0.017 | -0.017 |
+| audio | -0.011 | -0.003 | -0.024 | -0.009 | -0.005 | -0.014 | -0.021 | -0.021 | -0.021 |
+| document | -0.005 | -0.018 | -0.012 | -0.007 | -0.009 | -0.014 | -0.013 | -0.013 | -0.013 |
+| exe | -0.010 | -0.011 | -0.008 | -0.011 | -0.006 | -0.002 | +0.001 | +0.001 | +0.001 |
+| font | -0.029 | -0.057 | -0.039 | -0.037 | -0.031 | -0.014 | -0.014 | -0.014 | -0.014 |
+| image | -0.008 | -0.010 | -0.181 | -0.116 | -0.114 | -0.132 | -0.132 | -0.132 | -0.132 |
+| large | +0.022 | +0.006 | -0.052 | -1.024 | -1.158 | -1.214 | -1.213 | -1.219 | -1.219 |
+| small | -0.026 | -0.001 | -0.001 | +0.001 | +0.021 | +0.005 | +0.005 | +0.005 | +0.005 |
+| text | +0.026 | -0.006 | -0.006 | -0.016 | -0.004 | -0.045 | -0.019 | -0.019 | -0.019 |
+| video | +0.005 | +0.007 | -0.149 | -0.121 | -0.124 | -0.158 | -0.159 | -0.157 | -0.157 |
 
-Size, OREP vs REP (T4; negative = OREP smaller):
+Size, OREP vs REP, % (T4; negative = OREP smaller):
 
 | set | `-m1` | `-m2` | `-m3` | `-m4` | `-m5` | `-m6` | `-m7` | `-m8` | `-m9` |
 |---|---:|---:|---:|---:|---:|---:|---:|---:|---:|
-| TILIN.tar | -0.026 | -0.033 | -0.117 | -0.045 | -0.048 | -0.010 | -0.038 | -0.031 | -0.152 |
-| tilin_512m.tar | -0.010 | -0.005 | -0.015 | -0.020 | -0.018 | -0.011 | -0.039 | -0.096 | -0.093 |
-| archive | -0.004 | -0.009 | -0.007 | -0.005 | +0.002 | -0.011 | -0.011 | -0.011 | -0.011 |
-| audio | -0.006 | +0.001 | -0.011 | -0.001 | +0.002 | -0.014 | +0.004 | +0.004 | +0.004 |
-| document | -0.031 | -0.008 | +0.018 | +0.003 | +0.004 | -0.015 | -0.014 | -0.014 | -0.014 |
-| exe | -0.020 | -0.025 | +0.001 | +0.003 | -0.013 | -0.002 | -0.001 | -0.002 | -0.002 |
-| font | +0.001 | -0.034 | -0.038 | -0.016 | -0.035 | -0.009 | -0.009 | -0.009 | -0.009 |
-| image | -0.237 | -0.007 | -0.096 | -0.083 | -0.121 | -0.130 | -0.133 | -0.133 | -0.133 |
-| large | +0.012 | +0.025 | -0.587 | -0.603 | -0.996 | -1.231 | -1.217 | -1.222 | -1.222 |
-| small | -0.029 | +0.010 | -0.001 | +0.004 | +0.017 | +0.017 | +0.017 | +0.017 | +0.017 |
-| text | -0.017 | -0.008 | -0.014 | -0.037 | -0.024 | -0.024 | +0.002 | +0.001 | +0.001 |
-| video | +0.000 | +0.008 | -0.106 | -0.097 | -0.130 | -0.157 | -0.158 | -0.157 | -0.157 |
+| TILIN.tar | -0.016 | -0.033 | -0.116 | -0.045 | -0.048 | -0.013 | -0.032 | -0.030 | -0.157 |
+| tilin_512m.tar | -0.009 | -0.006 | -0.017 | -0.021 | -0.018 | -0.010 | -0.039 | -0.094 | -0.093 |
+| archive | +0.083 | -0.009 | -0.012 | -0.005 | -0.007 | -0.016 | -0.018 | -0.017 | -0.017 |
+| audio | -0.011 | +0.001 | -0.010 | -0.002 | -0.001 | -0.014 | -0.021 | -0.021 | -0.021 |
+| document | -0.124 | -0.008 | +0.019 | +0.004 | -0.002 | -0.014 | -0.013 | -0.013 | -0.013 |
+| exe | -0.012 | -0.026 | -0.001 | +0.003 | -0.014 | -0.002 | +0.001 | +0.001 | +0.001 |
+| font | +0.026 | -0.035 | -0.041 | -0.022 | -0.022 | -0.014 | -0.014 | -0.014 | -0.014 |
+| image | -0.016 | -0.007 | -0.100 | -0.087 | -0.116 | -0.132 | -0.132 | -0.132 | -0.132 |
+| large | +0.019 | +0.026 | -0.590 | -0.577 | -0.994 | -1.214 | -1.213 | -1.219 | -1.219 |
+| small | -0.013 | +0.007 | +0.007 | +0.007 | +0.018 | +0.005 | +0.005 | +0.005 | +0.005 |
+| text | +0.001 | -0.004 | -0.039 | -0.034 | -0.035 | -0.045 | -0.019 | -0.019 | -0.019 |
+| video | -0.003 | +0.007 | -0.103 | -0.098 | -0.136 | -0.158 | -0.159 | -0.157 | -0.157 |
 
-Time, REP and OREP run at the same time (same load), best of the runs; compression and `t`
-(decompression + CRC) wall/CPU seconds, peak RSS of compression in MB:
+Compression wall time, OREP vs REP, % (T1; best of 2, run at the same time):
 
-| input | T | level | comp wall | comp CPU | decomp wall | decomp CPU | comp RSS | runs |
-|---|---|---|---|---|---|---|---|---|
-| tilin_512m.tar | T1 | `-m1` | 7.78 → 8.09 (+4%) | 7.68 → 7.99 (+4%) | 3.97 → 4.18 (+5%) | 3.96 → 4.18 (+6%) | 163 → 186 | 2 |
-| tilin_512m.tar | T4 | `-m1` | 2.06 → 2.61 (+27%) | 7.50 → 7.88 (+5%) | 1.26 → 1.31 (+4%) | 4.81 → 5.02 (+4%) | 256 → 300 | 2 |
-| tilin_512m.tar | T1 | `-m2` | 25.01 → 24.69 (-1%) | 24.05 → 23.69 (-1%) | 6.77 → 6.55 (-3%) | 6.77 → 6.53 (-4%) | 256 → 279 | 2 |
-| tilin_512m.tar | T4 | `-m2` | 5.04 → 5.48 (+9%) | 18.77 → 18.58 (-1%) | 1.97 → 1.92 (-3%) | 7.40 → 7.26 (-2%) | 429 → 468 | 2 |
-| tilin_512m.tar | T1 | `-m3` | 67.27 → 65.28 (-3%) | 67.15 → 65.16 (-3%) | 12.98 → 12.43 (-4%) | 12.98 → 12.42 (-4%) | 363 → 385 | 2 |
-| tilin_512m.tar | T4 | `-m3` | 21.39 → 21.75 (+2%) | 83.15 → 82.07 (-1%) | 3.92 → 3.95 (+1%) | 14.30 → 14.34 (+0%) | 429 → 465 | 2 |
-| tilin_512m.tar | T1 | `-m4` | 102.35 → 108.67 (+6%) | 102.07 → 108.64 (+6%) | 13.23 → 12.78 (-3%) | 13.23 → 12.77 (-3%) | 330 → 353 | 2 |
-| tilin_512m.tar | T4 | `-m4` | 25.14 → 25.52 (+2%) | 96.31 → 96.43 (+0%) | 3.99 → 3.92 (-2%) | 14.45 → 14.37 (-1%) | 600 → 622 | 2 |
-| tilin_512m.tar | T1 | `-m5` | 139.25 → 144.20 (+4%) | 139.22 → 143.53 (+3%) | 13.09 → 13.92 (+6%) | 13.09 → 13.91 (+6%) | 1162 → 1185 | 2 |
-| tilin_512m.tar | T4 | `-m5` | 32.79 → 33.33 (+2%) | 127.41 → 127.83 (+0%) | 3.99 → 3.95 (-1%) | 14.29 → 14.27 (-0%) | 1362 → 1389 | 2 |
-| tilin_512m.tar | T1 | `-m6` | 182.07 → 174.16 (-4%) | 181.90 → 174.05 (-4%) | 12.07 → 12.77 (+6%) | 12.07 → 12.77 (+6%) | 674 → 936 | 2 |
-| tilin_512m.tar | T4 | `-m6` | 106.14 → 112.17 (+6%) | 200.12 → 207.63 (+4%) | 12.76 → 13.24 (+4%) | 12.76 → 13.24 (+4%) | 728 → 990 | 2 |
-| tilin_512m.tar | T1 | `-m7` | 208.69 → 201.00 (-4%) | 208.24 → 200.48 (-4%) | 12.61 → 13.36 (+6%) | 12.60 → 13.35 (+6%) | 1266 → 1789 | 2 |
-| tilin_512m.tar | T4 | `-m7` | 114.13 → 121.73 (+7%) | 216.89 → 229.26 (+6%) | 13.34 → 12.90 (-3%) | 13.34 → 12.90 (-3%) | 1364 → 1885 | 2 |
-| tilin_512m.tar | T1 | `-m8` | 185.74 → 204.96 (+10%) | 185.61 → 204.87 (+10%) | 12.35 → 12.88 (+4%) | 12.36 → 12.80 (+4%) | 1944 → 2545 | 2 |
-| tilin_512m.tar | T4 | `-m8` | 120.56 → 128.98 (+7%) | 224.71 → 237.08 (+6%) | 13.27 → 13.75 (+4%) | 13.26 → 13.75 (+4%) | 2041 → 2621 | 2 |
-| tilin_512m.tar | T1 | `-m9` | 182.76 → 195.43 (+7%) | 182.72 → 195.37 (+7%) | 12.89 → 13.26 (+3%) | 12.90 → 13.26 (+3%) | 3269 → 3847 | 2 |
-| tilin_512m.tar | T4 | `-m9` | 123.87 → 129.44 (+4%) | 227.46 → 235.44 (+4%) | 12.99 → 13.15 (+1%) | 12.99 → 13.15 (+1%) | 3367 → 3946 | 2 |
-| TILIN.tar | T4 | `-m1` | 5.91 → 7.92 (+34%) | 22.65 → 22.43 (-1%) | 3.22 → 3.43 (+7%) | 10.13 → 10.64 (+5%) | 282 → 317 | 2 |
-| TILIN.tar | T4 | `-m2` | 9.86 → 11.50 (+17%) | 37.31 → 38.56 (+3%) | 4.56 → 4.66 (+2%) | 14.09 → 13.86 (-2%) | 439 → 486 | 2 |
-| TILIN.tar | T4 | `-m3` | 39.43 → 42.50 (+8%) | 148.14 → 152.72 (+3%) | 8.93 → 10.27 (+15%) | 29.82 → 30.78 (+3%) | 433 → 474 | 2 |
-| TILIN.tar | T4 | `-m4` | 45.44 → 45.98 (+1%) | 170.20 → 173.19 (+2%) | 8.74 → 9.75 (+12%) | 29.87 → 31.25 (+5%) | 577 → 620 | 2 |
-| TILIN.tar | T4 | `-m5` | 56.00 → 59.21 (+6%) | 212.46 → 219.73 (+3%) | 8.86 → 10.05 (+13%) | 29.86 → 31.60 (+6%) | 1380 → 1478 | 2 |
+| set | `-m1` | `-m2` | `-m3` | `-m4` | `-m5` | `-m6` | `-m7` | `-m8` | `-m9` |
+|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|
+| TILIN.tar | -0 | -6 | -0 | +8 | +0 | — | — | — | — |
+| tilin_512m.tar | -0 | +11 | +3 | +2 | +5 | -2 | -1 | -2 | +3 |
+| archive | +8 | +6 | -5 | -5 | +0 | +1 | +3 | -1 | -0 |
+| audio | +5 | +6 | -1 | +4 | -3 | -4 | -4 | -1 | -4 |
+| document | +7 | +0 | +2 | -3 | +3 | -1 | -1 | +4 | +5 |
+| exe | -3 | +9 | -1 | +4 | +1 | -1 | -2 | -6 | -0 |
+| font | +0 | +1 | +0 | +2 | -2 | +4 | -1 | +1 | -1 |
+| image | +1 | -4 | +1 | -3 | -1 | -0 | -1 | +3 | +1 |
+| large | +4 | +2 | -1 | -0 | -3 | +5 | +3 | +2 | -3 |
+| small | -5 | +2 | +0 | +4 | -1 | -1 | -0 | +6 | +0 |
+| text | +2 | +7 | +1 | +1 | -1 | +0 | -1 | +1 | -1 |
+| video | +12 | -1 | +2 | -3 | +5 | +2 | +8 | +2 | +2 |
 
-Summary. **Size**: OREP wins or ties nearly everywhere (up to −1.23 % on `large`, −0.15 % on
-`TILIN.tar -m9` with 4 threads); losses are ≤ 0.025 %: `small` +0.017 % at `-m5`…`-m9` (many
-small solid blocks pay OREP's fixed stream cost), `large` +0.006…+0.025 % at `-m1`/`-m2`,
-`document`/`exe` ≤ +0.018 % at `-m3`/`-m4` with 4 threads, `audio`/`text` ≤ +0.004 % at
-`-m7`…`-m9`. **Time**: not a win everywhere. With 4 threads at `-m1`/`-m2` OREP (one thread)
-is slower than REP (search plus two hashing threads): TILIN.tar `-m1` +34 % (5.9 → 7.9 s),
-`-m2` +17 %; tilin_512m `-m1` +27 %. Elsewhere within about ±10 % (the machine is shared and
-loaded; the two binaries ran at the same time to share the load), with `-m6`…`-m9` 4–10 % slower
-on tilin_512m. Decompression is within a few percent except TILIN.tar `-m3`…`-m5` (+12–15 %
-wall, +3–6 % CPU); the OREP stage alone decodes 512 MB in 0.51 s vs REP's 0.43 s. **Memory**:
-compression peak RSS is higher at `-m6`…`-m9` (+260…+600 MB on 512 MB) because OREP grows its
-ring by doubling with `ReAllocMem` (both copies alive in the last step); the encoder memory
-estimate counts it (see TODO.md).
+Compression wall time, OREP vs REP, % (T4; best of 2, run at the same time):
+
+| set | `-m1` | `-m2` | `-m3` | `-m4` | `-m5` | `-m6` | `-m7` | `-m8` | `-m9` |
+|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|
+| TILIN.tar | +33 | +13 | +6 | +3 | +0 | +2 | -0 | -1 | -1 |
+| tilin_512m.tar | +15 | +9 | +3 | +4 | +4 | +4 | +1 | +4 | +4 |
+| archive | +9 | +6 | -21 | -31 | -20 | +0 | +2 | -1 | +1 |
+| audio | +7 | -4 | +52 | +1 | +5 | -1 | +2 | +2 | -1 |
+| document | +15 | -6 | -37 | -10 | +3 | +0 | +1 | +0 | +1 |
+| exe | -3 | +1 | -0 | +2 | +1 | -0 | +1 | +2 | +3 |
+| font | -5 | +16 | +2 | -1 | +0 | -1 | +3 | +2 | -2 |
+| image | +10 | -5 | +0 | -41 | +6 | +1 | +2 | +0 | -1 |
+| large | +14 | +6 | +3 | +3 | +2 | +0 | -0 | +1 | +2 |
+| small | +4 | +5 | +3 | +0 | +4 | +3 | -3 | +5 | -4 |
+| text | +15 | +7 | +2 | +2 | -29 | -2 | +16 | -2 | +1 |
+| video | -3 | +7 | +9 | -4 | -24 | +2 | +4 | +0 | +1 |
+
+Totals per level over all inputs (REP → OREP; size, compression wall and CPU, `t` wall, peak compression RSS of the largest input):
+
+| T | level | size | comp wall | comp CPU | decomp wall | max RSS MB |
+|---|---|---:|---|---|---|---|
+| T1 | `-m1` | +0.003 % | 46 → 47 s (+1 %) | 46 → 47 s (+1 %) | 25 → 25 s (+3 %) | 166 → 164 |
+| T1 | `-m2` | -0.004 % | 151 → 150 s (-1 %) | 151 → 149 s (-1 %) | 42 → 42 s (+0 %) | 282 → 263 |
+| T1 | `-m3` | -0.023 % | 399 → 400 s (+0 %) | 399 → 400 s (+0 %) | 89 → 86 s (-2 %) | 363 → 386 |
+| T1 | `-m4` | -0.058 % | 593 → 621 s (+5 %) | 591 → 620 s (+5 %) | 91 → 90 s (-2 %) | 331 → 353 |
+| T1 | `-m5` | -0.070 % | 748 → 755 s (+1 %) | 745 → 752 s (+1 %) | 98 → 97 s (-1 %) | 1162 → 1186 |
+| T1 | `-m6` | -0.146 % | 487 → 486 s (-0 %) | 482 → 483 s (+0 %) | 49 → 49 s (-0 %) | 674 → 689 |
+| T1 | `-m7` | -0.156 % | 520 → 521 s (+0 %) | 518 → 518 s (-0 %) | 49 → 49 s (-1 %) | 1266 → 1274 |
+| T1 | `-m8` | -0.175 % | 518 → 518 s (-0 %) | 511 → 513 s (+0 %) | 50 → 50 s (-0 %) | 1945 → 2010 |
+| T1 | `-m9` | -0.175 % | 506 → 511 s (+1 %) | 505 → 511 s (+1 %) | 50 → 50 s (+0 %) | 3269 → 3334 |
+| T4 | `-m1` | -0.011 % | 14 → 16 s (+19 %) | 46 → 46 s (+0 %) | 8 → 8 s (+4 %) | 303 → 315 |
+| T4 | `-m2` | -0.021 % | 30 → 33 s (+7 %) | 106 → 109 s (+3 %) | 11 → 12 s (+6 %) | 448 → 481 |
+| T4 | `-m3` | -0.101 % | 116 → 119 s (+3 %) | 367 → 374 s (+2 %) | 23 → 24 s (+4 %) | 439 → 475 |
+| T4 | `-m4` | -0.058 % | 148 → 142 s (-4 %) | 426 → 432 s (+1 %) | 24 → 25 s (+4 %) | 594 → 637 |
+| T4 | `-m5` | -0.079 % | 195 → 189 s (-3 %) | 594 → 606 s (+2 %) | 29 → 30 s (+3 %) | 1371 → 1497 |
+| T4 | `-m6` | -0.073 % | 526 → 535 s (+2 %) | 996 → 999 s (+0 %) | 84 → 83 s (-2 %) | 737 → 752 |
+| T4 | `-m7` | -0.089 % | 555 → 561 s (+1 %) | 1072 → 1066 s (-1 %) | 83 → 83 s (-1 %) | 1364 → 1378 |
+| T4 | `-m8` | -0.100 % | 549 → 552 s (+1 %) | 1045 → 1036 s (-1 %) | 81 → 79 s (-2 %) | 2612 → 2624 |
+| T4 | `-m9` | -0.165 % | 562 → 567 s (+1 %) | 1060 → 1061 s (+0 %) | 81 → 81 s (+0 %) | 4845 → 4834 |
+
+Remaining losses: compression wall time with 4 threads at `-m1` (+19 % over all inputs, +33 %
+on TILIN.tar: OREP on one thread vs REP's search plus two hashing threads) and `-m2` (+7 %,
+TILIN.tar +13 %); with one thread `-m4` +5 % (the rest within ±1 %); decompression +3…6 % at
+`-m1`…`-m5` with 4 threads. Single-input times vary ±20–40 % between paired runs on the loaded
+machine (e.g. `audio` `-m3`), so only the totals are meaningful. Sizes lose at most 0.08 %
+(`archive` `-m1` 4 threads, from `c1`), otherwise a few hundredths (`small`, `large` at
+`-m1`/`-m2`, `document` `-m3`). Peak RSS is now close to
+REP's (OREP 0.0.5 allocates the ring by slots, no growth copy).
 
 ## Compression memory limit (2026-11-17)
 
