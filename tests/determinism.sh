@@ -3,9 +3,9 @@
 #
 # Comprime el mismo árbol varias veces con cada nivel (-m0..-m9, -mx, -mxx) y varios
 # PARC_THREADS, y exige archivos idénticos byte a byte entre corridas con el mismo N. El
-# árbol mezcla lo que toca los caminos con hilos: un grupo $binary de ~20 MB (REP con tareas
-# de hashing, exe+delta, varios bloques de 4x4 en paralelo, trozos aleatorios que 4x4 guarda
-# tal cual), texto (dict/lzp/grzip/ppmd), datos repetidos para REP y muchos archivos chicos;
+# árbol mezcla lo que toca los caminos con hilos: un grupo $binary de ~20 MB (orep,
+# exe+delta, varios bloques de 4x4 en paralelo, trozos aleatorios que 4x4 guarda
+# tal cual), texto (dict/lzp/grzip/ppmd), datos repetidos para orep y muchos archivos chicos;
 # con varios grupos los bloques sólidos se escriben en paralelo (parc_writer).
 #
 # Entre N distintos la salida PUEDE cambiar, y es legítimo:
@@ -19,7 +19,7 @@
 #    diccionarios cuando una cadena no entra, y la memoria de 4x4 cuenta un codificador por
 #    hilo: con datos enormes el método puede cambiar con N (y entre 32 y 64 bits). Con el árbol
 #    de esta prueba (~20 MB) el límite no se alcanza.
-# Fuera de eso ningún codificador depende de los hilos (bt4 multihilo, 4x4, REP, grzip y los
+# Fuera de eso ningún codificador depende de los hilos (bt4 multihilo, 4x4, orep, grzip y los
 # bloques en paralelo dan la misma salida que en línea). Como las alternativas llegan hasta
 # 3, también se exige que N=4 y N=8 den el mismo archivo en cada nivel fuera de -m1..-m4
 # (DET_NDEP): si difieren, algo depende de la cantidad de hilos en tiempo de ejecución. Las
@@ -46,7 +46,7 @@ bad() { fail=$((fail+1)); echo "  FAIL $*"; }
 
 # --- árbol de prueba (~34 MB). Lo aleatorio se genera una vez: todas las corridas ven lo mismo
 head -c $((6 << 20)) /dev/urandom > rnd
-# $binary: el ejecutable de parc con variantes (REP encuentra las copias, exe/delta el código)
+# $binary: el ejecutable de parc con variantes (orep encuentra las copias, exe/delta el código)
 for i in 1 2 3 4; do
   { head -c $((i * 4096)) rnd; cat "$PARC"; tail -c $((i * 65536)) rnd; } > d/bin/p$i.exe
 done
@@ -56,7 +56,7 @@ done
 cat "$ROOT"/src/*.pas > d/txt/a.txt
 tr 'a-z' 'b-za' < d/txt/a.txt > d/txt/b.txt
 rev < d/txt/a.txt > d/txt/c.txt
-# REP: 2 MB aleatorios repetidos 3 veces, más 300 archivos chicos
+# orep: 2 MB aleatorios repetidos 3 veces, más 300 archivos chicos
 { head -c $((2 << 20)) rnd; head -c $((2 << 20)) rnd; head -c $((2 << 20)) rnd; } > d/misc/rep.bin
 for i in $(seq 1 300); do
   { echo "archivo $i"; tail -c +$((i * 997)) "$ROOT/src/parc_writer.pas" | head -c $((i * 37 % 3000 + 50)); } > d/misc/s$i.dat
@@ -101,8 +101,8 @@ done
 # Métodos explícitos (sin presets): la salida no depende de N, salvo lzma ht4 :normal/:max
 # (1 hilo contra 2 o más). Bloques chicos para que 4x4 reparta muchos trabajos entre hilos y
 # reuse motores de tor (TTorEncCache) en el orden que salga.
-for m in "4x4:tor:3:256kb" "4x4:tor:7:256kb" "4x4:tor:12:256kb" "rep:16mb+4x4:lzma:1mb:normal" \
-         "rep:8mb+exe+delta+lzma:8mb:max" "lzma:16mb:max:bt4" "4x4:b512kb:grzip:m1" \
+for m in "4x4:tor:3:256kb" "4x4:tor:7:256kb" "4x4:tor:12:256kb" "orep:16mb+4x4:lzma:1mb:normal" \
+         "orep:8mb:l512:s16+exe+delta+lzma:8mb:max" "lzma:16mb:max:bt4" "4x4:b512kb:grzip:m1" \
          "dict+lzp+ppmd:6" "lzma:16mb:normal:ht4"; do
   ref=""; hs=""; diff=0
   for T in $THREADS; do

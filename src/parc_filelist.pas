@@ -597,10 +597,10 @@ begin
   if Has('tta') then Result := '$wav'
   else if Has('mm') then Result := '$bmp'
   else if Has('grzip') or Has('ppmd') or Has('pmm') or Has('dict') then Result := '$text'
-  else if Only(['storing']) or Only(['rep', 'tor']) then Result := '$compressed'
+  else if Only(['storing']) or Only(['orep', 'tor']) then Result := '$compressed'
   else if Has('ecm') then Result := '$iso'
   else if Has('precomp') then Result := '$precomp'
-  else if Only(['precomp', 'rep']) then Result := '$jpgsolid'   // (inalcanzable, como en el fuente)
+  else if Only(['precomp', 'orep']) then Result := '$jpgsolid'   // (inalcanzable, como en el fuente)
   else if Has('jpg') then Result := '$jpg'
   else if Has('exe') then Result := '$binary'
   else if Has('lzma') or Has('tor') then Result := '$obj'

@@ -22,7 +22,7 @@ jobs:
         run: bash tests/smoke.sh build/linux64/parc
       - name: Tests de la CLI y de formato
         run: |
-          for t in cli stdio volumes rs_recovery bcj crc lz4frame ppmd ppmd_asm; do
+          for t in cli stdio volumes rs_recovery bcj crc lz4frame ppmd ppmd_asm orep; do
             bash tests/$t.sh || exit 1
           done
       - uses: actions/upload-artifact@v5

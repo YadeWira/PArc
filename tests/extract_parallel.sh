@@ -10,13 +10,13 @@ rm -rf -- "${W:?}"; mkdir -p "$W/mem" "$W/fat" && cd "$W" || exit 2
 fail=0
 ck() { if eval "$2"; then printf '  ok    %s\n' "$1"; else printf '  FAIL %s\n' "$1"; fail=$((fail+1)); fi; }
 
-# Memoria: 3 bloques de 160 MB (dispersos, casi todo ceros) con ventana de rep de 256 MB. Con
+# Memoria: 3 bloques de 160 MB (dispersos, casi todo ceros) con ventana de orep de 256 MB. Con
 # 4 decodificadores a la vez no entra en 500 MB de espacio de direcciones; uno por vez sí
 for i in 1 2 3; do
   truncate -s 160M mem/f$i.bin
   printf 'bloque %d' $i | dd of=mem/f$i.bin bs=1 seek=4096 conv=notrunc 2>/dev/null
 done
-(cd mem && "$PARC" a ../m.parc -s- -mrep:256mb+lzma:16m:fast f1.bin f2.bin f3.bin --no-progress >/dev/null 2>&1)
+(cd mem && "$PARC" a ../m.parc -s- -morep:256mb+lzma:16m:fast f1.bin f2.bin f3.bin --no-progress >/dev/null 2>&1)
 mkdir outm
 ( ulimit -v 500000; PARC_THREADS=4 "$PARC" x m.parc -dpoutm --no-progress > m.log 2>&1 ); rc=$?
 ck "poca memoria: rc 0"        '[ $rc = 0 ]'

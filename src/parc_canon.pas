@@ -20,7 +20,8 @@ interface
 function LimitAndCanonize(const Method: string; BlockSize: Int64): string;
 
 { Una etapa ya canónica achicada para que su codificador use a lo sumo MemLim bytes (aprox.):
-  lzma con su estimación exacta (LzmaFitDictionary), tor búfer + hash, rep/lzp/dict a la mitad,
+  lzma con su estimación exacta (LzmaFitDictionary), tor búfer + hash, orep con OrepEncMemory,
+  lzp/dict a la mitad,
   grzip a 1/8 (BWT), ppmd el modelo, y el método interno de 4x4 con MemLim repartido entre sus
   hilos. cm, srep y los filtros no cambian. Lo usa el ajuste de la cadena entera
   (parc_encoders.FitEncodeMem), que mide con la estimación de cada codificador y repite. }
@@ -39,7 +40,7 @@ var
 
 implementation
 
-uses SysUtils, Math, parc_os, parc_methods, parc_torenc, parc_lzmaenc, parc_parallel;
+uses SysUtils, Math, parc_os, parc_methods, parc_torenc, parc_lzmaenc, parc_parallel, parc_orep;
 
 const
   KB = 1024; MB = 1024*1024; GB = Int64(1024)*1024*1024;
@@ -212,6 +213,7 @@ var
     Interno: string;
     I: Integer;
     TM, TD: TTorMethod;
+    OM: TOrepMethod;
 
     function Pr(N: Integer): string;
     begin
@@ -224,33 +226,27 @@ begin
     Name  := LowerCase(Parts[0]);
     P     := '';
 
-    { --- rep (C_REP.cpp/.h). Defaults: 64mb, mc100, c0, mml512, dINTMAX,
-          s512, h0, a1. N% -> MinCompression; N -> MinMatchLen. :c se purifica. }
-    if Name = 'rep' then
+    { --- orep (parc_orep, MIT). La ventana se limita al bloque (como SetDictionary) y a la
+          memoria (OrepEncMemory); queda siempre, y los demás parámetros solo si no son los de
+          por omisión (l64, a0, s4, c4, b4mb, d0). Parámetros inválidos: igual (el codificador da
+          el error). }
+    if Name = 'orep' then
     begin
-      BS := ParseMem(Pr(1), 64*MB);
-      if BS > Limit then BS := Limit;                 { SetDictionary }
-      if (MemLim > 0) and (BS > MemLim div 2) then BS := FitMem(MemLim div 2);
-      MC := 100; MML := 512; Bar := INT_MAX;
-      Sm := 512; HSL := 0;   Amp := 1;
-      for J := 1 to High(Parts) do
-      begin
-        L := LowerCase(Parts[J]);
-        if (L <> '') and (L[1] in ['0'..'9']) and (Copy(L, Length(L), 1) = '%') then MC := Num(Copy(L, 1, Length(L)-1), 100)
-        else if (L <> '') and (L[1] in ['0'..'9']) then MML := Num(L, 512)
-        else if Copy(L,1,1) = 'd' then Bar := ParseMem(Copy(L,2,MaxInt), INT_MAX)
-        else if Copy(L,1,1) = 's' then Sm := Num(Copy(L,2,MaxInt), 512)
-        else if Copy(L,1,1) = 'h' then HSL := Num(Copy(L,2,MaxInt), 0)
-        else if Copy(L,1,1) = 'a' then Amp := Num(Copy(L,2,MaxInt), 1);
-        { :c<ChunkSize> se ignora: purify }
+      try
+        OM := ParseOrepMethod(Parts);
+      except
+        on EUnsupportedMethod do Exit(S);
       end;
-      Result := 'rep:' + ShowMem(BS);
-      if MC <> 100 then Result := Result + (':' + IntToStr(MC) + '%');
-      if MML <> 512 then Result := Result + (':' + IntToStr(MML));
-      if Bar <> INT_MAX then Result := Result + (':d' + ShowMem(Bar));
-      if Sm <> 512 then Result := Result + (':s' + IntToStr(Sm));
-      if HSL <> 0 then Result := Result + (':h' + IntToStr(HSL));
-      if Amp <> 1 then Result := Result + (':a' + IntToStr(Amp));
+      if Int64(OM.Window) > Limit then OM.Window := Limit;
+      if (MemLim > 0) and (Int64(OrepMethodEncMemory(OM)) > MemLim) then
+        OM.Window := OrepFitWindow(OM, MemLim);
+      Result := 'orep:' + ShowMem(OM.Window);
+      if OM.MinLen <> OREP_DEF_MINLEN then Result := Result + ':l' + IntToStr(OM.MinLen);
+      if OM.Align <> OREP_DEF_ALIGN then Result := Result + ':a' + IntToStr(OM.Align);
+      if OM.Density <> OREP_DEF_DENSITY then Result := Result + ':s' + IntToStr(OM.Density);
+      if OM.Cands <> OREP_DEF_CANDS then Result := Result + ':c' + IntToStr(OM.Cands);
+      if OM.Chunk <> OREP_DEF_CHUNK then Result := Result + ':b' + ShowMem(OM.Chunk);
+      if OM.MinDist <> 0 then Result := Result + ':d' + ShowMem(OM.MinDist);
       Exit;
     end;
 

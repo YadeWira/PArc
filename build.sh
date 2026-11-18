@@ -3,10 +3,11 @@
 # win32 (y win64 con todos los packages) usan el cross de PA-Lab en $FPC_CROSS.
 # El codificador Tornado es el C++ de FreeArc (reference/freearc-0.67/Compression/Tornado),
 # compilado acá con g++ / mingw-g++ y llamado desde Pascal por src/parc_torglue.cpp.
+# OREP (src/orep, MIT): orep_core.c se compila acá con el gcc/clang de cada target.
 set -e
 cd "$(dirname "$0")"
 
-FPCFLAGS="-O3 -Xs -vewn -Fusrc"
+FPCFLAGS="-O3 -Xs -vewn -Fusrc -Fusrc/orep"
 FPC_CROSS="${FPC_CROSS:-/mnt/IA_LAB/compartido/parc/fpc-cross}"
 # Las opciones de FreeArc (Compression/Tornado/makefile) salvo -ffast-math; sin excepciones ni RTTI
 CXXFLAGS="-O3 -fno-exceptions -fno-rtti -fomit-frame-pointer -fstrict-aliasing -funroll-loops
@@ -25,6 +26,15 @@ ctor() {
   $cxx $CXXFLAGS "$@" -I"$src" -c src/parc_torglue.cpp -o "$out/units/parc_torglue.o"
 }
 
+# corep <dir> <cc> [opciones]: el núcleo en C de OREP (src/orep/orep_core.c, MIT, sin libc) ->
+# <dir>/units/orep_core.o, que src/orep/orep.pas enlaza con {$L}. Opciones de su README.
+COREPFLAGS="-O2 -fno-builtin -ffreestanding -fno-stack-protector -fno-tree-loop-distribute-patterns -w"
+corep() {
+  out=$1; cc=$2; shift 2
+  mkdir -p "$out/units"
+  $cc $COREPFLAGS "$@" -c src/orep/orep_core.c -o "$out/units/orep_core.o"
+}
+
 build() {
   target=$1; compiler=$2; shift 2
   out="build/$target"
@@ -39,28 +49,35 @@ WINCXX="-DFREEARC_WIN -DUNICODE -D_UNICODE"
 winlibs() { echo "-Fl$(dirname "$($1 -print-libgcc-file-name)") -Fl$(dirname "$($1 -print-file-name=libmsvcrt.a)")"; }
 case "${1:-linux64}" in
   linux64) ctor build/linux64 g++ -DFREEARC_UNIX -fno-pie
+           corep build/linux64 gcc -fno-pie
            build linux64 fpc -Tlinux -Px86_64 ;;
   win64)   ctor build/win64 x86_64-w64-mingw32-g++ $WINCXX
+           corep build/win64 x86_64-w64-mingw32-gcc
            if [ -x "$FPC_CROSS/bin/fpc-win64" ]; then build win64 "$FPC_CROSS/bin/fpc-win64" $(winlibs x86_64-w64-mingw32-gcc)
            else build win64 fpc -Twin64 -Px86_64 $(winlibs x86_64-w64-mingw32-gcc); fi ;;
   # Linux i386: el g++ del sistema con -m32 (lib32stdc++/multilib) y el cross de FPC
   linux32) ctor build/linux32 g++ -m32 -DFREEARC_UNIX -fno-pie -msse2 -mfpmath=sse -mstackrealign
+           corep build/linux32 gcc -m32 -fno-pie -mstackrealign
            build linux32 "$FPC_CROSS/bin/fpc-linux32" -Fl/usr/lib32 -Fl"$(dirname "$(g++ -m32 -print-libgcc-file-name)")" ;;
   # Linux aarch64: el cross de FPC y aarch64-linux-gnu-g++ (Common.h detecta 64 bits por el parche)
   linuxarm64)
            if [ "$(uname -m)" = aarch64 ]; then
              # nativo (p. ej. el runner ARM de CI): el g++ y el fpc del sistema
              ctor build/linuxarm64 g++ -DFREEARC_UNIX -fno-pie
+             corep build/linuxarm64 gcc -fno-pie
              build linuxarm64 fpc -Tlinux -Paarch64
            else
              ctor build/linuxarm64 aarch64-linux-gnu-g++ -DFREEARC_UNIX -fno-pie
+             corep build/linuxarm64 aarch64-linux-gnu-gcc -fno-pie
              build linuxarm64 "$FPC_CROSS/bin/fpc-linuxarm64" -Fl"$(dirname "$(aarch64-linux-gnu-gcc -print-libgcc-file-name)")"
            fi ;;
   # macOS arm64 (solo en un Mac: clang++ de Xcode y el fpc de Homebrew), contra el SDK de xcrun
   macos)   ctor build/macos clang++ -DFREEARC_UNIX -Wno-c++11-narrowing
+           corep build/macos clang
            build macos fpc -Tdarwin -Paarch64 -XR"$(xcrun --show-sdk-path)" ;;
   # i686: SSE2 para los precios (log2) igual que en x86_64, y la pila realineada (FPC la deja a 4)
   win32)   ctor build/win32 i686-w64-mingw32-g++ $WINCXX -msse2 -mfpmath=sse -mstackrealign
+           corep build/win32 i686-w64-mingw32-gcc -mstackrealign
            build win32 "$FPC_CROSS/bin/fpc-win32" $(winlibs i686-w64-mingw32-gcc) ;;
   all)     for t in linux64 linux32 linuxarm64 win64 win32; do "$0" $t; done ;;
   *)       echo "target desconocido: $1" >&2; exit 1 ;;

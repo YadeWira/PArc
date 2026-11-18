@@ -171,7 +171,7 @@ begin
   OutLn('                  -s<N>f N files, -s<N>m blocks of at least N bytes');
   OutLn('                  default: solid, split only where a method needs it');
   OutLn('  -rr[spec]       recovery record: -rr, -rr5%, -rr10, -rr-');
-  OutLn('  -mc-<alg>       drop an algorithm from the chains: -mc-rep, -mc-exe,');
+  OutLn('  -mc-<alg>       drop an algorithm from the chains: -mc-orep, -mc-exe,');
   OutLn('                  -mcd- (delta), -mc-$text (group); repeatable');
   OutLn('  -lc<size>       memory limit per compressor (shrinks dictionaries)');
   OutLn('  -ld<size>       x/e/t: refuse blocks needing more memory (exit 7)');
@@ -1669,6 +1669,9 @@ begin
     if Missing <> '' then
     begin
       ErrLn('ERROR: no encoder yet for:' + Missing);
+      // REP de FreeArc ya no está: su reemplazo es orep (otros parámetros)
+      if (Pos(' rep', Missing) > 0) or (Pos('+rep', Missing) > 0) then
+        ErrLn('  (rep was replaced by orep: -morep:<window>:l<min length>, see docs/USO.md)');
       Exit(3);
     end;
 
@@ -1908,7 +1911,7 @@ end;
 { -mc...: True si S (sin "-mc") es una operación sobre los algoritmos y no un método que empieza
   con "c" (como -mcm). Agrega a Ops "grupos|cosa". Sintaxis: -mc-<alg>, -mc<alg>-, -mc-$grupo,
   -mc$g1,$g2:-<alg>; abreviaturas de una letra como FreeArc/RAR: d=delta, e=exe, l=lzp,
-  r=rep, z=dict, a=$wav, c=$bmp, t=$text. }
+  r=orep (y -mc-rep), z=dict, a=$wav, c=$bmp, t=$text. }
 function ParseMcOption(const Rest: string; Ops: TStrings): Boolean;
 var
   Groups, Op, What: string;
@@ -1937,7 +1940,7 @@ begin
     'd': What := 'delta';
     'e': What := 'exe';
     'l': What := 'lzp';
-    'r': What := 'rep';
+    'r', 'rep': What := 'orep';   // REP se reemplazó por OREP
     'z': What := 'dict';
     'a': What := '$wav';
     'c': What := '$bmp';

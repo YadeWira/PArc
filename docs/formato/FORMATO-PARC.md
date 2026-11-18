@@ -78,7 +78,8 @@ files), so a compact encoding is not worth a new tag.
 
 - **Blocks**: HEADER, DATA, DIR, FOOTER and RECOVERY, with the same type numbers.
 - **Descriptors**: the same fields and the same CRC; only the signature changes.
-- **Methods**: the same strings (`lzma:...`, `rep:...+...`, `4x4:...`).
+- **Methods**: the same strings (`lzma:...`, `orep:...+...`, `4x4:...`); see §6 for the streams
+  that are PArc's own (`ppmd`, `orep`).
 - **Footer**: the same fields, including `locked`, `recovery` and `comment`. `locked` (one byte,
   0 or 1) is written as 1 by `-k`/`k`; PArc then refuses every command that would modify the
   archive.
@@ -265,3 +266,45 @@ orders above 16 are allowed (the SDK limits them to 16 only for the zip format; 
 `CreateSuccessors` stack array is sized for 64); and in cut-off mode, when a `CutOff` +
 `ExpandTextArea` pass changes nothing while the memory is still above 3/4 (the SDK would loop
 forever, e.g. with very small memories), the model is restarted instead.
+
+### 6.2 `orep` (since 2026-11): replaces `rep`
+
+`orep` is OREP, a one-pass streaming long-range matcher written for PArc (clean-room, MIT;
+`src/orep/`, version and commit in `src/orep/VERSION`). It replaced FreeArc's REP (GPL):
+**the method `rep` no longer exists**; a `rep` block of an archive written by PArc 0.0.5 or
+earlier fails with "method rep (FreeArc REP) is no longer supported" (extract it with 0.0.5).
+
+Method string: `orep[:<window>][:<min length>][:w<mem>][:l<n>][:a<n>][:s<n>][:c<n>][:b<mem>][:d<mem>]`
+
+| parameter | meaning | default | range |
+|---|---|---|---|
+| `w<mem>` or a bare memory (`96mb`) | window: the largest match distance | 512mb | 1 byte .. 3840mb |
+| `l<n>` or a bare integer | shortest match searched | 64 | 16 .. 65536 |
+| `a<n>` | match lengths are multiples of `a`, and literals stay at their input position modulo `a` (lzma's `pb`/`lp` contexts); `a0` = chosen per stream block (1 for text, 4 otherwise) | 0 | 0 .. 4096, ≤ `l` |
+| `s<n>` | anchor density: higher finds more short matches, slower, larger table | 4 | 1 .. 64 |
+| `c<n>` | candidates tried per anchor: more finds longer matches, slower; 1 is the fastest | 4 | 1 .. 4 |
+| `b<mem>` | stream block (slot) size | 4mb | 64kb .. 64mb |
+| `d<mem>` | matches nearer than this are left to the next compressor | 0 | |
+
+Memories as everywhere in PArc (`b/k/m/g` suffixes; a bare number is 2^N). The stored
+(canonical) string always has the window, clipped to the solid block like any dictionary
+(`orep:57mb`) and, with `-lc`, to what fits the memory limit; the other parameters only when
+they differ from the defaults (`orep:96mb:l256`, `orep:2040mb:l512`).
+
+Stream: OREP format version 2 (OREP 0.0.3; still a draft upstream, so a later OREP may change
+it), specified in `src/orep/orep-format.md`: a 28-byte header (magic `OREP`, version, alignment
+setting, window, block size, minimum length, CRC-32C), blocks (output size, match count, column
+size, the block's alignment, three varint columns: literal run, length − 16, distance − 1, zero
+padding) followed by the block's literals
+and the CRC-32C of the block's output, and an end marker with the total size. The stream does
+not depend on the number of threads or on how the input is split into writes; the native core
+(`orep_core.c`) and the Pascal reference (`-dOREP_NO_NATIVE`) give the same bytes on every
+platform.
+
+The decoder reads the window and block size from the stream header. It keeps a ring of
+`ceil(window / block) × block + block` bytes, grown as data arrives, and refuses (as damaged) a
+header that needs more memory than the method string declares (`OrepDecMemory` of the method's
+window and block), so `-ld` (which reads the method string) bounds it. Every block is checked
+(sizes, distances inside the decoded data, zero padding, CRC-32C); the end marker's total and
+the absence of bytes after it too.
+

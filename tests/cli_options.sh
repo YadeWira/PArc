@@ -161,7 +161,7 @@ q a lc0.parc lc.bin -mlzma:64mb:max -s-; q a lc1.parc lc.bin -mlzma:64mb:max -s-
 d0=$(P lb lc0.parc | grep "^  data" | grep -o "lzma:[0-9]*[km]b" | head -1); d1=$(P lb lc1.parc | grep "^  data" | grep -o "lzma:[0-9]*[km]b" | head -1)
 ck "-lc reduce el diccionario de lzma ($d0 -> $d1)"  '[ "$d0" = lzma:11mb ] && [ -n "$d1" ] && [ "$d1" != "$d0" ] && P t lc1.parc | grep -q "All OK"'
 q a lc2.parc src -m9 -lc16m
-ck "-lc con un preset (ppmd/rep dentro del límite)" '! P lb lc2.parc | grep -oE "(ppmd:[0-9]+|rep|lzma):[0-9]+(gb|mb)" | grep -E ":([2-9][0-9]|[0-9]{3,})mb|gb" && P t lc2.parc | grep -q "All OK"'
+ck "-lc con un preset (ppmd/orep dentro del límite)" '! P lb lc2.parc | grep -oE "(ppmd:[0-9]+|orep|lzma):[0-9]+(gb|mb)" | grep -E ":([2-9][0-9]|[0-9]{3,})mb|gb" && P t lc2.parc | grep -q "All OK"'
 q a ld.parc lc.bin -mlzma:64mb -s-
 ck "-ld: rechaza con código 7"                '[ $(code t ld.parc -ld1m) = 7 ] && [ $(code x ld.parc -ld1m -dpldx) = 7 ] && [ ! -s ldx/lc.bin ]'
 ck "-ld suficiente: OK"                       '[ $(code t ld.parc -ld1g) = 0 ] && [ $(code t ld.parc -ld-) = 0 ]'
@@ -201,9 +201,11 @@ ck "--sync con x: rechazado"                  '[ $(code x sy.parc --sync) = 1 ]'
 
 echo '-- -mc'
 mk; q a mc0.parc src -m5 -s-
-q a mc1.parc src -m5 -s- -mc-rep -mc-exe -mcd-
-ck "-m5 trae rep/exe/delta"                   'P lb mc0.parc | grep -q "rep:" '
-ck "-mc-rep -mc-exe -mcd- los quita"          '! P lb mc1.parc | grep -qE "(^| |\+)(rep|exe|delta)(:|\+| |$)" && P t mc1.parc | grep -q "All OK"'
+q a mc1.parc src -m5 -s- -mc-orep -mc-exe -mcd-
+q a mc4.parc src -m5 -s- -mc-rep
+ck "-m5 trae orep/exe/delta"                  'P lb mc0.parc | grep -q "orep:" '
+ck "-mc-orep -mc-exe -mcd- los quita"         '! P lb mc1.parc | grep -qE "(^| |\+)(orep|exe|delta)(:|\+| |$)" && P t mc1.parc | grep -q "All OK"'
+ck "-mc-rep (FreeArc) quita orep"             '! P lb mc4.parc | grep -q "orep" && P t mc4.parc | grep -q "All OK"'
 q a mc2.parc src -m5 -s- '-mc$text,$default:-lzp'
 ck "-mc con grupos"                           '! P lb mc2.parc | grep -q "lzp:" && P t mc2.parc | grep -q "All OK"'
 q a mc3.parc src -mcm

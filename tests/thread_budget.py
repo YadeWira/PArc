@@ -2,7 +2,7 @@
 """tests/thread_budget.py — presupuesto global de hilos (PARC_THREADS=N).
 
 PARC_THREADS=N es el tope de hilos TRABAJANDO a la vez en todo el proceso, sumando bloques en
-paralelo, 4x4, hashing de REP, el match finder multihilo de LZMA y la verificación/extracción
+paralelo, 4x4, el match finder multihilo de LZMA y la verificación/extracción
 en paralelo (parc_parallel). Se muestrea /proc/<pid>/task/*/stat (hilos en estado R) mientras
 corre cada comando y se exige:
   - núcleos promedio (CPU/wall) <= N + 0.3 (holgura: el hilo principal que solo junta
@@ -10,8 +10,7 @@ corre cada comando y se exige:
   - percentil 99 de hilos en R <= N (un hilo que acaba de pasar su ficha sigue en R unos
     microsegundos, por eso no se mira el máximo);
   - que lo extraído sea idéntico.
-Escenarios: REP con varios bloques en paralelo (-s-, el caso de tests/rep_threads.sh de antes),
-un bloque grande con rep+4x4, LZMA con match finder multihilo, y t/x de esos archivos.
+Escenarios: orep con varios bloques en paralelo (-s-), un bloque grande con orep+4x4, LZMA con match finder multihilo, y t/x de esos archivos.
 Solo Linux. Uso: tests/thread_budget.py [parc]
 """
 import os, random, shutil, subprocess, sys, tempfile, time
@@ -99,7 +98,7 @@ def main():
     shutil.rmtree(base, ignore_errors=True)
     os.makedirs(base)
     rng = random.Random(1)
-    # g: 4 archivos de 24 MB (8 MB aleatorios repetidos 3 veces: REP encuentra coincidencias)
+    # g: 4 archivos de 24 MB (8 MB aleatorios repetidos 3 veces: orep encuentra coincidencias)
     g = os.path.join(base, 'g')
     os.makedirs(g)
     for i in range(4):
@@ -113,8 +112,8 @@ def main():
     with open(os.path.join(b, 'big'), 'wb') as f:
         f.write(t + rng.randbytes(1 << 20) + t + t[:15 << 20])
     cases = [
-        ('rep -s- (bloques en paralelo)', 'g', ['-s-', '-mrep:32mb:256']),
-        ('rep+4x4 (un bloque)', 'b', ['-mrep:64mb+4x4:b2mb:lzma:2mb:fast']),
+        ('orep -s- (bloques en paralelo)', 'g', ['-s-', '-morep:32mb:l256']),
+        ('orep+4x4 (un bloque)', 'b', ['-morep:64mb+4x4:b2mb:lzma:2mb:fast']),
         ('lzma mt (un bloque)', 'b', ['-mlzma:16mb:normal:bt4']),
         ('-m3 -s- (bloques con 4x4)', 'g', ['-s-', '-m3']),
     ]

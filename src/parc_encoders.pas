@@ -133,7 +133,7 @@ implementation
 
 uses
   Math, parc_filters, parc_ppmd, parc_methods, parc_lzp, parc_parallel, parc_lzmaenc,
-  parc_repenc, parc_deltaenc, parc_dictenc, parc_ttaenc, parc_mmenc, parc_torenc, parc_grzipenc,
+  parc_orep, parc_deltaenc, parc_dictenc, parc_ttaenc, parc_mmenc, parc_torenc, parc_grzipenc,
   parc_crypt, parc_canon, parc_lz4enc, parc_dispack, parc_srep, parc_cm, parc_bcj2;
 
 function StageName(const Stage: string): string; forward;
@@ -425,7 +425,14 @@ begin
     end
     else
       WriteOldest;
-  end;
+  end
+  else if (FCount >= TJobPool(FPool).MaxWorkers) and (BudgetIdle > 0) and
+    TJobPool(FPool).CanGrow(T4X4_MAXTHREADS) then
+    // Más trabajos en vuelo que hilos, todos trabajando y fichas libres (p. ej. los bloques
+    // en paralelo que ya terminaron): un hilo más ya, sin esperar a llenar la cola. Si no, el
+    // último bloque de un archivo con menos trabajos que la cola corría en serie (exe -m4 con
+    // 4 hilos: dos trabajos de lzma uno detrás del otro, 10 s en vez de 6)
+    TJobPool(FPool).SetMaxWorkers(TJobPool(FPool).MaxWorkers + 1);
   Job := T4x4EncJob.Create;
   Job.Inner := FInner;
   // Sin copiar: el bloque lleno pasa al trabajo y se sigue llenando un buffer reciclado
@@ -726,7 +733,8 @@ end;
   lo sabe (lzma, rep); lo demás, de lo que reserva cada uno:
   - ppmd: el modelo; tor: búfer + hash + hash auxiliar; lzp: entrada + salida + hash;
   - dict: ~3 veces el bloque; grzip: ~6 veces el bloque (BWT); dispack: ~3 veces su bloque;
-  - rep: ventana + hash, más hasta 64 MB de la copia al crecer (EnsureCap);
+  - orep: lo que dice OrepEncMemory (anillo de la ventana + un bloque, tabla de anclas, búferes)
+    más la ventana (la copia del anillo al crecer);
   - cm y srep guardan todo el bloque (cm: ~4 veces más sus modelos de 64 MB; srep: ~3 veces);
   - 4x4: los trabajos en vuelo (hasta los hilos, máx. 16) por (método interno + 2 bloques);
   - filtros (exe, delta, mm, tta, bcj2) y cifrado: búferes de unos MB. }
@@ -737,9 +745,8 @@ var
   Bs: SizeInt;
   TM, TD: TTorMethod;
   Lz: TLzpParams;
-  Rp: TRepEncParams;
+  Om: TOrepMethod;
   J: Integer;
-  B: Int64;
 begin
   if IsCipherStage(Stage) then Exit(MB_);
   Parts := Stage.Split([':']);
@@ -751,12 +758,15 @@ begin
           Result := Int64(Min(LzmaEncMemory(ParseLzmaEncParams(Parts)), QWord(High(Int64) div 2)));
           Inc(Result, 2 * MB_);
         end;
-      'rep':
+      'orep':
         begin
-          Rp := ParseRepEncParams(Parts);
-          B := Rp.BlockSize;
-          if (DataSize > 0) and (DataSize < B) then B := DataSize;
-          Result := RepEncMemory(Rp) + Min(B, 64 * MB_) + MB_;   // + la copia al crecer (EnsureCap)
+          Om := ParseOrepMethod(Parts);
+          // el anillo crece con la entrada: con un bloque más chico que la ventana, lo del bloque
+          if (DataSize > 0) and (QWord(DataSize) < Om.Window) then Om.Window := DataSize;
+          // + el anillo viejo mientras crece: OREP 0.0.3 lo agranda duplicando con ReAllocMem, y
+          // el último paso tiene las dos copias a la vez (medido: orep:512m:l512 solo en 512 MB
+          // de TILIN, 1128 MB de RSS para 640 MB de OrepEncMemory), y la salida de una llamada
+          Result := Int64(OrepMethodEncMemory(Om)) + Int64(Om.Window) + 2 * Int64(Om.Chunk) + 2 * MB_;
         end;
       'ppmd': Result := Int64(ParsePpmdParams(Parts).Mem) + 2 * MB_;
       'tor':
@@ -867,7 +877,7 @@ begin
         end;
       'tor': if not TorEncAvailable(Stage) then Exit(False);
       'lz4': if not Lz4EncAvailable(Stage) then Exit(False);
-      'storing', 'exe', 'ppmd', 'lzp', 'lzma', 'rep', 'delta', 'dict', 'tta', 'mm', 'grzip', 'cm',
+      'storing', 'exe', 'ppmd', 'lzp', 'lzma', 'orep', 'delta', 'dict', 'tta', 'mm', 'grzip', 'cm',
       'dispack', 'dispack070', 'srep', 'bcj2', 'exe2': ;
     else
       Exit(False);
@@ -910,7 +920,7 @@ begin
       end;
     'storing': Result := TStoringStage.Create(Target);
     'cm':      Result := TCmEncStage.Create(Target);
-    'rep':     Result := TRepEncStage.Create(Target, Parts);
+    'orep':    Result := TOrepEncStage.Create(Target, Parts);
     'delta':   Result := TDeltaEncStage.Create(Target, Parts);
     'dict':    Result := TDictEncStage.Create(Target, Parts);
     'tor':     Result := TTorEncStage.Create(Target, Parts);

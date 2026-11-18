@@ -74,8 +74,9 @@ ck "help: 0"                  '"$PARC" help >/dev/null 2>&1; [ $? = 0 ]'
 ck "help de comando"          '"$PARC" help x | grep -q "Extract keeping"'
 ck "comando desconocido: 1"   '"$PARC" nope >/dev/null 2>&1; [ $? = 1 ]'
 
-# dañado
-cp t.parc bad.parc; printf X | dd of=bad.parc bs=1 seek=100 conv=notrunc 2>/dev/null
+# dañado (un byte en el medio del bloque de datos, que empieza en 31: los últimos bytes del
+# stream de lzma pueden ser relleno del codificador de rango, y cambiarlos no daña nada)
+cp t.parc bad.parc; printf X | dd of=bad.parc bs=1 seek=60 conv=notrunc 2>/dev/null
 ck "t dañado: código 2"        '"$PARC" t bad.parc --no-progress >/dev/null 2>&1; [ $? = 2 ]'
 ck "x dañado: código 2"        '"$PARC" x bad.parc -dpbadout --no-progress >/dev/null 2>&1; [ $? = 2 ]'
 

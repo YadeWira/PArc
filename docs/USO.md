@@ -79,7 +79,7 @@ if that fails, PArc warns and skips it.
 | option | effect |
 |---|---|
 | `-m<N>` | preset (from FreeArc): `-m0` (store) to `-m9`, `-mx` (maximum ratio with fast decompression), `-mxx` (CM maximum ratio, slow decompression). Default is `-m4` |
-| `-m<method>` | explicit method, e.g. `-mlzma:64mb:max`, `-mcm` or `-mrep:96m+exe+lzma` |
+| `-m<method>` | explicit method, e.g. `-mlzma:64mb:max`, `-mcm` or `-morep:96m:l256+exe+lzma` |
 | `--recompress` | when updating, rebuild every block with the requested method instead of copying intact ones |
 | `-x<pattern>` | exclude files; may be repeated |
 
@@ -97,6 +97,21 @@ Independent data blocks are compressed in parallel (all threads together limited
 the archive; blocks that finish ahead of their turn wait in memory (at most min(1 GB, RAM/4)
 in total, 256 MB on 32-bit) and only what does not fit goes to a temporary file next to the
 archive.
+
+**Long-range matching: `orep`.** The presets put `orep` (OREP, MIT, written for PArc) in front
+of the binary chains; it replaces FreeArc's `rep`, which no longer exists (`-mrep` fails with a
+hint, and `rep` blocks of archives from PArc 0.0.5 or earlier do not decode). Syntax:
+`orep[:<window>][:<min length>][:w<mem>][:l<n>][:a<n>][:s<n>][:c<n>][:b<mem>][:d<mem>]` — window
+(largest distance, default `512mb`, up to `3840mb`), shortest match (`l`, default 64, ≥ 16),
+alignment (`a`: lengths multiple of `a` and literals kept at their position modulo `a`, which
+helps lzma; default `a0` = per stream block, 1 for text and 4 otherwise), anchor density (`s`,
+1..64, default 4: higher finds more short matches, slower and with a larger table), candidates
+per anchor (`c`, 1..4, default 4: 1 is the fastest), stream block (`b`, 64kb..64mb,
+default 4mb) and a minimum distance (`d`, default 0: nearer matches are left to the next
+compressor). For example `-morep:96m:l256+exe+delta+lzma:96m`. The presets use
+`orep:96m:l256` at `-m1`/`-m2`, `orep:96m:l512` at `-m3`…`-m5` and `orep:<window>:l512` at
+`-m6`…`-m9`/`-mx` (window 256m, 512m, 1024m, 2040m). The stored method shows the window
+clipped to the block. `orep` runs on the thread that writes the block (see `PARC_THREADS`).
 
 When updating (`a`, `u`, `f`), solid blocks that remain intact are copied without recompression;
 `--recompress` forces rebuilding them. With `d` and an explicit `-m`, the whole archive is
@@ -351,11 +366,11 @@ parc x site.parc '*.css' -ep -dpcss                     # all .css files, flat
 |---|---|
 | `-mt<N>` | thread budget for the whole process, exactly like `PARC_THREADS=N` (which it overrides): it also chooses the preset alternatives (`-mt1 -m1` uses the single-thread `tor:4`). `-mt0` = default |
 | `-lc<size>` | memory limit for compression (bare number = MB; `k`/`m`/`g`; or `N%` of RAM; `-lc-` or `-lc0` = no limit). Default: automatic, see below |
-| `-ld<size>` | `t`/`x`/`e`: do not decompress blocks whose method declares more memory than the limit; their files are reported and the exit code is **7**. `-ld-` = no limit (the default) |
+| `-ld<size>` | `t`/`x`/`e`: do not decompress blocks whose method declares more memory than the limit; their files are reported and the exit code is **7** (for `orep` the method declares its ring: window + one stream block). `-ld-` = no limit (the default) |
 
 The compression limit applies to the encoders running at the same time. PArc estimates what
 each method chain needs (all stages of a chain run together: lzma by its exact encoder size,
-match finder included; rep window and hash; PPMd model; Tornado buffer and hash; lzp/dict/grzip
+match finder included; orep window ring and anchor table (`OrepEncMemory`); PPMd model; Tornado buffer and hash; lzp/dict/grzip
 blocks; `4x4` counts one inner encoder per thread plus its blocks; `cm` and `srep` keep the whole
 block in memory) and, if a block's chain does not fit, shrinks the largest consumer first
 (dictionaries, windows, the PPMd model) until it fits, like FreeArc's memory limiting. Blocks
@@ -374,10 +389,10 @@ result only depends on the data, `PARC_THREADS`/`-mt`, the limit and the bitness
 
 | option | effect |
 |---|---|
-| `-mc-<alg>` or `-mc<alg>-` | remove the algorithm from every chain (`-mc-rep`, `-mc-exe`, `-mc-delta`, `-mc-lzp`, `-mc-dict`, `-mc-dispack`…); a file group whose special method *ends* with it is dropped (its files use the main method). A chain left empty becomes `storing` |
+| `-mc-<alg>` or `-mc<alg>-` | remove the algorithm from every chain (`-mc-orep` — `-mc-rep` too, for FreeArc's sake —, `-mc-exe`, `-mc-delta`, `-mc-lzp`, `-mc-dict`, `-mc-dispack`…); a file group whose special method *ends* with it is dropped (its files use the main method). A chain left empty becomes `storing` |
 | `-mc-$group` | drop that group's special method (`-mc-$text`, `-mc-$wav`) |
 | `-mc$g1,$g2:-<alg>` | only in those groups (`$default` = the main method) |
-| letters | as FreeArc/RAR: `-mcd-` delta, `-mce-` exe, `-mcl-` lzp, `-mcr-` rep, `-mcz-` dict, `-mca-` $wav, `-mcc-` $bmp, `-mct-` $text |
+| letters | as FreeArc/RAR: `-mcd-` delta, `-mce-` exe, `-mcl-` lzp, `-mcr-` orep, `-mcz-` dict, `-mca-` $wav, `-mcc-` $bmp, `-mct-` $text |
 
 Adding algorithms (`-mc+...`) and replacing them (`-mca/b`) are not supported. `-mcm` is still the
 `cm` method (an operation needs a leading or trailing `-` or a `$`).
@@ -447,7 +462,7 @@ extracting, the half-written file is deleted. A second Ctrl-C stops immediately.
 
 | variable | effect |
 |---|---|
-| `PARC_THREADS` | maximum number of threads working at the same time in the whole process (default: CPU cores, at most 64): block compression, 4x4/grzip, REP hashing, the multi-threaded LZMA match finder, `t` verification and parallel extraction all share it. It also picks the preset alternatives, like FreeArc's `-mtN` (e.g. `PARC_THREADS=1 -m1` uses the single-thread `tor:4`). The `-mt<N>` option overrides it |
+| `PARC_THREADS` | maximum number of threads working at the same time in the whole process (default: CPU cores, at most 64): block compression, 4x4/grzip, the multi-threaded LZMA match finder, `t` verification and parallel extraction all share it. It also picks the preset alternatives, like FreeArc's `-mtN` (e.g. `PARC_THREADS=1 -m1` uses the single-thread `tor:4`). The `-mt<N>` option overrides it |
 | `PARC_BUFMEM` | MB of memory for compressed blocks waiting their turn when compressing in parallel (default min(1024, RAM/4), 256 on 32-bit); the rest goes to temporary files |
 | `PARC_CRC` | `table` disables the PCLMULQDQ CRC-32 (for measurements) |
 

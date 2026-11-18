@@ -9,6 +9,7 @@ and the other containers (`.zip`/`.7z`/`.rar`) lives in
 
 ```
 src/                     Pascal sources (+ parc_torglue.cpp/.patch: bridge to FreeArc's Tornado encoder)
+src/orep/                OREP 0.0.3 (MIT, vendored unchanged): orep.pas + orep_core.c, the long-range matcher
 docs/                    manual (USO.md), format (formato/FORMATO-PARC.md), codecs
 tests/                   tests, codec oracles and fuzzers
 reference/freearc-0.67/  only Compression/: C codec sources and test oracle
@@ -21,7 +22,7 @@ The rest of the FreeArc 0.67 tree is in git history (commit `82ea8d9`) and in Fr
 | phase | status |
 |---|---|
 | FreeArc/PArc bugs | ✅ closed (the `.arc` parity fixes remain as history; see tag `entrega-arc`) |
-| Ported codecs | ✅ closed (LZMA, LZ4, PPMd, Tornado, REP, 4x4, Dict, LZP, Delta, MM, TTA, GRZip, BCJ, DisPack, SREP) |
+| Ported codecs | ✅ closed (LZMA, LZ4, PPMd, Tornado, 4x4, Dict, LZP, Delta, MM, TTA, GRZip, BCJ, DisPack, SREP); REP replaced by OREP (MIT, 2026-11) |
 | `.arc` compatibility | ❌ dropped: rejected with a message pointing to FreeArc-ex |
 | GUI | ❌ dropped |
 | `.zip/.7z/.rar` containers | ➡ moved to FreeArc-ex (tag `entrega-arc`) |
@@ -38,10 +39,11 @@ The rest of the FreeArc 0.67 tree is in git history (commit `82ea8d9`) and in Fr
 - Commands: `l`, `lb`, `t`, `x`, `e`, `a`, `u`, `f`, `d`, `r`, and FreeArc's `v`, `lt`, `create`,
   `m`, `mf`, `ch`, `rr<spec>`, `c`, `cw`, `j`, `k` (tests/cli_commands.sh). Not implemented: `s`
   (SFX) and `modify`.
-- Methods: `storing`, `lzma`, `ppmd`, `grzip`, `dict`, `rep`, `delta`, `tor`, `lzp`, `mm`,
+- Methods: `storing`, `lzma`, `ppmd`, `grzip`, `dict`, `orep`, `delta`, `tor`, `lzp`, `mm`,
   `tta`, `4x4`, `exe` (BCJ), `lz4`, `dispack070`, `srep` and `cm` (context mixing), alone or
   chained.
-- FreeArc built-in presets ported: `-m0`…`-m9`, `-mx`, `-mxx` and the `d/t/xt/xb/binary/rep` families.
+- FreeArc built-in presets ported: `-m0`…`-m9`, `-mx`, `-mxx` and the `d/t/xt/xb/binary` families
+  (the `rep` family is now `orep`: `-m5orep` = `orep:96m:l512`).
 - `ppmd` (2026-11) is PPMd var.I from the public-domain LZMA SDK (`Ppmd8`), ported to Pascal
   with x86-64 assembler for the symbol coder and `UpdateModel`; it replaced FreeArc's PPMd (a
   step towards relicensing). Same ratio as before plus an 8-byte stream header; `ppmd` blocks
@@ -270,6 +272,107 @@ What makes this possible (all inside `.parc`; the codecs are unchanged):
   directories with random nanoseconds.
 - Recovery is Reed-Solomon only; the `.arc` XOR scheme is gone.
 
+## REP replaced by OREP (2026-11-18)
+
+FreeArc's REP (GPL) is gone; the long-range stage is now `orep`: OREP 0.0.3 (MIT), written for
+PArc by osrep and vendored unchanged in `src/orep/` (version and commit in `src/orep/VERSION`;
+`build.sh` compiles its C core for every target). Syntax in [USO.md](USO.md), stream in
+[FORMATO-PARC.md §6.2](formato/FORMATO-PARC.md). `rep` blocks of older archives no longer decode
+(the error says so); `-mrep` fails with a hint; `-mc-rep`/`-mcr-` remove `orep`.
+
+Presets: `-m1`/`-m2` `orep:96m:l256`, `-m3`…`-m5` `orep:96m:l512`, `-m6`…`-m9` `orep:<window>:l512`
+(256m/512m/1024m/2040m); `-mxx` `orep:64m:l512:a1`. Chosen on TILIN and a 128 MB mix: OREP's own
+default `l64` (and `l32`) lost 0.1–0.4 % in front of lzma on TILIN (it won ~0.1–0.2 % on the
+mix), `l512` won everywhere; `c1` (one candidate) and `l512:c1` at `-m1`/`-m2` lost up to 0.19 %
+on the sets; `s16` saved 0.003 % for four times the anchor table.
+
+Threads: OREP runs with one thread, on the thread that writes the block (like REP's search).
+OREP's own threads cannot be accounted in the global budget (`PARC_THREADS`): see the comment in
+`src/parc_orep.pas` and TODO.md. A 4x4 scheduling quirk that the smaller OREP output exposed
+(the last blocks of a solid block ran one after another when there were fewer jobs than the
+queue: exe `-m4` with 4 threads 10 s instead of 6) was fixed in `T4x4EncStage.SubmitBlock`.
+
+Measured on the sets of `broad-sweep` (≈100 MB each), `tilin_512m.tar` and `TILIN.tar` (1.8 GB;
+with one thread only `-m1`…`-m5`), every level, 2 runs, `nice -n10` on the shared machine. `-mx`
+is `-m9` (same methods), not measured separately.
+
+Size, OREP vs REP (T1; negative = OREP smaller):
+
+| set | `-m1` | `-m2` | `-m3` | `-m4` | `-m5` | `-m6` | `-m7` | `-m8` | `-m9` |
+|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|
+| TILIN.tar | -0.001 | -0.002 | -0.011 | -0.014 | -0.009 | — | — | — | — |
+| tilin_512m.tar | -0.003 | -0.009 | -0.010 | -0.004 | -0.033 | -0.011 | -0.039 | -0.096 | -0.093 |
+| archive | -0.016 | -0.007 | -0.009 | -0.009 | -0.004 | -0.011 | -0.011 | -0.011 | -0.011 |
+| audio | -0.012 | -0.002 | -0.024 | -0.010 | -0.010 | -0.014 | +0.004 | +0.004 | +0.004 |
+| document | -0.012 | -0.019 | -0.012 | -0.008 | +0.001 | -0.015 | -0.014 | -0.014 | -0.014 |
+| exe | -0.016 | -0.012 | -0.008 | -0.009 | -0.004 | -0.002 | -0.001 | -0.002 | -0.002 |
+| font | -0.041 | -0.051 | -0.040 | -0.044 | -0.029 | -0.009 | -0.009 | -0.009 | -0.009 |
+| image | -0.013 | -0.010 | -0.181 | -0.113 | -0.114 | -0.130 | -0.133 | -0.133 | -0.133 |
+| large | +0.007 | +0.006 | -0.051 | -1.026 | -1.146 | -1.231 | -1.217 | -1.222 | -1.222 |
+| small | -0.028 | -0.001 | -0.000 | -0.002 | +0.016 | +0.017 | +0.017 | +0.017 | +0.017 |
+| text | +0.006 | -0.008 | -0.007 | -0.020 | -0.005 | -0.024 | +0.002 | +0.001 | +0.001 |
+| video | +0.006 | +0.008 | -0.149 | -0.120 | -0.123 | -0.157 | -0.158 | -0.157 | -0.157 |
+
+Size, OREP vs REP (T4; negative = OREP smaller):
+
+| set | `-m1` | `-m2` | `-m3` | `-m4` | `-m5` | `-m6` | `-m7` | `-m8` | `-m9` |
+|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|
+| TILIN.tar | -0.026 | -0.033 | -0.117 | -0.045 | -0.048 | -0.010 | -0.038 | -0.031 | -0.152 |
+| tilin_512m.tar | -0.010 | -0.005 | -0.015 | -0.020 | -0.018 | -0.011 | -0.039 | -0.096 | -0.093 |
+| archive | -0.004 | -0.009 | -0.007 | -0.005 | +0.002 | -0.011 | -0.011 | -0.011 | -0.011 |
+| audio | -0.006 | +0.001 | -0.011 | -0.001 | +0.002 | -0.014 | +0.004 | +0.004 | +0.004 |
+| document | -0.031 | -0.008 | +0.018 | +0.003 | +0.004 | -0.015 | -0.014 | -0.014 | -0.014 |
+| exe | -0.020 | -0.025 | +0.001 | +0.003 | -0.013 | -0.002 | -0.001 | -0.002 | -0.002 |
+| font | +0.001 | -0.034 | -0.038 | -0.016 | -0.035 | -0.009 | -0.009 | -0.009 | -0.009 |
+| image | -0.237 | -0.007 | -0.096 | -0.083 | -0.121 | -0.130 | -0.133 | -0.133 | -0.133 |
+| large | +0.012 | +0.025 | -0.587 | -0.603 | -0.996 | -1.231 | -1.217 | -1.222 | -1.222 |
+| small | -0.029 | +0.010 | -0.001 | +0.004 | +0.017 | +0.017 | +0.017 | +0.017 | +0.017 |
+| text | -0.017 | -0.008 | -0.014 | -0.037 | -0.024 | -0.024 | +0.002 | +0.001 | +0.001 |
+| video | +0.000 | +0.008 | -0.106 | -0.097 | -0.130 | -0.157 | -0.158 | -0.157 | -0.157 |
+
+Time, REP and OREP run at the same time (same load), best of the runs; compression and `t`
+(decompression + CRC) wall/CPU seconds, peak RSS of compression in MB:
+
+| input | T | level | comp wall | comp CPU | decomp wall | decomp CPU | comp RSS | runs |
+|---|---|---|---|---|---|---|---|---|
+| tilin_512m.tar | T1 | `-m1` | 7.78 → 8.09 (+4%) | 7.68 → 7.99 (+4%) | 3.97 → 4.18 (+5%) | 3.96 → 4.18 (+6%) | 163 → 186 | 2 |
+| tilin_512m.tar | T4 | `-m1` | 2.06 → 2.61 (+27%) | 7.50 → 7.88 (+5%) | 1.26 → 1.31 (+4%) | 4.81 → 5.02 (+4%) | 256 → 300 | 2 |
+| tilin_512m.tar | T1 | `-m2` | 25.01 → 24.69 (-1%) | 24.05 → 23.69 (-1%) | 6.77 → 6.55 (-3%) | 6.77 → 6.53 (-4%) | 256 → 279 | 2 |
+| tilin_512m.tar | T4 | `-m2` | 5.04 → 5.48 (+9%) | 18.77 → 18.58 (-1%) | 1.97 → 1.92 (-3%) | 7.40 → 7.26 (-2%) | 429 → 468 | 2 |
+| tilin_512m.tar | T1 | `-m3` | 67.27 → 65.28 (-3%) | 67.15 → 65.16 (-3%) | 12.98 → 12.43 (-4%) | 12.98 → 12.42 (-4%) | 363 → 385 | 2 |
+| tilin_512m.tar | T4 | `-m3` | 21.39 → 21.75 (+2%) | 83.15 → 82.07 (-1%) | 3.92 → 3.95 (+1%) | 14.30 → 14.34 (+0%) | 429 → 465 | 2 |
+| tilin_512m.tar | T1 | `-m4` | 102.35 → 108.67 (+6%) | 102.07 → 108.64 (+6%) | 13.23 → 12.78 (-3%) | 13.23 → 12.77 (-3%) | 330 → 353 | 2 |
+| tilin_512m.tar | T4 | `-m4` | 25.14 → 25.52 (+2%) | 96.31 → 96.43 (+0%) | 3.99 → 3.92 (-2%) | 14.45 → 14.37 (-1%) | 600 → 622 | 2 |
+| tilin_512m.tar | T1 | `-m5` | 139.25 → 144.20 (+4%) | 139.22 → 143.53 (+3%) | 13.09 → 13.92 (+6%) | 13.09 → 13.91 (+6%) | 1162 → 1185 | 2 |
+| tilin_512m.tar | T4 | `-m5` | 32.79 → 33.33 (+2%) | 127.41 → 127.83 (+0%) | 3.99 → 3.95 (-1%) | 14.29 → 14.27 (-0%) | 1362 → 1389 | 2 |
+| tilin_512m.tar | T1 | `-m6` | 182.07 → 174.16 (-4%) | 181.90 → 174.05 (-4%) | 12.07 → 12.77 (+6%) | 12.07 → 12.77 (+6%) | 674 → 936 | 2 |
+| tilin_512m.tar | T4 | `-m6` | 106.14 → 112.17 (+6%) | 200.12 → 207.63 (+4%) | 12.76 → 13.24 (+4%) | 12.76 → 13.24 (+4%) | 728 → 990 | 2 |
+| tilin_512m.tar | T1 | `-m7` | 208.69 → 201.00 (-4%) | 208.24 → 200.48 (-4%) | 12.61 → 13.36 (+6%) | 12.60 → 13.35 (+6%) | 1266 → 1789 | 2 |
+| tilin_512m.tar | T4 | `-m7` | 114.13 → 121.73 (+7%) | 216.89 → 229.26 (+6%) | 13.34 → 12.90 (-3%) | 13.34 → 12.90 (-3%) | 1364 → 1885 | 2 |
+| tilin_512m.tar | T1 | `-m8` | 185.74 → 204.96 (+10%) | 185.61 → 204.87 (+10%) | 12.35 → 12.88 (+4%) | 12.36 → 12.80 (+4%) | 1944 → 2545 | 2 |
+| tilin_512m.tar | T4 | `-m8` | 120.56 → 128.98 (+7%) | 224.71 → 237.08 (+6%) | 13.27 → 13.75 (+4%) | 13.26 → 13.75 (+4%) | 2041 → 2621 | 2 |
+| tilin_512m.tar | T1 | `-m9` | 182.76 → 195.43 (+7%) | 182.72 → 195.37 (+7%) | 12.89 → 13.26 (+3%) | 12.90 → 13.26 (+3%) | 3269 → 3847 | 2 |
+| tilin_512m.tar | T4 | `-m9` | 123.87 → 129.44 (+4%) | 227.46 → 235.44 (+4%) | 12.99 → 13.15 (+1%) | 12.99 → 13.15 (+1%) | 3367 → 3946 | 2 |
+| TILIN.tar | T4 | `-m1` | 5.91 → 7.92 (+34%) | 22.65 → 22.43 (-1%) | 3.22 → 3.43 (+7%) | 10.13 → 10.64 (+5%) | 282 → 317 | 2 |
+| TILIN.tar | T4 | `-m2` | 9.86 → 11.50 (+17%) | 37.31 → 38.56 (+3%) | 4.56 → 4.66 (+2%) | 14.09 → 13.86 (-2%) | 439 → 486 | 2 |
+| TILIN.tar | T4 | `-m3` | 39.43 → 42.50 (+8%) | 148.14 → 152.72 (+3%) | 8.93 → 10.27 (+15%) | 29.82 → 30.78 (+3%) | 433 → 474 | 2 |
+| TILIN.tar | T4 | `-m4` | 45.44 → 45.98 (+1%) | 170.20 → 173.19 (+2%) | 8.74 → 9.75 (+12%) | 29.87 → 31.25 (+5%) | 577 → 620 | 2 |
+| TILIN.tar | T4 | `-m5` | 56.00 → 59.21 (+6%) | 212.46 → 219.73 (+3%) | 8.86 → 10.05 (+13%) | 29.86 → 31.60 (+6%) | 1380 → 1478 | 2 |
+
+Summary. **Size**: OREP wins or ties nearly everywhere (up to −1.23 % on `large`, −0.15 % on
+`TILIN.tar -m9` with 4 threads); losses are ≤ 0.025 %: `small` +0.017 % at `-m5`…`-m9` (many
+small solid blocks pay OREP's fixed stream cost), `large` +0.006…+0.025 % at `-m1`/`-m2`,
+`document`/`exe` ≤ +0.018 % at `-m3`/`-m4` with 4 threads, `audio`/`text` ≤ +0.004 % at
+`-m7`…`-m9`. **Time**: not a win everywhere. With 4 threads at `-m1`/`-m2` OREP (one thread)
+is slower than REP (search plus two hashing threads): TILIN.tar `-m1` +34 % (5.9 → 7.9 s),
+`-m2` +17 %; tilin_512m `-m1` +27 %. Elsewhere within about ±10 % (the machine is shared and
+loaded; the two binaries ran at the same time to share the load), with `-m6`…`-m9` 4–10 % slower
+on tilin_512m. Decompression is within a few percent except TILIN.tar `-m3`…`-m5` (+12–15 %
+wall, +3–6 % CPU); the OREP stage alone decodes 512 MB in 0.51 s vs REP's 0.43 s. **Memory**:
+compression peak RSS is higher at `-m6`…`-m9` (+260…+600 MB on 512 MB) because OREP grows its
+ring by doubling with `ReAllocMem` (both copies alive in the last step); the encoder memory
+estimate counts it (see TODO.md).
+
 ## Compression memory limit (2026-11-17)
 
 Before, PArc only limited dictionaries to the data size: win32 `a -m9` over TILIN (1.86 GB,
@@ -341,6 +444,7 @@ python3 tests/thread_budget.py    # PARC_THREADS=N: <= N hilos trabajando (muest
 bash tests/determinism.sh         # mismo N => mismo archivo (todos los niveles, N=1/2/4/8)
 bash tests/ppmd.sh                # PPMd: ida y vuelta, streams dañados y bit a bit contra el LZMA SDK ($PPMD_SDK)
 bash tests/ppmd_asm.sh            # PPMd: ensamblador == Pascal (-dPARC_NOASM)
+bash tests/orep.sh                # OREP: etapas, parámetros, 1..8 hilos, C == Pascal (-dOREP_NO_NATIVE), dañados
 # liberar/reusar un trabajo del pool apenas termina (ventana ampliada con -dPARC_RACE_TEST)
 fpc -O2 -dPARC_RACE_TEST -Fusrc -FUbuild/tests/race -FEbuild/tests tests/test_jobfree.lpr
 PARC_THREADS=4 build/tests/test_jobfree

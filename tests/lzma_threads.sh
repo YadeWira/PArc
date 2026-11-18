@@ -64,15 +64,15 @@ for T in 1 4; do
   roundtrip one "ht4 normal, PARC_THREADS=$T"
 done
 
-# rep+lzma en un bloque: lzma usa el match finder multihilo aunque haya rep (antes, con T=2
-# rep se quedaba los 2 hilos y lzma corría en uno: -m7 un 50% más lento). Los hilos de hashing
-# de rep existen pero casi siempre esperan: al menos lzma (2) + rep.
+# orep+lzma en un bloque: lzma usa el match finder multihilo aunque haya orep delante (orep
+# corre en el hilo que escribe, sin hilos propios): bt4 con min(T, 3) hilos.
 for T in 2 3 4; do
-  peak $T one -mrep:16mb+lzma:16mb:max
-  if [ "$RC" -ne 0 ]; then bad "rep+lzma, PARC_THREADS=$T: rc=$RC"; continue; fi
-  if [ "$PEAK" -ge 3 ]; then ok "rep+lzma, PARC_THREADS=$T: $PEAK hilos"
-  else bad "rep+lzma, PARC_THREADS=$T: $PEAK hilos (se esperaban 3 o más)"; fi
-  roundtrip one "rep+lzma, PARC_THREADS=$T"
+  peak $T one -morep:16mb+lzma:16mb:max
+  want=$T; [ "$want" -gt 3 ] && want=3
+  if [ "$RC" -ne 0 ]; then bad "orep+lzma, PARC_THREADS=$T: rc=$RC"; continue; fi
+  if [ "$PEAK" -ge "$want" ]; then ok "orep+lzma, PARC_THREADS=$T: $PEAK hilos"
+  else bad "orep+lzma, PARC_THREADS=$T: $PEAK hilos (se esperaban $want o más)"; fi
+  roundtrip one "orep+lzma, PARC_THREADS=$T"
 done
 
 # 4 bloques en paralelo: los 4 se comprimen a la vez (el tope de los que trabajan lo mira

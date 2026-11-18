@@ -55,7 +55,7 @@ function ThreadsForMemory(const Est: array of Int64; Threads: Integer; Limit: In
 implementation
 
 uses
-  parc_crypt, StrUtils, parc_os, parc_lzma, parc_filters, parc_lz4, parc_rep, parc_lzp, parc_ppmd,
+  parc_crypt, StrUtils, parc_os, parc_lzma, parc_filters, parc_lz4, parc_orep, parc_lzp, parc_ppmd,
   parc_dict, parc_tornado, parc_grzip, parc_parallel, parc_tta, parc_mm, parc_dispack, parc_srep, parc_cm,
   parc_bcj2;
 
@@ -431,8 +431,12 @@ begin
       Result := TDeltaStage.Create(Source);
     'lz4':
       Result := TLz4Stage.Create(Source);   // el frame dice su tamaño de bloque
+    'orep':
+      Result := TOrepDecStage.Create(Source, ParseOrepMethod(Params));
     'rep':
-      Result := TRepStage.Create(Source);
+      // REP de FreeArc (GPL) se reemplazó por OREP (MIT) en PArc 0.0.6
+      raise EUnsupportedMethod.Create('method rep (FreeArc REP) is no longer supported: ' +
+        'it was replaced by orep (extract this archive with PArc 0.0.5)');
     '4x4':
       Result := T4x4Stage.Create(Source, Inner4x4Method(Params));
     'lzp':
@@ -543,6 +547,18 @@ begin
     if IsCipherStage(Stages[s]) then Continue;   // (la sal y el nonce en hex no son memoria)
     Params := Stages[s].Split([':']);
     StageMax := 0;
+    if Params[0] = 'orep' then
+    begin
+      // OREP: la ventana circular del decodificador (ventana + un bloque, redondeada a bloques)
+      try
+        StageMax := Int64(OrepMethodDecMemory(ParseOrepMethod(Params)));
+      except
+        on EUnsupportedMethod do StageMax := 0;   // lo informa el decodificador
+      end;
+      if StageMax > Cap then StageMax := Cap;
+      Inc(Result, StageMax);
+      Continue;
+    end;
     for k := 1 to High(Params) do
     begin
       p := Params[k];
