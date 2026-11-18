@@ -346,6 +346,18 @@ asm
   shr    eax, cl
   mov    r9d, eax
   prefetcht0 byte ptr [r12 + r9 * 8]
+  // y la de 8 bytes más adelante (sólo tiempo)
+  lea    rax, [r8 + 16]
+  cmp    rax, r15
+  jae    @scan
+  mov    rax, qword ptr [r8 + 8]
+  mov    ecx, dword ptr [rdi + TPlzGreedy.HSh]
+  shl    rax, cl
+  imul   rax, rbx
+  shr    rax, 32
+  mov    ecx, dword ptr [rdi + TPlzGreedy.Sh]
+  shr    eax, cl
+  prefetcht0 byte ptr [r12 + rax * 8]
   jmp    @scan
 
 @hitrep:
@@ -830,6 +842,408 @@ asm
   mov    rax, rsi
   ret
 
+@done:
+{$IFDEF WIN64}
+  pop    rsi
+  pop    rdi
+{$ENDIF}
+  pop    r15
+  pop    r14
+  pop    r13
+  pop    r12
+  pop    rbp
+  pop    rbx
+end;
+
+{ PlzEvalRows: TPlzEngine.EvalAt + FindAndInsert para filas de hasta 8 entradas (un grupo de
+  etiquetas), con la tabla corta; la misma salida que el Pascal. }
+function PlzEvalRows(var S: TPlzEval): LongInt; assembler; nostackframe;
+asm
+  push   rbx
+  push   rbp
+  push   r12
+  push   r13
+  push   r14
+  push   r15
+{$IFDEF WIN64}
+  push   rdi
+  push   rsi
+  mov    rdi, rcx
+{$ENDIF}
+  mov    r8, qword ptr [rdi + TPlzEval.X]
+  mov    r11, qword ptr [rdi + TPlzEval.Base]
+  mov    r15, qword ptr [rdi + TPlzEval.IEnd]
+  // reps: r12 = mejor ganancia (GR), r13 = RB, r14d = RD
+  mov    r12, -1000
+  xor    r13, r13
+  xor    r14d, r14d
+  mov    rbp, r8
+  sub    rbp, r11                            // Avail
+  mov    eax, dword ptr [r8]
+  and    eax, $FFFFFF                        // V3
+  xor    r10d, r10d                          // i
+@rloop:
+  mov    r9d, dword ptr [rdi + TPlzEval.Rep0 + r10 * 4]
+  cmp    r9, rbp
+  ja     @rnext
+  mov    rbx, r8
+  sub    rbx, r9
+  mov    ecx, dword ptr [rbx]
+  and    ecx, $FFFFFF
+  cmp    ecx, eax
+  jne    @rnext
+  push   rax
+  lea    rsi, [r8 + 3]
+  lea    rdx, [rbx + 3]
+  call   @ml
+  add    rax, 3                              // RL
+  lea    rcx, [rax * 4]
+  sub    rcx, r10                            // RL*4 - i
+  cmp    rcx, r12
+  jle    @rskip
+  mov    r12, rcx
+  mov    r13, rax
+  mov    r14d, r9d
+@rskip:
+  pop    rax
+@rnext:
+  inc    r10d
+  cmp    r10d, 4
+  jb     @rloop
+  // tabla: sólo si C >= InsNext
+  mov    qword ptr [rdi + TPlzEval.HL], 0
+  mov    dword ptr [rdi + TPlzEval.HD], 0
+  mov    ebx, ebp
+  add    ebx, dword ptr [rdi + TPlzEval.Cur0]  // C
+  mov    dword ptr [rdi + TPlzEval.C], ebx
+  cmp    ebx, dword ptr [rdi + TPlzEval.InsNext]
+  jb     @decide
+  inc    ebx
+  mov    dword ptr [rdi + TPlzEval.InsNext], ebx
+  mov    qword ptr [rdi + TPlzEval.HL], 3      // Best
+  mov    eax, dword ptr [r8]                 // V4
+  mov    r9, rax
+  shl    r9, 32
+  mov    ecx, dword ptr [rdi + TPlzEval.C]
+  or     r9, rcx                             // entrada nueva (tabla corta)
+  push   r9
+  // hash: fila y etiqueta
+  mov    rax, qword ptr [r8]
+  mov    ecx, dword ptr [rdi + TPlzEval.HShl]
+  shl    rax, cl
+  mov    rbx, $9E3779B185EBCA87
+  imul   rax, rbx
+  shr    rax, 32
+  mov    edx, eax
+  mov    ecx, dword ptr [rdi + TPlzEval.TagSh]
+  shr    edx, cl
+  mov    byte ptr [rdi + TPlzEval.Tag], dl
+  mov    ecx, dword ptr [rdi + TPlzEval.Sh]
+  shr    eax, cl                             // fila
+  imul   rax, qword ptr [rdi + TPlzEval.RowBytes]
+  mov    r9, qword ptr [rdi + TPlzEval.Rows]
+  add    r9, rax                             // R
+  mov    ecx, dword ptr [rdi + TPlzEval.HeadOff]
+  movzx  ebp, byte ptr [r9 + rcx]            // Hd
+  // máscara de etiquetas iguales (un grupo de 8)
+  movzx  ebx, byte ptr [rdi + TPlzEval.Tag]
+  mov    rcx, $0101010101010101
+  imul   rbx, rcx
+  mov    rax, qword ptr [r9]
+  xor    rax, rbx                            // V
+  mov    rbx, rax
+  sub    rbx, rcx
+  not    rax
+  and    rbx, rax
+  mov    rax, $8080808080808080
+  and    rbx, rax
+  shr    rbx, 7
+  mov    rax, $0102040810204080
+  imul   rbx, rax
+  shr    rbx, 56
+  and    rbx, qword ptr [rdi + TPlzEval.WayFull]
+  mov    r10, rbx
+  test   ebp, ebp
+  jz     @norot
+  mov    ecx, ebp
+  mov    rax, r10
+  shr    rax, cl
+  mov    ecx, dword ptr [rdi + TPlzEval.Ways]
+  sub    ecx, ebp
+  shl    r10, cl
+  or     r10, rax
+  and    r10, qword ptr [rdi + TPlzEval.WayFull]
+@norot:
+@cl:
+  test   r10, r10
+  jz     @rdone
+  bsf    rax, r10
+  lea    rcx, [r10 - 1]
+  and    r10, rcx
+  add    eax, ebp
+  and    eax, dword ptr [rdi + TPlzEval.WayMask]
+  mov    ecx, dword ptr [rdi + TPlzEval.PosOff]
+  lea    rbx, [r9 + rcx]
+  mov    edx, dword ptr [rbx + rax * 4]      // C del candidato
+  test   edx, edx
+  jz     @rdone
+  mov    ecx, dword ptr [rdi + TPlzEval.C]
+  sub    ecx, edx                            // D
+  cmp    ecx, dword ptr [rdi + TPlzEval.Win]
+  ja     @rdone
+  mov    rax, r15
+  sub    rax, r8                             // MaxL
+  mov    rdx, qword ptr [rdi + TPlzEval.HL]  // Best
+  cmp    rdx, rax
+  jae    @rdone
+  mov    rbx, r8
+  sub    rbx, rcx                            // Cp
+  mov    al, byte ptr [rbx + rdx]
+  cmp    al, byte ptr [r8 + rdx]
+  jne    @cl
+  push   rcx
+  mov    rsi, r8
+  mov    rdx, rbx
+  call   @ml
+  pop    rcx
+  cmp    rax, qword ptr [rdi + TPlzEval.HL]
+  jbe    @cl
+  mov    qword ptr [rdi + TPlzEval.HL], rax
+  mov    dword ptr [rdi + TPlzEval.HD], ecx
+  cmp    rax, qword ptr [rdi + TPlzEval.Nice]
+  jae    @rdone
+  jmp    @cl
+@rdone:
+  // insertar X en la fila
+  lea    eax, [rbp - 1]
+  and    eax, dword ptr [rdi + TPlzEval.WayMask]
+  mov    ecx, dword ptr [rdi + TPlzEval.HeadOff]
+  mov    byte ptr [r9 + rcx], al
+  mov    dl, byte ptr [rdi + TPlzEval.Tag]
+  mov    byte ptr [r9 + rax], dl
+  mov    ecx, dword ptr [rdi + TPlzEval.PosOff]
+  lea    rbx, [r9 + rcx]
+  mov    edx, dword ptr [rdi + TPlzEval.C]
+  mov    dword ptr [rbx + rax * 4], edx
+  pop    r9                                  // entrada nueva para la tabla corta
+@short:
+  cmp    qword ptr [rdi + TPlzEval.TS], 0
+  je     @decide
+  mov    eax, dword ptr [r8]
+  imul   eax, eax, $9E3779B1
+  mov    ecx, dword ptr [rdi + TPlzEval.SSh]
+  shr    eax, cl
+  mov    rbx, qword ptr [rdi + TPlzEval.TS]
+  lea    rbx, [rbx + rax * 8]
+  mov    rdx, qword ptr [rbx]                // ES
+  mov    qword ptr [rbx], r9
+  // D = C - lo(ES); válido, D <> HD, hi = V4
+  test   edx, edx
+  jz     @decide
+  mov    ecx, dword ptr [rdi + TPlzEval.C]
+  sub    ecx, edx
+  cmp    ecx, dword ptr [rdi + TPlzEval.Win]
+  ja     @decide
+  cmp    ecx, dword ptr [rdi + TPlzEval.HD]
+  je     @decide
+  mov    rax, rdx
+  shr    rax, 32
+  cmp    eax, dword ptr [r8]
+  jne    @decide
+  mov    dword ptr [rdi + TPlzEval.D2], ecx
+  lea    rsi, [r8 + 4]
+  mov    rdx, rsi
+  sub    rdx, rcx
+  call   @ml
+  add    rax, 4
+  mov    ecx, dword ptr [rdi + TPlzEval.D2]
+  cmp    rax, qword ptr [rdi + TPlzEval.HL]
+  ja     @stake
+  jb     @decide
+  cmp    dword ptr [rdi + TPlzEval.HD], 0
+  je     @decide
+  cmp    ecx, dword ptr [rdi + TPlzEval.HD]
+  jae    @decide
+@stake:
+  mov    qword ptr [rdi + TPlzEval.HL], rax
+  mov    dword ptr [rdi + TPlzEval.HD], ecx
+
+@decide:
+  // GH = HL >= 4 ? HL*4 - bsr(HD+3) : -1000
+  mov    rax, qword ptr [rdi + TPlzEval.HL]
+  mov    rcx, -1000
+  cmp    rax, 4
+  jb     @gh
+  lea    rcx, [rax * 4]
+  mov    edx, dword ptr [rdi + TPlzEval.HD]
+  add    edx, 3
+  bsr    edx, edx
+  sub    rcx, rdx
+@gh:
+  // sin rep ni hash: no hay match
+  test   r13, r13
+  jnz    @have
+  cmp    rax, 4
+  jb     @none
+@have:
+  cmp    r12, rcx
+  jl     @useh
+  mov    qword ptr [rdi + TPlzEval.Ln], r13
+  mov    dword ptr [rdi + TPlzEval.Dt], r14d
+  mov    qword ptr [rdi + TPlzEval.G], r12
+  mov    eax, 1
+  jmp    @done
+@useh:
+  mov    qword ptr [rdi + TPlzEval.Ln], rax
+  mov    edx, dword ptr [rdi + TPlzEval.HD]
+  mov    dword ptr [rdi + TPlzEval.Dt], edx
+  mov    qword ptr [rdi + TPlzEval.G], rcx
+  mov    eax, 1
+  jmp    @done
+@none:
+  xor    eax, eax
+  jmp    @done
+
+// candidato de la tabla principal en rdx (entrada): si es válido y coincide en 4 bytes y es
+// más largo que HL, pasa a HL/HD (usa rax, rbx, rcx, rsi)
+@cand:
+  test   edx, edx
+  jz     @cret
+  mov    ecx, dword ptr [rdi + TPlzEval.C]
+  sub    ecx, edx                            // D
+  cmp    ecx, dword ptr [rdi + TPlzEval.Win]
+  ja     @cret
+  mov    rax, rdx
+  shr    rax, 32
+  cmp    eax, dword ptr [r8]
+  jne    @cret
+  push   rcx
+  lea    rsi, [r8 + 4]
+  mov    rdx, rsi
+  sub    rdx, rcx
+  call   @ml
+  add    rax, 4
+  pop    rcx
+  cmp    rax, qword ptr [rdi + TPlzEval.HL]
+  jbe    @cret
+  mov    qword ptr [rdi + TPlzEval.HL], rax
+  mov    dword ptr [rdi + TPlzEval.HD], ecx
+@cret:
+  ret
+
+// largo común de rsi y rdx hasta IEnd (r15) -> rax (usa rbx, rcx)
+@ml:
+  mov    rax, rsi
+@ml8:
+  lea    rbx, [rsi + 8]
+  cmp    rbx, r15
+  ja     @mlb
+  mov    rbx, qword ptr [rsi]
+  xor    rbx, qword ptr [rdx]
+  jnz    @mlf
+  add    rsi, 8
+  add    rdx, 8
+  jmp    @ml8
+@mlf:
+  bsf    rbx, rbx
+  shr    rbx, 3
+  add    rsi, rbx
+  jmp    @mle
+@mlb:
+  cmp    rsi, r15
+  jae    @mle
+  mov    bl, byte ptr [rsi]
+  cmp    bl, byte ptr [rdx]
+  jne    @mle
+  inc    rsi
+  inc    rdx
+  jmp    @mlb
+@mle:
+  sub    rsi, rax
+  mov    rax, rsi
+  ret
+
+@done:
+{$IFDEF WIN64}
+  pop    rsi
+  pop    rdi
+{$ENDIF}
+  pop    r15
+  pop    r14
+  pop    r13
+  pop    r12
+  pop    rbp
+  pop    rbx
+end;
+
+{ PlzInsRows: inserta las posiciones [A, B) en las filas (hasta 8 entradas) y, si TS <> nil, en
+  la tabla corta; lo mismo que TPlzEngine.Insert posición por posición. }
+procedure PlzInsRows(var S: TPlzEval; A, B: PByte); assembler; nostackframe;
+asm
+  push   rbx
+  push   rbp
+  push   r12
+  push   r13
+  push   r14
+  push   r15
+{$IFDEF WIN64}
+  push   rdi
+  push   rsi
+  mov    rdi, rcx
+  mov    r15, r8
+  mov    r8, rdx
+{$ELSE}
+  mov    r8, rsi
+  mov    r15, rdx
+{$ENDIF}
+  mov    r11, qword ptr [rdi + TPlzEval.Base]
+  mov    r12, qword ptr [rdi + TPlzEval.Rows]
+  mov    r13, qword ptr [rdi + TPlzEval.RowBytes]
+  mov    ebp, dword ptr [rdi + TPlzEval.Cur0]
+@loop:
+  cmp    r8, r15
+  jae    @done
+  // posición relativa
+  mov    r14, r8
+  sub    r14, r11
+  add    r14d, ebp                           // C (32 bits)
+  mov    rax, qword ptr [r8]
+  mov    ecx, dword ptr [rdi + TPlzEval.HShl]
+  shl    rax, cl
+  mov    rbx, $9E3779B185EBCA87
+  imul   rax, rbx
+  shr    rax, 32
+  mov    edx, eax
+  mov    ecx, dword ptr [rdi + TPlzEval.TagSh]
+  shr    edx, cl                             // etiqueta en dl
+  mov    ecx, dword ptr [rdi + TPlzEval.Sh]
+  shr    eax, cl
+  imul   rax, r13
+  lea    r9, [r12 + rax]                     // fila
+  mov    ecx, dword ptr [rdi + TPlzEval.HeadOff]
+  movzx  eax, byte ptr [r9 + rcx]
+  dec    eax
+  and    eax, dword ptr [rdi + TPlzEval.WayMask]
+  mov    byte ptr [r9 + rcx], al
+  mov    byte ptr [r9 + rax], dl
+  mov    ecx, dword ptr [rdi + TPlzEval.PosOff]
+  lea    rbx, [r9 + rcx]
+  mov    dword ptr [rbx + rax * 4], r14d
+  // tabla corta
+  mov    rbx, qword ptr [rdi + TPlzEval.TS]
+  test   rbx, rbx
+  jz     @next
+  mov    eax, dword ptr [r8]
+  mov    edx, eax
+  imul   edx, edx, $9E3779B1
+  mov    ecx, dword ptr [rdi + TPlzEval.SSh]
+  shr    edx, cl
+  shl    rax, 32
+  or     rax, r14
+  mov    qword ptr [rbx + rdx * 8], rax
+@next:
+  inc    r8
+  jmp    @loop
 @done:
 {$IFDEF WIN64}
   pop    rsi
