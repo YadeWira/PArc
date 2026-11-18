@@ -105,7 +105,7 @@ const
   Methods: array[0..11] of string = ('orep', 'orep:96mb:l256', 'orep:16mb:l64:a4',
     'orep:8mb:l512:s16:c2', 'orep:1mb:l16:a1', 'orep:2mb:l32:a1:s64', 'orep:4mb:l64:b64kb',
     'orep:64mb:l128:b64mb', 'orep:4mb:l64:d1mb', 'orep:256kb:l4096:a4096', 'orep:1kb:l16',
-    'orep:4mb:l20:a3:s7:c1:b100kb');
+    'orep:4mb:l20:a3:s7:c1:b128kb');
 var
   Inputs: array of TBytes;
   i, m, k: Integer;

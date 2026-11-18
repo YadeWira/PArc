@@ -113,12 +113,13 @@ hint, and `rep` blocks of archives from PArc 0.0.5 or earlier do not decode). Sy
 alignment (`a`: lengths multiple of `a` and literals kept at their position modulo `a`, which
 helps lzma; default `a0` = per stream block, 1 for text and 4 otherwise), anchor density (`s`,
 1..64, default 4: higher finds more short matches, slower and with a larger table), candidates
-per anchor (`c`, 1..4, default 4: 1 is the fastest), stream block (`b`, 64kb..64mb,
+per anchor (`c`, 1..4, default 4: 1 is the fastest), stream block (`b`, a power of 2, 64kb..64mb,
 default 4mb) and a minimum distance (`d`, default 0: nearer matches are left to the next
 compressor). For example `-morep:96m:l256+exe+delta+lzma:96m`. The presets use
-`orep:96m:l256` at `-m1`/`-m2`, `orep:96m:l512` at `-m3`…`-m5` and `orep:<window>:l512` at
+`orep:96m:l256:c1` at `-m1`, `orep:96m:l256` at `-m2`, `orep:96m:l512` at `-m3`…`-m5` and `orep:<window>:l512` at
 `-m6`…`-m9`/`-mx` (window 256m, 512m, 1024m, 2040m). The stored method shows the window
-clipped to the block. `orep` runs on the thread that writes the block (see `PARC_THREADS`).
+clipped to the block. `orep` runs on the thread that writes the block (see `PARC_THREADS`;
+`PARC_OREP_THREADS` lets it use its own threads).
 
 When updating (`a`, `u`, `f`), solid blocks that remain intact are copied without recompression;
 `--recompress` forces rebuilding them. With `d` and an explicit `-m`, the whole archive is
@@ -470,6 +471,7 @@ extracting, the half-written file is deleted. A second Ctrl-C stops immediately.
 | variable | effect |
 |---|---|
 | `PARC_THREADS` | maximum number of threads working at the same time in the whole process (default: CPU cores, at most 64): block compression, 4x4/grzip, the multi-threaded LZMA match finder, `t` verification and parallel extraction all share it. It also picks the preset alternatives, like FreeArc's `-mtN` (e.g. `PARC_THREADS=1 -m1` uses the single-thread `tor:4`). The `-mt<N>` option overrides it |
+| `PARC_OREP_THREADS` | `k` >= 2: `orep` uses its own threads (a coordinator and `k` − 1 helpers, at most the block's share of `PARC_THREADS` and 8), each taking a `PARC_THREADS` token only while it works; same output. Off by default: with 4 threads it measured slower than `orep` on the writing thread (docs/ESTADO.md) |
 | `PARC_BUFMEM` | MB of memory for compressed blocks waiting their turn when compressing in parallel (default min(1024, RAM/4), 256 on 32-bit); the rest goes to temporary files |
 | `PARC_CRC` | `table` disables the PCLMULQDQ CRC-32 (for measurements) |
 

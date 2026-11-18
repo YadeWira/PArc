@@ -283,7 +283,7 @@ Method string: `orep[:<window>][:<min length>][:w<mem>][:l<n>][:a<n>][:s<n>][:c<
 | `a<n>` | match lengths are multiples of `a`, and literals stay at their input position modulo `a` (lzma's `pb`/`lp` contexts); `a0` = chosen per stream block (1 for text, 4 otherwise) | 0 | 0 .. 4096, ≤ `l` |
 | `s<n>` | anchor density: higher finds more short matches, slower, larger table | 4 | 1 .. 64 |
 | `c<n>` | candidates tried per anchor: more finds longer matches, slower; 1 is the fastest | 4 | 1 .. 4 |
-| `b<mem>` | stream block (slot) size | 4mb | 64kb .. 64mb |
+| `b<mem>` | stream block (slot) size | 4mb | a power of 2, 64kb .. 64mb |
 | `d<mem>` | matches nearer than this are left to the next compressor | 0 | |
 
 Memories as everywhere in PArc (`b/k/m/g` suffixes; a bare number is 2^N). The stored
@@ -291,9 +291,9 @@ Memories as everywhere in PArc (`b/k/m/g` suffixes; a bare number is 2^N). The s
 (`orep:57mb`) and, with `-lc`, to what fits the memory limit; the other parameters only when
 they differ from the defaults (`orep:96mb:l256`, `orep:2040mb:l512`).
 
-Stream: OREP format version 2 (OREP 0.0.3; still a draft upstream, so a later OREP may change
-it), specified in `src/orep/orep-format.md`: a 28-byte header (magic `OREP`, version, alignment
-setting, window, block size, minimum length, CRC-32C), blocks (output size, match count, column
+Stream: OREP format version 3 (OREP 0.0.4; still a draft upstream, so a later OREP may change
+it), specified in `src/orep/orep-format.md`: a 15–20-byte header (magic `OREP`, version, log2 of
+the block size, then varints: window, alignment setting, minimum length; CRC-32C), blocks (output size, match count, column
 size, the block's alignment, three varint columns: literal run, length − 16, distance − 1, zero
 padding) followed by the block's literals
 and the CRC-32C of the block's output, and an end marker with the total size. The stream does
@@ -302,7 +302,8 @@ not depend on the number of threads or on how the input is split into writes; th
 platform.
 
 The decoder reads the window and block size from the stream header. It keeps a ring of
-`ceil(window / block) × block + block` bytes, grown as data arrives, and refuses (as damaged) a
+`ceil(window / block) × block + block` bytes as separate block-sized slots allocated when first
+used (no copies when it grows), and refuses (as damaged) a
 header that needs more memory than the method string declares (`OrepDecMemory` of the method's
 window and block), so `-ld` (which reads the method string) bounds it. Every block is checked
 (sizes, distances inside the decoded data, zero padding, CRC-32C); the end marker's total and

@@ -738,8 +738,7 @@ end;
   lo sabe (lzma, rep); lo demás, de lo que reserva cada uno:
   - ppmd: el modelo; tor: búfer + hash + hash auxiliar; lzp: entrada + salida + hash;
   - dict: ~3 veces el bloque; grzip: ~6 veces el bloque (BWT); dispack: ~3 veces su bloque;
-  - orep: lo que dice OrepEncMemory (anillo de la ventana + un bloque, tabla de anclas, búferes)
-    más la ventana (la copia del anillo al crecer);
+  - orep: lo que dice OrepEncMemory (anillo de la ventana + un bloque, tabla de anclas, búferes);
   - cm y srep guardan todo el bloque (cm: ~4 veces más sus modelos de 64 MB; srep: ~3 veces);
   - 4x4: los trabajos en vuelo (hasta los hilos, máx. 16) por (método interno + 2 bloques);
   - filtros (exe, delta, mm, tta, bcj2) y cifrado: búferes de unos MB. }
@@ -766,12 +765,11 @@ begin
       'orep':
         begin
           Om := ParseOrepMethod(Parts);
-          // el anillo crece con la entrada: con un bloque más chico que la ventana, lo del bloque
+          // el anillo (ranuras de un bloque de OREP que se reservan al usarlas, desde 0.0.4 sin
+          // copias al crecer): con un bloque sólido más chico que la ventana, lo del bloque
           if (DataSize > 0) and (QWord(DataSize) < Om.Window) then Om.Window := DataSize;
-          // + el anillo viejo mientras crece: OREP 0.0.3 lo agranda duplicando con ReAllocMem, y
-          // el último paso tiene las dos copias a la vez (medido: orep:512m:l512 solo en 512 MB
-          // de TILIN, 1128 MB de RSS para 640 MB de OrepEncMemory), y la salida de una llamada
-          Result := Int64(OrepMethodEncMemory(Om)) + Int64(Om.Window) + 2 * Int64(Om.Chunk) + 2 * MB_;
+          // + la salida de una llamada (1 MB)
+          Result := Int64(OrepMethodEncMemory(Om)) + 2 * MB_;
         end;
       'ppmd': Result := Int64(ParsePpmdParams(Parts).Mem) + 2 * MB_;
       'tor':

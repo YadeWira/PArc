@@ -63,11 +63,14 @@ for m in orep orep:96mb:l256 orep:1mb:l16:a1 orep:8mb:l512:s16 orep:4mb:b64kb:d2
   for t in 2 3 4 8; do
     rm -f o.parc; PARC_THREADS=$t q "$PARC" a o.parc in/d -m"$m"
     cmp -s o.parc t1.parc || same=0
+    # con los hilos propios de OREP (fichas por los ganchos de 0.0.5)
+    rm -f o.parc; PARC_OREP_THREADS=$t PARC_THREADS=$t q "$PARC" a o.parc in/d -m"$m"
+    cmp -s o.parc t1.parc || same=0
   done
   rm -f o.parc; PARC_THREADS=4 q "$REF" a o.parc in/d -m"$m"
   cmp -s o.parc t1.parc || same=$((same + 2))
   check "$m: ida y vuelta" 'mkdir x && (cd x && q "$PARC" x ../t1.parc) && diff -r in/d x/in/d >/dev/null'
-  check "$m: mismos bytes con 1..8 hilos" '[ $((same & 1)) = 1 ]'
+  check "$m: mismos bytes con 1..8 hilos (y PARC_OREP_THREADS)" '[ $((same & 1)) = 1 ]'
   check "$m: mismos bytes con -dOREP_NO_NATIVE" '[ $same -lt 2 ]'
   check "$m: lo descomprime la referencia en Pascal" '"$REF" t t1.parc --no-progress 2>/dev/null | grep -q "All OK"'
 done

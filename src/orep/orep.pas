@@ -13,6 +13,12 @@
                        ->  OrepEncEnd(E)
     OrepDecInit(D, MemLimit) -> OrepDecRun(D, ...) -> OrepDecEnd(D)
 
+  P.OnWorkerBusy / P.OnWorkerIdle (with P.HookCtx), if set, are called by
+  OREP's own threads when they start working and before they block, so a
+  program with a global thread budget can take and give back one token per
+  thread (Busy may wait for a token; the search never waits for a thread
+  that has not joined).
+
   P.Threads >= 2 runs the search on a coordinator thread helped by
   Threads - 1 workers, while the caller's thread copies input and writes
   output; the stream is the same with any number of threads.  With threads
@@ -53,8 +59,8 @@ const
   OREP_FLUSH = 1;      { end the current block now (the stream goes on) }
   OREP_FINISH = 2;     { no more input: write the end of the stream }
 
-  OREP_VERSION_STR = '0.0.3';
-  OREP_FORMAT = 2;
+  OREP_VERSION_STR = '0.0.5';
+  OREP_FORMAT = 3;
 
   OREP_MIN_MATCH = 16;               { format minimum match length }
   OREP_MAX_WINDOW = QWord($F0000000); { < 2^32 minus a chunk }
@@ -62,12 +68,20 @@ const
   OREP_MIN_CHUNK = 64 * 1024;
 
 type
+  { called by OREP's own threads (workers and coordinator) when they start
+    working and before they block waiting, so a caller with a global thread
+    budget can take and give back a token per thread.  Busy may block until
+    a token is free: the search does not wait for a thread that has not
+    joined. }
+  TOrepHook = procedure(Ctx: Pointer);
+
   TOrepParams = record
     Window: QWord;      { max distance, bytes (default 512 MiB) }
     SizeHint: QWord;    { total input if known, 0 = unknown: a smaller
                           input gets a smaller window (same matches) }
     MinLen: LongWord;   { shortest match searched, >= 16 (default 64) }
-    Chunk: LongWord;    { block size, 64 KiB..64 MiB (default 4 MiB) }
+    Chunk: LongWord;    { block size, a power of two, 64 KiB..64 MiB
+                          (default 4 MiB) }
     Align: LongWord;    { match lengths multiple of this, and literals kept
                           at their input position modulo it; 0 (default) =
                           per block: 1 for text, 4 (lzma's pb2) otherwise }
@@ -83,6 +97,8 @@ type
                           only; OREP creates the others and goes on with
                           fewer if it cannot.  The output is the same with
                           any number. }
+    OnWorkerBusy, OnWorkerIdle: TOrepHook;  { optional, nil = none }
+    HookCtx: Pointer;
   end;
 
   POrepCfg = ^TOrepCfg;
@@ -91,17 +107,17 @@ type
     Window: QWord;
     RingSize: QWord;
     MinDist: QWord;
-    Ring: PByte;
+    Slots: PPByte;       { RingSize shr CShift slots, each its own GetMem }
     Table: PQWord;
     MinLen, Gram, SMask, MaxGap, TBits, Align, MinKeep, SShift: LongWord;
     Cands, Score: LongWord;
+    CShift, Pad: LongWord;
   end;
 
   TOrepEnc = record
     Cfg: TOrepCfg;
     TableRaw: Pointer;
     Chunk: LongWord;
-    RingAlloc: QWord;
     SlotAbs: QWord;      { absolute position of the current slot }
     SlotPhys: QWord;     { its offset in the ring }
     Fill: LongWord;      { bytes in the slot }
@@ -136,6 +152,8 @@ type
     SNM: LongInt;
     InFlight: Boolean;
     Coord: Pointer;                             { coordinator, or nil }
+    OnBusy, OnIdle: TOrepHook;
+    HookCtx: Pointer;
     SList: PLongWord;    { per segment: its anchors grouped by shard }
     SOfs: PLongWord;     { per segment: NShard + 1 offsets into SList }
     Cand4: PLongWord;    { 4 candidates per anchor }
@@ -145,8 +163,9 @@ type
   TOrepDec = record
     Window: QWord;
     Chunk: LongWord;
-    RingSize, RingAlloc: QWord;
-    Ring: PByte;
+    RingSize: QWord;
+    Slots: PPByte;
+    CShift: LongWord;
     MemLimit: QWord;
     Total: QWord;        { bytes decoded and checked }
     WPhys: QWord;        { ring offset of Total }
@@ -229,7 +248,7 @@ const
   OREP_SUB = 65536;
   OREP_BATCH = 8;      { segments per batch }
   OREP_PF = 16;
-  HDR_SIZE = 28;
+  HDR_MAX = 6 + 5 + 2 + 3 + 4;   { the longest stream header }
   Magic: array[0..3] of Char = 'OREP';
 
 var
@@ -300,6 +319,9 @@ begin
   P.MinDist := 0;
   P.Threads := 1;
   P.Cands := 4;
+  P.OnWorkerBusy := nil;
+  P.OnWorkerIdle := nil;
+  P.HookCtx := nil;
 end;
 
 function CheckParams(const P: TOrepParams): Boolean;
@@ -307,6 +329,7 @@ begin
   Result := (P.Window >= 1) and (P.Window <= OREP_MAX_WINDOW) and
     (P.MinLen >= OREP_MIN_MATCH) and (P.MinLen <= 65536) and
     (P.Chunk >= OREP_MIN_CHUNK) and (P.Chunk <= OREP_MAX_CHUNK) and
+    (P.Chunk and (P.Chunk - 1) = 0) and
     (P.Align <= 4096) and (P.Align <= P.MinLen) and
     (P.Density >= 1) and (P.Density <= 64) and (P.Threads <= 256) and
     (P.Cands >= 1) and (P.Cands <= 4);
@@ -327,6 +350,44 @@ end;
 function RingFor(Window: QWord; Chunk: LongWord): QWord;
 begin
   Result := (Window + Chunk - 1) div Chunk * Chunk + Chunk;
+end;
+
+function Log2Of(X: LongWord): LongWord;
+begin
+  Result := 0;
+  while (LongWord(1) shl Result) < X do Inc(Result);
+end;
+
+{ the byte at ring offset P (slots of 1 shl Shift bytes) }
+function SlotPtr(Slots: PPByte; Shift: LongWord; P: QWord): PByte; inline;
+begin
+  Result := Slots[P shr Shift] + (P and ((QWord(1) shl Shift) - 1));
+end;
+
+{ make sure the slot that holds ring offset P exists }
+function EnsureSlot(Slots: PPByte; Shift: LongWord; P: QWord): Boolean;
+var
+  I: SizeUInt;
+begin
+  Result := True;
+  I := P shr Shift;
+  if Slots[I] <> nil then Exit;
+  try
+    Slots[I] := GetMem(SizeUInt(1) shl Shift);
+  except
+    Result := False;
+  end;
+end;
+
+procedure FreeSlots(var Slots: PPByte; RingSize: QWord; Shift: LongWord);
+var
+  I: SizeUInt;
+begin
+  if Slots = nil then Exit;
+  for I := 0 to (RingSize shr Shift) - 1 do
+    if Slots[I] <> nil then FreeMem(Slots[I]);
+  FreeMem(Slots);
+  Slots := nil;
 end;
 
 procedure Derive(const P: TOrepParams; W: QWord; out Gram, SMask, MaxGap,
@@ -424,26 +485,21 @@ begin
   Result := Mix(K);
 end;
 
+function RB(const C: TOrepCfg; P: QWord): Byte; inline;
+begin
+  Result := SlotPtr(C.Slots, C.CShift, P)^;
+end;
+
 function Fwd(const C: TOrepCfg; S, D: QWord; Max: LongWord): LongWord;
 var
-  L, Run, K: LongWord;
-  Room: QWord;
+  L: LongWord;
 begin
   L := 0;
   while L < Max do
   begin
-    Room := C.RingSize - S;
-    Run := Max - L;
-    if Room < Run then Run := LongWord(Room);
-    K := 0;
-    while K < Run do
-    begin
-      if C.Ring[S + K] <> C.Ring[D + K] then Exit(L + K);
-      Inc(K);
-    end;
-    Inc(L, Run);
-    Inc(S, Run);
-    Inc(D, Run);
+    if RB(C, S) <> RB(C, D + L) then Exit(L);
+    Inc(L);
+    Inc(S);
     if S = C.RingSize then S := 0;
   end;
   Result := L;
@@ -451,34 +507,17 @@ end;
 
 function Bwd(const C: TOrepCfg; S, D: QWord; Max: LongWord): LongWord;
 var
-  L, Run, K: LongWord;
+  L: LongWord;
 begin
   L := 0;
   while L < Max do
   begin
-    Run := Max - L;
     if S = 0 then S := C.RingSize;
-    if S < Run then Run := LongWord(S);
-    K := 0;
-    while K < Run do
-    begin
-      if C.Ring[S - K - 1] <> C.Ring[D - K - 1] then Exit(L + K);
-      Inc(K);
-    end;
-    Inc(L, Run);
-    Dec(S, Run);
-    Dec(D, Run);
+    Dec(S);
+    if RB(C, S) <> RB(C, D - L - 1) then Exit(L);
+    Inc(L);
   end;
   Result := L;
-end;
-
-function Way(B: PQWord; Tag: LongWord): Integer;
-var
-  W: Integer;
-begin
-  for W := 0 to 3 do
-    if (LongWord(B[W] shr 32) = Tag) and (LongWord(B[W]) <> 0) then Exit(W);
-  Result := -1;
 end;
 
 function SrcPos(C: POrepCfg; Dp, D: QWord): QWord;
@@ -742,11 +781,15 @@ type
     N: LongInt;                 { workers started }
     W: array of TOrepWorker;
     Done: PRTLEvent;
+    Lock: TRTLCriticalSection;  { Open, Active, the job fields }
     Gen: LongInt;               { bumped for every job }
     Active, NextItem, Items: LongInt;
+    Open: Boolean;              { workers can still join the job }
     Job: TOrepJob;
     Ctx: Pointer;
     Quit: Boolean;
+    OnBusy, OnIdle: TOrepHook;
+    HookCtx: Pointer;
   end;
 
 procedure PoolItems(P: POrepPool);
@@ -766,15 +809,21 @@ const
   OREP_SPIN = 20000;
   OREP_YIELD = 3000;
 
+{ A worker holds its token (OnBusy .. OnIdle) from when it wakes until it
+  is about to sleep; the short spin between the jobs of a block counts as
+  busy.  It joins a job only while the job is open, so a worker that waits
+  in OnBusy never holds the search up. }
 function PoolWorker(Arg: Pointer): PtrInt;
 var
   Wk: ^TOrepWorker;
   P: POrepPool;
   MyGen, I: LongInt;
+  Holding, Join, Last: Boolean;
 begin
   Wk := Arg;
   P := Wk^.Pool;
   MyGen := 0;
+  Holding := False;
   repeat
     I := 0;
     while (P^.Gen = MyGen) and (I < OREP_SPIN) do
@@ -790,19 +839,42 @@ begin
       ReadBarrier;
       Inc(I);
     end;
+    if (P^.Gen = MyGen) and Holding then
+    begin
+      if P^.OnIdle <> nil then P^.OnIdle(P^.HookCtx);
+      Holding := False;
+    end;
     while P^.Gen = MyGen do
       RTLEventWaitFor(Wk^.Go, 100);
     ReadBarrier;
     MyGen := P^.Gen;
     if P^.Quit then Break;
-    PoolItems(P);
-    if InterLockedDecrement(P^.Active) = 0 then RTLEventSetEvent(P^.Done);
+    if not Holding then
+    begin
+      if P^.OnBusy <> nil then P^.OnBusy(P^.HookCtx);
+      Holding := True;
+    end;
+    EnterCriticalSection(P^.Lock);
+    Join := P^.Open and (P^.Gen = MyGen);
+    if Join then Inc(P^.Active);
+    LeaveCriticalSection(P^.Lock);
+    if Join then
+    begin
+      PoolItems(P);
+      EnterCriticalSection(P^.Lock);
+      Dec(P^.Active);
+      Last := P^.Active = 0;
+      LeaveCriticalSection(P^.Lock);
+      if Last then RTLEventSetEvent(P^.Done);
+    end;
   until False;
+  if Holding and (P^.OnIdle <> nil) then P^.OnIdle(P^.HookCtx);
   Result := 0;
 end;
 
 { start up to Want - 1 workers; nil when none could be started }
-function PoolCreate(Want: LongWord): POrepPool;
+function PoolCreate(Want: LongWord; OnBusy, OnIdle: TOrepHook;
+  HookCtx: Pointer): POrepPool;
 var
   I: LongInt;
 begin
@@ -810,6 +882,10 @@ begin
   if Want <= 1 then Exit;
   New(Result);
   FillChar(Result^, SizeOf(TOrepPool), 0);
+  Result^.OnBusy := OnBusy;
+  Result^.OnIdle := OnIdle;
+  Result^.HookCtx := HookCtx;
+  InitCriticalSection(Result^.Lock);
   SetLength(Result^.W, Want - 1);
   try
     Result^.Done := RTLEventCreate;
@@ -832,6 +908,7 @@ begin
   if Result^.N = 0 then
   begin
     if Result^.Done <> nil then RTLEventDestroy(Result^.Done);
+    DoneCriticalSection(Result^.Lock);
     Result^.W := nil;
     Dispose(Result);
     Result := nil;
@@ -854,6 +931,7 @@ begin
     RTLEventDestroy(P^.W[I].Go);
   end;
   RTLEventDestroy(P^.Done);
+  DoneCriticalSection(P^.Lock);
   P^.W := nil;
   Dispose(P);
 end;
@@ -868,16 +946,21 @@ begin
     for K := 0 to Items - 1 do Job(Ctx, K);
     Exit;
   end;
+  EnterCriticalSection(P^.Lock);
   P^.Job := Job;
   P^.Ctx := Ctx;
   P^.Items := Items;
   P^.NextItem := 0;
-  P^.Active := P^.N;
-  WriteBarrier;
+  P^.Active := 0;
+  P^.Open := True;
   InterLockedIncrement(P^.Gen);
+  LeaveCriticalSection(P^.Lock);
   for I := 0 to P^.N - 1 do RTLEventSetEvent(P^.W[I].Go);
   PoolItems(P);
-  { the workers are about to finish: spin, then yield, then sleep }
+  { every item is taken: no one joins any more; wait for those that did }
+  EnterCriticalSection(P^.Lock);
+  P^.Open := False;
+  LeaveCriticalSection(P^.Lock);
   I := 0;
   while P^.Active > 0 do
   begin
@@ -909,7 +992,8 @@ begin
   E := Ctx;
   SegRange(E, Item, S0, S1);
   O := LongWord(Item) * OREP_SUB;
-  E^.SegCnt[Item] := orep_anchors(@E^.Cfg, E^.Cfg.Ring + E^.BPhysQ, S0, S1,
+  E^.SegCnt[Item] := orep_anchors(@E^.Cfg,
+    SlotPtr(E^.Cfg.Slots, E^.Cfg.CShift, E^.BPhysQ), S0, S1,
     E^.APos + O, E^.AIdx + O, E^.ATag + O);
   if E^.NShard > 1 then
     orep_shard(E^.AIdx + O, E^.SegCnt[Item], E^.NShard, E^.Cfg.TBits,
@@ -1019,7 +1103,9 @@ begin
   repeat
     RTLEventWaitFor(C^.Go);
     if C^.Quit then Break;
+    if C^.E^.OnBusy <> nil then C^.E^.OnBusy(C^.E^.HookCtx);
     C^.E^.SNM := SearchBlock(C^.E^);
+    if C^.E^.OnIdle <> nil then C^.E^.OnIdle(C^.E^.HookCtx);
     RTLEventSetEvent(C^.Done);
   until False;
   Result := 0;
@@ -1062,7 +1148,7 @@ end;
 
 procedure EncFree(var E: TOrepEnc);
 begin
-  if E.Cfg.Ring <> nil then FreeMem(E.Cfg.Ring);
+  FreeSlots(E.Cfg.Slots, E.Cfg.RingSize, E.Cfg.CShift);
   if E.TableRaw <> nil then FreeMem(E.TableRaw);
   E.TableRaw := nil;
   if E.InFlight and (E.Coord <> nil) then
@@ -1093,7 +1179,7 @@ begin
   if E.SDist <> nil then FreeMem(E.SDist);
   E.SLit := nil; E.SLen := nil; E.SDist := nil;
   if E.Stage <> nil then FreeMem(E.Stage);
-  E.Cfg.Ring := nil; E.Cfg.Table := nil;
+  E.Cfg.Table := nil;
   E.Lit := nil; E.Len := nil; E.Dist := nil; E.Stage := nil;
 end;
 
@@ -1101,21 +1187,15 @@ procedure StageHeader(var E: TOrepEnc);
 begin
   Move(Magic, E.Stage[0], 4);
   E.Stage[4] := OREP_FORMAT;
-  E.Stage[5] := 0;
-  if E.AutoAlign then
-  begin
-    E.Stage[6] := 0; E.Stage[7] := 0;
-  end
-  else
-  begin
-    E.Stage[6] := Byte(E.Cfg.Align); E.Stage[7] := Byte(E.Cfg.Align shr 8);
-  end;
-  Put64(E.Stage + 8, E.Cfg.Window);
-  Put32(E.Stage + 16, E.Chunk);
-  Put32(E.Stage + 20, E.Cfg.MinLen);
-  Put32(E.Stage + 24, OrepCrc32c(0, E.Stage, 24));
-  E.StageLen := HDR_SIZE;
-  E.StreamPos := HDR_SIZE;
+  E.Stage[5] := Log2Of(E.Chunk);
+  E.StageLen := 6;
+  Inc(E.StageLen, PutVar(E.Stage + E.StageLen, E.Cfg.Window));
+  if E.AutoAlign then Inc(E.StageLen, PutVar(E.Stage + E.StageLen, 0))
+  else Inc(E.StageLen, PutVar(E.Stage + E.StageLen, E.Cfg.Align));
+  Inc(E.StageLen, PutVar(E.Stage + E.StageLen, E.Cfg.MinLen));
+  Put32(E.Stage + E.StageLen, OrepCrc32c(0, E.Stage, E.StageLen));
+  Inc(E.StageLen, 4);
+  E.StreamPos := E.StageLen;
   E.StagePos := 0;
   E.Phase := 2;   { drain the header, then fill }
 end;
@@ -1160,8 +1240,9 @@ begin
     E.SLen := GetMem(E.Cap * 4);
     E.SDist := GetMem(E.Cap * 8);
     E.Stage := GetMem(E.StageCap);
-    E.RingAlloc := P.Chunk;
-    E.Cfg.Ring := GetMem(E.RingAlloc);
+    E.Cfg.CShift := Log2Of(P.Chunk);
+    E.Cfg.Slots := AllocMem((E.Cfg.RingSize shr E.Cfg.CShift) * SizeOf(PByte));
+    E.Cfg.Slots[0] := GetMem(P.Chunk);
   except
     EncFree(E);
     Exit(OREP_E_MEM);
@@ -1169,7 +1250,11 @@ begin
   { Threads >= 2: a coordinator runs the search, helped by Threads - 1
     workers, while the caller's thread copies input and writes output }
   if P.Threads >= 2 then E.Coord := CoordCreate(@E);
-  if E.Coord <> nil then E.Pool := PoolCreate(P.Threads);
+  E.OnBusy := P.OnWorkerBusy;
+  E.OnIdle := P.OnWorkerIdle;
+  E.HookCtx := P.HookCtx;
+  if E.Coord <> nil then
+    E.Pool := PoolCreate(P.Threads, P.OnWorkerBusy, P.OnWorkerIdle, P.HookCtx);
   if E.Pool <> nil then E.NShard := POrepPool(E.Pool)^.N + 1
   else E.NShard := 1;
   if E.NShard > 1 then
@@ -1208,26 +1293,6 @@ begin
   E.Inited := False;
 end;
 
-function GrowRing(var E: TOrepEnc; Need: QWord): Boolean;
-var
-  NewSize: QWord;
-begin
-  Result := True;
-  if Need <= E.RingAlloc then Exit;
-  NewSize := E.RingAlloc * 2;
-  if NewSize < Need then NewSize := Need;
-  if NewSize > E.Cfg.RingSize then NewSize := E.Cfg.RingSize;
-  try
-    ReAllocMem(E.Cfg.Ring, NewSize);
-  except
-    Exit(False);
-  end;
-  E.RingAlloc := NewSize;
-end;
-
-{ hand the block [BlockStart, Fill) of the slot to the search (the
-  coordinator, or inline), move on, and make room in the ring for the next
-  bytes while no search runs }
 { the alignment of a block when it is chosen per block: 1 for text (at
   least 90% of ~4096 bytes spread over the block are printable ASCII or
   tab/CR/LF), else 4.  It runs before the search starts, so it samples. }
@@ -1266,9 +1331,13 @@ begin
   end
   else
     E.BlockStart := E.Fill;
-  if E.AutoAlign then E.Cfg.Align := BlockAlign(E.Cfg.Ring + E.BPhysQ, E.BLen);
+  if E.AutoAlign then
+    E.Cfg.Align := BlockAlign(SlotPtr(E.Cfg.Slots, E.Cfg.CShift, E.BPhysQ),
+      E.BLen);
   E.BAlign := E.Cfg.Align;
-  if not GrowRing(E, E.SlotPhys + E.Chunk) then Exit(OREP_E_MEM);
+  { the slot the caller's thread fills next (no search runs now) }
+  if not EnsureSlot(E.Cfg.Slots, E.Cfg.CShift, E.SlotPhys) then
+    Exit(OREP_E_MEM);
   { the search writes the spare match arrays (SLit...); Finalize swaps them
     with the ones being written out, which are done by then }
   E.InFlight := True;
@@ -1331,7 +1400,8 @@ begin
   Inc(E.StageLen, Pad);
   Inc(E.StreamPos, QWord(E.StageLen) + (E.BlkLen - SumLen) + 4);
   E.StagePos := 0;
-  E.BlockCrc := OrepCrc32c(0, E.Cfg.Ring + E.BlkPhys, E.BlkLen);
+  E.BlockCrc := OrepCrc32c(0, SlotPtr(E.Cfg.Slots, E.Cfg.CShift, E.BlkPhys),
+    E.BlkLen);
   E.LitRun := 0;
   E.LitOff := 0;
   E.LitBase := 0;
@@ -1372,7 +1442,8 @@ begin
            begin
              Want := E.Chunk - E.Fill;
              if Want > AvailIn then Want := AvailIn;
-             Move(NextIn^, E.Cfg.Ring[E.SlotPhys + E.Fill], Want);
+             Move(NextIn^, SlotPtr(E.Cfg.Slots, E.Cfg.CShift,
+               E.SlotPhys + E.Fill)^, Want);
              Inc(NextIn, Want);
              Dec(AvailIn, Want);
              Inc(E.Fill, Want);
@@ -1387,8 +1458,7 @@ begin
            if (Mode = OREP_FINISH) and not E.Ended then
            begin
              E.StageLen := PutVar(E.Stage, 0);
-             Put64(E.Stage + E.StageLen, E.Total);
-             Inc(E.StageLen, 8);
+             Inc(E.StageLen, PutVar(E.Stage + E.StageLen, E.Total));
              E.StagePos := 0;
              E.Ended := True;
              E.NMatch := 0;
@@ -1441,7 +1511,8 @@ begin
            if AvailOut = 0 then Exit(OREP_OK);
            K := Cnt - E.LitOff;
            if K > AvailOut then K := AvailOut;
-           Move(E.Cfg.Ring[E.BlkPhys + E.LitBase + E.LitOff], NextOut^, K);
+           Move(SlotPtr(E.Cfg.Slots, E.Cfg.CShift,
+             E.BlkPhys + E.LitBase + E.LitOff)^, NextOut^, K);
            Inc(NextOut, K);
            Dec(AvailOut, K);
            Inc(E.LitOff, K);
@@ -1470,12 +1541,12 @@ end;
 
 procedure DecFree(var D: TOrepDec);
 begin
-  if D.Ring <> nil then FreeMem(D.Ring);
+  FreeSlots(D.Slots, D.RingSize, D.CShift);
   if D.Cols <> nil then FreeMem(D.Cols);
   if D.Lit <> nil then FreeMem(D.Lit);
   if D.Len <> nil then FreeMem(D.Len);
   if D.Dist <> nil then FreeMem(D.Dist);
-  D.Ring := nil; D.Cols := nil; D.Lit := nil; D.Len := nil; D.Dist := nil;
+  D.Cols := nil; D.Lit := nil; D.Len := nil; D.Dist := nil;
 end;
 
 function OrepDecInit(out D: TOrepDec; MemLimit: QWord): Integer;
@@ -1493,21 +1564,46 @@ begin
   D.Inited := False;
 end;
 
-function DecHeader(var D: TOrepDec): Integer;
+{ the header so far (HdrLen bytes): 1 = complete, 0 = needs more,
+  < 0 = an error.  Magic, version, log2 chunk, then varints window, align
+  setting, minimum length, then the CRC-32C of all that. }
+function DecHeaderState(var D: TOrepDec): Integer;
 var
-  I: Integer;
+  I, P, N, Sh: LongWord;
+  V: array[0..2] of QWord;
 begin
   for I := 0 to 3 do
-    if Char(D.Hdr[I]) <> Magic[I] then Exit(OREP_E_VERSION);
-  if Get32(@D.Hdr[24]) <> OrepCrc32c(0, @D.Hdr[0], 24) then Exit(OREP_E_DATA);
-  if D.Hdr[4] <> OREP_FORMAT then Exit(OREP_E_VERSION);
-  if D.Hdr[5] <> 0 then Exit(OREP_E_VERSION);
-  { the encoder's alignment setting (0 = per block); each block has its own }
-  if (D.Hdr[6] or (LongWord(D.Hdr[7]) shl 8)) > 4096 then Exit(OREP_E_DATA);
-  D.Window := Get64(@D.Hdr[8]);
-  D.Chunk := Get32(@D.Hdr[16]);
+    if (I < D.HdrLen) and (Char(D.Hdr[I]) <> Magic[I]) then
+      Exit(OREP_E_VERSION);
+  if (D.HdrLen > 4) and (D.Hdr[4] <> OREP_FORMAT) then Exit(OREP_E_VERSION);
+  if D.HdrLen < 6 then Exit(0);
+  P := 6;
+  for N := 0 to 2 do
+  begin
+    V[N] := 0;
+    Sh := 0;
+    repeat
+      if P >= D.HdrLen then Exit(0);
+      if Sh >= 35 then Exit(OREP_E_DATA);   { at most 5 bytes }
+      V[N] := V[N] or (QWord(D.Hdr[P] and $7F) shl Sh);
+      Inc(Sh, 7);
+      Inc(P);
+    until D.Hdr[P - 1] < $80;
+  end;
+  if D.HdrLen < P + 4 then Exit(0);
+  if Get32(@D.Hdr[P]) <> OrepCrc32c(0, @D.Hdr[0], P) then Exit(OREP_E_DATA);
+  if (D.Hdr[5] < 16) or (D.Hdr[5] > 26) or (V[1] > 4096) then
+    Exit(OREP_E_DATA);
+  D.Chunk := LongWord(1) shl D.Hdr[5];
+  D.Window := V[0];
+  Result := 1;
+end;
+
+function DecHeader(var D: TOrepDec): Integer;
+begin
   if (D.Window < 1) or (D.Window > OREP_MAX_WINDOW) or
-    (D.Chunk < OREP_MIN_CHUNK) or (D.Chunk > OREP_MAX_CHUNK) then
+    (D.Chunk < OREP_MIN_CHUNK) or (D.Chunk > OREP_MAX_CHUNK) or
+    (D.Chunk and (D.Chunk - 1) <> 0) then
     Exit(OREP_E_DATA);
   if (D.MemLimit <> 0) and (OrepDecMemory(D.Window, D.Chunk) > D.MemLimit) then
     Exit(OREP_E_MEM);
@@ -1517,29 +1613,12 @@ begin
     D.Lit := GetMem(D.MCap * 4);
     D.Len := GetMem(D.MCap * 4);
     D.Dist := GetMem(D.MCap * 4);
-    D.RingAlloc := 0;
+    D.CShift := Log2Of(D.Chunk);
+    D.Slots := AllocMem((D.RingSize shr D.CShift) * SizeOf(PByte));
   except
     Exit(OREP_E_MEM);
   end;
   Result := OREP_OK;
-end;
-
-function DecGrow(var D: TOrepDec; Need: QWord): Boolean;
-var
-  NewSize: QWord;
-begin
-  Result := True;
-  if Need <= D.RingAlloc then Exit;
-  NewSize := D.RingAlloc * 2;
-  if NewSize < D.Chunk then NewSize := D.Chunk;
-  if NewSize < Need then NewSize := Need;
-  if NewSize > D.RingSize then NewSize := D.RingSize;
-  try
-    ReAllocMem(D.Ring, NewSize);
-  except
-    Exit(False);
-  end;
-  D.RingAlloc := NewSize;
 end;
 
 { parse and check the columns of the current block }
@@ -1599,20 +1678,25 @@ end;
   position BlkPos (forward, so an overlapping copy repeats) }
 procedure DecCopy(var D: TOrepDec; Len, Dist: LongWord);
 var
-  Dp, Sp: QWord;
-  Run, K: LongWord;
+  Sp: QWord;
+  Run, K, Off: LongWord;
+  Src, Dst: PByte;
 begin
-  Dp := D.WPhys + D.BlkPos;
-  if Dp >= Dist then Sp := Dp - Dist else Sp := Dp + D.RingSize - Dist;
+  Dst := SlotPtr(D.Slots, D.CShift, D.WPhys + D.BlkPos);
+  Sp := D.WPhys + D.BlkPos;
+  if Sp >= Dist then Sp := Sp - Dist else Sp := Sp + D.RingSize - Dist;
   while Len > 0 do
   begin
+    { the source run stays in one slot (the end of the ring is a slot end) }
+    Off := LongWord(Sp and (D.Chunk - 1));
     Run := Len;
-    if D.RingSize - Sp < Run then Run := LongWord(D.RingSize - Sp);
+    if D.Chunk - Off < Run then Run := D.Chunk - Off;
+    Src := SlotPtr(D.Slots, D.CShift, Sp);
     if Dist >= Run then
-      Move(D.Ring[Sp], D.Ring[Dp], Run)
+      Move(Src^, Dst^, Run)
     else
-      for K := 0 to Run - 1 do D.Ring[Dp + K] := D.Ring[Sp + K];
-    Inc(Dp, Run);
+      for K := 0 to Run - 1 do Dst[K] := Src[K];
+    Inc(Dst, Run);
     Inc(Sp, Run);
     if Sp = D.RingSize then Sp := 0;
     Dec(Len, Run);
@@ -1630,14 +1714,15 @@ begin
   if not D.Inited then Exit(OREP_E_PARAM);
   while True do
     case D.Phase of
-      0: begin { stream header }
-           if D.HdrLen < HDR_SIZE then
+      0: begin { stream header, a byte at a time (it is short) }
+           R := DecHeaderState(D);
+           if R < 0 then begin D.Phase := 99; Exit(R); end;
+           if R = 0 then
            begin
              if AvailIn = 0 then Exit(OREP_OK);
-             K := HDR_SIZE - D.HdrLen;
-             if K > AvailIn then K := AvailIn;
-             Move(NextIn^, D.Hdr[D.HdrLen], K);
-             Inc(NextIn, K); Dec(AvailIn, K); Inc(D.InPos, K); Inc(D.HdrLen, K);
+             if D.HdrLen >= HDR_MAX then begin D.Phase := 99; Exit(OREP_E_DATA); end;
+             D.Hdr[D.HdrLen] := NextIn^;
+             Inc(NextIn); Dec(AvailIn); Inc(D.InPos); Inc(D.HdrLen);
              Continue;
            end;
            R := DecHeader(D);
@@ -1685,7 +1770,7 @@ begin
              end;
              D.ColCap := D.ColSize;
            end;
-           if not DecGrow(D, D.WPhys + D.OutSize) then
+           if not EnsureSlot(D.Slots, D.CShift, D.WPhys) then
            begin
              D.Phase := 99; Exit(OREP_E_MEM);
            end;
@@ -1730,7 +1815,7 @@ begin
              if AvailIn = 0 then Exit(OREP_OK);
              K := D.LitLeft;
              if K > AvailIn then K := AvailIn;
-             Move(NextIn^, D.Ring[D.WPhys + D.BlkPos], K);
+             Move(NextIn^, SlotPtr(D.Slots, D.CShift, D.WPhys + D.BlkPos)^, K);
              Inc(NextIn, K); Dec(AvailIn, K); Inc(D.InPos, K);
              Inc(D.BlkPos, K); Dec(D.LitLeft, K);
              Continue;
@@ -1755,7 +1840,7 @@ begin
              Continue;
            end;
            if Get32(@D.CrcBuf[0]) <>
-             OrepCrc32c(0, D.Ring + D.WPhys, D.OutSize) then
+             OrepCrc32c(0, SlotPtr(D.Slots, D.CShift, D.WPhys), D.OutSize) then
            begin
              D.Phase := 99; Exit(OREP_E_DATA);
            end;
@@ -1768,7 +1853,7 @@ begin
              if AvailOut = 0 then Exit(OREP_OK);
              K := D.OutSize - D.EmitPos;
              if K > AvailOut then K := AvailOut;
-             Move(D.Ring[D.WPhys + D.EmitPos], NextOut^, K);
+             Move(SlotPtr(D.Slots, D.CShift, D.WPhys + D.EmitPos)^, NextOut^, K);
              Inc(NextOut, K); Dec(AvailOut, K); Inc(D.EmitPos, K);
              Continue;
            end;
@@ -1777,15 +1862,15 @@ begin
            if D.WPhys >= D.RingSize then D.WPhys := 0;
            D.Phase := 1;
          end;
-      6: begin { end: total size }
-           if D.CrcLen < 8 then
-           begin
-             if AvailIn = 0 then Exit(OREP_OK);
-             D.CrcBuf[D.CrcLen] := NextIn^;
-             Inc(NextIn); Dec(AvailIn); Inc(D.InPos); Inc(D.CrcLen);
-             Continue;
-           end;
-           if Get64(@D.CrcBuf[0]) <> D.Total then
+      6: begin { end: total size, a varint }
+           if AvailIn = 0 then Exit(OREP_OK);
+           B := NextIn^;
+           Inc(NextIn); Dec(AvailIn); Inc(D.InPos);
+           if D.VarShift > 63 then begin D.Phase := 99; Exit(OREP_E_DATA); end;
+           D.VarVal := D.VarVal or (QWord(B and $7F) shl D.VarShift);
+           Inc(D.VarShift, 7);
+           if B >= $80 then Continue;
+           if D.VarVal <> D.Total then
            begin
              D.Phase := 99; Exit(OREP_E_DATA);
            end;

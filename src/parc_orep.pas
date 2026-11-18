@@ -11,23 +11,22 @@
        1 en texto, 4 en lo demás; 0..4096, <= l)
     s  densidad de anclas (4; 1..64): más alta encuentra más coincidencias cortas, más lento
     c  candidatos por ancla (4; 1..4): más encuentra coincidencias más largas, 1 es lo más rápido
-    b  tamaño de bloque del stream (4mb; 64kb..64mb)
+    b  tamaño de bloque del stream (4mb; potencia de 2, 64kb..64mb)
     d  coincidencias más cercanas que esto quedan para el compresor de atrás (0)
   Las memorias como en el resto de PArc (sufijo b/k/m/g; sin sufijo, 2^N). El stream lleva
   su propio encabezado (ventana, bloque, alineación): el decodificador no usa los parámetros
   del método salvo para acotar la memoria (ver TOrepDecStage).
 
-  Hilos: OREP corre con P.Threads = 1, en el hilo que escribe el bloque (como antes la búsqueda
-  de REP). Sus hilos propios (P.Threads >= 2: un coordinador que busca y Threads - 1 ayudantes)
-  no saben del presupuesto global de PArc (parc_parallel): trabajan a ráfagas que desde afuera
-  no se ven, y la API de OREP (0.0.2, 0.0.3) no da cómo avisarlas, así que no hay forma de darles
-  fichas solo mientras trabajan y PArc pasaría de PARC_THREADS. Probado (2026-11, 512 MB de
-  TILIN, orep:96m:l256): llamar a OREP de a un bloque con OREP_FLUSH y fichas para sus hilos
-  solo dentro de la llamada daba 2,1 s con 4 hilos contra 1,9 s con uno (lo que gana OREP con
-  hilos es solapar la búsqueda con la copia y la salida, no la búsqueda paralela) y el doble
-  de CPU; correr OREP en un hilo propio de la etapa (con su ficha) y lzma/4x4 en el que
-  escribe era más lento que en línea en -m1..-m5 (copias de más y fichas que se disputan) y
-  apenas más rápido en -m9. Con un solo hilo la salida es la misma que con cualquier cantidad. }
+  Hilos: OREP corre en línea (P.Threads = 1), en el hilo que escribe el bloque, como antes la
+  búsqueda de REP. Desde OREP 0.0.5 sus hilos propios avisan cuándo trabajan (P.OnWorkerBusy /
+  OnWorkerIdle) y acá toman y sueltan una ficha del presupuesto global (BudgetWaitEnd con
+  prioridad / BudgetLeave), así que con PARC_OREP_THREADS=k (k >= 2, a lo sumo la parte del
+  bloque) OREP usa un coordinador y k - 1 ayudantes sin pasar de PARC_THREADS (lo verifica
+  tests/thread_budget.py) y con la misma salida. No es el valor por defecto porque resultó más
+  lento (2026-11-18, OREP 0.0.5, 4 hilos): tilin_512m -m1 2,3 s en línea, 3,0 s con k=2,
+  3,4 s con k=3; el set large -m3 7,6 s contra 10,1 s. Los hilos de OREP esperan girando entre
+  trabajos (con la ficha), y el hilo que escribe espera al coordinador con la suya: le faltan
+  fichas a 4x4/lzma. }
 unit parc_orep;
 
 {$mode objfpc}{$H+}
@@ -85,9 +84,13 @@ type
 
   TOrepEncStage = class(TOutStage)
   private
+    FM: TOrepMethod;
     FEnc: POrepEnc;
     FInited: Boolean;
+    FPend: array of Byte;      // entrada antes de crear OREP (para decidir los hilos)
+    FPendLen: SizeInt;
     FOut: array of Byte;
+    procedure Start(Threads: Integer);
     procedure Run(Buf: PByte; Count: SizeInt; Mode: Integer);
   protected
     procedure DoWrite(Buf: PByte; Count: SizeInt); override;
@@ -101,7 +104,7 @@ type
 implementation
 
 uses
-  parc_methods, parc_bytes;
+  parc_methods, parc_bytes, parc_parallel;
 
 function DefaultOrepMethod: TOrepMethod;
 begin
@@ -172,7 +175,7 @@ begin
   OP := OrepParamsOf(Result, 1);
   if OrepEncMemory(OP) = 0 then
     raise EUnsupportedMethod.CreateFmt('orep: invalid parameters "%s" (window 1b..3840mb, ' +
-      'l16..65536, a0..4096 and <= l, s1..64, c1..4, b64kb..64mb)', [string.Join(':', Params)]);
+      'l16..65536, a0..4096 and <= l, s1..64, c1..4, b64kb..64mb, power of 2)', [string.Join(':', Params)]);
 end;
 
 function OrepParamsOf(const M: TOrepMethod; Threads: LongWord): TOrepParams;
@@ -292,7 +295,36 @@ end;
 { ---- codificador ---- }
 
 const
-  OREP_OUT_BUF = 1 shl 20;   // salida de una llamada a OREP
+  OREP_OUT_BUF = 1 shl 20;      // salida de una llamada a OREP
+  { Hilos de OREP como mucho (PARC_OREP_THREADS) }
+  OREP_MAX_THREADS = 8;
+  { Con menos entrada que esto la etapa no crea hilos (no compensa) }
+  OREP_THREADS_MIN_INPUT = 4 shl 20;
+
+{ Ganchos de OREP 0.0.5: los llaman sus propios hilos (coordinador y ayudantes) al empezar a
+  trabajar y antes de dormir. Una ficha del presupuesto global por hilo, como los hilos del match
+  finder de LZMA (BudgetEnter puede esperar; BudgetLeave también suelta el evento del hilo). }
+procedure OrepHookBusy(Ctx: Pointer);
+begin
+  // con prioridad (como quien vuelve de una espera): el hilo que escribe espera a este
+  if not BudgetHeld then BudgetWaitEnd(True);
+end;
+
+procedure OrepHookIdle(Ctx: Pointer);
+begin
+  BudgetLeave;
+end;
+
+function OrepEncThreads: Integer;
+begin
+  // Por defecto en línea (ver el comentario de la unidad): con sus hilos y el presupuesto, PArc
+  // resultó más lento. PARC_OREP_THREADS=k los activa (k <= la parte del bloque, al menos 2;
+  // con una sola ficha para el bloque, en línea: el hilo que escribe se queda con la suya
+  // mientras espera al coordinador, y el coordinador necesita otra)
+  Result := StrToIntDef(GetEnvironmentVariable('PARC_OREP_THREADS'), 1);
+  if Result > PoolWorkers(OREP_MAX_THREADS) then Result := PoolWorkers(OREP_MAX_THREADS);
+  if Result < 2 then Result := 1;
+end;
 
 constructor TOrepEncStage.Create(ATarget: TOutStage; const Params: TStringArray);
 begin
@@ -300,35 +332,45 @@ begin
 end;
 
 constructor TOrepEncStage.Create(ATarget: TOutStage; const M: TOrepMethod);
-var
-  r: Integer;
 begin
-  // Validar y reservar ANTES de inherited Create: si algo falla, Destroy ve FTarget=nil y el
-  // destino sigue siendo del llamador. El anillo de la ventana crece a medida que llegan datos.
-  New(FEnc);
-  r := OrepEncInit(FEnc^, OrepParamsOf(M, 1));
-  if r <> OREP_OK then
-  begin
-    Dispose(FEnc);
-    FEnc := nil;
-    if r = OREP_E_MEM then OutOfMemoryError;
-    raise EUnsupportedMethod.Create('orep: ' + OrepErrorText(r));
-  end;
-  FInited := True;
+  // Validar ANTES de inherited Create: si algo falla, Destroy ve FTarget=nil y el destino sigue
+  // siendo del llamador. OREP se crea con la primera entrada que alcanza (o al final): así se
+  // sabe si vale la pena con hilos
+  if OrepMethodEncMemory(M) = 0 then raise EUnsupportedMethod.Create('orep: invalid parameters');
+  FM := M;
   SetLength(FOut, OREP_OUT_BUF);
   inherited Create(ATarget);
 end;
 
 destructor TOrepEncStage.Destroy;
 begin
-  if FInited then OrepEncEnd(FEnc^);
+  if FInited then OrepEncEnd(FEnc^);   // espera y cierra sus hilos
   FInited := False;
   if FEnc <> nil then Dispose(FEnc);
   inherited Destroy;
 end;
 
+procedure TOrepEncStage.Start(Threads: Integer);
+var
+  P: TOrepParams;
+  r: Integer;
+begin
+  P := OrepParamsOf(FM, Threads);
+  if Threads >= 2 then
+  begin
+    P.OnWorkerBusy := @OrepHookBusy;
+    P.OnWorkerIdle := @OrepHookIdle;
+  end;
+  New(FEnc);   // en el heap: con hilos no se puede mover
+  r := OrepEncInit(FEnc^, P);
+  if r = OREP_E_MEM then OutOfMemoryError;
+  if r <> OREP_OK then raise EUnsupportedMethod.Create('orep: ' + OrepErrorText(r));
+  FInited := True;
+end;
+
 { OrepEncRun hasta consumir Count bytes (OREP_RUN) o hasta el fin del stream (OREP_FINISH);
-  la salida va a la etapa siguiente de a OREP_OUT_BUF bytes. }
+  la salida va a la etapa siguiente de a OREP_OUT_BUF bytes. Con hilos, la búsqueda de un bloque
+  sigue en el coordinador mientras este hilo pasa el anterior a la etapa siguiente. }
 procedure TOrepEncStage.Run(Buf: PByte; Count: SizeInt; Mode: Integer);
 var
   NextIn, NextOut: PByte;
@@ -350,12 +392,39 @@ begin
 end;
 
 procedure TOrepEncStage.DoWrite(Buf: PByte; Count: SizeInt);
+var
+  n: SizeInt;
 begin
+  if not FInited then
+  begin
+    if FPendLen + Count < OREP_THREADS_MIN_INPUT then
+    begin
+      if Length(FPend) < FPendLen + Count then SetLength(FPend, OREP_THREADS_MIN_INPUT);
+      Move(Buf^, FPend[FPendLen], Count);
+      Inc(FPendLen, Count);
+      Exit;
+    end;
+    Start(OrepEncThreads);
+    if FPendLen > 0 then
+    begin
+      n := FPendLen;
+      FPendLen := 0;
+      Run(@FPend[0], n, OREP_RUN);
+    end;
+    FPend := nil;
+  end;
   Run(Buf, Count, OREP_RUN);
 end;
 
 procedure TOrepEncStage.DoFinish;
 begin
+  if not FInited then
+  begin
+    Start(1);
+    if FPendLen > 0 then Run(@FPend[0], FPendLen, OREP_RUN);
+    FPend := nil;
+    FPendLen := 0;
+  end;
   Run(nil, 0, OREP_FINISH);
 end;
 

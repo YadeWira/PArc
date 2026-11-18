@@ -35,6 +35,8 @@ def bad(msg):
 def run(args, n, cwd):
     """Corre parc con PARC_THREADS=n; devuelve (rc, núcleos promedio, p99 de hilos en R)."""
     env = dict(os.environ, PARC_THREADS=str(n))
+    if any('l256+4x4' in a for a in args):
+        env['PARC_OREP_THREADS'] = '3'
     t0 = time.time()
     p = subprocess.Popen([PARC] + args + ['--no-progress'], cwd=cwd, env=env,
                          stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
@@ -117,6 +119,8 @@ def main():
         ('lzma mt (un bloque)', 'b', ['-mlzma:16mb:normal:bt4']),
         ('-m3 -s- (bloques con 4x4)', 'g', ['-s-', '-m3']),
     ]
+    # orep con sus hilos propios (OREP 0.0.5: toman fichas por los ganchos)
+    cases.append(('orep con hilos (PARC_OREP_THREADS=3)', 'b', ['-morep:64mb:l256+4x4:b2mb:lzma:2mb:fast']))
     for n in (1, 2, 3):
         for k, (label, src, opts) in enumerate(cases):
             arc = os.path.join(base, 'a%d_%d.parc' % (n, k))
