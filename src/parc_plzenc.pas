@@ -293,9 +293,9 @@ const
   PLZ_MAXLEVEL = 7;
   LEVELS: array[1..PLZ_MAXLEVEL] of TPlzLevel = (
     (Window:  8 * MB; RowBits: 17; Ways:  1; Lazy: 0; Nice:  32; SkipShift: 4; HashLen: 6; InsertAll: False; InsertMax: 0; ShortBits: 16),
-    (Window:  8 * MB; RowBits: 20; Ways:  1; Lazy: 0; Nice:  32; SkipShift: 8; HashLen: 6; InsertAll: False; InsertMax: 0; ShortBits: 16),
-    (Window: 16 * MB; RowBits: 18; Ways:  4; Lazy: 1; Nice:  48; SkipShift: 6; HashLen: 5; InsertAll: True; InsertMax: 4; ShortBits: 0),
-    (Window: 64 * MB; RowBits: 18; Ways:  8; Lazy: 1; Nice:  64; SkipShift: 7; HashLen: 5; InsertAll: True; InsertMax: 16; ShortBits: 0),
+    (Window:  8 * MB; RowBits: 20; Ways:  1; Lazy: 0; Nice:  32; SkipShift: 8; HashLen: 6; InsertAll: False; InsertMax: 0; ShortBits: 12),
+    (Window: 16 * MB; RowBits: 18; Ways:  4; Lazy: 1; Nice:  48; SkipShift: 6; HashLen: 5; InsertAll: True; InsertMax: 4; ShortBits: 12),
+    (Window: 64 * MB; RowBits: 18; Ways:  8; Lazy: 1; Nice:  64; SkipShift: 7; HashLen: 5; InsertAll: True; InsertMax: 16; ShortBits: 16),
     (Window: 64 * MB; RowBits: 18; Ways: 16; Lazy: 2; Nice:  96; SkipShift: 7; HashLen: 5; InsertAll: True; InsertMax: 16; ShortBits: 0),
     (Window: 64 * MB; RowBits: 18; Ways: 32; Lazy: 2; Nice: 128; SkipShift: 0; HashLen: 5; InsertAll: True; InsertMax: 0; ShortBits: 0),
     (Window: 64 * MB; RowBits: 18; Ways: 64; Lazy: 2; Nice: 256; SkipShift: 0; HashLen: 4; InsertAll: True; InsertMax: 0; ShortBits: 0));
@@ -491,7 +491,8 @@ end;
 
 function PlzEncMemory(const P: TPlzEncParams; Streaming: Boolean): Int64;
 begin
-  Result := HashBytes(P) + 3 * DEFAULT_BLOCK;
+  Result := HashBytes(P) * P.Bucket + 3 * DEFAULT_BLOCK;
+  if P.ShortBits > 0 then Inc(Result, Int64(8) shl P.ShortBits);
   if Streaming then Inc(Result, 2 * Int64(P.Window) + 16 * MB);
 end;
 
@@ -1572,7 +1573,7 @@ var
   Row: LongWord;
 begin
   Row := HashOf(Ip, Tag);
-  if FOne then prefetch(FTab64[Row])
+  if FOne then prefetch(FTab64[Row * LongWord(P.Bucket)])
   else prefetch((FRows + SizeInt(Row) * FRowBytes)^);
 end;
 
@@ -2563,7 +2564,7 @@ begin
     for i := FCount - 1 downto 0 do
     begin
       E := TPlzEngine(FItems[i]);
-      if (E.P.RowBits = EffRowBits(P)) and (E.P.Ways = P.Ways) and (E.P.BlockSize = P.BlockSize) and
+      if (E.P.RowBits = EffRowBits(P)) and (E.P.Ways = P.Ways) and (E.P.BlockSize = P.BlockSize) and (E.P.Bucket = P.Bucket) and
          ((Length(E.FTabS) > 0) = ((P.ShortBits > 0) and (P.Ways = 1))) and
          ((Length(E.FTabS) = 0) or (E.P.ShortBits = P.ShortBits)) then
       begin
