@@ -49,6 +49,10 @@ type
     SkipShift: Integer;   // aceleración sin matches: paso 1 + fallos shr SkipShift (0 = sin)
     HashLen: Integer;     // bytes del hash (4..6)
     ShortBits: Integer;   // tabla corta de 4 bytes (log2 de entradas; 0 = sin)
+    SplitMode: Integer;   // partir bloques: 0 nunca, 1 siempre, 2 sólo los binarios
+    BinLazy: Integer;     // pasos perezosos de más en los bloques binarios
+    BinHashLen: Integer;  // bytes del hash en los bloques binarios (perezosos; 0 = el de siempre)
+    Bucket: Integer;      // una vía: entradas por hash (1 o 2; 2 sólo en los perezosos)
     BlockSize: Integer;
   end;
 
@@ -126,8 +130,18 @@ type
   end;
   PPlzSeq = ^TPlzSeq;
 
+  { Estado de la evaluación de una posición del perezoso de una vía (PlzEval1, en ensamblador) }
+  TPlzEval = record
+    X, Base, IEnd: PByte;
+    T64, TS: PQWord;
+    HL, Ln, G: Int64;
+    Rep0, Rep1, Rep2, Rep3: LongWord;
+    Cur0, InsNext, C, HD, Dt, D2, Win, HShl, Sh, SSh, Bucket, Check2: LongWord;
+  end;
+
   TPlzEngine = class
   private
+    FEv: TPlzEval;
     P: TPlzEncParams;
     // datos
     FOwnBuf: TBytes;
@@ -148,6 +162,8 @@ type
     FShortSh: Integer;
     FShortOn: Boolean;        // el bloque actual usa la tabla corta
     FHashShl: Integer;        // 64 - 8 * bytes del hash del bloque actual (filas)
+    FBin: Boolean;            // el bloque actual parece binario (WantShort)
+    FLazyCur: Integer;        // pasos perezosos en este bloque
     FOne: Boolean;
     FWayMask: LongWord;
     FRowShift: Integer;
@@ -164,7 +180,8 @@ type
     FBW: array[0..5] of TPlzBitWriter;   // 0 = tablas, 1..4 = literales, 5 = secuencias
     FTC: array[0..4] of TPlzTabCodes;
     FPay: TBytes;
-    FLeafF: array of TPlzFreqs;   // histogramas de las hojas de 16 KB del bloque
+    FLeafF: array of TPlzFreqs;   // histogramas de las hojas del bloque
+    FNodeF: array of TPlzFreqs;   // y de cada nodo del árbol de cortes
     FSplit: array[0..255] of Boolean;
     FLeafSeq, FLeafLit, FLeafRaw: array[0..64] of SizeInt;
     FOut: TBytes;             // salida acumulada (bloques)
@@ -180,9 +197,13 @@ type
     procedure Insert(Ip: PByte; Cur: LongWord); inline;
     function FindAndInsert(Ip, IEnd: PByte; Cur: LongWord; Best: SizeInt; out Dist: LongWord): SizeInt;
     procedure AddSeq(Lit: PByte; LL: LongWord; Dist: LongWord; ML: LongWord);
+    procedure FinishSeqs(Lo, Hi: SizeInt);
     procedure AddLits(Lit: PByte; N: SizeInt);
     procedure ParseFast(BS, BE: LongWord);
     procedure ParseFast1(BS, BE: LongWord);
+    {$IF defined(CPUX86_64) and not defined(PARC_NOASM)}
+    procedure RunGreedyAsm(Ip, IEnd: PByte);
+    {$ENDIF}
     function WantShort(Ip, IEnd: PByte): Boolean;
     procedure ParseFastDual(Ip, IEnd: PByte);
     function FastMatch(Ip: PByte; Dist: LongWord; L: SizeInt; ILimit: PByte): PByte;
@@ -196,8 +217,8 @@ type
     procedure CheckBlock(BS, BE: LongWord; const R: array of LongWord);
     {$ENDIF}
     procedure WriteBlock(Src: PByte; RawLen: SizeInt; SeqLo, SeqHi, LitLo, LitHi: SizeInt;
-      Piece: Boolean; const SavedRep: array of LongWord);
-    function BestSplit(Node, Lo, Hi: Integer; var F: TPlzFreqs): Int64;
+      Piece: Boolean; const SavedRep: array of LongWord; PF: Pointer; ExtraIn: Int64);
+    function BestSplit(Node, Lo, Hi: Integer): Int64;
     procedure EmitPieces(Node, Lo, Hi: Integer; Src: PByte; const SavedRep: array of LongWord);
   public
     constructor Create(const AP: TPlzEncParams);
@@ -273,8 +294,8 @@ const
   LEVELS: array[1..PLZ_MAXLEVEL] of TPlzLevel = (
     (Window:  8 * MB; RowBits: 17; Ways:  1; Lazy: 0; Nice:  32; SkipShift: 4; HashLen: 6; InsertAll: False; InsertMax: 0; ShortBits: 16),
     (Window:  8 * MB; RowBits: 20; Ways:  1; Lazy: 0; Nice:  32; SkipShift: 8; HashLen: 6; InsertAll: False; InsertMax: 0; ShortBits: 16),
-    (Window: 16 * MB; RowBits: 18; Ways:  4; Lazy: 1; Nice:  48; SkipShift: 6; HashLen: 5; InsertAll: True; InsertMax: 4; ShortBits: 1),
-    (Window: 64 * MB; RowBits: 18; Ways:  8; Lazy: 1; Nice:  64; SkipShift: 7; HashLen: 5; InsertAll: True; InsertMax: 16; ShortBits: 1),
+    (Window: 16 * MB; RowBits: 18; Ways:  4; Lazy: 1; Nice:  48; SkipShift: 6; HashLen: 5; InsertAll: True; InsertMax: 4; ShortBits: 0),
+    (Window: 64 * MB; RowBits: 18; Ways:  8; Lazy: 1; Nice:  64; SkipShift: 7; HashLen: 5; InsertAll: True; InsertMax: 16; ShortBits: 0),
     (Window: 64 * MB; RowBits: 18; Ways: 16; Lazy: 2; Nice:  96; SkipShift: 7; HashLen: 5; InsertAll: True; InsertMax: 16; ShortBits: 0),
     (Window: 64 * MB; RowBits: 18; Ways: 32; Lazy: 2; Nice: 128; SkipShift: 0; HashLen: 5; InsertAll: True; InsertMax: 0; ShortBits: 0),
     (Window: 64 * MB; RowBits: 18; Ways: 64; Lazy: 2; Nice: 256; SkipShift: 0; HashLen: 4; InsertAll: True; InsertMax: 0; ShortBits: 0));
@@ -347,7 +368,7 @@ begin
       if (m < 16 * KB) or (m > PLZ_MAXBLOCK) then raise EPlzEncoder.CreateFmt('plz: bad block size "%s"', [s]);
       BlockMem := m;
     end
-    else if (Length(s) > 1) and (s[1] in ['w', 'z', 'n', 'i', 'k', 'x', 'y']) then
+    else if (Length(s) > 1) and (s[1] in ['w', 'z', 'n', 'i', 'k', 'x', 'y', 'q', 'u', 'v', 'g']) then
     begin
       case s[1] of
         'w': begin v := Num(Copy(s, 2, MaxInt), 1, 64); if v and (v - 1) <> 0 then Num('-', 0, 0); end;
@@ -356,6 +377,10 @@ begin
         'i': v := Num(Copy(s, 2, MaxInt), 0, 65536);
         'k': v := Num(Copy(s, 2, MaxInt), 0, 31);
         'y': v := Num(Copy(s, 2, MaxInt), 0, 22);
+        'q': v := Num(Copy(s, 2, MaxInt), 0, 2);
+        'u': v := Num(Copy(s, 2, MaxInt), 0, 2);
+        'v': v := Num(Copy(s, 2, MaxInt), 0, 7);
+        'g': v := Num(Copy(s, 2, MaxInt), 1, 2);
       else
         v := Num(Copy(s, 2, MaxInt), 4, 7);
       end;
@@ -401,6 +426,15 @@ begin
   if Ov['x'] >= 0 then Result.HashLen := Ov['x'];
   Result.ShortBits := Lv.ShortBits;
   if Ov['y'] >= 0 then Result.ShortBits := Ov['y'];
+  Result.SplitMode := 1;
+  Result.BinLazy := 0;
+  if Ov['u'] >= 0 then Result.BinLazy := Ov['u'];
+  Result.BinHashLen := 0;
+  if Ov['v'] >= 0 then Result.BinHashLen := Ov['v'];
+  Result.Bucket := 1;
+  if Ov['g'] >= 0 then Result.Bucket := Ov['g'];
+  if (Result.Ways <> 1) or (Result.Lazy = 0) then Result.Bucket := 1;
+  if Ov['q'] >= 0 then Result.SplitMode := Ov['q'];
   Result.BlockSize := DEFAULT_BLOCK;
   if BlockMem > 0 then Result.BlockSize := BlockMem;
 end;
@@ -424,6 +458,10 @@ begin
   if P.SkipShift <> Lv.SkipShift then Result := Result + ':k' + IntToStr(P.SkipShift);
   if P.HashLen <> Lv.HashLen then Result := Result + ':x' + IntToStr(P.HashLen);
   if P.ShortBits <> Lv.ShortBits then Result := Result + ':y' + IntToStr(P.ShortBits);
+  if P.SplitMode <> 1 then Result := Result + ':q' + IntToStr(P.SplitMode);
+  if P.BinLazy <> 0 then Result := Result + ':u' + IntToStr(P.BinLazy);
+  if P.BinHashLen <> 0 then Result := Result + ':v' + IntToStr(P.BinHashLen);
+  if P.Bucket <> 1 then Result := Result + ':g' + IntToStr(P.Bucket);
   if P.BlockSize <> DEFAULT_BLOCK then Result := Result + ':b' + IntToStr(P.BlockSize div KB) + 'kb';
 end;
 
@@ -454,7 +492,7 @@ end;
 function PlzEncMemory(const P: TPlzEncParams; Streaming: Boolean): Int64;
 begin
   Result := HashBytes(P) + 3 * DEFAULT_BLOCK;
-  if Streaming then Inc(Result, Int64(P.Window) + P.Window div 2 + 2 * MB);
+  if Streaming then Inc(Result, 2 * Int64(P.Window) + 16 * MB);
 end;
 
 function ShowMemP(M: Int64): string;
@@ -704,7 +742,22 @@ type
     Ip, ILimit, Base: PByte;
     T64: PQWord;
     Cur0, Win, R0, Miss, H, Sh, HSh, Skip, Dist: LongWord;
+    TS: PQWord;               // tabla corta (PlzScanDual)
+    SSh, Dist2: LongWord;     // su desplazamiento y la distancia de su candidato (0 = no hay)
   end;
+
+type
+  { Estado de PlzGreedy (el voraz de una vía entero en ensamblador; offsets usados por el asm) }
+  TPlzGreedy = record
+    Ip, ILimit, IEnd, Base, Anchor, MStart, Lit: PByte;
+    Seq: Pointer;
+    T64, TS: PQWord;
+    CurLen: Int64;
+    Cur0, Win, Sh, HSh, SSh, Skip, Rep0, Rep1, Rep2, Rep3, CurDist, Dist2: LongWord;
+  end;
+
+const
+  PLZ_SEQSIZE = SizeOf(TPlzSeq);
 
 {$IF defined(CPUX86_64) and not defined(PARC_NOASM)}
 {$DEFINE PLZ_ASM}
@@ -750,6 +803,53 @@ begin
   until False;
   S.Ip := Ip; S.H := H; S.Miss := Miss;
 end;
+
+{ Como PlzScanFast1, también con la tabla corta (hash de 4 bytes): devuelve 2 si la principal o la
+  corta coinciden en 4 bytes (Dist y Dist2, 0 = ese candidato no está). }
+function PlzScanDual(var S: TPlzScan): LongInt;
+var
+  Ip, Base: PByte;
+  T64, TS: PQWord;
+  V4, H, HS, D, D2, Rel, Miss: LongWord;
+  E, ES: QWord;
+begin
+  Ip := S.Ip; H := S.H; Miss := S.Miss; Base := S.Base; T64 := S.T64; TS := S.TS;
+  repeat
+    V4 := PLongWord(Ip)^;
+    HS := LongWord(V4 * LongWord(2654435761)) shr S.SSh;
+    E := T64[H];
+    ES := TS[HS];
+    Rel := LongWord(PtrUInt(Ip - Base)) + S.Cur0;
+    T64[H] := (QWord(V4) shl 32) or Rel;
+    TS[HS] := (QWord(V4) shl 32) or Rel;
+    if (S.R0 <= LongWord(PtrUInt(Ip - Base))) and (PLongWord(Ip - S.R0)^ = V4) then
+    begin
+      Result := 1;
+      Break;
+    end;
+    D := Rel - LongWord(E);
+    if not ((LongWord(E shr 32) = V4) and (LongWord(E) <> 0) and (D <= S.Win)) then D := 0;
+    D2 := Rel - LongWord(ES);
+    if not ((LongWord(ES shr 32) = V4) and (LongWord(ES) <> 0) and (D2 <= S.Win)) then D2 := 0;
+    if (D or D2) <> 0 then
+    begin
+      S.Dist := D;
+      S.Dist2 := D2;
+      Result := 2;
+      Break;
+    end;
+    Inc(Miss);
+    Inc(Ip, 1 + (Miss shr S.Skip));
+    if Ip >= S.ILimit then
+    begin
+      Result := 0;
+      Break;
+    end;
+    H := LongWord(((PQWord(Ip)^ shl S.HSh) * PRIME64) shr 32) shr S.Sh;
+    prefetch(T64[H]);
+  until False;
+  S.Ip := Ip; S.H := H; S.Miss := Miss;
+end;
 {$ENDIF}
 
 { ---- TPlzEngine ---- }
@@ -773,7 +873,7 @@ begin
   Rows := SizeInt(1) shl P.RowBits;
   FOne := P.Ways = 1;
   if FOne then
-    SetLength(FTab64, Rows)
+    SetLength(FTab64, Rows * P.Bucket)
   else
   begin
     FRowBytes := RowBytesFor(P.Ways);
@@ -786,7 +886,7 @@ begin
   end;
   FWayMask := P.Ways - 1;
   FRowShift := 32 - P.RowBits;
-  if (P.ShortBits > 0) and (P.Ways = 1) then
+  if P.ShortBits > 0 then
   begin
     SetLength(FTabS, SizeInt(1) shl P.ShortBits);
     FShortSh := 32 - P.ShortBits;
@@ -882,7 +982,15 @@ begin
   Row := HashOf(Ip, Tag);
   if FOne then
   begin
-    FTab64[Row] := (QWord(PLongWord(Ip)^) shl 32) or Cur;
+    if P.Bucket = 2 then
+    begin
+      FTab64[2 * Row + 1] := FTab64[2 * Row];
+      FTab64[2 * Row] := (QWord(PLongWord(Ip)^) shl 32) or Cur;
+    end
+    else
+      FTab64[Row] := (QWord(PLongWord(Ip)^) shl 32) or Cur;
+    if FShortOn then
+      FTabS[LongWord(PLongWord(Ip)^ * LongWord(2654435761)) shr FShortSh] := (QWord(PLongWord(Ip)^) shl 32) or Cur;
     Exit;
   end;
   R := FRows + SizeInt(Row) * FRowBytes;
@@ -890,6 +998,8 @@ begin
   R[FHeadOff] := Hd;
   R[Hd] := Tag;
   PLongWord(R + FPosOff)[Hd] := Cur;
+  if FShortOn then
+    FTabS[LongWord(PLongWord(Ip)^ * LongWord(2654435761)) shr FShortSh] := (QWord(PLongWord(Ip)^) shl 32) or Cur;
 end;
 
 { Busca en la fila de Ip un match más largo que Best (hasta IEnd) e inserta Ip. Devuelve el
@@ -900,7 +1010,7 @@ var
   Tag: Byte;
   Cp, R: PByte;
   L, MaxL: SizeInt;
-  E, Bc, M, V, F: QWord;
+  E, E2, Bc, M, V, F: QWord;
   g: Integer;
   Pos: PLongWord;
 begin
@@ -908,13 +1018,50 @@ begin
   Row := HashOf(Ip, Tag);
   if FOne then
   begin
-    E := FTab64[Row];
-    FTab64[Row] := (QWord(PLongWord(Ip)^) shl 32) or Cur;
-    D := Cur - LongWord(E);
-    if (LongWord(E) <> 0) and (D <= P.Window) and (LongWord(E shr 32) = PLongWord(Ip)^) then
+    if P.Bucket = 2 then
     begin
-      L := 4 + MatchLen(Ip + 4, Ip - D + 4, IEnd);
-      if L > Best then begin Best := L; Dist := D; end;
+      // dos entradas por hash, la más nueva primero
+      E := FTab64[2 * Row];
+      E2 := FTab64[2 * Row + 1];
+      FTab64[2 * Row + 1] := E;
+      FTab64[2 * Row] := (QWord(PLongWord(Ip)^) shl 32) or Cur;
+      D := Cur - LongWord(E);
+      if (LongWord(E) <> 0) and (D <= P.Window) and (LongWord(E shr 32) = PLongWord(Ip)^) then
+      begin
+        L := 4 + MatchLen(Ip + 4, Ip - D + 4, IEnd);
+        if L > Best then begin Best := L; Dist := D; end;
+      end;
+      D := Cur - LongWord(E2);
+      // la segunda entrada sólo se mira en los bloques binarios (en texto cuesta más de lo que da)
+      if FBin and (LongWord(E2) <> 0) and (D <= P.Window) and (LongWord(E2 shr 32) = PLongWord(Ip)^) then
+      begin
+        L := 4 + MatchLen(Ip + 4, Ip - D + 4, IEnd);
+        if L > Best then begin Best := L; Dist := D; end;
+      end;
+    end
+    else
+    begin
+      E := FTab64[Row];
+      FTab64[Row] := (QWord(PLongWord(Ip)^) shl 32) or Cur;
+      D := Cur - LongWord(E);
+      if (LongWord(E) <> 0) and (D <= P.Window) and (LongWord(E shr 32) = PLongWord(Ip)^) then
+      begin
+        L := 4 + MatchLen(Ip + 4, Ip - D + 4, IEnd);
+        if L > Best then begin Best := L; Dist := D; end;
+      end;
+    end;
+    if FShortOn then
+    begin
+      // tabla corta (4 bytes): gana si es más larga, o igual de larga y más cerca
+      Row := LongWord(PLongWord(Ip)^ * LongWord(2654435761)) shr FShortSh;
+      E := FTabS[Row];
+      FTabS[Row] := (QWord(PLongWord(Ip)^) shl 32) or Cur;
+      D := Cur - LongWord(E);
+      if (LongWord(E) <> 0) and (D <= P.Window) and (D <> Dist) and (LongWord(E shr 32) = PLongWord(Ip)^) then
+      begin
+        L := 4 + MatchLen(Ip + 4, Ip - D + 4, IEnd);
+        if (L > Best) or ((L = Best) and (Dist <> 0) and (D < Dist)) then begin Best := L; Dist := D; end;
+      end;
     end;
     Exit(Best);
   end;
@@ -959,6 +1106,18 @@ begin
   R[FHeadOff] := Hd;
   R[Hd] := Tag;
   Pos[Hd] := Cur;
+  if FShortOn then
+  begin
+    Row := LongWord(PLongWord(Ip)^ * LongWord(2654435761)) shr FShortSh;
+    E := FTabS[Row];
+    FTabS[Row] := (QWord(PLongWord(Ip)^) shl 32) or Cur;
+    D := Cur - LongWord(E);
+    if (LongWord(E) <> 0) and (D <= P.Window) and (D <> Dist) and (LongWord(E shr 32) = PLongWord(Ip)^) then
+    begin
+      L := 4 + MatchLen(Ip + 4, Ip - D + 4, IEnd);
+      if (L > Best) or ((L = Best) and (Dist <> 0) and (D < Dist)) then begin Best := L; Dist := D; end;
+    end;
+  end;
   Result := Best;
 end;
 
@@ -969,10 +1128,13 @@ begin
   Inc(FNLit, N);
 end;
 
+{ Agrega una secuencia en forma cruda: LL, ML y, en OC, el rep usado (0..3) o 4 con la
+  distancia en OX; los códigos los calcula FinishSeqs para todo el bloque. Los reps se
+  actualizan acá (el parser los usa). }
 procedure TPlzEngine.AddSeq(Lit: PByte; LL: LongWord; Dist: LongWord; ML: LongWord);
 var
   S: ^TPlzSeq;
-  NB, X, LLt, MLt: LongWord;
+  R0, R1, R2: LongWord;
 begin
   if LL > 0 then
   begin
@@ -990,56 +1152,83 @@ begin
   Inc(FNSeq);
   S^.LL := LL;
   S^.ML := ML;
-  LLt := LL;
-  if LLt >= 7 then
-  begin
-    LLt := 7;
-    S^.LXC := PlzLenCode(LL - 7, NB, X);
-    S^.LXN := NB; S^.LXV := X;
-  end;
-  MLt := ML - PLZ_MINMATCH;
-  if MLt >= 15 then
-  begin
-    MLt := 15;
-    S^.MXC := PlzLenCode(ML - PLZ_MINMATCH - 15, NB, X);
-    S^.MXN := NB; S^.MXV := X;
-  end;
-  S^.Tok := LLt * 16 + MLt;
-  if Dist = FRep[0] then
-  begin
-    S^.OC := 0; S^.ONB := 0; S^.OX := 0;
-  end
-  else if Dist = FRep[1] then
-  begin
-    S^.OC := 1; S^.ONB := 0; S^.OX := 0;
-    FRep[1] := FRep[0]; FRep[0] := Dist;
-  end
-  else if Dist = FRep[2] then
-  begin
-    S^.OC := 2; S^.ONB := 0; S^.OX := 0;
-    FRep[2] := FRep[1]; FRep[1] := FRep[0]; FRep[0] := Dist;
-  end
-  else if Dist = FRep[3] then
-  begin
-    S^.OC := 3; S^.ONB := 0; S^.OX := 0;
-    FRep[3] := FRep[2]; FRep[2] := FRep[1]; FRep[1] := FRep[0]; FRep[0] := Dist;
-  end
+  R0 := FRep[0];
+  if Dist = R0 then
+    S^.OC := 0
   else
   begin
-    // slot de la distancia d = Dist - 1 (ver PlzOfsSlot), en línea
-    X := Dist - 1;
-    if X < 4 then
+    R1 := FRep[1];
+    FRep[0] := Dist;
+    FRep[1] := R0;
+    if Dist = R1 then
+      S^.OC := 1
+    else
     begin
-      S^.OC := 4 + X; S^.ONB := 0; S^.OX := 0;
+      R2 := FRep[2];
+      FRep[2] := R1;
+      if Dist = R2 then
+        S^.OC := 2
+      else
+      begin
+        if Dist = FRep[3] then S^.OC := 3
+        else
+        begin
+          S^.OC := 4;
+          S^.OX := Dist;
+        end;
+        FRep[3] := R2;
+      end;
+    end;
+  end;
+end;
+
+{ Los códigos de las secuencias [Lo, Hi) (token, LLX, MLX, slot y bits extra del offset). }
+procedure TPlzEngine.FinishSeqs(Lo, Hi: SizeInt);
+var
+  S: ^TPlzSeq;
+  j: SizeInt;
+  NB, X, LLt, MLt, LL, ML: LongWord;
+begin
+  for j := Lo to Hi - 1 do
+  begin
+    S := @FSeq[j];
+    LL := S^.LL;
+    ML := S^.ML;
+    LLt := LL;
+    if LLt >= 7 then
+    begin
+      LLt := 7;
+      S^.LXC := PlzLenCode(LL - 7, NB, X);
+      S^.LXN := NB; S^.LXV := X;
+    end;
+    MLt := ML - PLZ_MINMATCH;
+    if MLt >= 15 then
+    begin
+      MLt := 15;
+      S^.MXC := PlzLenCode(ML - PLZ_MINMATCH - 15, NB, X);
+      S^.MXN := NB; S^.MXV := X;
+    end;
+    S^.Tok := LLt * 16 + MLt;
+    if S^.OC < 4 then
+    begin
+      S^.ONB := 0; S^.OX := 0;
     end
     else
     begin
-      NB := BsrDWord(X);
-      S^.OC := 4 + 2 * NB + ((X shr (NB - 1)) and 1);
-      S^.ONB := NB - 1;
-      S^.OX := X and ((LongWord(1) shl (NB - 1)) - 1);
+      // slot de la distancia d = Dist - 1 (ver PlzOfsSlot)
+      X := S^.OX - 1;
+      if X < 4 then
+      begin
+        S^.OC := 4 + X; S^.ONB := 0; S^.OX := 0;
+      end
+      else
+      begin
+        NB := BsrDWord(X);
+        S^.OC := 4 + 2 * NB + ((X shr (NB - 1)) and 1);
+        S^.ONB := NB - 1;
+        S^.OX := X and ((LongWord(1) shl (NB - 1)) - 1);
+      end;
     end;
-    FRep[3] := FRep[2]; FRep[2] := FRep[1]; FRep[1] := FRep[0]; FRep[0] := Dist;
   end;
 end;
 
@@ -1105,7 +1294,7 @@ begin
     c := Ip^;
     if (c > 126) or ((c < 32) and not (c in [9..13])) then Inc(bin);
     Inc(n);
-    Inc(Ip, 61);
+    Inc(Ip, 251);
   end;
   Result := (n > 0) and (bin * 8 > n);   // más de 1/8 binario
 end;
@@ -1114,65 +1303,95 @@ end;
   tabla principal y la corta. }
 procedure TPlzEngine.ParseFastDual(Ip, IEnd: PByte);
 var
-  Base, ILimit: PByte;
-  Cur0, HSh, Sh: LongWord;
-  T64, TS: PQWord;
-  E, ES: QWord;
-  V4, H, HS, Cur, D, DS, R0, Miss, Skip, Win, Dist: LongWord;
+  S: TPlzScan;
   L, LS: SizeInt;
+  r: LongInt;
+  Dist: LongWord;
 begin
-  Base := FBuf; Cur0 := FBufRel; T64 := @FTab64[0]; TS := @FTabS[0];
-  ILimit := IEnd - 8;
-  HSh := 64 - 8 * P.HashLen; Sh := FRowShift;
-  Skip := P.SkipShift; if Skip = 0 then Skip := 31;
-  Win := P.Window; Miss := 0;
-  while Ip < ILimit do
+  S.Base := FBuf;
+  S.Cur0 := FBufRel;
+  S.Ip := Ip;
+  S.ILimit := IEnd - 8;
+  S.T64 := @FTab64[0];
+  S.TS := @FTabS[0];
+  S.SSh := FShortSh;
+  S.Win := P.Window;
+  S.Sh := FRowShift;
+  S.HSh := 64 - 8 * P.HashLen;
+  S.Skip := P.SkipShift;
+  if S.Skip = 0 then S.Skip := 31;
+  S.Miss := 0;
+  S.Dist := 0; S.Dist2 := 0;
+  while S.Ip < S.ILimit do
   begin
-    V4 := PLongWord(Ip)^;
-    Cur := LongWord(Ip - Base) + Cur0;
-    H := LongWord(((PQWord(Ip)^ shl HSh) * PRIME64) shr 32) shr Sh;
-    HS := LongWord(V4 * LongWord(2654435761)) shr FShortSh;
-    E := T64[H]; T64[H] := (QWord(V4) shl 32) or Cur;
-    ES := TS[HS]; TS[HS] := (QWord(V4) shl 32) or Cur;
-    L := 0;
-    Dist := 0;
-    R0 := FRep[0];
-    if (R0 <= LongWord(Ip - Base)) and (PLongWord(Ip - R0)^ = V4) then
+    S.H := LongWord(((PQWord(S.Ip)^ shl S.HSh) * PRIME64) shr 32) shr S.Sh;
+    S.R0 := FRep[0];
+    r := PlzScanDual(S);
+    if r = 0 then Break;
+    if r = 1 then
     begin
-      L := 4 + MatchLen(Ip + 4, Ip - R0 + 4, IEnd);
-      Dist := R0;
+      L := 4 + MatchLen(S.Ip + 4, S.Ip - S.R0 + 4, IEnd);
+      Dist := S.R0;
     end
     else
     begin
-      D := Cur - LongWord(E);
-      if (LongWord(E shr 32) = V4) and (LongWord(E) <> 0) and (D <= Win) then
+      L := 0; Dist := 0;
+      if S.Dist <> 0 then
       begin
-        L := 4 + MatchLen(Ip + 4, Ip - D + 4, IEnd);
-        Dist := D;
+        L := 4 + MatchLen(S.Ip + 4, S.Ip - S.Dist + 4, IEnd);
+        Dist := S.Dist;
       end;
-      DS := Cur - LongWord(ES);
-      if (LongWord(ES shr 32) = V4) and (LongWord(ES) <> 0) and (DS <= Win) and (DS <> Dist) then
+      if (S.Dist2 <> 0) and (S.Dist2 <> S.Dist) then
       begin
-        LS := 4 + MatchLen(Ip + 4, Ip - DS + 4, IEnd);
+        LS := 4 + MatchLen(S.Ip + 4, S.Ip - S.Dist2 + 4, IEnd);
         // la corta gana si es más larga, o igual de larga y más cerca
-        if (LS > L) or ((LS = L) and (DS < Dist)) then
+        if (LS > L) or ((LS = L) and (S.Dist2 < Dist)) then
         begin
           L := LS;
-          Dist := DS;
+          Dist := S.Dist2;
         end;
       end;
     end;
-    if L = 0 then
-    begin
-      Inc(Miss);
-      Inc(Ip, 1 + (Miss shr Skip));
-      Continue;
-    end;
-    Miss := 0;
-    Ip := FastMatch(Ip, Dist, L, ILimit);
+    S.Ip := FastMatch(S.Ip, Dist, L, S.ILimit);
+    S.Miss := 0;
   end;
   AddLits(FAnchor, IEnd - FAnchor);
 end;
+
+{ Voraz con tabla directa (una vía), el lazo más usado de los niveles rápidos. La búsqueda
+  hasta el próximo candidato (PlzScanFast1) está en ensamblador en x86-64; el match se procesa
+  en Pascal (FastMatch). }
+{$IFDEF PLZ_ASM}
+procedure TPlzEngine.RunGreedyAsm(Ip, IEnd: PByte);
+var
+  G: TPlzGreedy;
+begin
+  G.Ip := Ip;
+  G.IEnd := IEnd;
+  G.ILimit := IEnd - 8;
+  G.Base := FBuf;
+  G.Anchor := FAnchor;
+  G.Lit := @FLit[FNLit];
+  G.Seq := @FSeq[FNSeq];
+  G.T64 := @FTab64[0];
+  if FShortOn then G.TS := @FTabS[0] else G.TS := nil;
+  G.Cur0 := FBufRel;
+  G.Win := P.Window;
+  G.Sh := FRowShift;
+  G.HSh := 64 - 8 * P.HashLen;
+  G.SSh := FShortSh;
+  G.Skip := P.SkipShift;
+  if G.Skip = 0 then G.Skip := 31;
+  G.Rep0 := FRep[0]; G.Rep1 := FRep[1]; G.Rep2 := FRep[2]; G.Rep3 := FRep[3];
+  G.CurLen := 0; G.CurDist := 0; G.Dist2 := 0; G.MStart := nil;
+  PlzGreedy(G);
+  FRep[0] := G.Rep0; FRep[1] := G.Rep1; FRep[2] := G.Rep2; FRep[3] := G.Rep3;
+  FNLit := G.Lit - PByte(@FLit[0]);
+  FNSeq := (PByte(G.Seq) - PByte(@FSeq[0])) div PLZ_SEQSIZE;
+  FAnchor := G.Anchor;
+  AddLits(FAnchor, IEnd - FAnchor);
+end;
+{$ENDIF}
 
 procedure TPlzEngine.ParseFast1(BS, BE: LongWord);
 var
@@ -1195,7 +1414,11 @@ begin
   if S.Skip = 0 then S.Skip := 31;
   S.Miss := 0;
   S.Dist := 0;
-  FShortOn := (Length(FTabS) > 0) and WantShort(S.Ip, IEnd);
+  FShortOn := (Length(FTabS) > 0) and FBin;
+  {$IFDEF PLZ_ASM}
+  RunGreedyAsm(S.Ip, IEnd);
+  Exit;
+  {$ENDIF}
   if FShortOn then
   begin
     ParseFastDual(S.Ip, IEnd);
@@ -1393,6 +1616,21 @@ var
   RD, HD: LongWord;
   GR, GH: LongInt;
 begin
+  {$IFDEF PLZ_ASM}
+  if FOne then
+  begin
+    FEv.X := X;
+    FEv.Rep0 := FRep[0]; FEv.Rep1 := FRep[1]; FEv.Rep2 := FRep[2]; FEv.Rep3 := FRep[3];
+    FEv.InsNext := FInsNext;
+    Result := PlzEval1(FEv) <> 0;
+    FInsNext := FEv.InsNext;
+    if Result then
+    begin
+      Ln := FEv.Ln; Dt := FEv.Dt; G := FEv.G;
+    end;
+    Exit;
+  end;
+  {$ENDIF}
   C := LongWord(X - FBuf) + FBufRel;
   RB := 0; RD := 0; GR := -1000;
   Avail := LongWord(X - FBuf);
@@ -1450,6 +1688,13 @@ begin
   Lowest := FBuf;
   Miss := 0;
   Dist := 0;
+  if FOne then
+  begin
+    FEv.Base := FBuf; FEv.IEnd := IEnd; FEv.T64 := @FTab64[0];
+    if FShortOn then FEv.TS := @FTabS[0] else FEv.TS := nil;
+    FEv.Cur0 := FBufRel; FEv.Win := P.Window; FEv.HShl := FHashShl; FEv.Sh := FRowShift;
+    FEv.SSh := FShortSh; FEv.Bucket := P.Bucket; FEv.Check2 := Ord(FBin);
+  end;
   while Ip < ILimit do
   begin
     if not EvalAt(Ip, IEnd, L, Dist, Gain) then
@@ -1465,7 +1710,7 @@ begin
     if L < P.Nice then
     begin
       Depth := 0;
-      while Depth < P.Lazy do
+      while Depth < FLazyCur do
       begin
         Np := Ip + 1 + Depth;
         if Np >= ILimit then Break;
@@ -1568,7 +1813,7 @@ end;
 procedure ByteHist(P: PByte; N: SizeInt; var F: array of LongWord); forward;
 
 const
-  LEAF_BYTES = 16 * KB;
+  LEAF_BYTES = 32 * KB;
   MAX_LEAVES = 64;
 
 var
@@ -1646,24 +1891,27 @@ end;
 
 { Costo mínimo de las hojas [Lo, Hi) partiendo en mitades; deja en F el histograma del tramo
   y en FSplit[Node] si conviene partirlo. }
-function TPlzEngine.BestSplit(Node, Lo, Hi: Integer; var F: TPlzFreqs): Int64;
+function TPlzEngine.BestSplit(Node, Lo, Hi: Integer): Int64;
 var
-  Fr: TPlzFreqs;
   Mid, t, i: Integer;
   Whole, Parts: Int64;
+  F, A, B: ^TPlzFreqs;
 begin
+  F := @FNodeF[Node];
   if Hi - Lo = 1 then
   begin
-    F := FLeafF[Lo];
+    F^ := FLeafF[Lo];
     FSplit[Node] := False;
-    Exit(FreqsCost(F));
+    Exit(FreqsCost(F^));
   end;
   Mid := (Lo + Hi) div 2;
-  Parts := BestSplit(2 * Node, Lo, Mid, F);
-  Inc(Parts, BestSplit(2 * Node + 1, Mid, Hi, Fr));
+  Parts := BestSplit(2 * Node, Lo, Mid);
+  Inc(Parts, BestSplit(2 * Node + 1, Mid, Hi));
+  A := @FNodeF[2 * Node];
+  B := @FNodeF[2 * Node + 1];
   for t := 0 to 4 do
-    for i := 0 to PLZ_ALPHA[t] - 1 do Inc(F.F[t][i], Fr.F[t][i]);
-  Whole := FreqsCost(F);
+    for i := 0 to PLZ_ALPHA[t] - 1 do F^.F[t][i] := A^.F[t][i] + B^.F[t][i];
+  Whole := FreqsCost(F^);
   FSplit[Node] := Parts < Whole;
   if FSplit[Node] then Result := Parts else Result := Whole;
 end;
@@ -1680,7 +1928,7 @@ begin
   end
   else
     WriteBlock(Src + FLeafRaw[Lo], FLeafRaw[Hi] - FLeafRaw[Lo], FLeafSeq[Lo], FLeafSeq[Hi],
-      FLeafLit[Lo], FLeafLit[Hi], True, SavedRep);
+      FLeafLit[Lo], FLeafLit[Hi], True, SavedRep, @FNodeF[Node], 0);
 end;
 
 procedure TPlzEngine.EncodeBlock(BS, BE: LongWord);
@@ -1697,12 +1945,19 @@ begin
   FNSeq := 0;
   FNLit := 0;
   // Filas: en un bloque binario el hash es de 4 bytes (ver WantShort)
+  FBin := WantShort(FBuf + (BS - FBufRel), FBuf + (BE - FBufRel));
+  FShortOn := (Length(FTabS) > 0) and FBin;
+  FLazyCur := P.Lazy;
+  if FBin then Inc(FLazyCur, P.BinLazy);
   FHashShl := 64 - 8 * P.HashLen;
-  if (P.Lazy > 0) and (P.ShortBits > 0) and WantShort(FBuf + (BS - FBufRel), FBuf + (BE - FBufRel)) then
-    FHashShl := 32;
+  if (P.Lazy > 0) and FBin then
+  begin
+    if P.BinHashLen > 0 then FHashShl := 64 - 8 * P.BinHashLen;
+  end;
   if P.Lazy > 0 then ParseLazy(BS, BE)
   else if FOne then ParseFast1(BS, BE)
   else ParseFast(BS, BE);
+  FinishSeqs(0, FNSeq);
   {$IFDEF PLZ_CHECK}
   CheckBlock(BS, BE, Saved);
   {$ENDIF}
@@ -1710,7 +1965,7 @@ begin
   RawLen := BE - BS;
   // Hojas de ~16 KB, cortadas después de una secuencia
   NL := 0;
-  if (RawLen >= 2 * LEAF_BYTES) and (FNSeq > 0) then
+  if (RawLen >= 2 * LEAF_BYTES) and (FNSeq > 0) and ((P.SplitMode = 1) or ((P.SplitMode = 2) and FBin)) then
   begin
     if Length(FLeafF) < MAX_LEAVES then SetLength(FLeafF, MAX_LEAVES);
     FLeafSeq[0] := 0; FLeafLit[0] := 0; FLeafRaw[0] := 0;
@@ -1731,7 +1986,7 @@ begin
   end;
   if NL < 2 then
   begin
-    WriteBlock(Src, RawLen, 0, FNSeq, 0, FNLit, False, Saved);
+    WriteBlock(Src, RawLen, 0, FNSeq, 0, FNLit, False, Saved, nil, 0);
     Exit;
   end;
   // Histogramas por hoja
@@ -1749,10 +2004,11 @@ begin
       if S^.Tok and 15 = 15 then begin Inc(FLeafF[k].F[PT_MLX][S^.MXC]); Inc(Extra, S^.MXN); end;
     end;
   end;
-  Total := BestSplit(1, 0, NL, F) + Extra;
+  if Length(FNodeF) < 4 * MAX_LEAVES then SetLength(FNodeF, 4 * MAX_LEAVES);
+  Total := BestSplit(1, 0, NL) + Extra;
   if not FSplit[1] then
   begin
-    WriteBlock(Src, RawLen, 0, FNSeq, 0, FNLit, False, Saved);
+    WriteBlock(Src, RawLen, 0, FNSeq, 0, FNLit, False, Saved, @FNodeF[1], Extra);
     Exit;
   end;
   // Partido: si en total no achica, el bloque entero va guardado (como en WriteBlock)
@@ -1875,7 +2131,7 @@ begin
 end;
 
 procedure TPlzEngine.WriteBlock(Src: PByte; RawLen: SizeInt; SeqLo, SeqHi, LitLo, LitHi: SizeInt;
-  Piece: Boolean; const SavedRep: array of LongWord);
+  Piece: Boolean; const SavedRep: array of LongWord; PF: Pointer; ExtraIn: Int64);
 var
   Freq: array[0..4] of array[0..255] of LongWord;
   F1, F2, F3: array[0..255] of LongWord;
@@ -1935,17 +2191,26 @@ begin
   if RawLen <= 0 then Exit;
   NSeq := SeqHi - SeqLo;
   NLit := LitHi - LitLo;
-  FillChar(Freq, SizeOf(Freq), 0);
-  ByteHist(@FLit[LitLo], NLit, Freq[PT_LIT]);
-  Extra := 0;
-  for j := SeqLo to SeqHi - 1 do
+  if PF <> nil then
   begin
-    S := @FSeq[j];
-    Inc(Freq[PT_TOK][S^.Tok]);
-    Inc(Freq[PT_OFS][S^.OC]);
-    Inc(Extra, S^.ONB);
-    if S^.Tok >= 7 * 16 then begin Inc(Freq[PT_LLX][S^.LXC]); Inc(Extra, S^.LXN); end;
-    if S^.Tok and 15 = 15 then begin Inc(Freq[PT_MLX][S^.MXC]); Inc(Extra, S^.MXN); end;
+    // histogramas ya hechos por EncodeBlock (hojas y nodos)
+    Move(PF^, Freq, SizeOf(Freq));
+    Extra := ExtraIn;
+  end
+  else
+  begin
+    FillChar(Freq, SizeOf(Freq), 0);
+    ByteHist(@FLit[LitLo], NLit, Freq[PT_LIT]);
+    Extra := 0;
+    for j := SeqLo to SeqHi - 1 do
+    begin
+      S := @FSeq[j];
+      Inc(Freq[PT_TOK][S^.Tok]);
+      Inc(Freq[PT_OFS][S^.OC]);
+      Inc(Extra, S^.ONB);
+      if S^.Tok >= 7 * 16 then begin Inc(Freq[PT_LLX][S^.LXC]); Inc(Extra, S^.LXN); end;
+      if S^.Tok and 15 = 15 then begin Inc(Freq[PT_MLX][S^.MXC]); Inc(Extra, S^.MXN); end;
+    end;
   end;
   // Modos de las tablas
   Total := 16 * 8 + Extra;
@@ -1958,23 +2223,37 @@ begin
       Mode[t] := PM_NONE;
       Continue;
     end;
-    PlzHuffLens(Freq[t], PLZ_ALPHA[t], PLZ_MAXCODELEN, NewLens[t]);
-    CostNew := TableDescBits(NewLens[t], PLZ_ALPHA[t]) + DataBits(Freq[t], NewLens[t], PLZ_ALPHA[t]);
+    // Primero lo barato: reusar la tabla anterior (costo exacto) o, para los literales,
+    // guardarlos, contra una estimación de la tabla nueva; la tabla nueva se arma sólo si hace falta
     if FHavePrev[t] then CostReuse := DataBits(Freq[t], FPrevLens[t], PLZ_ALPHA[t])
     else CostReuse := High(Int64) div 4;
+    CostNew := EstBits(Freq[t], PLZ_ALPHA[t], False);
+    CostRaw := High(Int64) div 4;
+    if t = PT_LIT then CostRaw := Int64(NLit) * 8;
     if CostReuse <= CostNew then
     begin
       Mode[t] := PM_REUSE;
       CostLit := CostReuse;
     end
+    else if CostRaw <= CostNew + 32 then
+    begin
+      Mode[t] := PM_RAW;
+      CostLit := CostRaw;
+    end
     else
     begin
-      Mode[t] := PM_NEW;
-      CostLit := CostNew;
-    end;
-    if t = PT_LIT then
-    begin
-      CostRaw := Int64(NLit) * 8;
+      PlzHuffLens(Freq[t], PLZ_ALPHA[t], PLZ_MAXCODELEN, NewLens[t]);
+      CostNew := TableDescBits(NewLens[t], PLZ_ALPHA[t]) + DataBits(Freq[t], NewLens[t], PLZ_ALPHA[t]);
+      if CostReuse <= CostNew then
+      begin
+        Mode[t] := PM_REUSE;
+        CostLit := CostReuse;
+      end
+      else
+      begin
+        Mode[t] := PM_NEW;
+        CostLit := CostNew;
+      end;
       if CostRaw <= CostLit + 32 then
       begin
         Mode[t] := PM_RAW;
@@ -2162,8 +2441,11 @@ var
 begin
   if FCap = 0 then
   begin
-    FCap := SizeInt(P.Window) + SizeInt(P.Window) div 2;
-    if FCap < SizeInt(P.Window) + 4 * P.BlockSize then FCap := SizeInt(P.Window) + 4 * P.BlockSize;
+    // Ventana + lo mismo (al menos 16 MB) por delante: cada deslizamiento mueve W bytes cada
+    // >= W bytes de entrada (con W/2 eran dos copias por byte)
+    FCap := SizeInt(P.Window);
+    if FCap < 16 * MB then FCap := 16 * MB;
+    Inc(FCap, SizeInt(P.Window));
   end;
   while Count > 0 do
   begin
