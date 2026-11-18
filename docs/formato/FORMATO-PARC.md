@@ -274,7 +274,9 @@ Tornado; it uses textbook techniques: LZ77 with four repeated offsets, length-li
 Huffman codes rebuilt per block, literals in four interleaved streams.
 
 Method string: `plz[:<level>][:<window>][:h<hash>]` plus tuning options that only the encoder
-reads (`w<ways>`, `z<lazy>`, `n<nice>`, `i<insert>`, `k<skip>`, `x<hash bytes>`, `b<block>`).
+reads (`w<ways>`, `z<lazy>`, `n<nice>`, `i<insert>`, `k<skip>`, `x<hash bytes>`, `b<block>`,
+`y<short table bits>`, `q<split mode>`, `u<extra lazy steps on binary blocks>`, `v<hash bytes on
+binary blocks>`, `g<entries per direct-table slot>`).
 The stored (canonical) string is `plz:<level>:<window>` followed by the options that differ from
 the level's defaults; the window is limited to the block size (rounded up to 64 KB). The decoder
 takes everything it needs from the stream.

@@ -61,12 +61,12 @@ for w in 1kb 4kb 64kb 1mb 8mb; do
     for f in t25 mix pattern; do ck "plz:$l:$w $f" "rt plz:$l:$w $f"; done
   done
 done
-for m in plz:2:h64kb plz:3:w2:z0 plz:3:w64:z2:n4096 plz:2:x4:k0 plz:5:b16kb plz:5:b1mb plz:1:x7 plz:4:i2 plz:4:i0; do
+for m in plz:2:h64kb plz:3:w2:z0 plz:3:w64:z2:n4096 plz:2:x4:k0 plz:5:b16kb plz:5:b1mb plz:1:x7 plz:4:i2 plz:4:i0 plz:1:y0 plz:2:y12:q0 plz:3:w1:g2:y14:u1 plz:3:w1:x6:i0:y16 plz:4:v4:q2 plz:3:y0:w2; do
   for f in t25 mix one; do ck "$m $f" "rt $m $f"; done
 done
 
 # 2) parámetros inválidos: el codificador los rechaza
-for m in plz:0 plz:99 plz:3:w3 plz:3:q1 plz:3:2gb plz:3:b8mb plz:3:x9; do
+for m in plz:0 plz:99 plz:3:w3 plz:3:j1 plz:3:q9 plz:3:g3 plz:3:y30 plz:3:2gb plz:3:b8mb plz:3:x9; do
   ck "rechaza $m" "! '$T' enc $m one bad.plz 2>/dev/null"
 done
 
