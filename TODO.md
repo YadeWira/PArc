@@ -1,6 +1,6 @@
 # PArc — pending work and details
 
-Updated: 2026-11-19 (REP replaced by OREP 0.0.7, MIT)  
+Updated: 2026-11-19 (REP replaced by OREP 0.0.8, MIT)  
 Updated: 2026-10-30 (phase 3b merged to main: presets + sched + determinism)  
 Updated: 2026-10-29 (output determinism, PPMd asm fix)  
 Updated: 2026-10-29 (block scheduling under the thread budget)  
@@ -119,18 +119,16 @@ otherwise keep the current preset.
 ## Done — REP replaced by OREP (MIT relicensing step, 2026-11-18)
 
 `rep` (FreeArc REP, GPL: `parc_rep.pas`, `parc_repenc.pas`) is gone; the long-range stage is
-`orep` (OREP 0.0.7, MIT, vendored in `src/orep/`, stages in `src/parc_orep.pas`). Removed tests:
+`orep` (OREP 0.0.8, MIT, vendored in `src/orep/`, stages in `src/parc_orep.pas`). Removed tests:
 `rep_threads.sh`, `repcopy.sh`, `test_repcopy.lpr`, `test_repdelta.lpr`; new `tests/orep.sh` +
 `tests/test_orep.lpr`. Numbers and preset choice: docs/ESTADO.md ("REP replaced by OREP").
 
 Open points (for OREP's author where noted):
 
-- **Speed at `-m1`/`-m2` with 4 threads** (the only real loss): +7 % / +6 % wall over all
-  inputs, TILIN.tar +15 % / +12 % with OREP 0.0.7 (0.0.6: +9 % / +5 %). OREP's search on TILIN
-  is the bottleneck while 4x4/tor take the other tokens; REP had its search plus two hashing
-  threads.
-- Decompression at `-m1`…`-m6` with 4 threads +2…6 % over all inputs, though the `orep` stage
-  alone now ties REP (Peek/Reset in 0.0.7); mostly noise of the loaded machine.
+- **Speed**: with OREP 0.0.8 compression is within −4…+2 % of REP over all inputs at every level;
+  `-m1` with 4 threads on TILIN.tar is still +8 %.
+- **Decompression at `-m3`…`-m5` with 4 threads +6…9 %** over all inputs (consistent over the
+  0.0.7 and 0.0.8 runs) though the `orep` stage alone ties REP: look at the 4x4/lzma side.
 - Small solid blocks pay OREP's fixed per-stream cost: `small` up to +0.02 %.
 - `OrepEncReset` is not used: PArc builds the chain per solid block and the window is clipped to
   each block; a cache keyed by parameters could use it (and avoid creating threads per block).
