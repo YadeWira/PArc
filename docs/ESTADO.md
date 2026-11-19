@@ -9,7 +9,7 @@ and the other containers (`.zip`/`.7z`/`.rar`) lives in
 
 ```
 src/                     Pascal sources (+ parc_torglue.cpp/.patch: bridge to FreeArc's Tornado encoder)
-src/orep/                OREP 0.0.6 (MIT, vendored unchanged): orep.pas + orep_core.c, the long-range matcher
+src/orep/                OREP 0.0.7 (MIT, vendored unchanged): orep.pas + orep_core.c, the long-range matcher
 docs/                    manual (USO.md), format (formato/FORMATO-PARC.md), codecs
 tests/                   tests, codec oracles and fuzzers
 reference/freearc-0.67/  only Compression/: C codec sources and test oracle

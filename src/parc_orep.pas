@@ -67,11 +67,13 @@ function OrepMethodDecMemory(const M: TOrepMethod): QWord;
 function OrepFitWindow(const M: TOrepMethod; MemLim: QWord): QWord;
 
 type
+  POrepDec = ^TOrepDec;
+
   TOrepDecStage = class(TInStage)
   private
-    FDec: TOrepDec;
+    FDec: POrepDec;            // del pool de decodificadores (OrepDecReset) o nuevo
     FLimit: QWord;
-    FInited, FEnd, FSrcEof: Boolean;
+    FEnd, FSrcEof: Boolean;
     FIn: array of Byte;
     FInPos, FInLen: SizeInt;
   public
@@ -228,6 +230,75 @@ end;
 
 const
   OREP_IN_BUF = 256 * 1024;
+  { Decodificadores ociosos para reusar (OrepDecReset: conserva su anillo, sin volver a reservar
+    ni tocar páginas nuevas; con muchos bloques chicos, p. ej. -s- o la extracción en paralelo,
+    es lo que más cuesta). Solo los de anillo chico, y pocos: la memoria queda tomada. }
+  OREP_DEC_POOL = 8;
+  OREP_DEC_POOL_MAXMEM = 64 shl 20;
+
+var
+  DecPool: array[0..OREP_DEC_POOL - 1] of POrepDec;
+  DecPoolCount: Integer = 0;
+  DecPoolLock: TRTLCriticalSection;
+
+{ Un decodificador listo para un stream nuevo: uno del pool (OrepDecReset) o uno nuevo. }
+function TakeDecoder(Limit: QWord): POrepDec;
+begin
+  Result := nil;
+  EnterCriticalSection(DecPoolLock);
+  if DecPoolCount > 0 then
+  begin
+    Dec(DecPoolCount);
+    Result := DecPool[DecPoolCount];
+    DecPool[DecPoolCount] := nil;
+  end;
+  LeaveCriticalSection(DecPoolLock);
+  if (Result <> nil) and (OrepDecReset(Result^) <> OREP_OK) then
+  begin
+    OrepDecEnd(Result^);
+    Dispose(Result);
+    Result := nil;
+  end;
+  if Result = nil then
+  begin
+    New(Result);
+    OrepDecInit(Result^, Limit);
+  end;
+  Result^.MemLimit := Limit;   // el del método de este bloque
+end;
+
+{ Devuelve un decodificador que terminó bien su stream (o lo libera). }
+procedure GiveDecoder(D: POrepDec; Ok: Boolean);
+begin
+  if Ok and (OrepDecMemory(D^.Window, D^.Chunk) <= OREP_DEC_POOL_MAXMEM) then
+  begin
+    EnterCriticalSection(DecPoolLock);
+    if DecPoolCount < OREP_DEC_POOL then
+    begin
+      DecPool[DecPoolCount] := D;
+      Inc(DecPoolCount);
+      D := nil;
+    end;
+    LeaveCriticalSection(DecPoolLock);
+  end;
+  if D <> nil then
+  begin
+    OrepDecEnd(D^);
+    Dispose(D);
+  end;
+end;
+
+procedure FreeDecPool;
+var
+  i: Integer;
+begin
+  for i := 0 to DecPoolCount - 1 do
+  begin
+    OrepDecEnd(DecPool[i]^);
+    Dispose(DecPool[i]);
+  end;
+  DecPoolCount := 0;
+end;
 
 constructor TOrepDecStage.Create(ASource: TInStage; const M: TOrepMethod);
 begin
@@ -235,21 +306,23 @@ begin
   // El encabezado del stream no puede pedir más memoria que la que declara el método (que es
   // lo que mira -ld): si lo hace, el stream o el método están dañados
   FLimit := OrepMethodDecMemory(M);
-  OrepDecInit(FDec, FLimit);
-  FInited := True;
+  FDec := TakeDecoder(FLimit);
   SetLength(FIn, OREP_IN_BUF);
 end;
 
 destructor TOrepDecStage.Destroy;
 begin
-  if FInited then OrepDecEnd(FDec);
+  if FDec <> nil then GiveDecoder(FDec, FEnd);
+  FDec := nil;
   inherited Destroy;
 end;
 
+{ Con OrepDecPeek: la salida ya verificada se copia de la memoria del decodificador directo al
+  búfer del que lee (OrepDecSkip la marca como usada), sin pasar por otro búfer. }
 function TOrepDecStage.Read(Buf: PByte; Count: SizeInt): SizeInt;
 var
-  NextIn, NextOut: PByte;
-  AvailIn, AvailOut: SizeUInt;
+  NextIn, Data: PByte;
+  AvailIn, Avail: SizeUInt;
   r: Integer;
   Extra: Byte;
 begin
@@ -265,29 +338,32 @@ begin
     end;
     NextIn := @FIn[FInPos];
     AvailIn := FInLen - FInPos;
-    NextOut := Buf;
-    AvailOut := Count;
-    r := OrepDecRun(FDec, NextIn, AvailIn, NextOut, AvailOut);
+    r := OrepDecPeek(FDec^, NextIn, AvailIn, Data, Avail);
     FInPos := FInLen - SizeInt(AvailIn);
-    Result := Count - SizeInt(AvailOut);
     if r < 0 then
     begin
       if r = OREP_E_MEM then
-        if OrepDecMemory(FDec.Window, FDec.Chunk) > FLimit then
+        if OrepDecMemory(FDec^.Window, FDec^.Chunk) > FLimit then
           Corrupt('orep: the stream needs more memory than its method declares')
         else
           OutOfMemoryError;
       Corrupt('orep: ' + OrepErrorText(r));
     end;
+    if Avail > 0 then
+    begin
+      if SizeUInt(Count) < Avail then Avail := Count;
+      Move(Data^, Buf^, Avail);
+      OrepDecSkip(FDec^, Avail);
+      Exit(Avail);
+    end;
     if r = OREP_END then
     begin
-      FEnd := True;
       // nada después del fin del stream
       if (FInPos < FInLen) or (not FSrcEof and (Source.Read(@Extra, 1) <> 0)) then
         Corrupt('orep: data after the end of the stream');
+      FEnd := True;
       Exit;
     end;
-    if Result > 0 then Exit;
     if AvailIn > 0 then Corrupt('orep: decoder stalled');
     if FSrcEof then Corrupt('orep: truncated stream');
   end;
@@ -441,4 +517,9 @@ begin
   Run(nil, 0, OREP_FINISH);
 end;
 
+initialization
+  InitCriticalSection(DecPoolLock);
+finalization
+  FreeDecPool;
+  DoneCriticalSection(DecPoolLock);
 end.
