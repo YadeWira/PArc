@@ -1,6 +1,6 @@
 # PArc — pending work and details
 
-Updated: 2026-11-18 (REP replaced by OREP 0.0.5, MIT)  
+Updated: 2026-11-19 (REP replaced by OREP 0.0.6, MIT)  
 Updated: 2026-10-30 (phase 3b merged to main: presets + sched + determinism)  
 Updated: 2026-10-29 (output determinism, PPMd asm fix)  
 Updated: 2026-10-29 (block scheduling under the thread budget)  
@@ -119,24 +119,24 @@ otherwise keep the current preset.
 ## Done — REP replaced by OREP (MIT relicensing step, 2026-11-18)
 
 `rep` (FreeArc REP, GPL: `parc_rep.pas`, `parc_repenc.pas`) is gone; the long-range stage is
-`orep` (OREP 0.0.5, MIT, vendored in `src/orep/`, stages in `src/parc_orep.pas`). Removed tests:
+`orep` (OREP 0.0.6, MIT, vendored in `src/orep/`, stages in `src/parc_orep.pas`). Removed tests:
 `rep_threads.sh`, `repcopy.sh`, `test_repcopy.lpr`, `test_repdelta.lpr`; new `tests/orep.sh` +
 `tests/test_orep.lpr`. Numbers and preset choice: docs/ESTADO.md ("REP replaced by OREP").
 
 Open points (for OREP's author where noted):
 
-- **Speed at `-m1`/`-m2` with several threads** (the only real loss): about +20 % / +8 % wall
-  with 4 threads, because OREP runs on the writing thread while REP had two hashing threads.
-  OREP's own threads now take budget tokens (0.0.5 hooks, `PARC_OREP_THREADS=k`) but were slower:
-  its workers spin/yield between jobs holding their token, and the writing thread waits for the
-  coordinator holding its own. OREP: an option to sleep at once (no spin) when hooks are set, or
-  a way for the caller's wait inside `OrepEncRun` to release its token (a hook around that wait).
-- Small solid blocks pay OREP's fixed per-stream cost: `small` +0.017 % at `-m5`…`-m9`.
+- **Speed at `-m1`/`-m2` with 4 threads** (the only real loss): +9 % / +5 % wall over all
+  inputs, TILIN.tar +22 % / +11 %, with OREP 0.0.6's threads on budget tokens (they no longer
+  slow things down: 0.0.5's blocking hooks did). REP had its search plus two hashing threads;
+  OREP's single-thread search on TILIN is the bottleneck while 4x4/tor take the other tokens.
+- Decompression +4…9 % at `-m1`…`-m5` (OREP's decoder vs REP's).
+- Small solid blocks pay OREP's fixed per-stream cost: `small` up to +0.02 %.
 - `OrepEncReset` is not used: PArc builds the chain per solid block and the window is clipped to
-  each block; a cache keyed by parameters could use it.
-- The format is still a draft upstream (version 3 in 0.0.4/0.0.5; earlier streams are rejected).
-- Fixed upstream meanwhile: ring growth by `ReAllocMem` doubled peak memory in 0.0.2/0.0.3
-  (0.0.4 allocates slots), and the 0.0.3 decoder was ~20 % slower than REP's.
+  each block; a cache keyed by parameters could use it (and avoid creating threads per block).
+- The format is still a draft upstream (version 3 since 0.0.4; earlier streams are rejected).
+- Fixed upstream meanwhile: ring growth doubled peak memory (0.0.2/0.0.3, slots since 0.0.4);
+  threads spinning with a token and the caller waiting with its own (0.0.5, hooks in 0.0.6);
+  `OrepEncEnd` freeing the ring before a search in flight finished (0.0.4/0.0.5, fixed in 0.0.6).
 
 ## Next — `plz` replaces Tornado (relicensing step)
 
