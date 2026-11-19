@@ -39,7 +39,7 @@ FILES="empty one three eight rep17 text rnd mix zeros pattern"
 # 1) todos los niveles con su ventana, y varias ventanas (las chicas obligan a dar la vuelta)
 LEVELS=$(seq 1 7)
 rt() {   # rt <método> <archivo>: streaming = memoria = streaming al azar = noasm; ida y vuelta
-  local m=$1 f=$2 n
+  local m=$1 f=$2 n w
   n=$(stat -c %s "$f")
   "$T" enc "$m" "$f" s.plz 65536 || return 1
   "$T" enc "$m" "$f" r.plz 0 || return 1
@@ -47,7 +47,13 @@ rt() {   # rt <método> <archivo>: streaming = memoria = streaming al azar = noa
   "$TN" enc "$m" "$f" n.plz 65536 || return 1
   cmp -s s.plz n.plz || { echo "    ensamblador y Pascal difieren"; return 1; }
   "$T" encmem "$m" "$f" m.plz >/dev/null; rc=$?
-  if [ $rc -eq 0 ]; then cmp -s s.plz m.plz || { echo "    memoria y streaming difieren"; return 1; }
+  if [ $rc -eq 0 ]; then
+    # en memoria la ventana se achica al tamaño de la entrada: igual que en streaming con esa ventana
+    if ! cmp -s s.plz m.plz; then
+      w=$(od -An -tu4 -j1 -N4 m.plz | tr -d ' ')
+      "$T" enc "$m:${w}b" "$f" w.plz 65536 || return 1
+      cmp -s w.plz m.plz || { echo "    memoria y streaming difieren"; return 1; }
+    fi
     "$T" decmem m.plz m.out "$n" && cmp -s "$f" m.out || { echo "    decmem"; return 1; }
   elif [ $rc -ne 3 ]; then return 1; fi
   "$T" dec s.plz s.out && cmp -s "$f" s.out || { echo "    dec"; return 1; }
@@ -61,12 +67,12 @@ for w in 1kb 4kb 64kb 1mb 8mb; do
     for f in t25 mix pattern; do ck "plz:$l:$w $f" "rt plz:$l:$w $f"; done
   done
 done
-for m in plz:2:h64kb plz:3:w2:z0 plz:3:w64:z2:n4096 plz:2:x4:k0 plz:5:b16kb plz:5:b1mb plz:1:x7 plz:4:i2 plz:4:i0 plz:1:y0 plz:2:y12:q0 plz:3:w1:g2:y14:u1 plz:3:w1:x6:i0:y16 plz:4:v4:q2 plz:3:y0:w2; do
+for m in plz:2:h64kb plz:3:w2:z0 plz:3:w64:z2:n4096 plz:2:x4:k0 plz:5:b16kb plz:5:b1mb plz:1:x7 plz:4:i2 plz:4:i0 plz:1:y0 plz:2:y12:q0 plz:3:w1:g2:y14:u1 plz:3:w1:x6:i0:y16 plz:4:v4:q2 plz:3:y0:w2 plz:3:t0 plz:3:g1:e0 plz:4:t14:e3 plz:3:t16:g1:m16 plz:4:r6 plz:5:t18:g2:e2 plz:3:v4:k8; do
   for f in t25 mix one; do ck "$m $f" "rt $m $f"; done
 done
 
 # 2) parámetros inválidos: el codificador los rechaza
-for m in plz:0 plz:99 plz:3:w3 plz:3:j1 plz:3:q9 plz:3:g3 plz:3:y30 plz:3:2gb plz:3:b8mb plz:3:x9; do
+for m in plz:0 plz:99 plz:3:w3 plz:3:j1 plz:3:q9 plz:3:g3 plz:3:y30 plz:3:2gb plz:3:b8mb plz:3:x9 plz:3:t27 plz:3:e65 plz:3:r32; do
   ck "rechaza $m" "! '$T' enc $m one bad.plz 2>/dev/null"
 done
 

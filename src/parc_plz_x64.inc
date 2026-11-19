@@ -622,6 +622,26 @@ asm
   mov    r8, qword ptr [rdi + TPlzEval.X]
   mov    r11, qword ptr [rdi + TPlzEval.Base]
   mov    r15, qword ptr [rdi + TPlzEval.IEnd]
+  // pedir a la caché la entrada de X + 8 (sólo afecta el tiempo)
+  lea    rax, [r8 + 16]
+  cmp    rax, r15
+  jae    @nopf
+  mov    rax, qword ptr [r8 + 8]
+  mov    ecx, dword ptr [rdi + TPlzEval.HShl]
+  shl    rax, cl
+  mov    rdx, $9E3779B185EBCA87
+  imul   rax, rdx
+  shr    rax, 32
+  mov    ecx, dword ptr [rdi + TPlzEval.Sh]
+  shr    eax, cl
+  shl    rax, 3
+  cmp    dword ptr [rdi + TPlzEval.Bucket], 2
+  jne    @pf1
+  shl    rax, 1
+@pf1:
+  add    rax, qword ptr [rdi + TPlzEval.T64]
+  prefetcht0 [rax]
+@nopf:
   // reps: r12 = mejor ganancia (GR), r13 = RB, r14d = RD
   mov    r12, -1000
   xor    r13, r13
@@ -873,6 +893,22 @@ asm
   mov    r8, qword ptr [rdi + TPlzEval.X]
   mov    r11, qword ptr [rdi + TPlzEval.Base]
   mov    r15, qword ptr [rdi + TPlzEval.IEnd]
+  // pedir a la caché la entrada de X + 8 (sólo afecta el tiempo)
+  lea    rax, [r8 + 16]
+  cmp    rax, r15
+  jae    @nopf
+  mov    rax, qword ptr [r8 + 8]
+  mov    ecx, dword ptr [rdi + TPlzEval.HShl]
+  shl    rax, cl
+  mov    rdx, $9E3779B185EBCA87
+  imul   rax, rdx
+  shr    rax, 32
+  mov    ecx, dword ptr [rdi + TPlzEval.Sh]
+  shr    eax, cl
+  imul   rax, qword ptr [rdi + TPlzEval.RowBytes]
+  add    rax, qword ptr [rdi + TPlzEval.Rows]
+  prefetcht0 [rax]
+@nopf:
   // reps: r12 = mejor ganancia (GR), r13 = RB, r14d = RD
   mov    r12, -1000
   xor    r13, r13

@@ -276,7 +276,10 @@ Huffman codes rebuilt per block, literals in four interleaved streams.
 Method string: `plz[:<level>][:<window>][:h<hash>]` plus tuning options that only the encoder
 reads (`w<ways>`, `z<lazy>`, `n<nice>`, `i<insert>`, `k<skip>`, `x<hash bytes>`, `b<block>`,
 `y<short table bits>`, `q<split mode>`, `u<extra lazy steps on binary blocks>`, `v<hash bytes on
-binary blocks>`, `g<entries per direct-table slot>`).
+binary blocks>`, `g<entries per direct-table slot>`, `m<lazy-match limit on text blocks>`,
+`t<text-table bits>` (levels with hash rows: a direct table used instead of the rows on text
+blocks; greedy levels: hash bits used on text blocks; 0 = off), `r<skip on near-random blocks>`,
+`e<insertions inside a match on text blocks>` (1 = only the last two, n = the first and last n)).
 The stored (canonical) string is `plz:<level>:<window>` followed by the options that differ from
 the level's defaults; the window is limited to the block size (rounded up to 64 KB). The decoder
 takes everything it needs from the stream.

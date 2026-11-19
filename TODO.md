@@ -130,10 +130,13 @@ decompression time. The presets still use `tor`. Pending, in order:
    `parc_torglue.cpp/.patch`, the C++ part of `build.sh`) and then the decoder
    (`parc_tornado`, `parc_tordec.inc`); `tor` blocks stop decoding (pre-1.0, no format
    compatibility promised), `tests/run_tornado_tests.sh` goes away.
-3. Before switching (owner's condition: beat `tor` in every cell): compression time of the lazy
-   levels on text/small-file/font/video data (`plz:3` vs `tor:5`, `plz:4` vs `tor:6`, up to
-   ×1.5) and `audio` `-m2` 4 threads size (+0.21 %); see ESTADO "Second round". Ideas: a lazy
-   parser that evaluates fewer positions on text blocks, assembler for the row finder.
+3. Before switching (owner's condition: beat `tor` in every cell): after the third round
+   (ESTADO "Third round") 4 of 60 cells still lose compression CPU — `text` inside `4x4`
+   (`plz:3` ×1.06 against `tor:c3`, ×1.01 against `tor:5`; memory contention between the 4
+   workers, one thread already wins), plus `small` `-m2` and `font` `-m1` 4 threads at
+   ×1.02–1.05 (won in other runs: noise) — and `audio` `-m2` 4 threads size (+0.22 %: 16-bit
+   PCM of low amplitude, where `tor` gets 2-byte structure that the `plz` format cannot code;
+   needs 2-byte rep matches or literal contexts, i.e. a format change).
 4. Possible gains still open: literal coding with context (previous byte), an optimal parser for
    levels 6-7, and assembler for the 4-stream literal decoder.
 
