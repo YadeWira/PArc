@@ -506,13 +506,233 @@ written from public LZ77 literature without looking at Tornado's sources
 
 | level | window | finder | parser | aimed at | memory to compress (streaming) |
 |---|---|---|---|---|---|
-| 1 | 8 MB | direct table 1 MB, 5-byte hash | greedy | `tor:3:8mb` (4x4 `-m1`) | ~14 MB |
-| 2 | 8 MB | direct table 8 MB, 6-byte hash | greedy | `tor:4:8mb:h4m` (`-m1` one thread) | ~21 MB |
-| 3 | 16 MB | rows of 4 (8 MB), 5-byte hash | lazy 1 | `tor:5`, `tor:c3` (4x4 `-m2`, `$compressed`) | ~33 MB |
-| 4 | 64 MB | rows of 8 (16 MB), 5-byte hash | lazy 1 | `tor:6` (`-m2` one thread) | ~113 MB |
+| 1 | 8 MB | direct table 1 MB, 6-byte hash (+ 4-byte table 2^16 on binary blocks) | greedy | `tor:3:8mb` (4x4 `-m1`) | ~14 MB |
+| 2 | 8 MB | direct table 8 MB, 6-byte hash (+ 4-byte 2^12) | greedy | `tor:4:8mb:h4m` (`-m1` one thread) | ~21 MB |
+| 3 | 16 MB | rows of 4 (8 MB), 5-byte hash (+ 4-byte 2^12) | lazy 1 | `tor:5`, `tor:c3` (4x4 `-m2`, `$compressed`) | ~33 MB |
+| 4 | 64 MB | rows of 8 (16 MB), 5-byte hash (+ 4-byte 2^16) | lazy 1 | `tor:6` (`-m2` one thread) | ~113 MB |
 | 5–7 | 64 MB | rows of 16/32/64 | lazy 2 | slower, smaller (e.g. `3xt`'s `tor:7`) | 130–200 MB |
 
 Decompression needs the window plus ~2 MB.
+
+**Second round (2026-11-18): every cell against `tor`.** The owner asked for `plz` to beat
+`tor` in size, compression time and decompression time on every set at every preset use before
+the switch. Encoder changes (the stream format and the decoder are unchanged):
+
+- *Short-match table.* Binary formats (fonts, images, audio, video) repeat 4-byte stretches that
+  the 5/6-byte hashes miss. Each 256 KB block is classified by a cheap deterministic sample (more
+  than 1/8 of bytes outside 9..13 and 32..126 = binary); in binary blocks a second direct table
+  hashed on 4 bytes (`y<bits>`: 2^16 entries at levels 1 and 4, 2^12 at 2 and 3) is probed and
+  updated besides the main one, and the longer (or equally long and closer) candidate wins. Text
+  blocks skip it. Level 1 now hashes 6 bytes like level 2.
+- *Assembler.* The whole greedy loop of levels 1–2 (scan, both tables, match length, backward
+  extension, literal copy, sequence, reps, insertions) and the per-position evaluation of the
+  lazy parser on direct tables are x86-64 assembler, byte-identical to the Pascal path
+  (`-dPARC_NOASM`, checked by `tests/plz.sh` and `tests/plz_cross.sh`).
+- *Cheaper entropy stage.* Sequences are stored raw (length, length, rep index or distance) and
+  coded in one pass per block; the histograms built to decide block cuts are reused when
+  writing; a new Huffman table is only built when reusing the previous one or storing literals
+  raw is not already cheaper than an entropy estimate.
+- *Memory.* Hash tables shrink with small windows (≈ 2 entries per window byte), and the
+  streaming buffer keeps one window ahead (one copy per input byte instead of two).
+
+Measured again (2026-11-18, same chains with `rep` in front as the presets, best of 2 runs,
+`nice -n10`, each run pinned to the idlest physical cores of the shared 64-core machine;
+bold = `plz` worse). Logs: `/mnt/IA_LAB/agentes/PArc/lz-new/logs/final2/`.
+
+| data | cell | tor size | plz size | Δ size | comp CPU tor/plz | comp wall tor/plz | dec CPU tor/plz | dec wall tor/plz |
+|---|---|---:|---:|---:|---:|---:|---:|---:|
+| tilin512 | T1 -m1 (`plz:2`) | 284,628,505 | 280,958,631 | -1.29 % | 7.38 / 5.55 | 7.40 / 5.56 | 4.02 / 1.83 | 4.03 / 1.84 |
+| tilin512 | T1 -m2 (`plz:4`) | 270,565,702 | 265,138,547 | -2.01 % | 23.06 / 17.58 | 23.09 / 17.59 | 5.93 / 2.40 | 5.94 / 2.41 |
+| tilin512 | T4 -m1 (`plz:1`) | 289,006,803 | 283,942,785 | -1.75 % | 7.49 / 6.38 | 2.26 / 1.94 | 4.99 / 2.18 | 1.45 / 0.69 |
+| tilin512 | T4 -m2 (`plz:3`) | 274,584,657 | 269,163,817 | -1.97 % | 18.24 / 17.12 | 5.03 / 4.82 | 7.09 / 2.62 | 1.98 / 1.03 |
+| tilin512 | T4 -m4 $compressed (`plz:3`) | 276,647,421 | 270,844,074 | -2.10 % | 16.07 / 15.98 | 4.74 / 4.72 | 4.84 / 2.22 | 1.43 / 0.72 |
+| TILIN | T1 -m1 (`plz:2`) | 1,078,738,066 | 1,070,935,651 | -0.72 % | 22.92 / 14.95 | 22.94 / 14.95 | 13.74 / 4.13 | 13.77 / 4.14 |
+| TILIN | T1 -m2 (`plz:4`) | 1,055,483,194 | 1,044,817,684 | -1.01 % | 69.99 / 50.53 | 70.12 / 51.14 | 20.64 / 5.38 | 20.68 / 5.38 |
+| TILIN | T4 -m1 (`plz:1`) | 1,091,769,634 | 1,086,040,274 | -0.52 % | 19.78 / 17.07 | 5.84 / 4.81 | 9.35 / 5.33 | 3.30 / 2.27 |
+| TILIN | T4 -m2 (`plz:3`) | 1,071,314,861 | 1,065,244,516 | -0.57 % | **36.67 / 36.74** | **10.23 / 10.47** | 13.68 / 6.51 | 4.76 / 3.35 |
+| TILIN | T4 -m4 $compressed (`plz:3`) | 1,072,970,322 | 1,066,257,446 | -0.63 % | 38.21 / 35.19 | 10.25 / 9.52 | 10.51 / 5.67 | 3.56 / 2.35 |
+| text | T1 -m1 (`plz:2`) | 32,081,028 | 31,132,657 | -2.96 % | 1.22 / 1.22 | 1.23 / 1.22 | 0.52 / 0.39 | 0.53 / 0.40 |
+| text | T1 -m2 (`plz:4`) | 29,429,591 | 28,187,532 | -4.22 % | **3.64 / 4.86** | **3.65 / 4.93** | 0.86 / 0.60 | 0.86 / 0.60 |
+| text | T4 -m1 (`plz:1`) | 32,211,864 | 31,048,863 | -3.61 % | **1.56 / 1.66** | **0.63 / 0.69** | 0.74 / 0.52 | 0.24 / 0.22 |
+| text | T4 -m2 (`plz:3`) | 30,061,663 | 28,640,003 | -4.73 % | **2.85 / 3.91** | **1.00 / 1.33** | 0.98 / 0.62 | 0.38 / 0.32 |
+| text | T4 -m4 $compressed (`plz:3`) | 30,277,365 | 28,709,005 | -5.18 % | **2.45 / 3.70** | **0.86 / 1.29** | 0.69 / 0.52 | 0.23 / 0.22 |
+| exe | T1 -m1 (`plz:2`) | 80,573,341 | 79,859,654 | -0.89 % | 1.70 / 1.11 | 1.71 / 1.12 | 0.99 / 0.33 | 1.00 / 0.33 |
+| exe | T1 -m2 (`plz:4`) | 79,057,427 | 78,089,151 | -1.22 % | 5.51 / 4.08 | 5.51 / 4.08 | 1.66 / 0.54 | 1.66 / 0.55 |
+| exe | T4 -m1 (`plz:1`) | 81,460,328 | 80,797,862 | -0.81 % | 1.70 / 1.36 | 0.57 / 0.52 | 0.92 / 0.42 | 0.31 / 0.21 |
+| exe | T4 -m2 (`plz:3`) | 79,479,124 | 79,128,399 | -0.44 % | 3.14 / 3.08 | 1.08 / 1.03 | 1.25 / 0.53 | 0.49 / 0.28 |
+| exe | T4 -m4 $compressed (`plz:3`) | 79,917,714 | 79,477,905 | -0.55 % | **3.08 / 3.25** | **1.02 / 1.07** | 0.85 / 0.44 | 0.36 / 0.21 |
+| small | T1 -m1 (`plz:2`) | 4,690,757 | 4,556,561 | -2.86 % | **0.56 / 0.57** | **0.56 / 0.58** | 0.14 / 0.11 | 0.14 / 0.12 |
+| small | T1 -m2 (`plz:4`) | 4,299,569 | 4,230,099 | -1.62 % | **0.93 / 1.07** | **0.94 / 1.07** | 0.18 / 0.13 | 0.18 / 0.14 |
+| small | T4 -m1 (`plz:1`) | 4,727,630 | 4,649,454 | -1.65 % | 0.71 / 0.66 | 0.48 / 0.47 | 0.19 / 0.14 | 0.10 / 0.09 |
+| small | T4 -m2 (`plz:3`) | 4,396,415 | 4,334,506 | -1.41 % | **0.91 / 1.05** | **0.55 / 0.67** | 0.21 / 0.14 | 0.12 / 0.10 |
+| small | T4 -m4 $compressed (`plz:3`) | 4,413,401 | 4,332,622 | -1.83 % | **0.85 / 1.11** | **0.53 / 0.68** | 0.18 / 0.13 | 0.11 / 0.09 |
+| document | T1 -m1 (`plz:2`) | 41,794,289 | 40,992,605 | -1.92 % | **1.22 / 1.38** | **1.22 / 1.38** | 0.63 / 0.36 | 0.63 / 0.37 |
+| document | T1 -m2 (`plz:4`) | 39,949,183 | 38,982,101 | -2.42 % | **3.83 / 4.09** | **3.84 / 4.13** | 1.01 / 0.52 | 1.02 / 0.52 |
+| document | T4 -m1 (`plz:1`) | 42,624,097 | 41,534,157 | -2.56 % | 1.49 / 1.45 | 0.55 / 0.54 | 0.80 / 0.45 | 0.25 / 0.20 |
+| document | T4 -m2 (`plz:3`) | 40,562,832 | 39,819,202 | -1.83 % | **3.17 / 3.40** | **1.06 / 1.20** | 1.13 / 0.51 | 0.39 / 0.26 |
+| document | T4 -m4 $compressed (`plz:3`) | 40,668,877 | 39,665,698 | -2.47 % | **2.83 / 3.38** | **1.06 / 1.11** | 0.82 / 0.43 | 0.29 / 0.19 |
+| large | T1 -m1 (`plz:2`) | 79,570,422 | 78,486,251 | -1.36 % | 2.04 / 1.53 | 2.05 / 1.54 | 1.13 / 0.59 | 1.13 / 0.59 |
+| large | T1 -m2 (`plz:4`) | 75,655,717 | 74,144,171 | -2.00 % | 7.56 / 7.18 | 7.57 / 7.19 | 1.86 / 0.85 | 1.86 / 0.85 |
+| large | T4 -m1 (`plz:1`) | 80,096,432 | 78,656,993 | -1.80 % | 2.30 / 1.80 | 0.75 / 0.68 | 1.41 / 0.74 | 0.47 / 0.26 |
+| large | T4 -m2 (`plz:3`) | 76,716,241 | 76,678,508 | -0.05 % | 5.29 / 4.18 | 1.68 / 1.41 | 2.03 / 0.84 | 0.59 / 0.40 |
+| large | T4 -m4 $compressed (`plz:3`) | 76,828,425 | 76,710,910 | -0.15 % | 5.09 / 4.18 | 1.56 / 1.34 | 1.40 / 0.74 | 0.45 / 0.27 |
+| archive | T1 -m1 (`plz:2`) | 67,646,429 | 66,793,769 | -1.26 % | 1.75 / 1.28 | 1.76 / 1.28 | 0.95 / 0.38 | 0.96 / 0.39 |
+| archive | T1 -m2 (`plz:4`) | 65,912,043 | 65,193,266 | -1.09 % | 5.03 / 3.99 | 5.03 / 3.99 | 1.47 / 0.57 | 1.47 / 0.58 |
+| archive | T4 -m1 (`plz:1`) | 68,341,150 | 67,306,699 | -1.51 % | 1.86 / 1.46 | 0.65 / 0.50 | 1.03 / 0.51 | 0.41 / 0.20 |
+| archive | T4 -m2 (`plz:3`) | 66,314,139 | 65,807,208 | -0.76 % | 3.62 / 3.35 | 1.31 / 1.08 | 1.44 / 0.56 | 0.51 / 0.27 |
+| archive | T4 -m4 $compressed (`plz:3`) | 66,531,275 | 65,724,543 | -1.21 % | 3.87 / 3.33 | 1.23 / 1.11 | 1.07 / 0.52 | 0.38 / 0.23 |
+| image | T1 -m1 (`plz:2`) | 58,746,853 | 58,492,680 | -0.43 % | 1.68 / 1.34 | 1.68 / 1.35 | 0.89 / 0.40 | 0.89 / 0.41 |
+| image | T1 -m2 (`plz:4`) | 56,861,907 | 56,128,471 | -1.29 % | **5.28 / 5.36** | **5.29 / 5.36** | 1.34 / 0.61 | 1.35 / 0.62 |
+| image | T4 -m1 (`plz:1`) | 59,545,860 | 58,890,014 | -1.10 % | 1.79 / 1.56 | 0.63 / 0.56 | 1.10 / 0.56 | 0.35 / 0.23 |
+| image | T4 -m2 (`plz:3`) | 57,422,990 | 57,391,953 | -0.05 % | **3.99 / 4.19** | **1.23 / 1.33** | 1.34 / 0.61 | 0.42 / 0.26 |
+| image | T4 -m4 $compressed (`plz:3`) | 57,249,674 | 56,924,299 | -0.57 % | 3.80 / 3.75 | 1.27 / 1.26 | 1.12 / 0.55 | 0.36 / 0.20 |
+| audio | T1 -m1 (`plz:2`) | 83,827,418 | 83,791,609 | -0.04 % | 1.92 / 1.26 | 1.93 / 1.26 | 1.03 / 0.39 | 1.03 / 0.40 |
+| audio | T1 -m2 (`plz:4`) | 82,524,997 | 81,757,047 | -0.93 % | 6.16 / 4.84 | 6.17 / 4.85 | 1.69 / 0.64 | 1.69 / 0.64 |
+| audio | T4 -m1 (`plz:1`) | 84,173,578 | 83,928,132 | -0.29 % | 2.08 / 1.50 | 0.69 / 0.60 | 1.12 / 0.55 | 0.35 / 0.23 |
+| audio | T4 -m2 (`plz:3`) | 82,868,979 | 83,044,680 | **+0.21 %** | 4.71 / 3.94 | 1.46 / 1.43 | 1.73 / 0.62 | 0.54 / 0.30 |
+| audio | T4 -m4 $compressed (`plz:3`) | 83,042,167 | 83,032,508 | -0.01 % | 4.98 / 3.85 | 1.54 / 1.45 | 1.21 / 0.53 | 0.34 / 0.21 |
+| video | T1 -m1 (`plz:2`) | 64,745,387 | 64,409,731 | -0.52 % | 1.79 / 1.55 | 1.79 / 1.56 | 0.95 / 0.44 | 0.96 / 0.45 |
+| video | T1 -m2 (`plz:4`) | 62,640,174 | 61,788,517 | -1.36 % | **5.01 / 6.10** | **5.03 / 6.11** | 1.33 / 0.62 | 1.34 / 0.63 |
+| video | T4 -m1 (`plz:1`) | 66,763,444 | 65,451,648 | -1.96 % | 1.87 / 1.76 | **0.62 / 0.66** | 1.16 / 0.62 | 0.35 / 0.23 |
+| video | T4 -m2 (`plz:3`) | 63,257,329 | 62,837,475 | -0.66 % | **4.40 / 5.20** | **1.34 / 1.64** | 1.60 / 0.68 | 0.46 / 0.27 |
+| video | T4 -m4 $compressed (`plz:3`) | 63,609,571 | 63,056,869 | -0.87 % | **4.26 / 5.27** | **1.20 / 1.56** | 1.13 / 0.60 | 0.35 / 0.19 |
+| font | T1 -m1 (`plz:2`) | 7,672,347 | 7,577,104 | -1.24 % | 0.32 / 0.32 | 0.33 / 0.32 | 0.13 / 0.09 | 0.14 / 0.10 |
+| font | T1 -m2 (`plz:4`) | 6,929,099 | 6,717,691 | -3.05 % | **0.75 / 0.91** | **0.76 / 0.92** | 0.19 / 0.11 | 0.19 / 0.12 |
+| font | T4 -m1 (`plz:1`) | 7,745,276 | 7,672,837 | -0.94 % | **0.44 / 0.45** | **0.19 / 0.20** | 0.21 / 0.13 | 0.08 / 0.06 |
+| font | T4 -m2 (`plz:3`) | 7,253,698 | 7,085,828 | -2.31 % | **0.86 / 1.05** | **0.34 / 0.39** | 0.27 / 0.14 | 0.11 / 0.07 |
+| font | T4 -m4 $compressed (`plz:3`) | 7,289,331 | 7,082,817 | -2.83 % | **0.78 / 1.00** | **0.29 / 0.37** | 0.21 / 0.12 | 0.10 / 0.06 |
+
+
+Result: **decompression wins every cell** (CPU and wall, typically 2–5× faster); **size wins
+every cell but one** (`audio`, `-m2` 4 threads: +0.21 %); **compression time still loses 24 of
+60 cells**, almost all at the lazy levels on text-like and small-file data: `plz:3` against
+`tor:5`/`tor:c3` inside `4x4` (text ×1.37–1.51, small ×1.15–1.31, font ×1.22–1.28, video
+×1.18–1.24, document ×1.07–1.19, image ×1.05, exe `$compressed` ×1.06, TILIN `-m2` ×1.00–1.02
+wall) and `plz:4` against `tor:6` with one thread (text ×1.34, font/video ×1.21, small ×1.15,
+document ×1.07, image ×1.02); greedy levels lose only on text 4 threads (×1.06–1.10), font 4
+threads (×1.02–1.05), video wall (×1.06) and small/document 1 thread (×1.02–1.13). Where
+`plz` is slower it is also 0.6–5 % smaller. The lazy parser is memory-latency bound on these
+data (hash-row and candidate loads); the per-position evaluation in assembler gained only ~5 %.
+Timing noise on the shared machine was ±10–50 % between runs even pinned, so cells within
+~5 % are not significant.
+
+**Third round (2026-11-18): compression time.** Same goal (every cell against `tor`); this round
+went after the 24 compression-time cells and the `audio` size cell. Encoder changes only (the
+stream format and the decoder are unchanged):
+
+- *Engine cache in `4x4`.* The cache that hands each `4x4` block an engine with its tables
+  already allocated never matched at the row levels (its short-table check still assumed only
+  the one-way levels had one), so every block of `plz:3`/`plz:4` inside `4x4` allocated and
+  zeroed fresh tables (8–16 MB) and ran on cold memory. Fixed; on top of that a table is only
+  cleared between streams if the previous stream wrote it (a text-only block never touches the
+  rows, a binary one never touches the text table). This alone took most of the `4x4` binary
+  cells (video, image, font, small) from ×1.0–1.2 to ×0.75–0.97.
+- *Text table at the row levels.* Text blocks (the round-2 classifier) of levels 3–4 no longer
+  use the 4/8-way rows: they use a direct table of 2-entry buckets (6-byte hash; 2^18 buckets
+  at level 3, 2^20 at level 4, scaled with the window like the rows) with the one-way lazy
+  evaluation, and insert only part of each match (level 3: the first and last 3 positions,
+  level 4: the last 2). Binary blocks keep the rows. Options `t<bits>`, `g<entries>`,
+  `e<insertions>`.
+- *Greedy levels.* On text blocks levels 1–2 hash into only 2^14 / 2^17 entries of their table
+  (fresher and cache-resident: smaller output too), and they only try block splits on binary
+  blocks (`q2`), where the split pays for its estimate. Level 4's short table is 2^12.
+- *Assembler and parser.* The prefetch of the entry 8 positions ahead moved into
+  `PlzEval1`/`PlzEvalRows`; the lazy parser calls them directly (no Pascal wrapper per
+  position) and copies the rep offsets once per match instead of once per position.
+- `v<n>` (shorter hash on binary blocks, off by default) now skips near-random blocks.
+- Memory-to-memory (`4x4`) the window shrinks to the block (power of 2, ≥ 64 KB), so small
+  blocks get small tables; `tests/plz.sh` checks that this equals streaming with that window.
+
+Measured again (2026-11-18, all 60 cells): each cell is 3 interleaved rounds (`tor` then `plz`,
+each run pinned with `taskset` to the idlest physical cores of the shared 64-core machine,
+`nice -n10`), best of 3 per side; CPU = user + system (the decision criterion), wall shown too;
+bold = `plz` worse. Logs: `/mnt/IA_LAB/agentes/PArc/lz-new/logs/final3/`.
+
+| data | cell | tor size | plz size | Δ size | comp CPU tor/plz | comp wall tor/plz | dec CPU tor/plz | dec wall tor/plz |
+|---|---|---:|---:|---:|---:|---:|---:|---:|
+| tilin512 | T1 -m1 (`plz:2`) | 284,628,505 | 281,361,777 | -1.15 % | 7.33 / 5.20 | 7.40 / 5.22 | 4.10 / 1.82 | 4.10 / 1.82 |
+| tilin512 | T1 -m2 (`plz:4`) | 270,565,702 | 266,290,682 | -1.58 % | 23.02 / 16.77 | 23.03 / 16.78 | 5.79 / 2.23 | 5.80 / 2.23 |
+| tilin512 | T4 -m1 (`plz:1`) | 289,006,803 | 285,199,896 | -1.32 % | 7.00 / 6.04 | 2.10 / 1.91 | 4.56 / 2.10 | 1.33 / 0.69 |
+| tilin512 | T4 -m2 (`plz:3`) | 274,584,657 | 269,518,058 | -1.85 % | 17.53 / 13.65 | 4.87 / 3.95 | 6.71 / 2.55 | 1.90 / 0.97 |
+| tilin512 | T4 -m4 $compressed (`plz:3`) | 276,647,421 | 271,192,397 | -1.97 % | 18.05 / 13.20 | 5.13 / 3.93 | 4.42 / 2.15 | 1.29 / 0.68 |
+| TILIN | T1 -m1 (`plz:2`) | 1,078,738,066 | 1,071,462,943 | -0.67 % | 22.25 / 13.47 | 22.26 / 13.48 | 12.85 / 3.74 | 12.85 / 3.75 |
+| TILIN | T1 -m2 (`plz:4`) | 1,055,483,194 | 1,046,650,199 | -0.84 % | 68.92 / 36.99 | 69.29 / 37.30 | 20.08 / 5.43 | 20.09 / 5.43 |
+| TILIN | T4 -m1 (`plz:1`) | 1,091,769,634 | 1,087,588,940 | -0.38 % | 18.62 / 17.40 | 5.22 / 5.03 | 9.22 / 5.05 | 3.12 / 2.14 |
+| TILIN | T4 -m2 (`plz:3`) | 1,071,314,861 | 1,065,878,213 | -0.51 % | 33.71 / 27.62 | 9.67 / 7.60 | 12.50 / 6.18 | 4.41 / 3.03 |
+| TILIN | T4 -m4 $compressed (`plz:3`) | 1,072,970,322 | 1,066,969,400 | -0.56 % | 35.84 / 25.86 | 9.80 / 7.15 | 9.77 / 5.33 | 3.38 / 2.21 |
+| text | T1 -m1 (`plz:2`) | 32,081,028 | 31,342,044 | -2.30 % | 1.19 / 1.14 | 1.20 / 1.16 | 0.53 / 0.35 | 0.54 / 0.36 |
+| text | T1 -m2 (`plz:4`) | 29,429,591 | 28,750,178 | -2.31 % | 3.31 / 3.17 | 3.32 / 3.18 | 0.76 / 0.55 | 0.76 / 0.56 |
+| text | T4 -m1 (`plz:1`) | 32,211,864 | 31,403,873 | -2.51 % | 1.51 / 1.35 | 0.62 / 0.57 | 0.72 / 0.45 | 0.24 / 0.19 |
+| text | T4 -m2 (`plz:3`) | 30,061,663 | 28,583,701 | -4.92 % | **2.74 / 2.76** | 0.97 / 0.95 | 0.96 / 0.57 | 0.35 / 0.26 |
+| text | T4 -m4 $compressed (`plz:3`) | 30,277,365 | 28,671,662 | -5.30 % | **2.46 / 2.61** | **0.89 / 0.95** | 0.62 / 0.46 | 0.23 / 0.20 |
+| exe | T1 -m1 (`plz:2`) | 80,573,341 | 79,859,654 | -0.89 % | 1.65 / 1.28 | 1.66 / 1.28 | 0.94 / 0.33 | 0.95 / 0.34 |
+| exe | T1 -m2 (`plz:4`) | 79,057,427 | 78,126,172 | -1.18 % | 5.88 / 3.50 | 5.89 / 3.51 | 1.55 / 0.50 | 1.56 / 0.51 |
+| exe | T4 -m1 (`plz:1`) | 81,460,328 | 80,800,220 | -0.81 % | 1.66 / 1.38 | 0.56 / 0.52 | 0.86 / 0.41 | 0.28 / 0.20 |
+| exe | T4 -m2 (`plz:3`) | 79,479,124 | 79,139,051 | -0.43 % | 3.16 / 2.36 | 1.10 / 0.83 | 1.11 / 0.50 | 0.45 / 0.27 |
+| exe | T4 -m4 $compressed (`plz:3`) | 79,917,714 | 79,491,377 | -0.53 % | 2.91 / 2.38 | 0.98 / 0.84 | 0.80 / 0.43 | 0.33 / 0.20 |
+| small | T1 -m1 (`plz:2`) | 4,690,757 | 4,567,954 | -2.62 % | 0.52 / 0.52 | 0.53 / 0.52 | 0.12 / 0.10 | 0.12 / 0.11 |
+| small | T1 -m2 (`plz:4`) | 4,299,569 | 4,277,000 | -0.52 % | **0.78 / 0.82** | **0.79 / 0.83** | 0.17 / 0.12 | 0.18 / 0.13 |
+| small | T4 -m1 (`plz:1`) | 4,727,630 | 4,671,896 | -1.18 % | 0.67 / 0.63 | 0.46 / 0.46 | 0.17 / 0.14 | 0.10 / 0.09 |
+| small | T4 -m2 (`plz:3`) | 4,396,415 | 4,367,284 | -0.66 % | 0.90 / 0.86 | **0.58 / 0.61** | 0.21 / 0.14 | 0.12 / 0.10 |
+| small | T4 -m4 $compressed (`plz:3`) | 4,413,401 | 4,366,223 | -1.07 % | 0.90 / 0.87 | **0.56 / 0.57** | 0.16 / 0.13 | 0.11 / 0.09 |
+| document | T1 -m1 (`plz:2`) | 41,794,289 | 41,066,767 | -1.74 % | 1.30 / 1.08 | 1.31 / 1.09 | 0.62 / 0.30 | 0.62 / 0.32 |
+| document | T1 -m2 (`plz:4`) | 39,949,183 | 39,096,238 | -2.14 % | 3.57 / 3.08 | 3.58 / 3.09 | 0.92 / 0.47 | 0.92 / 0.48 |
+| document | T4 -m1 (`plz:1`) | 42,624,097 | 41,624,430 | -2.35 % | 1.43 / 1.37 | 0.56 / 0.52 | 0.76 / 0.44 | 0.25 / 0.19 |
+| document | T4 -m2 (`plz:3`) | 40,562,832 | 39,825,904 | -1.82 % | 3.08 / 2.83 | 1.01 / 1.01 | 1.06 / 0.48 | 0.34 / 0.25 |
+| document | T4 -m4 $compressed (`plz:3`) | 40,668,877 | 39,677,170 | -2.44 % | 2.69 / 2.54 | 0.90 / 0.88 | 0.79 / 0.44 | 0.27 / 0.20 |
+| large | T1 -m1 (`plz:2`) | 79,570,422 | 78,645,219 | -1.16 % | 2.05 / 1.40 | 2.07 / 1.41 | 1.11 / 0.52 | 1.11 / 0.52 |
+| large | T1 -m2 (`plz:4`) | 75,655,717 | 74,522,634 | -1.50 % | 7.50 / 4.82 | 7.51 / 4.83 | 1.74 / 0.88 | 1.75 / 0.89 |
+| large | T4 -m1 (`plz:1`) | 80,096,432 | 79,073,471 | -1.28 % | 2.23 / 1.65 | 0.71 / 0.58 | 1.35 / 0.68 | 0.43 / 0.27 |
+| large | T4 -m2 (`plz:3`) | 76,716,241 | 76,594,564 | -0.16 % | 5.36 / 3.28 | 1.66 / 1.09 | 1.94 / 0.79 | 0.57 / 0.34 |
+| large | T4 -m4 $compressed (`plz:3`) | 76,828,425 | 76,624,711 | -0.27 % | 5.09 / 3.22 | 1.58 / 1.02 | 1.35 / 0.70 | 0.38 / 0.26 |
+| archive | T1 -m1 (`plz:2`) | 67,646,429 | 66,818,361 | -1.22 % | 1.61 / 1.09 | 1.62 / 1.10 | 0.86 / 0.37 | 0.87 / 0.37 |
+| archive | T1 -m2 (`plz:4`) | 65,912,043 | 65,317,774 | -0.90 % | 5.10 / 3.29 | 5.11 / 3.30 | 1.39 / 0.55 | 1.39 / 0.55 |
+| archive | T4 -m1 (`plz:1`) | 68,341,150 | 67,341,675 | -1.46 % | 1.77 / 1.46 | 0.60 / 0.49 | 1.02 / 0.50 | 0.37 / 0.21 |
+| archive | T4 -m2 (`plz:3`) | 66,314,139 | 65,825,846 | -0.74 % | 3.81 / 2.64 | 1.23 / 0.83 | 1.40 / 0.57 | 0.50 / 0.30 |
+| archive | T4 -m4 $compressed (`plz:3`) | 66,531,275 | 65,761,537 | -1.16 % | 3.62 / 2.97 | 1.19 / 0.98 | 1.04 / 0.51 | 0.35 / 0.20 |
+| image | T1 -m1 (`plz:2`) | 58,746,853 | 58,492,680 | -0.43 % | 1.55 / 1.23 | 1.56 / 1.24 | 0.80 / 0.38 | 0.80 / 0.39 |
+| image | T1 -m2 (`plz:4`) | 56,861,907 | 56,353,441 | -0.89 % | 4.99 / 3.76 | 5.05 / 3.91 | 1.22 / 0.59 | 1.23 / 0.59 |
+| image | T4 -m1 (`plz:1`) | 59,545,860 | 58,890,108 | -1.10 % | 1.70 / 1.53 | 0.61 / 0.53 | 0.96 / 0.52 | 0.32 / 0.19 |
+| image | T4 -m2 (`plz:3`) | 57,422,990 | 57,392,168 | -0.05 % | 3.97 / 2.97 | 1.27 / 0.99 | 1.35 / 0.57 | 0.44 / 0.25 |
+| image | T4 -m4 $compressed (`plz:3`) | 57,249,674 | 56,924,478 | -0.57 % | 3.98 / 3.13 | 1.32 / 1.00 | 0.99 / 0.55 | 0.32 / 0.21 |
+| audio | T1 -m1 (`plz:2`) | 83,827,418 | 83,791,609 | -0.04 % | 1.97 / 1.16 | 2.02 / 1.16 | 1.05 / 0.37 | 1.05 / 0.38 |
+| audio | T1 -m2 (`plz:4`) | 82,524,997 | 81,816,431 | -0.86 % | 6.56 / 4.15 | 6.73 / 4.16 | 1.68 / 0.59 | 1.69 / 0.60 |
+| audio | T4 -m1 (`plz:1`) | 84,173,578 | 83,929,774 | -0.29 % | 2.10 / 1.50 | 0.72 / 0.54 | 1.09 / 0.55 | 0.35 / 0.21 |
+| audio | T4 -m2 (`plz:3`) | 82,868,979 | 83,051,399 | **+0.22 %** | 4.52 / 2.89 | 1.37 / 1.07 | 1.65 / 0.63 | 0.48 / 0.28 |
+| audio | T4 -m4 $compressed (`plz:3`) | 83,042,167 | 83,039,775 | -0.00 % | 4.62 / 2.76 | 1.41 / 1.02 | 1.13 / 0.53 | 0.36 / 0.20 |
+| video | T1 -m1 (`plz:2`) | 64,745,387 | 64,409,731 | -0.52 % | 1.74 / 1.44 | 1.75 / 1.44 | 0.93 / 0.40 | 0.93 / 0.40 |
+| video | T1 -m2 (`plz:4`) | 62,640,174 | 62,072,646 | -0.91 % | 5.83 / 4.67 | 5.83 / 4.68 | 1.37 / 0.65 | 1.38 / 0.65 |
+| video | T4 -m1 (`plz:1`) | 66,763,444 | 65,453,930 | -1.96 % | 1.83 / 1.81 | **0.58 / 0.61** | 1.12 / 0.58 | 0.32 / 0.20 |
+| video | T4 -m2 (`plz:3`) | 63,257,329 | 62,837,815 | -0.66 % | 4.15 / 4.14 | 1.27 / 1.22 | 1.63 / 0.64 | 0.48 / 0.25 |
+| video | T4 -m4 $compressed (`plz:3`) | 63,609,571 | 63,070,779 | -0.85 % | 4.78 / 4.20 | 1.39 / 1.32 | 1.17 / 0.62 | 0.33 / 0.20 |
+| font | T1 -m1 (`plz:2`) | 7,672,347 | 7,591,492 | -1.05 % | 0.32 / 0.29 | 0.33 / 0.29 | 0.14 / 0.09 | 0.14 / 0.10 |
+| font | T1 -m2 (`plz:4`) | 6,929,099 | 6,736,068 | -2.79 % | 0.79 / 0.76 | 0.79 / 0.76 | 0.20 / 0.11 | 0.20 / 0.12 |
+| font | T4 -m1 (`plz:1`) | 7,745,276 | 7,712,329 | -0.43 % | **0.44 / 0.45** | 0.19 / 0.19 | 0.21 / 0.13 | 0.09 / 0.06 |
+| font | T4 -m2 (`plz:3`) | 7,253,698 | 7,112,475 | -1.95 % | 0.85 / 0.77 | 0.33 / 0.33 | 0.24 / 0.15 | 0.10 / 0.08 |
+| font | T4 -m4 $compressed (`plz:3`) | 7,289,331 | 7,115,927 | -2.38 % | 0.75 / 0.73 | **0.28 / 0.30** | 0.19 / 0.13 | 0.07 / 0.06 |
+
+Result: **decompression wins every cell** (CPU, 1.2–3.7× faster). **Size wins 59 of 60**:
+`audio` `-m2` 4 threads is still +0.22 % (`-m4 $compressed` on the same data is −0.00 %).
+**Compression CPU wins 56 of 60** (was 36): the remaining losses are `text` inside `4x4`
+(`plz:3` against `tor:c3` ×1.06, against `tor:5` ×1.01; both 5 % smaller), `small` `-m2` one
+thread (`plz:4` ×1.05) and `font` `-m1` 4 threads (`plz:1` ×1.02); the last two won in the
+previous runs of this round (×0.95–0.97), so they are within the noise (±5 % on this shared
+machine even pinned and interleaved). A few 4-thread cells lose on wall time only, within the
+same noise.
+
+What is left and why:
+
+- *`audio` size.* Per file, `plz` loses on 16-bit PCM of low amplitude: on `example.wav` (16-bit
+  stereo, samples near zero) `tor:3` is 5 % smaller than even `plz:7`, and its 16-bit symbol
+  entropy is 15 % below its byte entropy; the sizes say `tor` gets 2-byte structure that `plz`
+  cannot express (minimum match 3, one literal table per block). `v4` (4-byte hash on binary
+  blocks) closes it to +0.00…+0.02 % but costs ×1.05–1.2 time on video/image/document, so it
+  stays off. A real fix needs a format change (2-byte rep matches or literal contexts).
+- *`text` inside `4x4`.* With one thread `plz:3` already beats `tor:c3` on the same chain
+  (1.80 s against 1.96 s of CPU); with 4 threads `plz` grows more (+0.6 s against +0.3 s). The
+  profile is the same at 1 and 4 threads (half the time in the evaluation loads of the text
+  table and the window), so the extra cost is memory contention between the 4 workers, not
+  code; a 2^17 table (`t17`) did not change it.
 
 **Measurements** (2026-11-17, one `parc` binary containing both codecs; a 64-core Xeon
 E5-2697A v4 shared with other jobs, `nice -n10`, best of 2 runs; CPU = user + system of the
