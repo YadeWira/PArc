@@ -1,10 +1,10 @@
-OREP 0.0.5 (stream format 3, draft) — MIT, Copyright (c) 2026 Yade E. Bravo; written for PArc by osrep.
+OREP 0.0.6 (stream format 3, draft) — MIT, Copyright (c) 2026 Yade E. Bravo; written for PArc by osrep.
 
-Source: https://github.com/YadeWira/omega-srep, branch osrep, tag orep-v0.0.5
-        (commit 64a0590162b1f7776063dbecb6fc1e2802adb44e), release asset orep-unit-0.0.5.tar.gz
+Source: https://github.com/YadeWira/omega-srep, branch osrep, tag orep-v0.0.6
+        (commit b9125f1126bdc2b14dcc290a666f8bb5af67c66d), release asset orep-unit-0.0.6.tar.gz
         (sha256 in the release's SHA256SUMS).
 
-Files copied unchanged from orep-unit-0.0.5.tar.gz:
+Files copied unchanged from orep-unit-0.0.6.tar.gz:
   orep.pas         the Pascal unit (API, framing, decoder, Pascal reference of the core)
   orep_core.c      the native match finder and CRC-32C (freestanding C, no libc)
   orep-format.md   the stream format

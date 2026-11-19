@@ -49,7 +49,7 @@ writes the same bytes.
   directory fields.
 - **Codecs implemented in Pascal** (hot loops in inline assembler), no third-party compression
   libraries linked; the only C/C++ is FreeArc's own Tornado encoder, used for `tor:10` and
-  `tor:15` where it measured faster (`src/parc_torglue.cpp`), and the core of OREP 0.0.5
+  `tor:15` where it measured faster (`src/parc_torglue.cpp`), and the core of OREP 0.0.6
   (`src/orep/orep_core.c`, MIT), both compiled from source and linked statically:
   `storing`, `lzma`, `ppmd`, `grzip`, `dict`, `orep` (long-range matcher, MIT; replaces FreeArc's
   `rep`), `delta`, `tor` (Tornado), `plz`, `lzp`, `mm`,

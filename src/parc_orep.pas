@@ -17,16 +17,16 @@
   su propio encabezado (ventana, bloque, alineación): el decodificador no usa los parámetros
   del método salvo para acotar la memoria (ver TOrepDecStage).
 
-  Hilos: OREP corre en línea (P.Threads = 1), en el hilo que escribe el bloque, como antes la
-  búsqueda de REP. Desde OREP 0.0.5 sus hilos propios avisan cuándo trabajan (P.OnWorkerBusy /
-  OnWorkerIdle) y acá toman y sueltan una ficha del presupuesto global (BudgetWaitEnd con
-  prioridad / BudgetLeave), así que con PARC_OREP_THREADS=k (k >= 2, a lo sumo la parte del
-  bloque) OREP usa un coordinador y k - 1 ayudantes sin pasar de PARC_THREADS (lo verifica
-  tests/thread_budget.py) y con la misma salida. No es el valor por defecto porque resultó más
-  lento (2026-11-18, OREP 0.0.5, 4 hilos): tilin_512m -m1 2,3 s en línea, 3,0 s con k=2,
-  3,4 s con k=3; el set large -m3 7,6 s contra 10,1 s. Los hilos de OREP esperan girando entre
-  trabajos (con la ficha), y el hilo que escribe espera al coordinador con la suya: le faltan
-  fichas a 4x4/lzma. }
+  Hilos (OREP 0.0.6): con dos fichas o más para el bloque (ThreadShare) y al menos 4 MB de
+  entrada, OREP usa P.Threads = esa parte (hasta 4): un coordinador que busca mientras el hilo que
+  escribe pasa el bloque anterior a la etapa siguiente, y ayudantes. Ningún hilo de OREP espera
+  una ficha: P.OnWorkerTryBusy toma una del presupuesto global sin esperar (BudgetTryTake; si no
+  hay, ese bloque o lote lo busca el hilo que ya tiene la suya) y OnWorkerIdle la devuelve
+  (BudgetGive) antes de dormir, tras girar a lo sumo P.SpinUs = 200 us. El hilo que escribe
+  suelta su ficha mientras espera a la búsqueda (OnCallerWaitBegin/End -> BudgetWaitBegin/End).
+  Así nunca se pasa de PARC_THREADS (tests/thread_budget.py) y no hay deadlock: nadie espera una
+  ficha teniendo otra. Sin ganchos OREP no se usa con hilos (P.Threads = 1). La salida es la
+  misma con cualquier cantidad de hilos. PARC_OREP_THREADS=k fija k (1 = en línea). }
 unit parc_orep;
 
 {$mode objfpc}{$H+}
@@ -90,6 +90,7 @@ type
     FPend: array of Byte;      // entrada antes de crear OREP (para decidir los hilos)
     FPendLen: SizeInt;
     FOut: array of Byte;
+    FCallerHad: Boolean;       // el hilo que escribe tenía ficha al empezar a esperar a OREP
     procedure Start(Threads: Integer);
     procedure Run(Buf: PByte; Count: SizeInt; Mode: Integer);
   protected
@@ -296,32 +297,39 @@ end;
 
 const
   OREP_OUT_BUF = 1 shl 20;      // salida de una llamada a OREP
-  { Hilos de OREP como mucho (PARC_OREP_THREADS) }
-  OREP_MAX_THREADS = 8;
+  { Hilos de OREP como mucho (más allá casi no acelera) }
+  OREP_MAX_THREADS = 4;
+  { Giro de un hilo ocioso de OREP antes de devolver la ficha y dormir (sugerido por OREP) }
+  OREP_SPIN_US = 200;
   { Con menos entrada que esto la etapa no crea hilos (no compensa) }
   OREP_THREADS_MIN_INPUT = 4 shl 20;
 
-{ Ganchos de OREP 0.0.5: los llaman sus propios hilos (coordinador y ayudantes) al empezar a
-  trabajar y antes de dormir. Una ficha del presupuesto global por hilo, como los hilos del match
-  finder de LZMA (BudgetEnter puede esperar; BudgetLeave también suelta el evento del hilo). }
-procedure OrepHookBusy(Ctx: Pointer);
+{ Ganchos de OREP 0.0.6 (ver el comentario de la unidad). Las fichas de los hilos de OREP no
+  van atadas a un hilo: la puede pedir el que escribe para el coordinador y devolverla este. }
+function OrepHookTryBusy(Ctx: Pointer): Boolean;
 begin
-  // con prioridad (como quien vuelve de una espera): el hilo que escribe espera a este
-  if not BudgetHeld then BudgetWaitEnd(True);
+  Result := BudgetTryTake;
 end;
 
 procedure OrepHookIdle(Ctx: Pointer);
 begin
-  BudgetLeave;
+  BudgetGive;
+end;
+
+procedure OrepHookCallerWaitBegin(Ctx: Pointer);
+begin
+  TOrepEncStage(Ctx).FCallerHad := BudgetWaitBegin;
+end;
+
+procedure OrepHookCallerWaitEnd(Ctx: Pointer);
+begin
+  BudgetWaitEnd(TOrepEncStage(Ctx).FCallerHad);
 end;
 
 function OrepEncThreads: Integer;
 begin
-  // Por defecto en línea (ver el comentario de la unidad): con sus hilos y el presupuesto, PArc
-  // resultó más lento. PARC_OREP_THREADS=k los activa (k <= la parte del bloque, al menos 2;
-  // con una sola ficha para el bloque, en línea: el hilo que escribe se queda con la suya
-  // mientras espera al coordinador, y el coordinador necesita otra)
-  Result := StrToIntDef(GetEnvironmentVariable('PARC_OREP_THREADS'), 1);
+  Result := StrToIntDef(GetEnvironmentVariable('PARC_OREP_THREADS'), 0);
+  if Result <= 0 then Result := OREP_MAX_THREADS;
   if Result > PoolWorkers(OREP_MAX_THREADS) then Result := PoolWorkers(OREP_MAX_THREADS);
   if Result < 2 then Result := 1;
 end;
@@ -358,8 +366,13 @@ begin
   P := OrepParamsOf(FM, Threads);
   if Threads >= 2 then
   begin
-    P.OnWorkerBusy := @OrepHookBusy;
+    // todos los ganchos o ninguno: con hilos y sin ellos podría haber deadlock (OREP 0.0.6)
+    P.OnWorkerTryBusy := @OrepHookTryBusy;
     P.OnWorkerIdle := @OrepHookIdle;
+    P.OnCallerWaitBegin := @OrepHookCallerWaitBegin;
+    P.OnCallerWaitEnd := @OrepHookCallerWaitEnd;
+    P.HookCtx := Self;
+    P.SpinUs := OREP_SPIN_US;
   end;
   New(FEnc);   // en el heap: con hilos no se puede mover
   r := OrepEncInit(FEnc^, P);

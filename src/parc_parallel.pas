@@ -169,6 +169,11 @@ procedure BudgetEnter;
 procedure BudgetLeave;
 { ¿Este hilo tiene una ficha? }
 function BudgetHeld: Boolean;
+{ Una ficha sin atarla a un hilo (para hilos ajenos, los de OREP: la pide un hilo y la puede
+  devolver otro). BudgetTryTake no espera: True si había una libre y nadie la estaba esperando.
+  BudgetGive la devuelve (al primero que espera, o a las libres). }
+function BudgetTryTake: Boolean;
+procedure BudgetGive;
 { Hilos que el contexto actual puede planear: el presupuesto entero, o la parte de un trabajo
   de un pool externo (TJobPool.Share). }
 function ThreadShare: Integer;
@@ -313,11 +318,24 @@ begin
   AcquireWith(W, High);
 end;
 
+function BudgetTryTake: Boolean;
+begin
+  EnterCriticalSection(BLock);
+  Result := (BAvail > 0) and (BHighHead = nil) and (BLowHead = nil);
+  if Result then Dec(BAvail);
+  LeaveCriticalSection(BLock);
+end;
+
 procedure BudgetRelease;
+begin
+  TokenHeld := False;
+  BudgetGive;
+end;
+
+procedure BudgetGive;
 var
   W: PBudgetWaiter;
 begin
-  TokenHeld := False;
   EnterCriticalSection(BLock);
   W := BHighHead;
   if W <> nil then
