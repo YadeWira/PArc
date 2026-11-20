@@ -98,12 +98,20 @@ the archive; blocks that finish ahead of their turn wait in memory (at most min(
 in total, 256 MB on 32-bit) and only what does not fit goes to a temporary file next to the
 archive.
 
-`plz` is PArc's own fast LZ codec (it is meant to replace FreeArc's Tornado, `tor`, in the
-presets): `-mplz:<level>[:<window>]`, levels 1–7 (1–2 greedy, about `tor:3`/`tor:4`; 3–4 lazy,
-about `tor:5`/`tor:6`; 5–7 slower and smaller), default level 3; the window defaults to 8 MB
-(levels 1–2), 16 MB (3) or 64 MB (4–7), e.g. `-mrep:96m+exe+delta+plz:4` or
-`-m4x4:plz:1` (blocks of the window size in parallel). It decompresses about twice as fast as
-`tor`. Stream format in [FORMATO-PARC.md §6.2](formato/FORMATO-PARC.md).
+`plz` is PArc's own fast LZ codec, the engine of `-m1`/`-m2` and of already-compressed files
+up to `-m4`: `-mplz:<level>[:<window>]`, levels 1–7 (1–2 greedy, 3–4 lazy, 5–7 slower and
+smaller), default level 3; the window defaults to 8 MB (levels 1–2), 16 MB (3) or 64 MB (4–7),
+e.g. `-mrep:96m+exe+delta+plz:4` or `-m4x4:plz:1` (blocks of the window size in parallel;
+`xplz` = `4x4:plz`, and `eplz` picks `plz` with one thread and `xplz` with more). Stream format
+in [FORMATO-PARC.md §6.2](formato/FORMATO-PARC.md).
+
+FreeArc's Tornado (`tor`, `xtor`, `etor`) was removed after PArc 0.0.5 (it was FreeArc code;
+PArc is moving to the MIT license). `plz` replaced it everywhere: `-m1` uses `plz:2` with one
+thread and `4x4:plz:1` with more (was `tor:4:8mb:h4m` / `4x4:tor:3:8mb`), `-m2` `plz:4` /
+`4x4:plz:3` (was `tor:6` / `4x4:tor:5`), `$compressed` files at `-m4` `eplz:3` (was `etor:c3`).
+A `tor` method on the command line is an error (exit code 3, with a hint to use `plz`), and
+blocks compressed with `tor` by older pre-releases no longer decode (exit code 3: extract them
+with PArc 0.0.5).
 
 When updating (`a`, `u`, `f`), solid blocks that remain intact are copied without recompression;
 `--recompress` forces rebuilding them. With `d` and an explicit `-m`, the whole archive is
@@ -356,13 +364,13 @@ parc x site.parc '*.css' -ep -dpcss                     # all .css files, flat
 
 | option | effect |
 |---|---|
-| `-mt<N>` | thread budget for the whole process, exactly like `PARC_THREADS=N` (which it overrides): it also chooses the preset alternatives (`-mt1 -m1` uses the single-thread `tor:4`). `-mt0` = default |
+| `-mt<N>` | thread budget for the whole process, exactly like `PARC_THREADS=N` (which it overrides): it also chooses the preset alternatives (`-mt1 -m1` uses the single-thread `plz:2`). `-mt0` = default |
 | `-lc<size>` | memory limit for compression (bare number = MB; `k`/`m`/`g`; or `N%` of RAM; `-lc-` or `-lc0` = no limit). Default: automatic, see below |
 | `-ld<size>` | `t`/`x`/`e`: do not decompress blocks whose method declares more memory than the limit; their files are reported and the exit code is **7**. `-ld-` = no limit (the default) |
 
 The compression limit applies to the encoders running at the same time. PArc estimates what
 each method chain needs (all stages of a chain run together: lzma by its exact encoder size,
-match finder included; rep window and hash; PPMd model; Tornado buffer and hash; lzp/dict/grzip
+match finder included; rep window and hash; PPMd model; plz window and tables; lzp/dict/grzip
 blocks; `4x4` counts one inner encoder per thread plus its blocks; `cm` and `srep` keep the whole
 block in memory) and, if a block's chain does not fit, shrinks the largest consumer first
 (dictionaries, windows, the PPMd model) until it fits, like FreeArc's memory limiting. Blocks
@@ -454,7 +462,7 @@ extracting, the half-written file is deleted. A second Ctrl-C stops immediately.
 
 | variable | effect |
 |---|---|
-| `PARC_THREADS` | maximum number of threads working at the same time in the whole process (default: CPU cores, at most 64): block compression, 4x4/grzip, REP hashing, the multi-threaded LZMA match finder, `t` verification and parallel extraction all share it. It also picks the preset alternatives, like FreeArc's `-mtN` (e.g. `PARC_THREADS=1 -m1` uses the single-thread `tor:4`). The `-mt<N>` option overrides it |
+| `PARC_THREADS` | maximum number of threads working at the same time in the whole process (default: CPU cores, at most 64): block compression, 4x4/grzip, REP hashing, the multi-threaded LZMA match finder, `t` verification and parallel extraction all share it. It also picks the preset alternatives, like FreeArc's `-mtN` (e.g. `PARC_THREADS=1 -m1` uses the single-thread `plz:2`). The `-mt<N>` option overrides it |
 | `PARC_BUFMEM` | MB of memory for compressed blocks waiting their turn when compressing in parallel (default min(1024, RAM/4), 256 on 32-bit); the rest goes to temporary files |
 | `PARC_CRC` | `table` disables the PCLMULQDQ CRC-32 (for measurements) |
 

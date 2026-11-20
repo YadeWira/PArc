@@ -269,8 +269,8 @@ forever, e.g. with very small memories), the model is restarted instead.
 ### 6.2 `plz` (since 2026-11)
 
 `plz` is PArc's own LZ77 codec (`src/parc_plz.pas` decoder and format, `src/parc_plzenc.pas`
-encoder), written to replace Tornado (`tor`), which comes from FreeArc. It is not derived from
-Tornado; it uses textbook techniques: LZ77 with four repeated offsets, length-limited canonical
+encoder), written to replace Tornado (`tor`), which came from FreeArc and was removed after
+0.0.5 (`tor` blocks are no longer read). It is not derived from Tornado; it uses textbook techniques: LZ77 with four repeated offsets, length-limited canonical
 Huffman codes rebuilt per block, literals in four interleaved streams.
 
 Method string: `plz[:<level>][:<window>][:h<hash>]` plus tuning options that only the encoder

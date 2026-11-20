@@ -1,5 +1,6 @@
 # PArc — pending work and details
 
+Updated: 2026-11-20 (Tornado removed: `plz` in the presets, no C/C++ in the build)  
 Updated: 2026-10-30 (phase 3b merged to main: presets + sched + determinism)  
 Updated: 2026-10-29 (output determinism, PPMd asm fix)  
 Updated: 2026-10-29 (block scheduling under the thread budget)  
@@ -10,6 +11,9 @@ This file is the project backlog. It records decisions, measurements and accepta
 the next session does not need to rediscover them.
 
 ## P0 — large single-file speed: Tornado/REP
+
+> History: Tornado was replaced by `plz` and removed (2026-11-20, see below); what is left of
+> this item is REP. The numbers below are from the `tor` era.
 
 ### Problem
 
@@ -115,30 +119,33 @@ single 64-bit move in `FindMatchLen`.
 Acceptance: for TILIN, `-m1` should be materially faster without giving up the ~57,8 % ratio;
 otherwise keep the current preset.
 
-## Next — `plz` replaces Tornado (relicensing step)
+## Done — `plz` replaced Tornado (relicensing step, 2026-11-20)
 
 `plz` (2026-11-17, `src/parc_plz.pas`, `src/parc_plzenc.pas`, format in FORMATO-PARC.md §6.2)
-is PArc's own LZ codec, written without Tornado's code. Measured against every `tor` use of the
-presets (`docs/ESTADO.md`, "plz"): smaller, less compression CPU and about half the
-decompression time. The presets still use `tor`. Pending, in order:
+is PArc's own LZ codec, written without Tornado's code. After three rounds against every `tor`
+use of the presets (`docs/ESTADO.md`, "plz") it replaced Tornado, and Tornado was deleted:
 
-1. Switch the presets: `1binary = plz:2`, `2binary = plz:4`, `ex1binary = xplz:1`,
-   `ex2binary = xplz:3`, `4$compressed = 4rep + eplz:3`, `4x$compressed = eplz:3:8m`,
-   `bmpfastest = mm:d1 + plz:2`, `3xt = dict:64m:80% + plz:5:96m` (with `xplz = 4x4:plz`,
-   `eplz = (|x)plz`); update the expectations in tests that name `tor` (cli, determinism).
-2. Remove the Tornado encoder (`parc_torenc`, `parc_torfast/toropt/torrun.inc`,
-   `parc_torglue.cpp/.patch`, the C++ part of `build.sh`) and then the decoder
-   (`parc_tornado`, `parc_tordec.inc`); `tor` blocks stop decoding (pre-1.0, no format
-   compatibility promised), `tests/run_tornado_tests.sh` goes away.
-3. Before switching (owner's condition: beat `tor` in every cell): after the third round
-   (ESTADO "Third round") 4 of 60 cells still lose compression CPU — `text` inside `4x4`
-   (`plz:3` ×1.06 against `tor:c3`, ×1.01 against `tor:5`; memory contention between the 4
-   workers, one thread already wins), plus `small` `-m2` and `font` `-m1` 4 threads at
-   ×1.02–1.05 (won in other runs: noise) — and `audio` `-m2` 4 threads size (+0.22 %: 16-bit
-   PCM of low amplitude, where `tor` gets 2-byte structure that the `plz` format cannot code;
-   needs 2-byte rep matches or literal contexts, i.e. a format change).
-4. Possible gains still open: literal coding with context (previous byte), an optimal parser for
-   levels 6-7, and assembler for the 4-stream literal decoder.
+- Presets: `1binary = plz:2`, `2binary = plz:4`, `ex1binary = xplz:1`, `ex2binary = xplz:3`,
+  `4$compressed = 4rep + eplz:3`, `4x$compressed = eplz:3:8m`, `bmpfastest = mm:d1 + 1binary`
+  (the `:t0` of `tor` dropped, also in `ex1`'s `$wav`/`$bmp`), `3xt = dict:64m:80% + plz:5:96m`,
+  with `xplz = 4x4:plz` and `eplz = (|x)plz` (`xtor`/`etor` gone). `4x4` with no inner method
+  uses `plz:1:1mb` (FreeArc: `tor:3:1mb`).
+- Removed: the Pascal Tornado encoder (`parc_torenc.pas`, `parc_torfast/toropt/torrun.inc`),
+  FreeArc's C++ encoder and its bridge (`parc_torglue.cpp/.patch`, the `g++`/`clang++` steps
+  and `-lstdc++`/libgcc/mingw link flags of `build.sh`; `reference/.../Compression/Tornado`), the
+  decoder (`parc_tornado.pas`, `parc_tordec.inc`) and `tests/run_tornado_tests.sh`,
+  `tests/test_tornado.lpr`, `tests/tor_optfuzz.py`. PArc builds with FPC alone; the binaries
+  link only libc/libm (Linux) or Windows system DLLs.
+- Sanity check against old `main` (ESTADO "Tornado removed"): every `-m1`/`-m2` cell smaller and
+  faster (TILIN 1 thread `-m2`: -0.84 %, 69 → 38 s, decompression 21 → 5 s); `-m3`/`-m4` differ
+  only on `$compressed` files (±0.2 %); `-m5`…`-m9` byte-identical.
+- `tor`/`xtor`/`etor` on the command line: error (exit 3) with a hint to use `plz`; `tor` blocks
+  of older archives: error (exit 3) "extract this archive with PArc 0.0.5" (pre-1.0, no format
+  compatibility promised).
+- Still open from the comparison (ESTADO "Third round"): `audio` `-m2` 4 threads is +0.22 %
+  (16-bit PCM of low amplitude: needs 2-byte rep matches or literal contexts, a format change)
+  and `text` inside `4x4` is ×1.01–1.06 compression CPU. Possible gains: literal coding with
+  context, an optimal parser for levels 6–7, assembler for the 4-stream literal decoder.
 
 ## Done — PPMd from the LZMA SDK (relicensing step)
 
@@ -550,7 +557,8 @@ Still to consider:
 ## Decisions / non-goals
 
 - Licence: GPL-2.0 today; the plan is MIT, which needs every GPL-derived FreeArc/lpaq1 piece
-  replaced (PPMd done in 2026-11 with the LZMA SDK).
+  replaced (PPMd done in 2026-11 with the LZMA SDK; Tornado replaced by the own `plz` and
+  removed on 2026-11-20).
 - `.arc`, `.zip`, `.7z`, `.rar` are out of scope; use FreeArc-ex for those containers.
 - No GUI and no SFX creation; existing SFX archives are read and preserved on update.
 - bsc/libbsc is Apache-2.0 (incompatible with GPLv2); bzip3 is LGPL-3+ (incompatible).
@@ -570,7 +578,7 @@ Still to consider:
 - [x] Silesia benchmark.
 - [x] 0.0.1 and 0.0.2 GitHub releases; asset hashes verified after download.
 - [ ] Real Windows 10/7 re-test for 0.0.2.
-- [ ] Tornado/REP speed work.
+- [ ] REP speed work (Tornado replaced by `plz`, 2026-11-20).
 - [x] PPMd from the LZMA SDK (`Ppmd8`, var.I).
 - [x] Preset monotonicity for large single files.
 - [ ] Exact BCJ2 (optional).

@@ -1,4 +1,4 @@
-# PArc status (2026-10-30)
+# PArc status (2026-11-20)
 
 PArc is an archiver written in **Free Pascal** with its own format, **`.parc`**, for Windows 7+
 (x86/x64) and Linux x64. It does not read or write `.arc` and has no GUI: support for `.arc`
@@ -8,7 +8,7 @@ and the other containers (`.zip`/`.7z`/`.rar`) lives in
 ## Layout
 
 ```
-src/                     Pascal sources (+ parc_torglue.cpp/.patch: bridge to FreeArc's Tornado encoder)
+src/                     Pascal sources (with inline assembler; no C/C++)
 docs/                    manual (USO.md), format (formato/FORMATO-PARC.md), codecs
 tests/                   tests, codec oracles and fuzzers
 reference/freearc-0.67/  only Compression/: C codec sources and test oracle
@@ -21,7 +21,7 @@ The rest of the FreeArc 0.67 tree is in git history (commit `82ea8d9`) and in Fr
 | phase | status |
 |---|---|
 | FreeArc/PArc bugs | ✅ closed (the `.arc` parity fixes remain as history; see tag `entrega-arc`) |
-| Ported codecs | ✅ closed (LZMA, LZ4, PPMd, Tornado, REP, 4x4, Dict, LZP, Delta, MM, TTA, GRZip, BCJ, DisPack, SREP) |
+| Ported codecs | ✅ closed (LZMA, LZ4, PPMd, REP, 4x4, Dict, LZP, Delta, MM, TTA, GRZip, BCJ, DisPack, SREP; Tornado was ported too and removed after 0.0.5, replaced by the own `plz`) |
 | `.arc` compatibility | ❌ dropped: rejected with a message pointing to FreeArc-ex |
 | GUI | ❌ dropped |
 | `.zip/.7z/.rar` containers | ➡ moved to FreeArc-ex (tag `entrega-arc`) |
@@ -38,11 +38,12 @@ The rest of the FreeArc 0.67 tree is in git history (commit `82ea8d9`) and in Fr
 - Commands: `l`, `lb`, `t`, `x`, `e`, `a`, `u`, `f`, `d`, `r`, and FreeArc's `v`, `lt`, `create`,
   `m`, `mf`, `ch`, `rr<spec>`, `c`, `cw`, `j`, `k` (tests/cli_commands.sh). Not implemented: `s`
   (SFX) and `modify`.
-- Methods: `storing`, `lzma`, `ppmd`, `grzip`, `dict`, `rep`, `delta`, `tor`, `plz`, `lzp`, `mm`,
+- Methods: `storing`, `lzma`, `ppmd`, `grzip`, `dict`, `rep`, `delta`, `plz`, `lzp`, `mm`,
   `tta`, `4x4`, `exe` (BCJ), `lz4`, `dispack070`, `srep` and `cm` (context mixing), alone or
   chained.
-- `plz` (2026-11) is PArc's own LZ77 codec (no FreeArc code), meant to replace Tornado in the
-  presets: see "plz" below for the design and the measurements against `tor`; stream format in
+- `plz` (2026-11) is PArc's own LZ77 codec (no FreeArc code). Since 2026-11-20 it is the LZ of
+  the presets (`-m1`/`-m2`, `$compressed` up to `-m4`, `3xt`) and Tornado (`tor`) is gone: see
+  "plz" and "Tornado removed" below for the design and the measurements; stream format in
   `formato/FORMATO-PARC.md` §6.2.
 - FreeArc built-in presets ported: `-m0`…`-m9`, `-mx`, `-mxx` and the `d/t/xt/xb/binary/rep` families.
 - `ppmd` (2026-11) is PPMd var.I from the public-domain LZMA SDK (`Ppmd8`), ported to Pascal
@@ -588,6 +589,44 @@ What is left and why:
   profile is the same at 1 and 4 threads (half the time in the evaluation loads of the text
   table and the window), so the extra cost is memory contention between the 4 workers, not
   code; a 2^17 table (`t17`) did not change it.
+
+**Tornado removed (2026-11-20).** The presets switched to the round-3 cells (`1binary = plz:2`,
+`2binary = plz:4`, `ex1binary = xplz:1`, `ex2binary = xplz:3`, `4$compressed = 4rep + eplz:3`,
+`4x$compressed = eplz:3:8m`, `bmpfastest = mm:d1 + 1binary`, `3xt = dict:64m:80% + plz:5:96m`;
+`xplz = 4x4:plz`, `eplz = (|x)plz`) and Tornado was deleted: encoder (Pascal and FreeArc's C++
+with its bridge), decoder, `reference/.../Tornado`, the C++ steps of `build.sh` and the tor
+tests (~16,900 lines). The build needs only FPC; Linux binaries link libc/libm, the `.exe`
+only Windows system DLLs. `tor`/`xtor`/`etor` given with `-m` fail (exit 3, hint to use
+`plz`); `tor` blocks of older archives fail with "extract this archive with PArc 0.0.5".
+
+Sanity check of the whole presets, old `main` (8ab0ae4, `tor`) against the new build, with the
+groups (`$compressed`, `$text`...) as in real use. Data: `mix` = the `small`, `font`, `document`
+and `exe` sets (256 MB, 7,201 files) and `TILIN.tar`. Levels whose method changed, measured one
+at a time on a quiet machine (load ~5), old/new interleaved, best of 3 (mix) or 2 (TILIN),
+pinned to idle physical cores; CPU = user + system. Logs:
+`/mnt/IA_LAB/agentes/PArc/notor/logs/bench2.csv`.
+
+| data | cell | old size | new size | Δ | comp wall old/new | comp CPU old/new | dec wall old/new | dec CPU old/new |
+|---|---|---:|---:|---:|---:|---:|---:|---:|
+| mix | T1 -m1 | 141,666,657 | 139,924,545 | -1.23 % | 4.12 / 3.31 | 4.12 / 3.28 | 2.02 / 0.82 | 2.02 / 0.81 |
+| mix | T1 -m2 | 130,671,916 | 128,831,831 | -1.41 % | 8.94 / 8.13 | 8.88 / 7.97 | 3.03 / 1.63 | 3.01 / 1.62 |
+| mix | T1 -m3 | 126,845,173 | 126,577,194 | -0.21 % | 18.52 / 18.34 | 18.48 / 18.29 | 5.25 / 4.68 | 5.23 / 4.67 |
+| mix | T1 -m4 | 124,822,486 | 124,579,537 | -0.19 % | 31.05 / 30.30 | 31.02 / 30.22 | 5.40 / 4.49 | 5.38 / 4.49 |
+| mix | T4 -m1 | 143,240,238 | 141,452,892 | -1.25 % | 1.36 / 1.22 | 3.78 / 3.32 | 0.58 / 0.42 | 1.82 / 0.99 |
+| mix | T4 -m2 | 132,297,063 | 130,761,945 | -1.16 % | 2.63 / 2.56 | 7.86 / 7.30 | 0.83 / 0.55 | 2.74 / 1.81 |
+| mix | T4 -m3 | 126,471,835 | 126,434,015 | -0.03 % | 7.94 / 8.02 | 25.67 / 25.80 | 1.43 / 1.39 | 4.44 / 4.34 |
+| mix | T4 -m4 | 125,937,969 | **125,956,437** | **+0.01 %** | 10.59 / 10.72 | 29.13 / 29.17 | 1.77 / 1.79 | 5.03 / 4.87 |
+| TILIN | T1 -m1 | 1,078,738,066 | 1,071,462,943 | -0.67 % | 22.13 / 13.77 | 22.09 / 13.49 | 13.23 / 3.81 | 13.20 / 3.80 |
+| TILIN | T1 -m2 | 1,055,483,194 | 1,046,650,199 | -0.84 % | 69.37 / 37.60 | 69.21 / 37.53 | 21.05 / 5.29 | 21.01 / 5.27 |
+| TILIN | T4 -m1 | 1,091,769,634 | 1,087,588,940 | -0.38 % | 5.55 / 5.05 | 19.49 / 16.65 | 3.32 / 2.28 | 9.58 / 5.29 |
+| TILIN | T4 -m2 | 1,071,314,861 | 1,065,878,213 | -0.51 % | 10.07 / 8.10 | 36.00 / 28.42 | 4.43 / 3.14 | 13.27 / 6.24 |
+
+`-m3`/`-m4` change only on `$compressed` files (`document` has some): the sizes there move by
+±0.2 % and the times are within noise (mix T4 `-m4` is +18 KB, +0.01 %, from `4x4:plz:3`
+against `4x4:tor:c3` on those files). `-m5`…`-m9` (and TILIN `-m3`…`-m9`, a single `.tar`
+with no `$compressed` file) use exactly the same methods as before (`--print-config` differs
+only in the lines above) and gave byte-identical sizes in a first, parallel run (mix T1/T4
+`-m1`…`-m9`, TILIN T4 `-m1`…`-m9`; its times were too noisy to report: load ~30).
 
 **Measurements** (2026-11-17, one `parc` binary containing both codecs; a 64-core Xeon
 E5-2697A v4 shared with other jobs, `nice -n10`, best of 2 runs; CPU = user + system of the
