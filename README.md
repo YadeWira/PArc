@@ -20,7 +20,7 @@ Documentation: [manual](docs/USO.md) · [format](docs/formato/FORMATO-PARC.md) �
 | Latest release | [![Release][relBadge]][relLink] (pre-releases until 1.0.0; no format compatibility promised before then) |
 | CI | [![CI][ciBadge]][ciLink] [![macOS][macBadge]][macLink] Linux x64, Linux arm64 and macOS arm64: build and round trip at every level with 1 and 4 threads |
 | vs FreeArc 0.67.1 | smaller and faster at `-m1`…`-m9` on TILIN.tar with 1 thread; with 4 threads too, except a tie in `-m5` compression ([details](docs/ESTADO.md)) |
-| License | GPL-2.0 (moving to MIT: the FreeArc-derived code is being rewritten) |
+| License | GPL-2.0 (moving to MIT: the FreeArc-derived code is being rewritten; Tornado already replaced by the own `plz`) |
 
 ## Platforms
 
@@ -48,15 +48,15 @@ writes the same bytes.
   and adds 64-bit nanosecond timestamps, Windows attributes and Unix modes/links as optional
   directory fields.
 - **Codecs implemented in Pascal** (hot loops in inline assembler), no third-party compression
-  libraries linked; the only C/C++ is FreeArc's own Tornado encoder, used for `tor:10` and
-  `tor:15` where it measured faster (`src/parc_torglue.cpp`), and the core of OREP 0.0.8
-  (`src/orep/orep_core.c`, MIT), both compiled from source and linked statically:
+  libraries linked; the only C is the core of OREP 0.0.8 (`src/orep/orep_core.c`, MIT, compiled
+  from source and linked statically):
   `storing`, `lzma`, `ppmd`, `grzip`, `dict`, `orep` (long-range matcher, MIT; replaces FreeArc's
-  `rep`), `delta`, `tor` (Tornado), `plz`, `lzp`, `mm`,
+  `rep`), `delta`, `plz`, `lzp`, `mm`,
   `tta`, `4x4`, `exe` (BCJ x86), `lz4`, `dispack070` (DisPack), `srep` (SREP) and `cm` (context mixing), alone or in
-  chains (`exe+dispack070+lzma`, `srep+lzma`, …). `plz` is PArc's own LZ codec, written to
-  replace Tornado (FreeArc code) in `-m1`…`-m4`: smaller, faster to compress and about twice as
-  fast to decompress (measurements in `docs/ESTADO.md`; the presets still use `tor` for now).
+  chains (`exe+dispack070+lzma`, `srep+lzma`, …). `plz` is PArc's own LZ codec, the engine of
+  `-m1`/`-m2` and of `$compressed` files up to `-m4`: it replaced FreeArc's Tornado (`tor`),
+  which was removed after 0.0.5 — smaller, faster to compress and 2–3× faster to decompress
+  (measurements in `docs/ESTADO.md`). Archives with `tor` blocks need PArc 0.0.5 to extract.
 - **Smaller and faster than FreeArc 0.67.1** at `-m1`…`-m9` on the test corpora. `-mx` gives
   the smallest archives that still decompress fast; `-mxx` adds context mixing (`cm`) for the
   absolute smallest archives, at the cost of decompression speed (see `docs/ESTADO.md`).
@@ -117,17 +117,16 @@ Most FreeArc 0.67 options work the same way: `-x`/`-n` and `@listfile`, size and
 
 ## Build
 
-Requires Free Pascal 3.2 or newer, `g++` (linux64) and the MinGW-w64 `g++`
-(`x86_64-w64-mingw32-g++`, `i686-w64-mingw32-g++`) for the Windows targets: `build.sh` compiles
-FreeArc's Tornado encoder (`reference/freearc-0.67/Compression/Tornado`, patched with
-`src/parc_torglue.patch`) and links it statically (no extra DLLs: the `.exe` imports the same
-system DLLs as before, kernel32/user32/shell32/oleaut32/msvcrt).
+Requires only Free Pascal 3.2 or newer (plus the FPC cross compilers in `FPC_CROSS` for the
+other targets): everything is Pascal with inline assembler, no C/C++ compiler and no libstdc++.
+The Linux binaries need only libc and libm; the `.exe` imports only Windows system DLLs
+(kernel32/user32/advapi32/shell32/oleaut32/msvcrt).
 
 ```sh
 ./build.sh linux64     # default; produces build/linux64/parc
-./build.sh linux32     # Linux x86: g++ -m32 and the FPC i386 cross compiler (FPC_CROSS)
-./build.sh linuxarm64  # native on arm64, or with aarch64-linux-gnu-g++ and the FPC cross compiler
-./build.sh macos       # on a Mac: clang++ (Xcode) and Homebrew fpc
+./build.sh linux32     # Linux x86: the FPC i386 cross compiler (FPC_CROSS)
+./build.sh linuxarm64  # native on arm64, or with the FPC aarch64 cross compiler
+./build.sh macos       # on a Mac: Homebrew fpc and the Xcode SDK
 ./build.sh win64       # needs the Windows cross toolchain (FPC_CROSS)
 ./build.sh win32
 ./build.sh all         # every target except macos
@@ -145,7 +144,7 @@ bash tests/cli.sh tests/cli_options.sh tests/cli_commands.sh
 bash tests/stdio.sh tests/volumes.sh
 bash tests/rs_recovery.sh tests/parc_crypt.sh tests/cm.sh
 bash tests/dispack.sh tests/srep.sh tests/bcj.sh
-bash tests/run_tornado_tests.sh tests/crypto_vectors.sh
+bash tests/crypto_vectors.sh tests/determinism.sh
 bash tests/plz.sh tests/plz_cross.sh
 sudo bash tests/fixes.sh
 python3 tests/fuzz.py build/linux64/parc 100 build/linux64/*.parc
@@ -180,7 +179,19 @@ part of PArc; it lives in the FreeArc-ex repository and in PArc's git history (c
 
 ## License
 
-GNU General Public License v2.0; see [`LICENSE`](LICENSE).
+GNU General Public License v2.0; see [`LICENSE`](LICENSE). PArc is moving to MIT by replacing
+the code derived from GPL sources; the current inventory:
 
-The codec implementations are ports of FreeArc 0.67 sources by Bulat Ziganshin and
+| part | origin | license state |
+|---|---|---|
+| container, CLI, `.parc` format, Reed–Solomon, volumes, `bcj2` filter, LZ4 decoder | own code | own (MIT-ready) |
+| encryption (XChaCha20/AES-GCM/Argon2id/BLAKE2b) | own code from the RFCs/FIPS | own (MIT-ready) |
+| `plz` (the LZ of `-m1`/`-m2`; replaced Tornado, removed 2026-11-20) | own code | own (MIT-ready) |
+| `ppmd` | LZMA SDK `Ppmd8` | public domain |
+| `lzma`, `exe` (BCJ) | LZMA SDK (+ FreeArc's `fast` additions in the encoder) | public domain (the FreeArc additions are GPL-derived) |
+| `lz4` | LZ4 1.11.1 | BSD-2 (notice kept) |
+| `rep`, `4x4`, `dict`, `lzp`, `delta`, `mm`, `tta`, `grzip`, `dispack070`, `srep` | ports of FreeArc 0.67 `Compression/` | GPL-derived, pending rewrite |
+| `cm` | lpaq1 (Matt Mahoney) | GPL-2.0-derived, pending rewrite |
+
+The FreeArc-derived codec ports come from FreeArc 0.67 sources by Bulat Ziganshin and
 contributors; `reference/` preserves the original notices.

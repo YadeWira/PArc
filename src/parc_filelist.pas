@@ -89,7 +89,7 @@ function FaCompareNames(const A, B: string): Integer;
 implementation
 
 uses
-  Classes, Math, parc_os, parc_methods, parc_filetype, parc_mmdet, parc_torenc, parc_strmap,
+  Classes, Math, parc_os, parc_methods, parc_filetype, parc_mmdet, parc_plzenc, parc_strmap,
   parc_parallel;
 
 const
@@ -597,13 +597,13 @@ begin
   if Has('tta') then Result := '$wav'
   else if Has('mm') then Result := '$bmp'
   else if Has('grzip') or Has('ppmd') or Has('pmm') or Has('dict') then Result := '$text'
-  else if Only(['storing']) or Only(['orep', 'tor']) then Result := '$compressed'
+  else if Only(['storing']) or Only(['orep', 'plz']) then Result := '$compressed'   // FreeArc: rep+tor
   else if Has('ecm') then Result := '$iso'
   else if Has('precomp') then Result := '$precomp'
   else if Only(['precomp', 'orep']) then Result := '$jpgsolid'   // (inalcanzable, como en el fuente)
   else if Has('jpg') then Result := '$jpg'
   else if Has('exe') then Result := '$binary'
-  else if Has('lzma') or Has('tor') then Result := '$obj'
+  else if Has('lzma') or Has('plz') then Result := '$obj'
   else Result := 'default';
 end;
 
@@ -1177,18 +1177,22 @@ begin
   end;
 end;
 
-{ VeryFast? de un método de una sola etapa (C_Tornado.h, C_LZP.h): FreeArc no ordena. }
+{ VeryFast? de un método de una sola etapa (C_LZP.h; FreeArc lo decía también de tor con filas
+  de hash de <= 2, que acá son los niveles voraces de plz, 1 y 2): FreeArc no ordena. }
 function VeryFast(const Method: string): Boolean;
 var
-  M: TTorMethod;
   P: TStringArray;
   i, h: Integer;
 begin
   Result := False;
   if Pos('+', Method) > 0 then Exit;
   P := Method.Split([':']);
-  if P[0] = 'tor' then
-    Result := (ParseTorEncParams(P, M) = '') and (M.HashRowWidth <= 2)
+  if P[0] = 'plz' then
+    try
+      Result := ParsePlzEncParams(P).Lazy = 0
+    except
+      on EPlzEncoder do Result := False;
+    end
   else if P[0] = 'lzp' then
   begin
     h := 18;

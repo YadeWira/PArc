@@ -125,7 +125,7 @@ ck "m a stdout: error"                        '[ $(code m - mv) = 1 ]'
 echo '-- v / lt'
 q a v.parc src -m3
 out=$(P v v.parc)
-ck "v: ns, permisos, ratio, bloque y método"  'echo "$out" | grep -qE "[0-9]{4}-[0-9]{2}-[0-9]{2} [0-9:]{8}\.[0-9]{9}" && echo "$out" | grep -q -- "-rw" && echo "$out" | grep -q "%" && echo "$out" | grep -q "src/n.txt" && echo "$out" | grep -qE "(lzma|tor|ppmd|grzip|lzp|dict)"'
+ck "v: ns, permisos, ratio, bloque y método"  'echo "$out" | grep -qE "[0-9]{4}-[0-9]{2}-[0-9]{2} [0-9:]{8}\.[0-9]{9}" && echo "$out" | grep -q -- "-rw" && echo "$out" | grep -q "%" && echo "$out" | grep -q "src/n.txt" && echo "$out" | grep -qE "(lzma|plz|ppmd|grzip|lzp|dict)"'
 ck "v con patrón"                             '[ "$(P v v.parc "*.bin" | grep -c "      src/")" = 1 ]'
 out=$(P lt v.parc)
 ck "lt: bloques y offsets por archivo"        'echo "$out" | grep -q "Data blocks:" && echo "$out" | grep -q "^Files:" && echo "$out" | grep -qE "^  [0-9]+ +[0-9]+ +[0-9]+ +[0-9]+ +[0-9A-F]{8}"'

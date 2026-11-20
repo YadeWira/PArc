@@ -15,7 +15,7 @@ jobs:
     steps:
       - uses: actions/checkout@v5
       - name: Herramientas
-        run: sudo apt-get update && sudo apt-get install -y fpc g++
+        run: sudo apt-get update && sudo apt-get install -y fpc gcc
       - name: Compilar
         run: ./build.sh linux64
       - name: Ida y vuelta (todos los niveles, 1 y 4 hilos)
@@ -35,7 +35,7 @@ jobs:
     steps:
       - uses: actions/checkout@v5
       - name: Herramientas
-        run: sudo apt-get update && sudo apt-get install -y fpc g++
+        run: sudo apt-get update && sudo apt-get install -y fpc gcc
       - name: Compilar
         run: ./build.sh linuxarm64
       - name: Ida y vuelta (todos los niveles, 1 y 4 hilos)

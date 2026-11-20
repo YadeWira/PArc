@@ -40,13 +40,12 @@ var
 
 implementation
 
-uses SysUtils, Math, parc_os, parc_methods, parc_torenc, parc_lzmaenc, parc_parallel, parc_orep, parc_plzenc;
+uses SysUtils, Math, parc_os, parc_methods, parc_lzmaenc, parc_parallel, parc_orep, parc_plzenc;
 
 const
   KB = 1024; MB = 1024*1024; GB = Int64(1024)*1024*1024;
   INT_MAX = High(Integer);
   GRZ_MaxBlockSize = 64*MB;   { C_GRZip; no alcanza a capar en el corpus }
-  default_Tornado_method = 5; { Tornado.cpp:77 }
 
 { --- showMem (Compression.hs:547-556) -------------------------------------- }
 
@@ -81,12 +80,6 @@ function LB(X: Int64): Integer;   { floor(log2(X)), X>0 }
 begin
   Result := 0;
   while (X shr (Result+1)) > 0 do Inc(Result);
-end;
-
-function RoundUpPow2(X: Int64): Int64;   { roundup_to_power_of(x,2) }
-begin
-  Result := 1;
-  while Result < X do Result := Result shl 1;
 end;
 
 { --- parseMem de FreeArc: sufijos b/kb/mb/gb; pelado = bytes ---------------- }
@@ -134,13 +127,6 @@ function Num(const S: string; Def: Int64): Int64;
 begin
   Result := StrToInt64Def(S, Def);
 end;
-
-const
-  StdEnc:  array[0..16] of Integer = (0,1,2,3,3,4,4,4,4,4,4,4,4,4,4,4,4);
-  StdHS:   array[0..16] of Int64   = (0,16*KB,64*KB,128*KB,2*MB,8*MB,32*MB,128*MB,512*MB,2*GB,2*GB,
-                                       256*MB,256*MB,384*MB,512*MB,512*MB,128*MB);
-  StdBuf:  array[0..16] of Int64   = (1*MB,1*MB,2*MB,4*MB,8*MB,16*MB,64*MB,256*MB,1*GB,1*GB,1*GB,
-                                       128*MB,128*MB,128*MB,128*MB,128*MB,128*MB);
 
 function StageNameOf(const S: string): string;
 begin
@@ -203,7 +189,7 @@ var
     Parts: TStringArray;
     Name, P: string;
     J: Integer;
-    BS, MC, MML, Bar, Sm, HSL, Amp, Hash, Alg, MFi, NFB, PB, LC, LP, HS: Int64;
+    BS, MC, MML, Bar, Sm, HSL, Amp, Hash, Alg, MFi, NFB, PB, LC, LP: Int64;
     MFSet: Boolean;
     M, MR, W, MM, MS, Num9, Enc, Lvl, BPos: Int64;
     PP: TPpmdParams;
@@ -212,7 +198,6 @@ var
     LZP, A, C3, Ext: Boolean;
     Interno: string;
     I: Integer;
-    TM, TD: TTorMethod;
     OM: TOrepMethod;
 
     function Pr(N: Integer): string;
@@ -407,42 +392,6 @@ begin
       Exit;
     end;
 
-    { --- tornado (C_Tornado.cpp): TORNADO_METHOD::ShowCompressionMethod, con todos los
-          parámetros que difieren de std_Tornado_method[m.number] (antes acá solo quedaban
-          número, buffer, h y c: el resto -l, p, s, x, u, t, ah, al, fb- se perdía, y una opción
-          desconocida se tomaba como buffer). El número se imprime sólo si <> 5.
-          SetDictionary: si mem < buffer, hashsize = 4*min(hs/4, roundup2(mem)).
-          Si los parámetros no son válidos queda igual (el codificador da el error). }
-    if Name = 'tor' then
-    begin
-      if not TorParseWithDefaults(Parts, TM, TD) then Exit(S);
-      BS := TM.Buffer; HS := TM.HashSize;
-      if BS > Limit then
-      begin
-        HS := 4 * Min(Int64(HS div 4), RoundUpPow2(Limit));  { PtrVal=4, 32-bit }
-        BS := Limit;
-      end;
-      // -lc: búfer + hash dentro del límite (se achica el mayor de los dos)
-      if MemLim > 0 then
-        while (BS + HS > MemLim) and ((BS > 64*KB) or (HS > 64*KB)) do
-          if (HS >= BS) and (HS > 64*KB) then HS := HS div 2 else BS := BS div 2;
-      Result := 'tor';
-      if TM.Number <> default_Tornado_method then Result := Result + (':' + IntToStr(TM.Number));
-      Result := Result + (':' + ShowMem(BS));
-      if HS <> TD.HashSize then Result := Result + (':h' + ShowMem(HS));
-      if TM.HashRowWidth <> TD.HashRowWidth then Result := Result + (':l' + IntToStr(TM.HashRowWidth));
-      if TM.EncodingMethod <> TD.EncodingMethod then Result := Result + (':c' + IntToStr(TM.EncodingMethod));
-      if TM.MatchParser <> TD.MatchParser then Result := Result + (':p' + IntToStr(TM.MatchParser));
-      if TM.MatchFinder <> TD.MatchFinder then Result := Result + (':x' + IntToStr(TM.MatchFinder));
-      if TM.UpdateStep <> TD.UpdateStep then Result := Result + (':u' + IntToStr(TM.UpdateStep));
-      if TM.FindTables <> TD.FindTables then Result := Result + (':t' + IntToStr(Ord(TM.FindTables)));
-      if TM.AuxHashSize <> TD.AuxHashSize then Result := Result + (':ah' + ShowMem(TM.AuxHashSize));
-      if TM.AuxHashRowWidth <> TD.AuxHashRowWidth then Result := Result + (':al' + IntToStr(TM.AuxHashRowWidth));
-      if TM.Hash3 <> TD.Hash3 then Result := Result + (':s' + IntToStr(TM.Hash3));
-      if TM.FastBytes <> TD.FastBytes then Result := Result + (':fb' + IntToStr(TM.FastBytes));
-      Exit;
-    end;
-
     { --- plz (parc_plzenc): nivel y ventana siempre; h<mem> si no es el del nivel. La ventana
           no pasa del bloque (redondeada a 64 KB) y -lc achica ventana y hash. }
     if Name = 'plz' then Exit(PlzCanon(Parts, Limit, MemLim));
@@ -526,7 +475,7 @@ begin
           el resto es el método interno, que hereda el límite y se canoniza.
           Igual que parse_4x4: un parámetro es propio si empieza con dígito o si el
           segundo carácter es dígito (t4, i2, r99, b7mb); el primero que no, arranca el
-          método interno. Sin método interno, el default del constructor: tor:3:1mb. }
+          método interno. Sin método interno: plz:1:1mb (FreeArc: tor:3:1mb). }
     if Name = '4x4' then
     begin
       BS := 0; StartI := 0;
@@ -548,7 +497,7 @@ begin
         else
         begin StartI := J; Break; end;
       end;
-      if StartI = 0 then Interno := 'tor:3:1mb'
+      if StartI = 0 then Interno := 'plz:1:1mb'
       else
       begin
         Interno := '';

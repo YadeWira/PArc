@@ -1669,6 +1669,13 @@ begin
     if Missing <> '' then
     begin
       ErrLn('ERROR: no encoder yet for:' + Missing);
+      for i := 0 to High(Groups) do
+        if TornadoRequested(WithoutCipher(Groups[i].Method)) then
+        begin
+          ErrLn('The tor (Tornado) method was removed after PArc 0.0.5; use plz instead ' +
+            '(plz:1..7; tor:3/4/5/6 -> plz:1/2/3/4, xtor -> 4x4:plz).');
+          Break;
+        end;
       // REP de FreeArc ya no está: su reemplazo es orep (otros parámetros)
       if (Pos(' rep', Missing) > 0) or (Pos('+rep', Missing) > 0) then
         ErrLn('  (rep was replaced by orep: -morep:<window>:l<min length>, see docs/USO.md)');

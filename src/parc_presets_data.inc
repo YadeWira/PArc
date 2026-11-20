@@ -42,7 +42,7 @@ const
     ';Text files compression with fast decompression',
     '1xt = 1xb',
     '2xt = 2xb',
-    '3xt = dict:  64m:80% + tor:7:96m:h64m',
+    '3xt = dict:  64m:80% + plz:5:96m',  // PARC: plz (antes tor:7:96m:h64m)
     '4xt = dict:  64m:75% + 4binary',
     '#xt = dict: 128m:75% + #binary',
     '',
@@ -52,8 +52,8 @@ const
     '#xb = delta + #binary',
     '',
     ';Binary files compression with fast decompression',
-    '1binary = tor:4:8mb:h4m               | ex1binary',  // PARC: hash 4 MB
-    '2binary = tor:6                       | ex2binary',
+    '1binary = plz:2                       | ex1binary',  // PARC: plz (antes tor:4:8mb:h4m)
+    '2binary = plz:4                       | ex2binary',  // PARC: plz (antes tor:6)
     '3binary = lzma: 96m:fast  :32:mc6:lc4 | ex3binary',  // PARC: mc6 y lc4
     '4binary = lzma: 96m:normal:16:mc8:lc4 | | ex4binary',  // PARC: lc4
     '5binary = lzma: 96m:normal:32:bt4:mc8:lc4:pb1 | | ex5binary',  // PARC: bt4 con 8 ciclos, lc4 y pb1: más chico que ht4 mc32 y no más lento (sin lc4 perdía en audio; lc4 solo, en fuentes)
@@ -86,7 +86,7 @@ const
     ';Bitmap graphic files are best compressed with GRZip',
     'bmp        = mm    + grzip:m1:l2048:a  ;best compression',
     'bmpfast    = mm    + grzip:m4:l:a      ;faster compression',
-    'bmpfastest = mm:d1 + 1binary:t0        ;fastest one',
+    'bmpfastest = mm:d1 + 1binary           ;fastest one',  // PARC: sin :t0 (era tor sin búsqueda de tablas)
     '1$bmp  = ;;; bmpfastest',
     '2$bmp  = bmpfastest | bmpfast',
     '3$bmp  = bmpfast    | bmp',
@@ -99,13 +99,13 @@ const
     '1$compressed   = ',  // PARC: comprimidos por extensión van con el resto (4x4 saltea los aleatorios)
     '2$compressed   = 2orep + 1binary',
     '3$compressed   = 3orep + 1binary',
-    '4$compressed   = 4orep + etor:c3',
+    '4$compressed   = 4orep + eplz:3',  // PARC: plz (antes etor:c3)
     '#$compressed   = ',
     '',
     '1x$compressed  = storing | 1orep',
     '2x$compressed  = 2orep:8m + 1binary',
     '3x$compressed  = 3orep:8m + 1binary',
-    '4x$compressed  = etor:8m:c3',
+    '4x$compressed  = eplz:3:8m',  // PARC: plz (antes etor:8m:c3)
     '#x$compressed  = ',
     '',
     ';LZ4 support',
@@ -117,14 +117,14 @@ const
     '',
     '',
     ';Multi-threading compression modes',
-    'xtor  = 4x4:tor',
+    'xplz  = 4x4:plz',  // PARC: plz en lugar de tor
     'xlzma = 4x4:lzma',
     'xppmd = 4x4:b7mb:ppmd',
-    'etor  = (|x)tor',
+    'eplz  = (|x)plz',
     'elzma = (|x)lzma',
     'eppmd = (|x)ppmd',
     '',
-    'ex1 = ex1b / $wav=mm:d1+ex1b:t0 / $bmp=mm:d1+ex1b:t0 / $compressed = #$compressed',
+    'ex1 = ex1b / $wav=mm:d1+ex1b / $bmp=mm:d1+ex1b / $compressed = #$compressed',  // PARC: sin :t0 (de tor)
     'ex# = #orep+exe+ex#b / $obj=#orep+ex#b / $text=ex#t / $wav = #$wav / $bmp = #$bmp / $compressed = #$compressed',
     '#ex = ex#',
     '',
@@ -132,8 +132,8 @@ const
     'ex2b = ex2binary',
     'ex#b = delta + ex#binary',
     '',
-    'ex1binary = xtor:3:8mb',
-    'ex2binary = xtor:5',
+    'ex1binary = xplz:1',  // PARC: plz (antes xtor:3:8mb)
+    'ex2binary = xplz:3',  // PARC: plz (antes xtor:5)
     'ex3binary = 4x4:lzma:16mb:normal:16:mc4:lc4',  // PARC: bloques de 16 MB (FreeArc: 96 MB, casi sin paralelismo)
     'ex4binary = 4x4:lzma:24mb:normal:20:mc6:lc5:pb1',  // PARC: ht4 con 6 ciclos, fb20, lc5 y pb1 (lc4/pb2 perdía en 'large' y 'archive'; más ciclos o fb, lentos en TILIN)
     'ex5binary = 4x4:lzma:24mb:normal:32:bt4:mc8:lc4',  // PARC: bt4 con 8 ciclos y lc4

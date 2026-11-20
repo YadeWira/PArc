@@ -70,7 +70,7 @@ type
     FHead, FCount: Integer;
     FFree: array of TBytes;     // buffers de entrada ya escritos, para reciclar (sin ceros ni faltas de página)
     FNumFree: Integer;
-    FTorCache: TObject;         // motores de tor reusados entre bloques (TTorEncCache)
+    FEngCache: TObject;         // motores de plz reusados entre bloques (TPlzEncCache)
     FHint, FIn: Int64;          // entrada esperada del bloque sólido (0: no se sabe) y recibida
     FTarget: SizeInt;           // tamaño del bloque que se está llenando (<= FBlockSize)
     procedure SubmitBlock;
@@ -118,6 +118,9 @@ function FitEncodeMem(const Method: string; DataSize, Limit: Int64): string;
 
 { True si CreateEncoderChain sabe comprimir con Method (sin crear nada). }
 function EncoderAvailable(const Method: string): Boolean;
+{ True si la cadena pide Tornado (tor, xtor, etor; también dentro de 4x4), que se quitó
+  después de 0.0.5: el llamador da un error que dice qué usar en su lugar (plz). }
+function TornadoRequested(const Method: string): Boolean;
 
 { Etapa de cifrado para un bloque nuevo: Algorithm es el de -ae= ("chacha", "aes", con
   :t/:m/:p opcionales), Password en UTF-8, Header = bloque de control (-hp). La etapa no lleva
@@ -133,7 +136,7 @@ implementation
 
 uses
   Math, parc_filters, parc_ppmd, parc_methods, parc_lzp, parc_parallel, parc_lzmaenc,
-  parc_orep, parc_deltaenc, parc_dictenc, parc_ttaenc, parc_mmenc, parc_torenc, parc_grzipenc,
+  parc_orep, parc_deltaenc, parc_dictenc, parc_ttaenc, parc_mmenc, parc_grzipenc,
   parc_crypt, parc_canon, parc_lz4enc, parc_dispack, parc_srep, parc_cm, parc_bcj2, parc_plzenc;
 
 function StageName(const Stage: string): string; forward;
@@ -155,7 +158,7 @@ type
     OrigSize: SizeInt;
     Stored: Boolean;
     MinOrder0Ratio: Double;
-    TorCache: TObject;      // TTorEncCache de la etapa (nil si el método interno no es tor)
+    EngCache: TObject;      // TPlzEncCache de la etapa (nil si el método interno no es plz)
     Parts: array of T4x4Part;   // vacío: un solo bloque (Stored/OutBuf/OutSize)
     function CompressPart(Src: PByte; Len: SizeInt; out Data: TBytes): Boolean;
     procedure SplitHighEntropy;
@@ -245,11 +248,8 @@ begin
   if StageName(Inner) = 'lz4' then
     // LZ4_METHOD::DeCompressMem: versión + un solo bloque LZ4 (no el stream por bloques)
     Result := Lz4EncodeMem(Inner.Split([':']), Src, Len, Data)
-  else if StageName(Inner) = 'tor' then
-    // TORNADO_METHOD::DeCompressMem con compress_all_at_once=1; OutputSize = InSize
-    Result := TorEncodeMem(Inner.Split([':']), Src, Len, Len, Data, TorCache)
   else if StageName(Inner) = 'plz' then
-    Result := PlzEncodeMem(Inner.Split([':']), Src, Len, Data, TorCache)
+    Result := PlzEncodeMem(Inner.Split([':']), Src, Len, Data, EngCache)
   else
   begin
     Data := CompressMem(Inner, Src, Len);
@@ -347,8 +347,7 @@ begin
   Threads := PoolWorkers(T4X4_MAXTHREADS);
   if Threads > 0 then SetLength(FQueue, Threads + 1) else SetLength(FQueue, 1);
   FPool := TJobPool.Create(Threads, Length(FQueue));
-  if StageName(AInner) = 'tor' then FTorCache := TTorEncCache.Create;
-  if StageName(AInner) = 'plz' then FTorCache := TPlzEncCache.Create;
+  if StageName(AInner) = 'plz' then FEngCache := TPlzEncCache.Create;
   if (BudgetThreads >= 2) and FastInner4x4(AInner) then FHint := Enc4x4BlockHint;
   EmitU32(0);   // versión del formato 4x4 (se escribe aunque no haya datos, como el C)
 end;
@@ -359,7 +358,7 @@ var
 begin
   FPool.Free;
   for i := 0 to FCount - 1 do FQueue[(FHead + i) mod Length(FQueue)].Free;
-  FTorCache.Free;      // después del pool: ningún trabajo usa ya sus motores
+  FEngCache.Free;      // después del pool: ningún trabajo usa ya sus motores
   inherited Destroy;
 end;
 
@@ -450,7 +449,7 @@ begin
     FFree[FNumFree] := nil;
   end;
   Job.MinOrder0Ratio := MinOrder0Ratio;
-  Job.TorCache := FTorCache;
+  Job.EngCache := FEngCache;
   FQueue[(FHead + FCount) mod Length(FQueue)] := Job;
   Inc(FCount);
   TJobPool(FPool).Submit(Job);
@@ -574,7 +573,7 @@ var
   m: QWord;
 begin
   Params := Stage.Split([':']);
-  Inner := 'tor:3:1mb';
+  Inner := 'plz:1:1mb';   // sin método interno (FreeArc: tor:3:1mb)
   BlockSize := 0;
   for k := 1 to High(Params) do
     if (Params[k] <> '') and ((Params[k][1] in ['0'..'9']) or
@@ -587,8 +586,6 @@ begin
       Inner := string.Join(':', Params, k, Length(Params) - k);
       Break;
     end;
-  if (BlockSize = 0) and (StageName(Inner) = 'tor') then
-    BlockSize := TorDictionary(Inner.Split([':']));    // cmethod->GetDictionary()
   if (BlockSize = 0) and (StageName(Inner) = 'plz') and PlzEncAvailable(Inner) then
     BlockSize := PlzDictionary(Inner.Split([':']));      // la ventana
   if (BlockSize = 0) and (StageName(Inner) = 'lz4') and Lz4EncAvailable(Inner) then
@@ -615,7 +612,7 @@ end;
   tiene un trabajo y sólo se acortaría la cola: 4 bloques iguales en vez de 24x3+23 eran
   +0,03 % en archive -m5, +0,2 % en documentos -m5) y los bloques se achican a lo sumo 1/8:
   más chicos pierden relación (ejecutables, 24+24+11 -> 3x19,7 MB: +0,05 %; S/N o el
-  múltiplo de N siguiente, 0,1..0,7 %). tor/lz4 no se tocan (su bloque es su ventana). El :b
+  múltiplo de N siguiente, 0,1..0,7 %). plz/lz4 no se tocan (su bloque es su ventana). El :b
   queda en el método guardado; el decodificador lee bloques de cualquier tamaño. }
 function Balance4x4(const Method: string; DataSize: Int64): string;
 var
@@ -672,14 +669,14 @@ begin
   if c < BlockSize then Result := c;
 end;
 
-{ ¿Método interno rápido (tor, lz4, lzma fast)? Solo con esos 4x4 achica bloques
+{ ¿Método interno rápido (plz, lz4, lzma fast)? Solo con esos 4x4 achica bloques
   (Adaptive4x4Block y el final de T4x4EncStage.DoWrite): son los niveles -m1..-m3, donde el
   tiempo pesa; con lzma normal/max, ppmd, etc. el bloque grande vale más por el tamaño (y
   esos niveles ya sobran en velocidad). }
 function FastInner4x4(const Inner: string): Boolean;
 begin
   case StageName(Inner) of
-    'tor', 'lz4', 'plz': Result := True;
+    'lz4', 'plz': Result := True;
     'lzma': Result := ParseLzmaEncParams(Inner.Split([':'])).Algorithm = 0;
   else
     Result := False;
@@ -736,7 +733,7 @@ end;
 
 { Memoria de una etapa al comprimir un bloque de DataSize bytes. Lo exacto donde el codificador
   lo sabe (lzma, rep); lo demás, de lo que reserva cada uno:
-  - ppmd: el modelo; tor: búfer + hash + hash auxiliar; lzp: entrada + salida + hash;
+  - ppmd: el modelo; plz: ventana + tablas; lzp: entrada + salida + hash;
   - dict: ~3 veces el bloque; grzip: ~6 veces el bloque (BWT); dispack: ~3 veces su bloque;
   - orep: lo que dice OrepEncMemory (anillo de la ventana + un bloque, tabla de anclas, búferes);
   - cm y srep guardan todo el bloque (cm: ~4 veces más sus modelos de 64 MB; srep: ~3 veces);
@@ -747,7 +744,6 @@ var
   Parts: TStringArray;
   Inner: string;
   Bs: SizeInt;
-  TM, TD: TTorMethod;
   Lz: TLzpParams;
   Om: TOrepMethod;
   J: Integer;
@@ -772,10 +768,6 @@ begin
           Result := Int64(OrepMethodEncMemory(Om)) + 2 * MB_;
         end;
       'ppmd': Result := Int64(ParsePpmdParams(Parts).Mem) + 2 * MB_;
-      'tor':
-        if TorParseWithDefaults(Parts, TM, TD) then
-          Result := Int64(TM.Buffer) + Int64(TM.HashSize) + Int64(TM.AuxHashSize) + 2 * MB_
-        else Result := 64 * MB_;
       'lzp':
         begin
           Lz := ParseLzpParams(Parts);
@@ -866,6 +858,23 @@ begin
   Result := string.Join('+', St);
 end;
 
+function TornadoRequested(const Method: string): Boolean;
+var
+  Stage, Inner: string;
+  Bs: SizeInt;
+begin
+  for Stage in Method.Split(['+']) do
+    case StageName(Stage) of
+      'tor', 'xtor', 'etor': Exit(True);
+      '4x4':
+        begin
+          Parse4x4(Stage, Inner, Bs);
+          if TornadoRequested(Inner) then Exit(True);
+        end;
+    end;
+  Result := False;
+end;
+
 function EncoderAvailable(const Method: string): Boolean;
 var
   Stage, Inner: string;
@@ -879,7 +888,6 @@ begin
           Parse4x4(Stage, Inner, Bs);
           if not EncoderAvailable(Inner) then Exit(False);
         end;
-      'tor': if not TorEncAvailable(Stage) then Exit(False);
       'lz4': if not Lz4EncAvailable(Stage) then Exit(False);
       'plz': if not PlzEncAvailable(Stage) then Exit(False);
       'storing', 'exe', 'ppmd', 'lzp', 'lzma', 'orep', 'delta', 'dict', 'tta', 'mm', 'grzip', 'cm',
@@ -928,7 +936,6 @@ begin
     'orep':    Result := TOrepEncStage.Create(Target, Parts);
     'delta':   Result := TDeltaEncStage.Create(Target, Parts);
     'dict':    Result := TDictEncStage.Create(Target, Parts);
-    'tor':     Result := TTorEncStage.Create(Target, Parts);
     'lz4':     Result := TLz4EncStage.Create(Target, Parts);
     'plz':     Result := TPlzEncStage.Create(Target, Parts);
     'grzip':   Result := TGrzipEncStage.Create(Target, Parts);
