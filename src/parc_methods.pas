@@ -56,7 +56,7 @@ implementation
 
 uses
   parc_crypt, StrUtils, parc_os, parc_lzma, parc_filters, parc_lz4, parc_rep, parc_lzp, parc_ppmd,
-  parc_dict, parc_tornado, parc_grzip, parc_parallel, parc_tta, parc_mm, parc_dispack, parc_srep, parc_cm,
+  parc_dict, parc_grzip, parc_parallel, parc_tta, parc_mm, parc_dispack, parc_srep, parc_cm,
   parc_bcj2, parc_plz;
 
 var
@@ -200,6 +200,13 @@ begin
   end;
 end;
 
+{ Tornado (`tor`) se quitó después de 0.0.5 (relicencia MIT): sus streams ya no se leen. }
+procedure RaiseTornadoRemoved;
+begin
+  raise EUnsupportedMethod.Create('the tor (Tornado) method is no longer supported (removed after PArc 0.0.5); ' +
+    'extract this archive with PArc 0.0.5');
+end;
+
 { Método interno de 4x4 (parse_4x4): los parámetros propios de 4x4 empiezan con dígito o con
   letra+dígito (t4, b7mb, i2, r99, 8mb); el primero que no cumple eso arranca el método interno. }
 function Inner4x4Method(const Params: TStringArray): string;
@@ -214,7 +221,7 @@ begin
       Result := string.Join(':', Params, k, Length(Params) - k);
       Exit;
     end;
-  if Result = '' then Result := 'tor:3:1mb';   // default de _4x4_METHOD
+  if Result = '' then Result := 'plz:1:1mb';   // sin método interno (FreeArc: tor:3:1mb)
 end;
 
 { Descomprime en memoria un bloque de 4x4 con el método interno (COMPRESSION_METHOD::DeCompressMem).
@@ -238,10 +245,7 @@ begin
       end;
     'lz4':
       if not Lz4DecodeMem(Src, SrcLen, Dst, DstLen) then Corrupt('4x4: lz4 decompression failed');
-    'tor':
-      // Dentro de 4x4 FreeArc usa compress_all_at_once, que cambia cuándo se deshacen las tablas
-      if not TornadoDecodeMem(Src, SrcLen, Dst, DstLen, Written) or (Written <> DstLen) then
-        Corrupt('4x4: tornado decompression failed');
+    'tor': RaiseTornadoRemoved;
     'plz':
       if not PlzDecodeMem(Src, SrcLen, Dst, DstLen) then Corrupt('4x4: plz decompression failed');
   else
@@ -441,9 +445,7 @@ begin
       Result := TLzpStage.Create(Source, ParseLzpParams(Params));
     'dict':
       Result := TDictStage.Create(Source, ParseDictBlockSize(Params));
-    'tor':
-      // El stream de Tornado describe su propio formato: los parámetros son del compresor
-      Result := TTornadoStage.Create(Source);
+    'tor': RaiseTornadoRemoved;
     'plz':
       // El stream dice su ventana: los parámetros son del compresor
       Result := TPlzStage.Create(Source);

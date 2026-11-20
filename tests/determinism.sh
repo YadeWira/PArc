@@ -100,8 +100,8 @@ done
 
 # Métodos explícitos (sin presets): la salida no depende de N, salvo lzma ht4 :normal/:max
 # (1 hilo contra 2 o más). Bloques chicos para que 4x4 reparta muchos trabajos entre hilos y
-# reuse motores de tor (TTorEncCache) en el orden que salga.
-for m in "4x4:tor:3:256kb" "4x4:tor:7:256kb" "4x4:tor:12:256kb" "rep:16mb+4x4:lzma:1mb:normal" \
+# reuse motores de plz (TPlzEncCache) en el orden que salga.
+for m in "4x4:plz:1:256kb" "4x4:plz:3:256kb" "4x4:plz:5:256kb" "rep:16mb+4x4:lzma:1mb:normal" \
          "rep:8mb+exe+delta+lzma:8mb:max" "lzma:16mb:max:bt4" "4x4:b512kb:grzip:m1" \
          "dict+lzp+ppmd:6" "lzma:16mb:normal:ht4"; do
   ref=""; hs=""; diff=0

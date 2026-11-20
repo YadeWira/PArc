@@ -27,9 +27,9 @@ mk
 
 echo '-- -mt'
 PARC_THREADS=1 q a e1.parc src -m1 -s-; q a m1.parc src -m1 -mt1 -s-
-ck "-mt1 = PARC_THREADS=1 (mismos métodos)"  '[ "$(P lb e1.parc | grep -c "tor:4")" -gt 0 ] && diff <(P lb e1.parc | grep -o "[a-z0-9:+]*$" | sort) <(P lb m1.parc | grep -o "[a-z0-9:+]*$" | sort) >/dev/null'
+ck "-mt1 = PARC_THREADS=1 (mismos métodos)"  '[ "$(P lb e1.parc | grep -c "plz:2")" -gt 0 ] && diff <(P lb e1.parc | grep -o "[a-z0-9:+]*$" | sort) <(P lb m1.parc | grep -o "[a-z0-9:+]*$" | sort) >/dev/null'
 PARC_THREADS=1 q a m4.parc src -m1 -mt4 -s-
-ck "-mt4 manda sobre PARC_THREADS=1"          '! P lb m4.parc | grep -q "tor:4"'
+ck "-mt4 manda sobre PARC_THREADS=1"          '! P lb m4.parc | grep -q "plz:2"'
 ck "-mt0 = por defecto"                       '[ $(code a m0.parc src -mt0) = 0 ]'
 
 echo '-- -t / -tp'
@@ -212,7 +212,7 @@ ck "-mcm sigue siendo el método cm"           'P lb mc3.parc | grep -q " cm"'
 echo '-- --print-config'
 out=$("$PARC" --print-config 2>&1); c=$?
 ck "--print-config"                           '[ $c = 0 ] && echo "$out" | grep -q "^\[Compression methods\]" && echo "$out" | grep -q "^-m5 = " && echo "$out" | grep -q "^\$text"'
-ck "--print-config con -mt1"                  '"$PARC" --print-config -mt1 | grep -q "^-m1 = .*tor:4"'
+ck "--print-config con -mt1"                  '"$PARC" --print-config -mt1 | grep -q "^-m1 = .*plz:2"'
 
 echo '-- -kf'
 head -c 1000 /dev/urandom > key.bin; head -c 1000 /dev/urandom > key2.bin

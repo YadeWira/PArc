@@ -1,9 +1,9 @@
-{ plz_bench: mide un método cualquiera (plz, tor, lz4, lzma...) en memoria por las cadenas de
+{ plz_bench: mide un método cualquiera (plz, lz4, lzma...) en memoria por las cadenas de
   PArc (CreateEncoderChain / CreateDecoderChain, un hilo de etapa) y, con plz, también el
   camino memoria a memoria de 4x4. Imprime método, bytes, comprimido, CPU y pared de
   compresión, CPU y pared de descompresión (el mínimo de las corridas; CPU del proceso).
     plz_bench <método> <entrada> [corridas]
-  Se compila con los objetos del build (el codificador C++ de Tornado):
+  Se compila con las unidades del build:
     fpc -O3 -Fusrc -Fobuild/linux64/units -Flbuild/linux64/units ... tests/plz_bench.lpr }
 program plz_bench;
 
