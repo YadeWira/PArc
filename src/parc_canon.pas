@@ -230,6 +230,7 @@ begin
       if OM.Align <> OREP_DEF_ALIGN then Result := Result + ':a' + IntToStr(OM.Align);
       if OM.Density <> OREP_DEF_DENSITY then Result := Result + ':s' + IntToStr(OM.Density);
       if OM.Cands <> OREP_DEF_CANDS then Result := Result + ':c' + IntToStr(OM.Cands);
+      if OM.RunKeep <> 0 then Result := Result + ':r' + IntToStr(OM.RunKeep);
       if OM.Chunk <> OREP_DEF_CHUNK then Result := Result + ':b' + ShowMem(OM.Chunk);
       if OM.MinDist <> 0 then Result := Result + ':d' + ShowMem(OM.MinDist);
       Exit;

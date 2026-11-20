@@ -274,7 +274,7 @@ forever, e.g. with very small memories), the model is restarted instead.
 **the method `rep` no longer exists**; a `rep` block of an archive written by PArc 0.0.5 or
 earlier fails with "method rep (FreeArc REP) is no longer supported" (extract it with 0.0.5).
 
-Method string: `orep[:<window>][:<min length>][:w<mem>][:l<n>][:a<n>][:s<n>][:c<n>][:b<mem>][:d<mem>]`
+Method string: `orep[:<window>][:<min length>][:w<mem>][:l<n>][:a<n>][:s<n>][:c<n>][:r<n>][:b<mem>][:d<mem>]`
 
 | parameter | meaning | default | range |
 |---|---|---|---|
@@ -283,6 +283,7 @@ Method string: `orep[:<window>][:<min length>][:w<mem>][:l<n>][:a<n>][:s<n>][:c<
 | `a<n>` | match lengths are multiples of `a`, and literals stay at their input position modulo `a` (lzma's `pb`/`lp` contexts); `a0` = chosen per stream block (1 for text, 4 otherwise) | 0 | 0 .. 4096, ≤ `l` |
 | `s<n>` | anchor density: higher finds more short matches, slower, larger table | 4 | 1 .. 64 |
 | `c<n>` | candidates tried per anchor: more finds longer matches, slower; 1 is the fastest | 4 | 1 .. 4 |
+| `r<n>` | a match that only covers a run of one byte and is shorter than this is left to the next compressor (`plz` codes runs almost free) | 0 | 0 .. 65536 |
 | `b<mem>` | stream block (slot) size | 4mb | a power of 2, 64kb .. 64mb |
 | `d<mem>` | matches nearer than this are left to the next compressor | 0 | |
 
@@ -291,7 +292,7 @@ Memories as everywhere in PArc (`b/k/m/g` suffixes; a bare number is 2^N). The s
 (`orep:57mb`) and, with `-lc`, to what fits the memory limit; the other parameters only when
 they differ from the defaults (`orep:96mb:l256`, `orep:2040mb:l512`).
 
-Stream: OREP format version 3 (OREP 0.0.4 to 0.0.8; still a draft upstream, so a later OREP may change
+Stream: OREP format version 3 (OREP 0.0.4 to 0.0.9; still a draft upstream, so a later OREP may change
 it), specified in `src/orep/orep-format.md`: a 15–20-byte header (magic `OREP`, version, log2 of
 the block size, then varints: window, alignment setting, minimum length; CRC-32C), blocks (output size, match count, column
 size, the block's alignment, three varint columns: literal run, length − 16, distance − 1, zero

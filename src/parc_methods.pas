@@ -262,9 +262,9 @@ begin
 end;
 
 const
-  { Trabajos de 4x4 entregados que se guardan para reusar sus buffers: en régimen se entrega
-    uno y se lee el siguiente, así que alcanzan pocos. }
-  T4X4_MAXFREE = 4;
+  { Trabajos de 4x4 entregados que se guardan para reusar sus buffers: hasta lo que entra en la
+    cola de lectura adelantada (QueueCapacity), con este tope. }
+  T4X4_MAXFREE = 256;
 
 type
   { Un bloque de 4x4: se descomprime entero en memoria con el método interno. }
@@ -336,7 +336,9 @@ end;
 { Un bloque ya entregado se guarda (hasta uno por trabajo en vuelo) para reusar sus buffers. }
 procedure T4x4Stage.ReleaseJob(Job: TParallelJob);
 begin
-  if T4x4Job(Job).Stored or (FNumFree >= T4X4_MAXFREE) then
+  // tantos como la cola (con lectura adelantada por bytes puede tener decenas de bloques chicos:
+  // sin reciclarlos, cada uno reservaba y tocaba páginas nuevas)
+  if T4x4Job(Job).Stored or (FNumFree >= T4X4_MAXFREE) or (FNumFree >= QueueCapacity) then
   begin
     Job.Free;
     Exit;
@@ -352,6 +354,11 @@ begin
   // Un bloque extra por hilo: mientras uno se entrega, los demás ya se están descomprimiendo
   inherited Create(ASource, 16, 16);
   FInner := AInner;
+  // Lectura adelantada también por bytes: 4x4 comprime aparte los trozos de 1 MB que repiten
+  // dentro de un bloque casi aleatorio, y con 8 trabajos en vuelo (4 hilos) eran 8 MB de
+  // adelanto (TILIN -m4 con 4 hilos). 16 MB por hilo, a lo sumo 256 MB.
+  // (TILIN.tar -m4 con 4 hilos, t: 8,9 -> 7,8 s con REP; con 32 MB 8,3 s)
+  ReadAheadBytes := Int64(PoolWorkers(16)) * (16 shl 20);
 end;
 
 function T4x4Stage.ReadJob: TParallelJob;

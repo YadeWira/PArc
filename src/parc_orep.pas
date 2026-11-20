@@ -4,13 +4,15 @@
   método `orep` (parámetros y texto canónico), la etapa de decodificación (TInStage) y la de
   codificación (TOutStage), y la memoria de cada lado.
 
-  Método: orep[:<ventana>][:<largo mínimo>][:w<mem>][:l<n>][:a<n>][:s<n>][:c<n>][:b<mem>][:d<mem>]
+  Método: orep[:<ventana>][:<largo mínimo>][:w<mem>][:l<n>][:a<n>][:s<n>][:c<n>][:r<n>][:b<mem>][:d<mem>]
     ventana (w, o una memoria sin nombre)   distancia máxima (512mb; hasta 3840mb)
     largo mínimo (l, o un entero sin nombre) coincidencia más corta que se busca (64; >= 16)
     a  alineación: largos múltiplos de a y literales en su posición módulo a (0 = por bloque:
        1 en texto, 4 en lo demás; 0..4096, <= l)
     s  densidad de anclas (4; 1..64): más alta encuentra más coincidencias cortas, más lento
     c  candidatos por ancla (4; 1..4): más encuentra coincidencias más largas, 1 es lo más rápido
+    r  una coincidencia que solo cubre una tirada de un byte y es más corta que esto queda para
+       la etapa siguiente (0 = ninguna; hasta 65536): plz codifica esas tiradas casi gratis
     b  tamaño de bloque del stream (4mb; potencia de 2, 64kb..64mb)
     d  coincidencias más cercanas que esto quedan para el compresor de atrás (0)
   Las memorias como en el resto de PArc (sufijo b/k/m/g; sin sufijo, 2^N). El stream lleva
@@ -41,7 +43,7 @@ type
   { Parámetros del método `orep` (los del codificador; el stream trae los suyos) }
   TOrepMethod = record
     Window: QWord;
-    MinLen, Align, Density, Cands, Chunk: LongWord;
+    MinLen, Align, Density, Cands, Chunk, RunKeep: LongWord;
     MinDist: QWord;
   end;
 
@@ -93,8 +95,21 @@ type
     FPendLen: SizeInt;
     FOut: array of Byte;
     FCallerHad: Boolean;       // el hilo que escribe tenía ficha al empezar a esperar a OREP
+    { Cola de salida demorada (memoria): hasta FTailMax bytes de la salida de OREP quedan aquí
+      mientras FProduced <= FTailUntil, en trozos de OREP_OUT_BUF; al terminar se libera OREP
+      (anillo y tabla) ANTES de pasar la cola a la etapa siguiente, que así crece (lzma bt4) sin
+      OREP vivo. Con FTailMax = 0, como antes. }
+    FTailMax: SizeInt;
+    FTailUntil, FProduced: QWord;
+    FQ: array of PByte;
+    FQLen: array of SizeInt;
+    FQN: Integer;
+    FQHeld: SizeInt;
+    FSpare: PByte;
     procedure Start(Threads: Integer);
     procedure Run(Buf: PByte; Count: SizeInt; Mode: Integer);
+    procedure QDrain(Keep: SizeInt; FreeIt: Boolean);
+    procedure QFreeAll;
   protected
     procedure DoWrite(Buf: PByte; Count: SizeInt); override;
     procedure DoFinish; override;
@@ -102,6 +117,8 @@ type
     constructor Create(ATarget: TOutStage; const M: TOrepMethod);
     constructor Create(ATarget: TOutStage; const Params: TStringArray);
     destructor Destroy; override;
+    { Demora hasta MaxBytes de salida mientras la salida total no pase de UntilBytes. }
+    procedure SetTail(MaxBytes: SizeInt; UntilBytes: QWord);
   end;
 
 implementation
@@ -116,6 +133,7 @@ begin
   Result.Align := OREP_DEF_ALIGN;
   Result.Density := OREP_DEF_DENSITY;
   Result.Cands := OREP_DEF_CANDS;
+  Result.RunKeep := 0;
   Result.Chunk := OREP_DEF_CHUNK;
   Result.MinDist := 0;
 end;
@@ -160,6 +178,7 @@ begin
       'a': Result.Align := Int(Copy(p, 2, MaxInt));
       's': Result.Density := Int(Copy(p, 2, MaxInt));
       'c': Result.Cands := Int(Copy(p, 2, MaxInt));
+      'r': Result.RunKeep := Int(Copy(p, 2, MaxInt));
       'b':
         begin
           Result.Chunk := High(LongWord);   // fuera de rango: lo rechaza la validación
@@ -178,7 +197,7 @@ begin
   OP := OrepParamsOf(Result, 1);
   if OrepEncMemory(OP) = 0 then
     raise EUnsupportedMethod.CreateFmt('orep: invalid parameters "%s" (window 1b..3840mb, ' +
-      'l16..65536, a0..4096 and <= l, s1..64, c1..4, b64kb..64mb, power of 2)', [string.Join(':', Params)]);
+      'l16..65536, a0..4096 and <= l, s1..64, c1..4, r0..65536, b64kb..64mb, power of 2)', [string.Join(':', Params)]);
 end;
 
 function OrepParamsOf(const M: TOrepMethod; Threads: LongWord): TOrepParams;
@@ -191,6 +210,7 @@ begin
   Result.Align := M.Align;
   Result.Density := M.Density;
   Result.Cands := M.Cands;
+  Result.RunKeep := M.RunKeep;
   Result.MinDist := M.MinDist;
   Result.Threads := Threads;
 end;
@@ -431,7 +451,54 @@ begin
   if FInited then OrepEncEnd(FEnc^);   // espera y cierra sus hilos
   FInited := False;
   if FEnc <> nil then Dispose(FEnc);
+  FEnc := nil;
+  QFreeAll;
   inherited Destroy;
+end;
+
+procedure TOrepEncStage.SetTail(MaxBytes: SizeInt; UntilBytes: QWord);
+var
+  v: Int64;
+begin
+  v := StrToInt64Def(GetEnvironmentVariable('PARC_OREP_TAIL'), -1);   // MB, para medir
+  if v >= 0 then MaxBytes := v shl 20;
+  if MaxBytes < 0 then MaxBytes := 0;
+  FTailMax := MaxBytes;
+  FTailUntil := UntilBytes;
+end;
+
+procedure TOrepEncStage.QFreeAll;
+var
+  i: Integer;
+begin
+  for i := 0 to FQN - 1 do FreeMem(FQ[i]);
+  FQN := 0;
+  FQHeld := 0;
+  if FSpare <> nil then FreeMem(FSpare);
+  FSpare := nil;
+end;
+
+{ Pasa a la etapa siguiente los trozos más viejos hasta que queden <= Keep bytes (solo trozos
+  llenos, salvo Keep = 0). FreeIt: libera cada trozo (al final, para que baje el RSS). }
+procedure TOrepEncStage.QDrain(Keep: SizeInt; FreeIt: Boolean);
+var
+  p: PByte;
+  n: SizeInt;
+begin
+  while (FQN > 0) and (FQHeld > Keep) and ((Keep = 0) or (FQLen[0] = OREP_OUT_BUF)) do
+  begin
+    p := FQ[0];
+    n := FQLen[0];
+    Dec(FQN);
+    if FQN > 0 then
+    begin
+      Move(FQ[1], FQ[0], FQN * SizeOf(PByte));
+      Move(FQLen[1], FQLen[0], FQN * SizeOf(SizeInt));
+    end;
+    Dec(FQHeld, n);
+    if n > 0 then Emit(p, n);
+    if FreeIt or (FSpare <> nil) then FreeMem(p) else FSpare := p;
+  end;
 end;
 
 procedure TOrepEncStage.Start(Threads: Integer);
@@ -462,7 +529,7 @@ end;
   sigue en el coordinador mientras este hilo pasa el anterior a la etapa siguiente. }
 procedure TOrepEncStage.Run(Buf: PByte; Count: SizeInt; Mode: Integer);
 var
-  NextIn, NextOut: PByte;
+  NextIn, NextOut, p: PByte;
   AvailIn, AvailOut: SizeUInt;
   r: Integer;
   n: SizeInt;
@@ -470,13 +537,52 @@ begin
   NextIn := Buf;
   AvailIn := Count;
   repeat
-    NextOut := @FOut[0];
-    AvailOut := Length(FOut);
-    r := OrepEncRun(FEnc^, NextIn, AvailIn, NextOut, AvailOut, Mode);
-    if r = OREP_E_MEM then OutOfMemoryError;
-    if r < 0 then raise EUnsupportedMethod.Create('orep: ' + OrepErrorText(r));
-    n := Length(FOut) - SizeInt(AvailOut);
-    if n > 0 then Emit(@FOut[0], n);
+    if FTailMax = 0 then
+    begin
+      NextOut := @FOut[0];
+      AvailOut := Length(FOut);
+      r := OrepEncRun(FEnc^, NextIn, AvailIn, NextOut, AvailOut, Mode);
+      if r = OREP_E_MEM then OutOfMemoryError;
+      if r < 0 then raise EUnsupportedMethod.Create('orep: ' + OrepErrorText(r));
+      n := Length(FOut) - SizeInt(AvailOut);
+      if n > 0 then Emit(@FOut[0], n);
+    end
+    else
+    begin
+      if (FQN = 0) or (FQLen[FQN - 1] = OREP_OUT_BUF) then
+      begin
+        if FSpare <> nil then begin p := FSpare; FSpare := nil; end
+        else p := GetMem(OREP_OUT_BUF);
+        if FQN >= Length(FQ) then
+        begin
+          SetLength(FQ, FQN + 16);
+          SetLength(FQLen, FQN + 16);
+        end;
+        FQ[FQN] := p;
+        FQLen[FQN] := 0;
+        Inc(FQN);
+      end;
+      NextOut := FQ[FQN - 1] + FQLen[FQN - 1];
+      AvailOut := OREP_OUT_BUF - FQLen[FQN - 1];
+      n := AvailOut;
+      r := OrepEncRun(FEnc^, NextIn, AvailIn, NextOut, AvailOut, Mode);
+      if r = OREP_E_MEM then OutOfMemoryError;
+      if r < 0 then raise EUnsupportedMethod.Create('orep: ' + OrepErrorText(r));
+      n := n - SizeInt(AvailOut);
+      Inc(FQLen[FQN - 1], n);
+      Inc(FQHeld, n);
+      Inc(FProduced, n);
+      if FProduced > FTailUntil then
+      begin
+        // la etapa siguiente ya no crece: sin cola desde aquí
+        QDrain(0, True);
+        QFreeAll;
+        FTailMax := 0;
+        AvailOut := 1;   // (para la condición de salida)
+      end
+      else
+        QDrain(FTailMax, False);
+    end;
   until (r = OREP_END) or ((Mode <> OREP_FINISH) and (AvailIn = 0) and (AvailOut > 0));
 end;
 
@@ -515,6 +621,15 @@ begin
     FPendLen := 0;
   end;
   Run(nil, 0, OREP_FINISH);
+  // OREP ya no hace falta: liberar anillo, tabla e hilos antes de pasar la cola y de que la
+  // etapa siguiente termine (su memoria sigue creciendo hasta su Finish)
+  if FInited then OrepEncEnd(FEnc^);
+  FInited := False;
+  if FEnc <> nil then Dispose(FEnc);
+  FEnc := nil;
+  FOut := nil;
+  QDrain(0, True);
+  QFreeAll;
 end;
 
 initialization

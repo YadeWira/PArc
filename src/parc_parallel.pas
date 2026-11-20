@@ -128,6 +128,8 @@ type
     FQueue: TJobArray;                // FIFO de bloques en vuelo, en orden de stream
     FHead, FCount, FMaxJobs: Integer;
     FCap, FExtra: Integer;            // tope de hilos y bloques extra por hilo pedidos
+    FAheadBytes: Int64;               // salida (OutSize) de los bloques en la cola
+    FBaseJobs: Integer;               // bloques en vuelo por cantidad (hilos + extra)
     FPool: TJobPool;
     FCur: TParallelJob;
     FPos: SizeInt;
@@ -142,12 +144,23 @@ type
       reciclar sus buffers. }
     procedure ReleaseJob(Job: TParallelJob); virtual;
   public
+    { Lectura adelantada medida en bytes (0 = solo por cantidad de bloques): mientras la salida
+      de los bloques en la cola no llegue a esto, se leen más aunque pase de hilos + extra (hasta
+      READAHEAD_MAXJOBS). Con bloques chicos (los trozos de 1 MB que 4x4 comprime aparte) la
+      cuenta por cantidad dejaba a los hilos sin trabajo. }
+    ReadAheadBytes: Int64;
+    { Bloques que caben ahora en la cola (crece con ReadAheadBytes). }
+    function QueueCapacity: Integer;
     { MaxThreads: tope de hilos (el presupuesto puede dar menos); ExtraJobs: bloques leídos por
       adelantado además de uno por hilo (como mucho uno más por hilo). }
     constructor Create(ASource: TInStage; MaxThreads, ExtraJobs: Integer);
     destructor Destroy; override;
     function Read(Buf: PByte; Count: SizeInt): SizeInt; override;
   end;
+
+const
+  { Tope de bloques en la cola de TParallelBlockStage con ReadAheadBytes }
+  READAHEAD_MAXJOBS = 256;
 
 { --- Presupuesto global de hilos --- }
 
@@ -791,6 +804,7 @@ begin
   if ExtraJobs > w then ExtraJobs := w;
   FMaxJobs := w + ExtraJobs;
   if FMaxJobs < 2 then FMaxJobs := 2;
+  FBaseJobs := FMaxJobs;
   SetLength(FQueue, FMaxJobs);
   FPool := TJobPool.Create(Threads, FMaxJobs);
 end;
@@ -830,11 +844,21 @@ begin
           GrowJobRing(FQueue, FHead, FCount, w + e);
           FMaxJobs := w + e;
         end;
+        if w + e > FBaseJobs then FBaseJobs := w + e;
         FPool.SetMaxWorkers(w);
+      end
+      else if (ReadAheadBytes > 0) and (FAheadBytes < ReadAheadBytes) and
+        (FMaxJobs < READAHEAD_MAXJOBS) then
+      begin
+        // bloques chicos: más en la cola sin más hilos
+        GrowJobRing(FQueue, FHead, FCount, 2 * FMaxJobs);
+        FMaxJobs := 2 * FMaxJobs;
       end
       else
         Break;
-    end;
+    end
+    else if (ReadAheadBytes > 0) and (FCount >= FBaseJobs) and (FAheadBytes >= ReadAheadBytes) then
+      Break;   // (la cola creció por bloques chicos: con bloques grandes, el límite de bytes)
     Job := ReadJob;
     if Job = nil then
     begin
@@ -843,8 +867,14 @@ begin
     end;
     FQueue[(FHead + FCount) mod FMaxJobs] := Job;
     Inc(FCount);
+    Inc(FAheadBytes, Job.OutSize);
     FPool.Submit(Job);
   end;
+end;
+
+function TParallelBlockStage.QueueCapacity: Integer;
+begin
+  Result := FMaxJobs;
 end;
 
 function TParallelBlockStage.Read(Buf: PByte; Count: SizeInt): SizeInt;
@@ -869,6 +899,7 @@ begin
       FQueue[FHead] := nil;
       FHead := (FHead + 1) mod FMaxJobs;
       Dec(FCount);
+      Dec(FAheadBytes, FCur.OutSize);
       FPool.WaitJobQuiet(FCur);
       FPos := 0;
       if FCur.FErrClass <> nil then

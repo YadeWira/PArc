@@ -29,8 +29,8 @@ const
     '',
     ';Binary files compression with slow and/or memory-expensive decompression',
     '#b  = #orep+#bx',
-    '1orep = orep:  96m:l256:c1',          // PARC: OREP (MIT) en lugar de REP; c1 (un candidato): 6 % menos tiempo con 4 hilos, hasta +0,08 %
-    '2orep = orep:  96m:l256',
+    '1orep = orep:  96m:l256:c2:r512',     // PARC: OREP (MIT) en lugar de REP; r512: las tiradas de un byte quedan para plz
+    '2orep = orep:  96m:l256:r512',
     '3orep = orep:  96m:l512',             // PARC: con lzma, l512: en TILIN l64 (el de OREP) perdía 0,1..0,4 % y l512 gana a REP
     '4orep = orep:  96m:l512',
     '5orep = orep:  96m:l512',

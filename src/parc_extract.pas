@@ -57,7 +57,9 @@ uses
   parc_strmap;
 
 const
-  COPY_BUF = 1 shl 20;
+  { Búfer de copia de lo extraído (descomprimir -> CRC -> archivo): 128 KB entra en la L2; con
+    1 MB, -m1/-m2 con 4 hilos tardaban 5..7 % más en t (TILIN.tar -m1 2,12 -> 1,98 s) }
+  COPY_BUF = 128 shl 10;
 
 { Comodines estilo FreeArc: '*' = cualquier secuencia, '?' = un carácter.
   En Windows sin distinguir mayúsculas. Backtracking simple sobre el último '*'. }

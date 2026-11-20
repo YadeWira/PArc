@@ -116,15 +116,16 @@ with PArc 0.0.5).
 **Long-range matching: `orep`.** The presets put `orep` (OREP, MIT, written for PArc) in front
 of the binary chains; it replaces FreeArc's `rep`, which no longer exists (`-mrep` fails with a
 hint, and `rep` blocks of archives from PArc 0.0.5 or earlier do not decode). Syntax:
-`orep[:<window>][:<min length>][:w<mem>][:l<n>][:a<n>][:s<n>][:c<n>][:b<mem>][:d<mem>]` — window
+`orep[:<window>][:<min length>][:w<mem>][:l<n>][:a<n>][:s<n>][:c<n>][:r<n>][:b<mem>][:d<mem>]` — window
 (largest distance, default `512mb`, up to `3840mb`), shortest match (`l`, default 64, ≥ 16),
 alignment (`a`: lengths multiple of `a` and literals kept at their position modulo `a`, which
 helps lzma; default `a0` = per stream block, 1 for text and 4 otherwise), anchor density (`s`,
 1..64, default 4: higher finds more short matches, slower and with a larger table), candidates
-per anchor (`c`, 1..4, default 4: 1 is the fastest), stream block (`b`, a power of 2, 64kb..64mb,
+per anchor (`c`, 1..4, default 4: 1 is the fastest), single-byte runs left to the next compressor
+(`r<n>`: matches over a run of one byte shorter than `n`; default 0), stream block (`b`, a power of 2, 64kb..64mb,
 default 4mb) and a minimum distance (`d`, default 0: nearer matches are left to the next
 compressor). For example `-morep:96m:l256+exe+delta+lzma:96m`. The presets use
-`orep:96m:l256:c1` at `-m1`, `orep:96m:l256` at `-m2`, `orep:96m:l512` at `-m3`…`-m5` and `orep:<window>:l512` at
+`orep:96m:l256:c2:r512` at `-m1`, `orep:96m:l256:r512` at `-m2`, `orep:96m:l512` at `-m3`…`-m5` and `orep:<window>:l512` at
 `-m6`…`-m9`/`-mx` (window 256m, 512m, 1024m, 2040m). The stored method shows the window
 clipped to the block. `orep` searches with up to 4 threads of its own, taken from `PARC_THREADS`
 (see `PARC_OREP_THREADS`).

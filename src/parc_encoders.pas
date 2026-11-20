@@ -1059,6 +1059,35 @@ begin
   inherited DoFinish;
 end;
 
+{ Memoria: si detrás de orep (después de filtros 1:1) va lzma con match finder bt/hc, su memoria
+  crece con la entrada hasta el diccionario (bt4 ~9 bytes por byte, hc4 ~5). OREP demora su
+  salida N bytes y se libera al terminar antes de pasarlos: el pico baja de lzma + OREP a ~lzma
+  + OREP - (g - 1) N. N = memoria de OREP / (g - 1), hasta 64 MB. }
+procedure SetOrepTail(St: TOrepEncStage; const Stages: TStringArray; k: Integer);
+var
+  j: Integer;
+  Lp: TLzmaEncParams;
+  g: Int64;
+  Om: TOrepMethod;
+  N: Int64;
+begin
+  St.SetTail(0, 0);
+  j := k + 1;
+  while (j <= High(Stages)) and ((StageName(Stages[j]) = 'exe') or (StageName(Stages[j]) = 'delta')) do Inc(j);
+  if (j > High(Stages)) or (StageName(Stages[j]) <> 'lzma') then Exit;
+  Lp := ParseLzmaEncParams(Stages[j].Split([':']));
+  case Lp.MatchFinder of
+    mfBT2, mfBT3, mfBT4: g := 9;
+    mfHC4: g := 5;
+  else
+    Exit;
+  end;
+  Om := ParseOrepMethod(Stages[k].Split([':']));
+  N := Int64(OrepMethodEncMemory(Om)) div (g - 1);
+  if N > 64 * MB_ then N := 64 * MB_;
+  St.SetTail(N, Lp.DictSize);
+end;
+
 function CreateEncoderChain(const Method: string; Target: TOutStage): TOutStage;
 var
   Stages: TStringArray;
@@ -1074,7 +1103,10 @@ begin
   try
     Stages := Method.Split(['+']);
     for k := High(Stages) downto 0 do
+    begin
       Result := CreateStage(Stages[k], Result);
+      if StageName(Stages[k]) = 'orep' then SetOrepTail(TOrepEncStage(Result), Stages, k);
+    end;
   except
     Result.Free;   // libera lo ya armado (y con eso Target)
     raise;

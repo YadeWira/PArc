@@ -53,7 +53,7 @@ done
 echo "== parc"
 cd "$W" || exit 2
 q() { "$@" --no-progress >/dev/null 2>&1; }
-for m in orep orep:96mb:l256 orep:1mb:l16:a1 orep:8mb:l512:s16 orep:4mb:b64kb:d256kb orep:16mb:l256:c1 orep:16mb:a4:c2 \
+for m in orep orep:96mb:l256 orep:1mb:l16:a1 orep:8mb:l512:s16 orep:4mb:b64kb:d256kb orep:16mb:l256:c1 orep:16mb:a4:c2 orep:16mb:l256:c2:r512 \
          orep:256kb:l4096:a4096 orep:2mb:l64+lzma:8mb:fast "orep:1mb+exe+delta+lzma:4mb:normal:bt4" \
          orep:16mb:l32:a1:s64+4x4:b1mb:lzma:1mb:fast; do
   rm -rf o.parc x
@@ -76,11 +76,11 @@ for m in orep orep:96mb:l256 orep:1mb:l16:a1 orep:8mb:l512:s16 orep:4mb:b64kb:d2
 done
 
 # Método guardado: la ventana se recorta al bloque y los parámetros quedan explícitos
-rm -f c.parc; q "$PARC" a c.parc in/d -morep:1gb:l128:a1:s8:c2:b1mb:d64kb
-check "texto canónico" '"$PARC" lb c.parc | grep -qE "orep:[0-9]+(kb|mb):l128:a1:s8:c2:b1mb:d64kb"'
+rm -f c.parc; q "$PARC" a c.parc in/d -morep:1gb:l128:a1:s8:c2:r300:b1mb:d64kb
+check "texto canónico" '"$PARC" lb c.parc | grep -qE "orep:[0-9]+(kb|mb):l128:a1:s8:c2:r300:b1mb:d64kb"'
 
 # Parámetros inválidos: error que lo dice, sin archivo a medias
-for m in orep:l8 orep:a8:l4 orep:w5g orep:b1k orep:s0 orep:s65 orep:c0 orep:c5 orep:zz orep:l0x; do
+for m in orep:l8 orep:a8:l4 orep:w5g orep:b1k orep:s0 orep:s65 orep:c0 orep:c5 orep:zz orep:l0x orep:r70000; do
   rm -f e.parc
   out=$("$PARC" a e.parc in/d -m"$m" --no-progress 2>&1); rc=$?
   check "$m: rechazado" '[ $rc != 0 ] && echo "$out" | grep -q "orep: invalid" && [ ! -e e.parc ]'
