@@ -305,7 +305,7 @@ end;
 
 function TMmStage.NextChunk: Boolean;
 var
-  n: SizeInt;
+  n, k: SizeInt;
 begin
   if FStored then
   begin
@@ -317,7 +317,13 @@ begin
   end;
   if FChunk <= 0 then Exit(False);
   if Length(FBuf) < FChunk then SetLength(FBuf, FChunk);
-  n := Source.Read(@FBuf[0], FChunk);
+  // Llenar el trozo entero: Read puede devolver menos (p. ej. plz entrega de a bloques) y un
+  // trozo que no termina en un límite de muestra rompía el undiff de los siguientes
+  n := 0;
+  repeat
+    k := Source.Read(@FBuf[n], FChunk - n);
+    Inc(n, k);
+  until (k = 0) or (n = FChunk);
   FLen := n;
   FPos := 0;
   if n <= 0 then Exit(False);
