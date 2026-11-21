@@ -12,11 +12,14 @@ FPC_CROSS="${FPC_CROSS:-/mnt/IA_LAB/compartido/parc/fpc-cross}"
 
 # corep <dir> <cc> [opciones]: el núcleo en C de OREP -> <dir>/units/orep_core.o, que
 # src/orep/orep.pas enlaza con {$L}. Opciones del README de OREP.
-COREPFLAGS="-O2 -fno-builtin -ffreestanding -fno-stack-protector -fno-tree-loop-distribute-patterns -w"
+# -fno-tree-loop-distribute-patterns es solo de gcc: clang (macOS) no lo conoce.
+COREPFLAGS="-O2 -fno-builtin -ffreestanding -fno-stack-protector -w"
 corep() {
   out=$1; cc=$2; shift 2
   mkdir -p "$out/units"
-  $cc $COREPFLAGS "$@" -c src/orep/orep_core.c -o "$out/units/orep_core.o"
+  extra=""
+  case "$cc" in *clang*) ;; *) extra="-fno-tree-loop-distribute-patterns" ;; esac
+  $cc $COREPFLAGS $extra "$@" -c src/orep/orep_core.c -o "$out/units/orep_core.o"
 }
 
 build() {
