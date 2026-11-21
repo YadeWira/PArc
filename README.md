@@ -48,7 +48,7 @@ writes the same bytes.
   and adds 64-bit nanosecond timestamps, Windows attributes and Unix modes/links as optional
   directory fields.
 - **Codecs implemented in Pascal** (hot loops in inline assembler), no third-party compression
-  libraries linked; the only C is the core of OREP 0.0.9 (`src/orep/orep_core.c`, MIT, compiled
+  libraries linked; the only C is the core of OREP 0.0.10 (`src/orep/orep_core.c`, MIT, compiled
   from source and linked statically):
   `storing`, `lzma`, `ppmd`, `grzip`, `dict`, `orep` (long-range matcher, MIT; replaces FreeArc's
   `rep`), `delta`, `plz`, `lzp`, `mm`,

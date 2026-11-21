@@ -161,6 +161,7 @@ end;
 procedure Corrupt(const Name: string; Iters, Seed: Integer);
 const
   Method = 'orep:2mb:l32:b64kb';
+  Methods2: array[0..2] of string = ('orep:4mb:b64kb', 'orep:8mb:b1mb', 'orep:64mb:b64mb');
 var
   Data, Enc, D, Dec: TBytes;
   i, j, n, Kind, Caught, Same: Integer;
@@ -205,6 +206,29 @@ begin
   except
     on E: EArcCorrupt do Inc(Caught);
     on E: Exception do Bad('ventana más grande: ' + E.ClassName + ': ' + E.Message);
+  end;
+  // Regresión (OREP 0.0.10): tras un encabezado rechazado por el límite de memoria, los streams
+  // siguientes en el mismo proceso (con otros tamaños de bloque, y por el pool de
+  // decodificadores) tienen que salir bien: el decodificador rechazado no se reusa
+  for j := 1 to 3 do
+  begin
+    try
+      Decode(Encode(Data, 'orep:64mb:b64mb', 1 shl 20), 'orep:2mb:b64kb', 1 shl 16);
+      Bad('límite de memoria: sin error');
+    except
+      on E: EArcCorrupt do Inc(Caught);
+      on E: Exception do Bad('límite de memoria: ' + E.ClassName + ': ' + E.Message);
+    end;
+    for Kind := 0 to 2 do
+    begin
+      D := Encode(Data, Methods2[Kind], 1 shl 20);
+      try
+        if not SameBytes(Decode(D, Methods2[Kind], 1 + Random(1 shl 20)), Data) then
+          Bad('después de un rechazo: ' + Methods2[Kind] + ' distinto');
+      except
+        on E: Exception do Bad('después de un rechazo: ' + Methods2[Kind] + ': ' + E.Message);
+      end;
+    end;
   end;
   // Un stream vacío no es un stream de OREP
   try

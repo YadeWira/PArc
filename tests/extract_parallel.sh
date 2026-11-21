@@ -62,6 +62,16 @@ if [ -x /sbin/mkfs.fat ] && sudo -n true 2>/dev/null; then
   ck "vfat, README/readme con -o+: rc 0, queda el último"  '[ $oko = 1 ]'
 fi
 
+# Orden de los bloques de TParallelBlockStage cuando la cola crece por bytes y después en hilos
+# (tests/test_blockorder.lpr; con 4x4 de -m3 a 4 hilos entregaba un bloque fuera de orden)
+mkdir -p bo
+if fpc -O2 -Fu"$ROOT/src" -FUbo -FEbo "$ROOT/tests/test_blockorder.lpr" > bo/build.log 2>&1; then
+  PARC_THREADS=4 bo/test_blockorder > bo/run.log 2>&1; rc=$?
+  ck "orden de bloques con lectura adelantada por bytes" '[ $rc = 0 ]'
+else
+  ck "test_blockorder compila" 'false'
+fi
+
 cd / && rm -rf -- "${W:?}"
 echo "== extract_parallel: $fail failures"
 [ $fail -eq 0 ]

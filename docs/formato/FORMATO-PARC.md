@@ -292,9 +292,11 @@ Memories as everywhere in PArc (`b/k/m/g` suffixes; a bare number is 2^N). The s
 (`orep:57mb`) and, with `-lc`, to what fits the memory limit; the other parameters only when
 they differ from the defaults (`orep:96mb:l256`, `orep:2040mb:l512`).
 
-Stream: OREP format version 3 (OREP 0.0.4 to 0.0.9; still a draft upstream, so a later OREP may change
-it), specified in `src/orep/orep-format.md`: a 15–20-byte header (magic `OREP`, version, log2 of
-the block size, then varints: window, alignment setting, minimum length; CRC-32C), blocks (output size, match count, column
+Stream: OREP format version 4 (OREP 0.0.10; still a draft upstream, so a later OREP may change
+it; 0.0.10 does not read the version 3 streams of OREP 0.0.4 to 0.0.9, which only pre-release
+branches wrote), specified in `src/orep/orep-format.md`: a 14–30-byte header (magic `OREP`,
+version, log2 of the block size, then varints: window, alignment setting, minimum length, flags
+(0); CRC-32C), blocks (output size, match count, column
 size, the block's alignment, three varint columns: literal run, length − 16, distance − 1, zero
 padding) followed by the block's literals
 and the CRC-32C of the block's output, and an end marker with the total size. The stream does

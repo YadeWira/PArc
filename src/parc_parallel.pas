@@ -846,6 +846,9 @@ begin
         end;
         if w + e > FBaseJobs then FBaseJobs := w + e;
         FPool.SetMaxWorkers(w);
+        // Volver a mirar: si la cola ya había crecido por bytes (FMaxJobs >= w + e) sigue
+        // llena, y escribir ahora pisaba el bloque de FHead (se entregaba otro bloque primero)
+        Continue;
       end
       else if (ReadAheadBytes > 0) and (FAheadBytes < ReadAheadBytes) and
         (FMaxJobs < READAHEAD_MAXJOBS) then
