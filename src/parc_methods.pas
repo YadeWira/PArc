@@ -55,7 +55,7 @@ function ThreadsForMemory(const Est: array of Int64; Threads: Integer; Limit: In
 implementation
 
 uses
-  parc_crypt, StrUtils, parc_os, parc_lzma, parc_filters, parc_lz4, parc_orep, parc_lzp, parc_ppmd,
+  parc_crypt, StrUtils, parc_os, parc_lzma, parc_filters, parc_delta, parc_lz4, parc_orep, parc_lzp, parc_ppmd,
   parc_dict, parc_grzip, parc_parallel, parc_tta, parc_mm, parc_dispack, parc_srep, parc_cm,
   parc_bcj2, parc_plz;
 

@@ -187,10 +187,12 @@ the code derived from GPL sources; the current inventory:
 | container, CLI, `.parc` format, Reed–Solomon, volumes, `bcj2` filter, LZ4 decoder | own code | own (MIT-ready) |
 | encryption (XChaCha20/AES-GCM/Argon2id/BLAKE2b) | own code from the RFCs/FIPS | own (MIT-ready) |
 | `plz` (the LZ of `-m1`/`-m2`; replaced Tornado, removed 2026-11-20) | own code | own (MIT-ready) |
+| `delta` (table filter of the binary presets; replaced FreeArc's, 2026-11-21) | own code | own (MIT-ready) |
+| `lzp` (long-repeat filter of the text presets; replaced FreeArc's, 2026-11-21) | own code | own (MIT-ready) |
 | `ppmd` | LZMA SDK `Ppmd8` | public domain |
 | `lzma`, `exe` (BCJ) | LZMA SDK (+ FreeArc's `fast` additions in the encoder) | public domain (the FreeArc additions are GPL-derived) |
 | `lz4` | LZ4 1.11.1 | BSD-2 (notice kept) |
-| `rep`, `4x4`, `dict`, `lzp`, `delta`, `mm`, `tta`, `grzip`, `dispack070`, `srep` | ports of FreeArc 0.67 `Compression/` | GPL-derived, pending rewrite |
+| `rep`, `4x4`, `dict`, `mm`, `tta`, `grzip`, `dispack070`, `srep` | ports of FreeArc 0.67 `Compression/` | GPL-derived, pending rewrite |
 | `cm` | lpaq1 (Matt Mahoney) | GPL-2.0-derived, pending rewrite |
 
 The FreeArc-derived codec ports come from FreeArc 0.67 sources by Bulat Ziganshin and

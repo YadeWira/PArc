@@ -1,10 +1,7 @@
-{ Filtros de preprocesamiento (lado decodificador):
-  - exe:   BCJ x86 del LZMA SDK 26.03 (Bra86.c, Igor Pavlov, dominio público). El stream es
-           el de los filtros x86 de 7-Zip/xz: los datos convertidos tal cual, sin cabecera; la
-           posición (ip) y el estado siguen de un buffer al otro, y los últimos bytes que no
-           alcanzan para una instrucción quedan sin convertir.
-  - delta: Compression/Delta/Delta.cpp (delta_decompress) de Bulat Ziganshin (FreeArc, GPL;
-           pendiente de reemplazo). }
+{ Filtro exe (lado decodificador): BCJ x86 del LZMA SDK 26.03 (Bra86.c, Igor Pavlov, dominio
+  público). El stream es el de los filtros x86 de 7-Zip/xz: los datos convertidos tal cual, sin
+  cabecera; la posición (ip) y el estado siguen de un buffer al otro, y los últimos bytes que no
+  alcanzan para una instrucción quedan sin convertir. (delta está en parc_delta.) }
 unit parc_filters;
 
 {$mode objfpc}{$H+}
@@ -28,16 +25,6 @@ type
     procedure Fill;
   public
     constructor Create(ASource: TInStage);
-    function Read(Buf: PByte; Count: SizeInt): SizeInt; override;
-  end;
-
-  TDeltaStage = class(TInStage)
-  private
-    FData: array of Byte;
-    FLen, FPos: SizeInt;
-    FEof: Boolean;
-    function NextBlock: Boolean;
-  public
     function Read(Buf: PByte; Count: SizeInt): SizeInt; override;
   end;
 
@@ -223,115 +210,6 @@ begin
   if Result > Count then Result := Count;
   Move(FBuf[FOutPos], Buf^, Result);
   Inc(FOutPos, Result);
-end;
-
-{ TDeltaStage }
-
-const
-  MAX_ELEMENT_SIZE = 32;
-
-{ Un bloque: U32 DataSize (el stream puede terminar acá), U32 TableSize, luego TSkip, TType y
-  TRows (TableSize bytes cada uno, U32 por tabla) y los DataSize bytes de datos. }
-function TDeltaStage.NextBlock: Boolean;
-var
-  Hdr: array[0..3] of Byte;
-  DataSize, TableSize: LongWord;
-  Tables: array of Byte;
-  NTables, i, k, N, Rows, Skip, Imm: SizeInt;
-  TypeW: LongWord;
-  Immutable: array[0..MAX_ELEMENT_SIZE - 1] of Boolean;
-  P, R: SizeInt;
-  Tmp: array of Byte;
-  q, q1, Carry, Sum, Col: SizeInt;
-begin
-  if not Source.ReadExactOrEof(@Hdr[0], 4) then Exit(False);
-  DataSize := GetUi32(@Hdr[0]);
-  TableSize := Source.ReadU32;
-  if (TableSize mod 4) <> 0 then Corrupt('delta: invalid table size');
-  if DataSize > $7FFFFFFF then Corrupt('delta: block too large');
-  SetLength(Tables, 3 * SizeInt(TableSize));
-  if TableSize > 0 then Source.ReadExact(@Tables[0], 3 * SizeInt(TableSize));
-  SetLength(FData, DataSize);
-  if DataSize > 0 then Source.ReadExact(@FData[0], DataSize);
-
-  NTables := TableSize div 4;
-  P := 0;
-  for i := 0 to NTables - 1 do
-  begin
-    Skip := GetUi32(@Tables[4 * i]);
-    TypeW := GetUi32(@Tables[TableSize + 4 * i]);
-    Rows := GetUi32(@Tables[2 * TableSize + 4 * i]);
-    // decode_type: el bit más alto es el ancho N; los de abajo marcan columnas inmutables
-    N := 0;
-    while TypeW > 1 do
-    begin
-      if N >= MAX_ELEMENT_SIZE then Corrupt('delta: invalid table type');
-      Immutable[N] := (TypeW and 1) <> 0;
-      TypeW := TypeW shr 1;
-      Inc(N);
-    end;
-    Inc(P, Skip);
-    if (N = 0) or (Rows < 0) or (P < 0) or (P + N * Rows > SizeInt(DataSize)) then
-      Corrupt('delta: table outside block');
-
-    // unreorder_table: las columnas inmutables se guardaron primero, juntas
-    Imm := 0;
-    for k := 0 to N - 1 do if Immutable[k] then Inc(Imm);
-    if (Imm <> 0) and (Imm <> N) then
-    begin
-      SetLength(Tmp, N * Rows);
-      Move(FData[P], Tmp[0], N * Rows);
-      R := P;
-      q := 0;
-      q1 := Imm * Rows;
-      for k := 0 to Rows - 1 do
-        for Col := 0 to N - 1 do
-        begin
-          if Immutable[Col] then begin FData[R] := Tmp[q]; Inc(q); end
-          else begin FData[R] := Tmp[q1]; Inc(q1); end;
-          Inc(R);
-        end;
-    end;
-
-    // undiff_table: cada fila suma la anterior (LSB primero), acarreando solo entre
-    // columnas mutables contiguas
-    R := P + N;
-    while R < P + N * Rows do
-    begin
-      Carry := 0;
-      for Col := 0 to N - 1 do
-        if not Immutable[Col] then
-        begin
-          Sum := FData[R + Col] + FData[R + Col - N] + Carry;
-          FData[R + Col] := Byte(Sum);
-          Carry := Sum shr 8;
-        end
-        else
-          Carry := 0;
-      Inc(R, N);
-    end;
-    Inc(P, N * Rows);
-  end;
-  FLen := DataSize;
-  FPos := 0;
-  Result := True;
-end;
-
-function TDeltaStage.Read(Buf: PByte; Count: SizeInt): SizeInt;
-begin
-  while FPos >= FLen do
-  begin
-    if FEof then Exit(0);
-    if not NextBlock then
-    begin
-      FEof := True;
-      Exit(0);
-    end;
-  end;
-  Result := FLen - FPos;
-  if Result > Count then Result := Count;
-  Move(FData[FPos], Buf^, Result);
-  Inc(FPos, Result);
 end;
 
 end.

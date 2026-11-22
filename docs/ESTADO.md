@@ -1149,6 +1149,111 @@ inside `4x4`). Where parity is **not** reached:
 `eplz = (|x)plz`.
 
 
+## Own filters replacing FreeArc's `delta` and `lzp` (2026-11-21/22)
+
+Same method as `plz`: each filter is rewritten from the published idea of the algorithm, using
+PArc's current code only for the interface (parameters, place in the chain, presets, memory
+estimate, tests), then benchmarked against the old one until it is at least as good in size and
+speed in every preset that uses it. `dict` stays FreeArc's for now: the own one (separate branch) is still behind it on
+natural-language text. Work area and logs:
+`/mnt/IA_LAB/agentes/PArc/filters/` (corpus copies in `data/`, scripts in `scripts/`, CSVs in
+`logs/`; `base/parc_old` and `base/bench_old` are 40ffce5).
+
+**`delta`** (done: `src/parc_delta.pas`, stream in `formato/FORMATO-PARC.md` §6.4; the old
+`parc_deltaenc.pas` and the decoder in `parc_filters.pas` are gone). Per 8 MB block, in 512-byte
+windows: a one-pass repeat-distance histogram (x86-64 assembler, Pascal fallback with the same
+result) finds windows whose bytes repeat at a fixed distance (or change slowly byte to byte); the
+stride is confirmed by the window's difference cost against unrelated control strides; the run
+grows record by record while a moving average of the record cost stays below the midpoint of the
+two levels, and runs of the same stride are joined across short gaps. For each run a field layout
+is chosen on a sample (1/2/4-byte fields, both byte orders, every alignment, per-field on/off) by
+order-0 column entropy in integer fixed point, counting raw bytes equal to the one a record back
+as cheap repeats (that is what made it stop hurting LZ back ends on bitmaps with repeated
+patterns). Output is aligned like the input (header padded to 8 bytes: plz and lzma use the
+position modulo 2/4/8, and a 5-byte shift cost plz up to 6 % on some files). Decoding keeps the
+running sums in registers for up to four differenced fields.
+
+**`lzp`** (done: `src/parc_lzp.pas` rewritten, stream in `formato/FORMATO-PARC.md` §6.5). Bloom's
+LZP on a 4-byte context with **two candidates per bucket** (the most recent and the one before;
+the longer match beyond its minimum wins, one bit of the length says which). That was the step
+that made it beat the old filter on documents in front of grzip (one candidate: +0.05 %; two:
+−0.14 %); contexts of 5–6 bytes lost up to 0.7 % there. The escape is the block's least frequent
+byte; lengths go to a separate stream after the literals. `d<barrier>`/`s<smallest>`: a repeat
+that starts more than `d` back may be as short as `s` (close repeats are left to PPMd, which
+predicts them well: the other way round cost 1 % with `ppmd:13`). Speed: the encoder computes
+and prefetches table slots 8 positions ahead and rejects a candidate on its first 8 bytes; the
+decoder writes literals 8 at a time with their 8 table slots computed together.
+
+
+**`delta` in the presets** (binary pipelines; old = 40ffce5, new = own delta, both with REP; best of 2
+runs, T1 on 2 and T4 on 4 of cores 0–15; `/mnt/IA_LAB/agentes/PArc/filters/logs/final_all.csv`). `-m2`
+at T4 does not use delta. After the OREP merge the same comparison (main 78de427 vs the branch)
+gave −0.02…−0.78 % in every binary cell (`logs/final_merged.csv`).
+
+| set | preset | T | old size | new size | Δ | comp wall old/new | dec wall old/new |
+|---|---|---|---:|---:|---:|---:|---:|
+| TILIN | -m3 | 1 | 1,022,570,069 | 1,022,421,520 | -0.01 % | 237.49 / 233.07 | 44.74 / 46.80 |
+| TILIN | -m5 | 1 | 1,006,574,156 | 1,006,338,179 | -0.02 % | 362.95 / 348.61 | 47.78 / 42.01 |
+| TILIN | -m3 | 4 | 1,044,078,773 | 1,043,621,470 | -0.04 % | 42.48 / 43.99 | 9.65 / 9.59 |
+| TILIN | -m5 | 4 | 1,037,925,682 | 1,037,439,496 | -0.05 % | 69.87 / 65.03 | 9.37 / 9.61 |
+| exe | -m2 | 1 | 52,308,428 | 52,119,058 | -0.36 % | 3.06 / 2.85 | 0.46 / 0.47 |
+| exe | -m3 | 1 | 51,123,480 | 51,092,421 | -0.06 % | 8.15 / 7.39 | 1.88 / 1.80 |
+| exe | -m5 | 1 | 50,185,871 | 50,160,462 | -0.05 % | 19.23 / 20.17 | 2.54 / 2.54 |
+| exe | -m9 | 1 | 50,096,051 | 50,052,547 | -0.09 % | 21.86 / 21.71 | 2.48 / 2.36 |
+| exe | -m2 | 4 | 53,624,421 | 53,624,421 | +0.00 % | 0.85 / 0.83 | 0.22 / 0.20 |
+| exe | -m3 | 4 | 51,558,814 | 51,512,785 | -0.09 % | 4.26 / 4.06 | 1.03 / 0.98 |
+| exe | -m5 | 4 | 51,090,694 | 51,053,921 | -0.07 % | 11.52 / 11.43 | 1.51 / 1.48 |
+| exe | -m9 | 4 | 50,096,051 | 50,052,547 | -0.09 % | 13.67 / 13.73 | 2.39 / 2.37 |
+| table | -m2 | 1 | 152,512,559 | 150,370,428 | -1.40 % | 13.22 / 12.68 | Command / 3.49 |
+| table | -m3 | 1 | 127,876,558 | 127,480,406 | -0.31 % | 41.44 / 40.28 | 19.76 / 19.83 |
+| table | -m5 | 1 | 122,043,571 | 121,814,956 | -0.19 % | 70.00 / 68.45 | 33.48 / 33.68 |
+| table | -m9 | 1 | 122,289,320 | 121,995,336 | -0.24 % | 75.24 / 82.20 | 33.71 / 32.75 |
+| table | -m2 | 4 | 143,003,447 | 143,003,447 | +0.00 % | 6.38 / 6.33 | 4.22 / 4.08 |
+| table | -m3 | 4 | 131,146,349 | 130,173,754 | -0.74 % | 16.28 / 15.62 | 8.54 / 8.45 |
+| table | -m5 | 4 | 132,471,118 | 131,325,733 | -0.86 % | 18.85 / 19.29 | 9.19 / 8.34 |
+| table | -m9 | 4 | 122,289,320 | 121,995,336 | -0.24 % | 28.50 / 29.69 | 9.25 / 9.25 |
+| document | -m2 | 1 | 35,518,465 | 35,465,212 | -0.15 % | 2.75 / 2.88 | 1.00 / 1.01 |
+| document | -m3 | 1 | 35,030,204 | 35,015,420 | -0.04 % | 5.14 / 5.28 | 2.39 / 2.35 |
+| document | -m5 | 1 | 33,611,454 | 33,601,378 | -0.03 % | 14.55 / 15.45 | 3.23 / 3.78 |
+| document | -m9 | 1 | 33,443,280 | 33,424,992 | -0.05 % | 19.98 / 19.42 | 3.49 / 3.48 |
+| document | -m2 | 4 | 36,084,754 | 36,084,754 | +0.00 % | 0.99 / 1.01 | 0.51 / 0.53 |
+| document | -m3 | 4 | 35,052,506 | 35,032,773 | -0.06 % | 3.03 / 3.07 | 0.55 / 0.55 |
+| document | -m5 | 4 | 33,620,367 | 33,614,224 | -0.02 % | 6.33 / 6.28 | 1.81 / 2.08 |
+| document | -m9 | 4 | 33,443,280 | 33,424,992 | -0.05 % | 11.28 / 10.93 | 2.30 / 2.16 |
+| TILIN | -m3 | 1 | 1,022,444,338 | 1,022,287,502 | -0.02 % | 258.01 / 236.77 | 46.88 / 46.84 |
+| TILIN | -m5 | 1 | 1,006,474,857 | 1,006,182,353 | -0.03 % | 397.17 / 368.87 | 48.42 / 48.30 |
+| TILIN | -m3 | 4 | 1,044,040,024 | 1,043,543,307 | -0.05 % | 55.26 / 41.14 | 9.32 / 8.28 |
+| TILIN | -m5 | 4 | 1,038,051,990 | 1,037,628,647 | -0.04 % | 78.08 / 62.02 | 8.34 / 8.35 |
+| exe | -m3 | 1 | 51,107,676 | 51,070,356 | -0.07 % | 8.06 / 8.15 | 1.89 / 1.89 |
+| exe | -m9 | 1 | 50,085,686 | 50,028,045 | -0.12 % | 20.15 / 20.29 | 2.41 / 2.41 |
+| exe | -m3 | 4 | 51,538,484 | 51,489,178 | -0.10 % | 3.87 / 3.84 | 1.11 / 1.17 |
+| exe | -m9 | 4 | 50,085,686 | 50,028,045 | -0.12 % | 14.21 / 13.94 | 2.46 / 2.47 |
+| table | -m3 | 1 | 127,796,882 | 127,315,615 | -0.38 % | 44.59 / 41.31 | 21.30 / 21.59 |
+| table | -m9 | 1 | 122,252,199 | 121,885,049 | -0.30 % | 80.91 / 81.63 | 39.11 / 34.86 |
+| table | -m3 | 4 | 131,124,694 | 130,096,945 | -0.78 % | 16.09 / 16.13 | 9.79 / 9.33 |
+| table | -m9 | 4 | 122,252,199 | 121,885,049 | -0.30 % | 29.02 / 29.76 | 9.26 / 9.50 |
+| document | -m3 | 1 | 35,026,170 | 35,012,675 | -0.04 % | 5.32 / 5.57 | 2.49 / 2.41 |
+| document | -m9 | 1 | 33,438,412 | 33,419,913 | -0.06 % | 19.84 / 28.30 | 3.52 / 3.78 |
+| document | -m3 | 4 | 35,065,468 | 35,048,515 | -0.05 % | 3.13 / 3.13 | 0.60 / 0.62 |
+| document | -m9 | 4 | 33,438,412 | 33,419,913 | -0.06 % | 11.00 / 11.01 | 2.32 / 2.35 |
+| table | `delta` | 276,596,408 | 275,804,424 | -0.29 % | 5.601 / 4.741 | 0.438 / 0.501 |
+| exe | `delta` | 90,177,852 | 90,096,736 | -0.09 % | 0.823 / 0.739 | 0.116 / 0.115 |
+| document | `delta` | 70,580,428 | 70,518,152 | -0.09 % | 0.603 / 0.634 | 0.088 / 0.088 |
+| table | `delta+lzma:96m:normal:32:bt4:mc8:lc4:pb1` | 129,076,876 | 126,805,049 | -1.76 % | 109.930 / 110.539 | 7.814 / 7.406 |
+| exe | `delta+lzma:96m:normal:32:bt4:mc8:lc4:pb1` | 50,310,989 | 50,293,975 | -0.03 % | 21.177 / 21.390 | 2.314 / 2.333 |
+| document | `delta+lzma:96m:normal:32:bt4:mc8:lc4:pb1` | 33,690,036 | 33,667,331 | -0.07 % | 17.822 / 17.172 | 1.628 / 1.664 |
+| table | `delta+plz:4` | 160,749,548 | 149,530,401 | -6.98 % | 15.206 / 14.189 | 1.422 / 1.529 |
+| exe | `delta+plz:4` | 54,222,235 | 54,052,898 | -0.31 % | 3.130 / 2.934 | 0.358 / 0.374 |
+| document | `lzp:64m:32:h20:92%` | 50,929,712 | 50,627,665 | -0.59 % | 1.366 / 1.183 | 0.449 / 0.426 |
+| document | `lzp:80m:105:d1m:s32:h22:92%` | 55,881,983 | 55,941,537 | +0.11 % | 2.600 / 2.071 | 1.226 / 0.794 |
+
+**`lzp`**: with the presets' dict in front, the text chains are smaller than with the old lzp in
+every case measured (3t grzip −0.14…−0.25 %, 4t ppmd:8 −0.07 %, 5t ppmd:13 −0.02 %, #t −0.03 %); `lzp`
+alone encodes 5–25 % faster and decodes faster with h22/h23, 5–20 % slower with h20 on text
+(0.47 vs 0.40 s for 93 MB), which is lost in the chains' seconds of PPMd/BWT.
+
+Found on the way: `parc a -m2 -mt1` corrupted some images (mm + plz short reads), fixed in dc7aca9.
+
 ## Verified platforms (0.0.2)
 
 | platform | binary | tests |
@@ -1185,6 +1290,9 @@ bash tests/ppmd_asm.sh            # PPMd: ensamblador == Pascal (-dPARC_NOASM)
 bash tests/orep.sh                # OREP: etapas, parámetros, 1..8 hilos, C == Pascal (-dOREP_NO_NATIVE), dañados
 bash tests/plz.sh                 # plz: niveles, ventanas, streaming == memoria, asm == Pascal, dañados
 bash tests/plz_cross.sh           # plz: mismos bytes en linux64/linux32/linuxarm64 (QEMU)/win64/win32 (Wine)
+bash tests/delta.sh               # delta: tablas sintéticas de cada formato, trozos al azar, asm == Pascal, dañados
+bash tests/lzp.sh                 # lzp: parámetros de los presets y extremos, trozos al azar, dañados
+bash tests/filters_cross.sh       # delta/lzp: mismos bytes en linux64/linux32/linuxarm64/win64/win32
 # plz_bench: cualquier método en memoria por las cadenas (tamaño, CPU y pared)
 fpc -O3 -Fusrc -Fobuild/linux64/units -Flbuild/linux64/units -FUbuild/tests/units -FEbuild/tests tests/plz_bench.lpr
 # liberar/reusar un trabajo del pool apenas termina (ventana ampliada con -dPARC_RACE_TEST)

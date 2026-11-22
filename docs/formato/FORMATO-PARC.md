@@ -385,3 +385,81 @@ stream is bounded; each bit stream must end exactly at its last byte; anything e
 block (`EArcCorrupt`). Memory comes from W, never more than W + 1 MiB (allocated as the data
 arrives), plus fixed buffers. Inside `4x4` each 4x4 block is a complete `plz` stream decoded
 memory to memory, which must produce exactly the block's original size and end at its last byte.
+
+### 6.4 `delta` (since 2026-11)
+
+`delta` is PArc's own filter for tables of fixed-size records (`src/parc_delta.pas`, encoder
+and decoder), written to replace FreeArc's `delta` (Bulat Ziganshin, GPL); it is not derived from
+it. **`delta` blocks written before this change do not decode** (the version byte rejects them).
+The output has the length of the input plus a small header per block: the encoder rewrites the
+tables it finds in place (each field minus the same field of the previous record) and leaves
+everything else as it is. How the tables are found is the encoder's business (see the comment at
+the top of the unit); the decoder only follows the segment list.
+
+Method string: `delta[:<block>][:x]`, also `b<block>`. Block 8 MB by default (1 B .. 1 GB; a
+bare number without a suffix is 2^N as in every PArc memory parameter); `x` lets the encoder
+look for records of up to 64 bytes (default 32). The decoder needs no parameter.
+
+Stream: one byte, the version (1), then blocks until the end of the stream:
+
+| Field | Value |
+|---|---|
+| `VInt Len` | bytes in the block, 1 ≤ Len ≤ 2^30 |
+| `VInt NSeg` | number of segments, NSeg ≤ Len / 2 |
+| NSeg × segment | `VInt Gap`, `U8 Stride`, `VInt Count`, `U8 Layout`, `VInt Mask` |
+| padding | zero bytes until the stream position (from the version byte) is a multiple of 8 |
+| data | Len bytes |
+
+`VInt` is LEB128 (7 bits per byte, low group first, bit 7 = more), at most 64 bits. Segment i
+starts Gap bytes after the end of segment i−1 (after the block start for the first one) and
+covers Count × Stride bytes: Count ≥ 2 records of Stride bytes (1 ≤ Stride ≤ 64), entirely inside
+the block. Layout bits 0-1 give the field width w = 1, 2 or 4 bytes (3 is invalid; Stride must
+be a multiple of w), bit 2 = the fields are big endian (only with w > 1), bits 3-7 zero. Field f
+of a record is bytes [f·w, (f+1)·w). Mask is non-zero and has no bits at or above Stride / w;
+bit f set means that in every record but the first, field f holds (value − value of field f in
+the previous record) mod 2^(8w), the values read with the given byte order. The decoder undoes the
+segments in order, records first to last. The padding keeps the data at the alignment it had in
+the input (LZ and context-mixing back ends use the position modulo 2, 4 or 8 as context).
+
+Decoder checks: version, VInt ranges, every segment field and position, and the padding bytes;
+anything else is a damaged block (`EArcCorrupt`). Memory: one block (at most Len bytes, the
+buffer growing as the data arrives, so a damaged length cannot reserve 1 GB up front) plus the
+segment list.
+
+### 6.5 `lzp` (since 2026-11)
+
+`lzp` is PArc's own long-repeat filter for the text presets (`src/parc_lzp.pas`), written to
+replace FreeArc's `lzp` (Dmitry Shkarin's LZP as ported by Bulat Ziganshin, GPL); it is not
+derived from it. **`lzp` blocks written before this change do not decode.**
+
+Method string: `lzp[:<block>][:<min>][:h<bits>][:d<barrier>][:s<smallest>][:<N>%]`, also
+`b<block>` and `l<min>`. Defaults: block 8 MB, minimum match 64, 18 hash bits, no barrier,
+smallest match 32, N = 100. Limits applied by both sides (`Normalize`): block ≤ 1 GB, 8 ≤
+minimum ≤ 65535, 8 ≤ smallest ≤ minimum, 10 ≤ bits ≤ 26, barrier ≤ 1 GB. `N%` is the encoder's:
+a block whose coded size exceeds N % of the input is stored. The decoder allocates from the
+method string (block, table), never from stream values.
+
+Stream header: `U8 version` (1), `U8 context bytes` (4), `U8 hash bits`, `VInt minimum`,
+`VInt smallest`, `VInt barrier`; all must equal the method string's values after the limits.
+Then blocks until the end of the stream: `VInt Len` (1 ≤ Len ≤ block size), `U8 mode`. Mode 0:
+Len stored bytes. Mode 1: `U8 escape`, `VInt NMain` (≤ Len), `VInt NLens`, NMain bytes of main
+stream, NLens bytes of length stream. `VInt` is LEB128 (bit 7 = more).
+
+Model (encoder and decoder keep it identically): positions are offsets in the block; the table
+has 2^b buckets of two positions (b = the hash bits, but at most 1 + ⌈log2 Len⌉ and at least 10),
+cleared at each block. Position i ≥ 8 has the context C = the 4 bytes before it (as a
+little-endian 32-bit value) and the bucket ⌊(C · 0x9E3779B97F4A7C15 mod 2^64) / 2^(64−b)⌋; its
+candidates are the bucket's first slot (the most recent position with that bucket) and second
+slot (the one before), 0 = none; after reading them the bucket becomes (i, first). Positions below 8
+have no candidates and do not touch the table.
+
+Decoding, at output position i: take the next main byte m. If m ≠ escape, output m (i + 1). If
+m = escape, read a length value v from the length stream (a sequence of bytes, each 255 adds 255,
+the first byte < 255 ends it): v = 0 outputs the escape byte itself; otherwise the candidate is
+the first slot if v is odd, the second if even (it must not be 0), the minimum is `smallest` if
+the candidate is more than `barrier` bytes back and `minimum` otherwise, and the match length is
+⌊(v − 1) / 2⌋ + minimum: copy that many bytes from the candidate position onwards (forwards, the
+copy may overlap itself). The table is updated at every position where a main byte is read,
+before the byte is interpreted; positions inside a match are not. The block must end exactly
+when both streams are used up, at Len bytes; anything else (or a match past Len, or NLens
+larger than NMain + 2⌊Len/255⌋ + 2) is a damaged block (`EArcCorrupt`).

@@ -136,7 +136,7 @@ implementation
 
 uses
   Math, parc_filters, parc_ppmd, parc_methods, parc_lzp, parc_parallel, parc_lzmaenc,
-  parc_orep, parc_deltaenc, parc_dictenc, parc_ttaenc, parc_mmenc, parc_grzipenc,
+  parc_orep, parc_delta, parc_dictenc, parc_ttaenc, parc_mmenc, parc_grzipenc,
   parc_crypt, parc_canon, parc_lz4enc, parc_dispack, parc_srep, parc_cm, parc_bcj2, parc_plzenc;
 
 function StageName(const Stage: string): string; forward;
@@ -738,7 +738,8 @@ end;
   - orep: lo que dice OrepEncMemory (anillo de la ventana + un bloque, tabla de anclas, búferes);
   - cm y srep guardan todo el bloque (cm: ~4 veces más sus modelos de 64 MB; srep: ~3 veces);
   - 4x4: los trabajos en vuelo (hasta los hilos, máx. 16) por (método interno + 2 bloques);
-  - filtros (exe, delta, mm, tta, bcj2) y cifrado: búferes de unos MB. }
+  - delta: su bloque (8 MB por defecto) y las tablas del análisis;
+  - filtros (exe, mm, tta, bcj2) y cifrado: búferes de unos MB. }
 function StageEncodeMem(const Stage: string; DataSize: Int64): Int64;
 var
   Parts: TStringArray;
@@ -747,6 +748,7 @@ var
   Lz: TLzpParams;
   Om: TOrepMethod;
   J: Integer;
+  B: Int64;
 begin
   if IsCipherStage(Stage) then Exit(MB_);
   Parts := Stage.Split([':']);
@@ -773,6 +775,13 @@ begin
           Lz := ParseLzpParams(Parts);
           Result := 2 * Int64(Lz.BlockSize) + (Int64(8) shl Lz.HashSizeLog) + MB_;
         end;
+      'delta':
+        begin
+          // the block (it grows with the data) plus the analysis tables
+          B := ParseDeltaEncParams(Parts).BlockSize;
+          if (DataSize > 0) and (DataSize < B) then B := DataSize;
+          Result := B + MB_;
+        end;
       'dict': Result := 3 * FirstMemParam(Parts, 64 * MB_) + MB_;
       'grzip': Result := 6 * FirstMemParam(Parts, 8 * MB_) + MB_;
       'dispack', 'dispack070': Result := 3 * FirstMemParam(Parts, 8 * MB_) + MB_;
@@ -789,7 +798,7 @@ begin
           Result := Int64(J) * (EncodeMemEstimate(Inner, Bs) + 2 * Int64(Bs)) + Int64(Bs);
         end;
     else
-      Result := 4 * MB_;   // exe, delta, mm, tta, bcj2, storing...
+      Result := 4 * MB_;   // exe, mm, tta, bcj2, storing...
     end;
   except
     Result := 64 * MB_;    // parámetros raros: el codificador dará el error
