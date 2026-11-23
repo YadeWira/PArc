@@ -515,7 +515,7 @@ const
   SEG_STRIDE = 8;
   SEG_MIN = 64 * 1024;
   SEG_MAX = 64;              // pieces per block
-  SEG_PENALTY = 49152.0;     // bits of the whole piece (the samples see 1/SEG_STRIDE of it)
+  SEG_PENALTY = 49152;     // bits of the whole piece (the samples see 1/SEG_STRIDE of it)
   SEG_DIV = 32;
   SEG_TAB = 65536;
   SEG_ONE = 65536;           // fixed point: costs in 1/65536 bit
@@ -531,19 +531,41 @@ type
   end;
 
 var
-  SegD: array of LongInt;            // SEG_ONE * ((f + 1) log2 (f + 1) - f log2 f) for f < SEG_TAB
+  SegD: array of LongInt;            // FLogF(f + 1) - FLogF(f) for f < SEG_TAB
   SegLogLock: TRTLCriticalSection;
 
-function FLogF(f: LongInt): Double; inline;
+{ floor(SEG_ONE * log2 x) for x >= 1, in integers only (the same on every platform): the
+  integer part from the top bit, 16 fraction bits by squaring the mantissa (Q31) }
+function Log2Fixed(x: QWord): Int64;
+var
+  k, i: Integer;
+  m: QWord;
 begin
-  if f <= 1 then Result := 0 else Result := f * Log2(f);
+  k := BsrQWord(x);
+  if k >= 31 then m := x shr (k - 31) else m := x shl (31 - k);   // 1.xxx in Q31
+  Result := Int64(k) * SEG_ONE;
+  for i := 15 downto 0 do
+  begin
+    m := (m * m) shr 31;
+    if m >= QWord(1) shl 32 then
+    begin
+      Inc(Result, Int64(1) shl i);
+      m := m shr 1;
+    end;
+  end;
 end;
 
-{ SEG_ONE * (FLogF(f + 1) - FLogF(f)) }
+{ SEG_ONE * f log2 f, fixed point }
+function FLogF(f: LongInt): Int64; inline;
+begin
+  if f <= 1 then Result := 0 else Result := Int64(f) * Log2Fixed(f);
+end;
+
+{ FLogF(f + 1) - FLogF(f) }
 function DLogF(f: LongInt): LongInt; inline;
 begin
   if f < SEG_TAB then Result := SegD[f]
-  else Result := Round(SEG_ONE * (FLogF(f + 1) - FLogF(f)));
+  else Result := LongInt(FLogF(f + 1) - FLogF(f));
 end;
 
 procedure BuildSegLog;
@@ -555,7 +577,7 @@ begin
     if Length(SegD) = 0 then
     begin
       SetLength(SegD, SEG_TAB);
-      for i := 0 to SEG_TAB - 1 do SegD[i] := Round(SEG_ONE * (FLogF(i + 1) - FLogF(i)));
+      for i := 0 to SEG_TAB - 1 do SegD[i] := LongInt(FLogF(i + 1) - FLogF(i));
     end;
   finally
     LeaveCriticalSection(SegLogLock);
@@ -572,8 +594,7 @@ end;
 function SegSplit(M: TSegModel; P: PByte; n: SizeInt): SizeInt;
 var
   i, c, k, Best, Stop: SizeInt;
-  Whole: Double;
-  Cur, BestCost: Int64;
+  Whole, Cur, BestCost: Int64;
   x, y: LongInt;
   Tp: ^TSegPair;
 begin
@@ -592,8 +613,8 @@ begin
   Whole := 0;
   for c := 0 to 255 do Whole := Whole + FLogF(M.C[c].R);
   for k := 0 to 65535 do Whole := Whole - FLogF(M.T[k].R);
-  Cur := Round(Whole * SEG_ONE);
-  BestCost := Round((Whole - Whole / SEG_DIV - SEG_PENALTY / SEG_STRIDE) * SEG_ONE);
+  Cur := Whole;
+  BestCost := Whole - Whole div SEG_DIV - SEG_PENALTY * SEG_ONE div SEG_STRIDE;
   Best := 0;
   i := SEG_STRIDE;
   Stop := n - SEG_MIN;
