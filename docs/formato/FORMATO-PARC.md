@@ -464,7 +464,129 @@ before the byte is interpreted; positions inside a match are not. The block must
 when both streams are used up, at Len bytes; anything else (or a match past Len, or NLens
 larger than NMain + 2⌊Len/255⌋ + 2) is a damaged block (`EArcCorrupt`).
 
-### 6.6 `bwt` (since 2026-11): replaces `grzip`
+### 6.6 `dispack` (since 2026-11): replaces FreeArc's DisPack
+
+`dispack` is PArc's own filter for x86 and x86-64 machine code (`src/parc_dispack.pas` and the
+walker `src/parc_dispack_walk.inc`, shared by encoder and decoder), written to replace FreeArc's
+DisPack 0.70 (GPL); it is not derived from it. Method names `dispack`, `dispack070` (stored) and
+the preset `exe2`. **`dispack070` blocks written before this change do not decode** (the version
+byte rejects them).
+
+Method string: `dispack070[:<block>][:x]`, also `b<block>`. Block 8 MB by default (1 B .. 1 GB; a
+bare number is 2^N as in every PArc memory parameter); `x` is accepted and ignored. The decoder
+uses the block size as the limit of `Len`.
+
+Stream: `U8 version` (1), then blocks until the end of the stream:
+
+| Field | Value |
+|---|---|
+| `VInt Len` | bytes in the block, 1 ≤ Len ≤ block size |
+| `VInt NReg` | code regions, NReg ≤ Len / 16 + 1 |
+| NReg × region | `VInt Gap`, `VInt RegLen` (≥ 1), `U8 Mode` (0 = 32-bit, 1 = 64-bit), `U32 Va` |
+| 8 × `VInt StreamLen` | OP, D32, ADDR, I16, I32, CALL, JMP, RAW; each ≤ 2·Len + 64 |
+| padding | zero bytes until the stream position (from the version byte) is a multiple of 4 |
+| 8 streams | each followed by zero bytes up to a multiple of 4 |
+
+`VInt` is LEB128 (bit 7 = more), `U32` little endian. Region i starts Gap bytes after the end of
+region i−1 (after the block start for the first) and lies inside the block; the bytes before,
+between and after the regions are taken in order from RAW. A region is rebuilt instruction by
+instruction from the other streams; Va is the virtual address of its first byte (only its value
+modulo 2^32 matters).
+
+Instruction walk (the decoder rebuilds the bytes in this order and every choice depends only on
+bytes already rebuilt). At the start of an instruction, OP byte `D6` is an escape: `D6 00` = the
+byte D6; `D6 n` with 1 ≤ n ≤ 63 = n raw bytes from OP (n ≤ bytes left in the region); other n are
+invalid. Otherwise, from OP: up to 14 prefixes (26 2E 36 3E 64 65 66 67 F0 F2 F3, and 40-4F in
+64-bit mode; a 15th prefix byte is taken as the opcode), then the opcode: `0F xx`, `0F 38 xx` and
+`0F 3A xx`; C4/C5/62 followed by a byte b: in 64-bit mode or when b ≥ C0, VEX (C5: b; C4: b and
+one more byte, map = b & 1F) or EVEX (62: b and two more bytes, map = b & 7) and then the opcode
+byte; in 32-bit mode with b < C0, b is the ModRM of LES/LDS/BOUND. ModRM and SIB come from OP.
+Operand fields, by the opcode maps of the Intel/AMD manuals (the tables in the unit are the
+normative list): 8-bit displacement → OP; 32-bit displacement with a base register (mod = 2) →
+D32 as is; [disp32] without base (mod = 0 and r/m = 5 or SIB base = 5, 32-bit mode; SIB base = 5
+in 64-bit mode) → ADDR; RIP-relative disp32 (64-bit mode, mod = 0, r/m = 5) → ADDR as disp +
+address of the next instruction; 16-bit addressing (67 in 32-bit mode) → D32 (2 bytes) / OP;
+imm8 and rel8 → OP; imm16 → I16; imm16/32 by operand size → I16 / I32; imm64 (B8+r with REX.W)
+→ I32 (8 bytes); moffs → ADDR (32-bit address) or I32 / I16; E8 rel32 → CALL and E9 / 0F 80-8F
+rel32 → JMP as rel + address of the next instruction (with 66 in 32-bit mode: I16). Values in
+ADDR, CALL and JMP are 32-bit, most significant byte first, arithmetic modulo 2^32. An
+instruction that would end past the region is invalid.
+
+Decoder checks: version, VInt ranges, regions inside the block, Mode, padding bytes, escapes,
+every instruction inside its region, every stream used exactly; anything else is a damaged
+block (`EArcCorrupt`). Memory: the encoded block plus the decoded block.
+
+### 6.7 `cm` (since 2026-11)
+
+`cm` is PArc's own context-mixing compressor (`src/parc_cm.pas` + the model in
+`src/cm/pcm_core.c`, freestanding C, MIT), written to replace the port of Matt Mahoney's lpaq1
+(GPL); it is not derived from it (designed from published descriptions of bitwise context
+mixing). **`cm` blocks written before this change do not decode** (the version byte rejects
+them). Used by `-mxx` (`xx$text`, `xx$binary`, `xx$obj`).
+
+Method string: `cm[:<level>]`, level 1..9 (default 6). The level sets the encoder's table sizes
+and, at 8–9, the `full` option; both go in the stream header, the decoder needs no parameter.
+
+| level | context table | history | match table | model memory |
+|---|---|---|---|---|
+| L | 64·2^(15+L) B | 2^(18+L) B | 4·2^(16+L) B | ≈ 2^(21+L) · 1.25 B (level 6: ≈ 168 MB) |
+
+Inputs of at most 1 MB get smaller tables (context table ≥ 4 buckets per input byte rounded up
+to a power of two, history and match table ≥ the input), so small blocks neither allocate nor
+clear the full model.
+
+Stream header: `U8 version` (1), `U8 htbits` (10..24: 2^htbits buckets of 64 bytes), `U8 wbits`
+(16..27: history ring of 2^wbits bytes), `U8 mtbits` (12..25: match table of 2^mtbits
+entries), `U8 flags` (bit 0: the size follows; bit 1: `full`; other bits 0), and if bit 0 is set `U32 size`
+(little endian, ≤ 64 MiB, the exact number of bytes the stream decodes to). The encoder sets
+bit 0 when the whole input fits in 64 MiB; the decoder then decodes everything at once and
+frees the model before the stages above it allocate theirs (so a `dict+lzp+cm` chain never
+holds the CM model and the LZP tables at the same time).
+
+Then one binary arithmetic-coded stream (32-bit range, carry-less; probability of a 1 in 16
+bits; after the last bit the encoder writes the 4 bytes of the low end of the range). It is a
+sequence of blocks of at most 64 KiB:
+
+| Field | Coding |
+|---|---|
+| end | 1 bit, p = 1/2: 1 = end of stream (nothing follows) |
+| modelled | 1 bit, adaptive (p starts at 1/2, moves 1/16 towards each coded value) |
+| text | only if modelled: 1 bit, adaptive like the previous one (its own probability) |
+| full | 1 bit, p = 1/2: 1 = 65536 bytes; 0 = 16 bits of length follow (p = 1/2, MSB first, 1..65535) |
+| data | the block's bytes, 8 bits each MSB first: predicted by the model if modelled, else p = 1/2 |
+
+In a binary block the model uses the sparse context "bytes 2–3 back", and with `full` also
+"bytes 3–4 back" (about 2% smaller binaries, 8% slower); in a text block it uses neither: they
+help text little and cost about 4% each. The
+encoder marks a block as text when at least half of its bytes are printable ASCII (0x20–0x7E,
+tab, LF, CR) and fewer than 1/32 are zero (a heuristic; the decoder only reads the bit).
+The encoder stores a block raw ("not modelled") when it has at least 4096 bytes and its order-0
+entropy exceeds 7.92 bits per byte (already compressed data): it costs 8 bits per byte and keeps
+such data at full speed in both directions. Raw bytes still enter the history, the contexts and
+the match model; the mixers, state maps and secondary estimators only learn from modelled bits.
+
+The model (identical in encoder and decoder; integer arithmetic only, so every platform gives
+the same bytes; the SSE2 (x86, also 32-bit: `build.sh` compiles the core with `-msse2` there)
+and NEON (aarch64) mixer code and the portable C code are bit-exact) is defined by
+`pcm_core.c`. In short: for each bit, up to eleven contexts give a bit-history state (one byte, a
+bounded (n0, n1, last bit) counter): order 0 and order 1 from direct tables, and orders 2, 3, 4
+and 6, the current word, the previous and current word, bytes 2–3 back, the two bytes that last
+followed the previous byte (indirect), and bytes 3–4 back from a hash table of 64-byte buckets
+(four 16-byte slots: an 8-bit check and the 15 states of a nibble; the slot with the lowest
+state count is replaced). Each state is mapped to a probability by an adaptive table per context
+(rate 1/(n+1.5), n ≤ 1023). A match model (the last position with the same 6 preceding bytes,
+verified backwards) adds the predicted bit with its length. Six mixers (16 inputs, 16-bit
+weights, weight sets selected by the partial byte, the match state, the number of known
+contexts and bit position, the byte 2 back, the byte 3 back and the classes of the last three
+bytes) feed a second mixer (selected by the match state and the partial byte), followed by two
+interpolated secondary estimators (order 1, and match byte or order-2 hash).
+
+Decoder checks: version, header ranges, the flags byte, the known size (decoded bytes must
+match it exactly) and a stream that ends early (more than 8 missing bytes); a damaged stream
+gives either wrong data (caught by the block's CRC) or `EArcCorrupt`. Memory: the model (from
+the header) plus 64 KiB, or plus the known size.
+
+### 6.8 `bwt` (since 2026-11): replaces `grzip`
 
 `bwt` is PArc's block-sorting compressor (`src/parc_bwt.pas` and the C core in `src/bwt/`),
 written to replace FreeArc's GRZip (I. Grebnov, LGPL); it is not derived from it. It is LZP

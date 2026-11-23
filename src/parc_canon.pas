@@ -392,7 +392,7 @@ begin
     { --- srep: compresor externo; el método guardado es siempre "srep". }
     if Name = 'srep' then Exit('srep');
 
-    { --- dispack (C_DisPack.cpp): BlockSize por defecto 8 MB; :x no cambia el flujo. }
+    { --- dispack (parc_dispack, filtro x86 propio): bloque por defecto 8 MB; :x se acepta y no cambia nada. }
     if (Name = 'dispack') or (Name = 'dispack070') then
     begin
       BS := 8*MB;

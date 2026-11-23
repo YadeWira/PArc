@@ -33,7 +33,7 @@
   bare memory size the block (as with GRZip). `grzip:...` strings are written as `bwt:...` by
   the canonizer.
 
-  Stream (version 1, docs/formato/FORMATO-PARC.md §6.6):
+  Stream (version 1, docs/formato/FORMATO-PARC.md §6.8):
     U8 version (1), U8 LZP hash bits (0 = no LZP), [VInt LZP minimum if bits > 0]; both must
     be those of the method string. Then blocks until the end of the stream:
       VInt Len (1..block size), U8 mode:

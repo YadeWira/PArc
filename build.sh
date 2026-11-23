@@ -1,9 +1,10 @@
 #!/bin/sh
 # Compila PArc. Uso: ./build.sh [linux64|linux32|linuxarm64|macos|win64|win32|all] (default: linux64)
 # Todo es Pascal (con ensamblador en línea) salvo el núcleo de OREP (src/orep/orep_core.c, MIT,
-# C sin libc) y el de `bwt` (src/bwt/bwt_core.c: libsais y QLFC, Apache-2.0, C sin libc), que se
-# compilan acá con el gcc/clang de cada target y se enlazan estáticos (no hace falta libstdc++
-# ni libgcc). Con -dOREP_NO_NATIVE se usa la referencia en Pascal (mismos bytes).
+# C sin libc), el de `bwt` (src/bwt/bwt_core.c: libsais y QLFC, Apache-2.0, C sin libc) y el
+# modelo de cm (src/cm/pcm_core.c, MIT, C sin libc), que se compilan acá con el gcc/clang de cada
+# target y se enlazan estáticos (no hace falta libstdc++ ni libgcc). Con -dOREP_NO_NATIVE se usa
+# la referencia en Pascal (mismos bytes).
 # win32, linux32 y linuxarm64 (y win64 si está) usan el cross de PA-Lab en $FPC_CROSS.
 set -e
 cd "$(dirname "$0")"
@@ -23,6 +24,11 @@ corep() {
   $cc $COREPFLAGS $extra "$@" -c src/orep/orep_core.c -o "$out/units/orep_core.o"
   # the C core of `bwt` (libsais + QLFC, src/bwt/bwt_core.c), same rules: no libc
   $cc -O3 -fno-builtin -ffreestanding -fno-stack-protector -w $extra "$@" -c src/bwt/bwt_core.c -o "$out/units/bwt_core.o"
+  # the cm model (src/cm/pcm_core.c, MIT, also without libc)
+  # (32-bit x86 with -msse2 for the SSE2 mixer: same bytes as the portable C path)
+  sse=""
+  case "$cc $*" in *-m32*|*i686*) sse="-msse2" ;; esac
+  $cc $COREPFLAGS -O3 -funroll-loops $sse $extra "$@" -c src/cm/pcm_core.c -o "$out/units/pcm_core.o"
 }
 
 build() {

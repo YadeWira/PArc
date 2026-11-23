@@ -90,7 +90,7 @@ require the full preset memory.
 
 `-mx` is the maximum preset that still decompresses fast: PPMd for text and LZMA for binaries
 (both with the level's filters). It is slightly smaller than `-m9` and decompresses at similar
-speed. `-mxx` uses the **context-mixing** codec (`cm`, lpaq1-style) for text and binaries: it
+speed. `-mxx` uses PArc's **context-mixing** codec (`cm`) for text and binaries: it
 produces clearly smaller archives, but decompression is roughly 5–40× slower than `-mx`.
 Independent data blocks are compressed in parallel (all threads together limited by
 `PARC_THREADS`) at every level, also when encrypting; incremental repacks stay serial. The block being written goes straight into
@@ -388,7 +388,8 @@ parc x site.parc '*.css' -ep -dpcss                     # all .css files, flat
 The compression limit applies to the encoders running at the same time. PArc estimates what
 each method chain needs (all stages of a chain run together: lzma by its exact encoder size,
 match finder included; orep window ring and anchor table (`OrepEncMemory`); PPMd model; plz window and tables; lzp/dict/bwt
-blocks; `4x4` counts one inner encoder per thread plus its blocks; `cm` and `srep` keep the whole
+blocks; `4x4` counts one inner encoder per thread plus its blocks; `cm` its model (`cm:<level>`,
+level 6 ≈ 170 MB, less for blocks under 1 MB) plus up to 64 MB of input; `srep` keeps the whole
 block in memory) and, if a block's chain does not fit, shrinks the largest consumer first
 (dictionaries, windows, the PPMd model) until it fits, like FreeArc's memory limiting. Blocks
 compressed in parallel are also limited so that their sum fits. The reduced method is what the
