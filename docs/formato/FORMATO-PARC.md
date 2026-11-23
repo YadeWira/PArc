@@ -472,8 +472,8 @@ larger than NMain + 2⌊Len/255⌋ + 2) is a damaged block (`EArcCorrupt`).
 mixing). **`cm` blocks written before this change do not decode** (the version byte rejects
 them). Used by `-mxx` (`xx$text`, `xx$binary`, `xx$obj`).
 
-Method string: `cm[:<level>]`, level 1..9 (default 6). The level only sets the encoder's table
-sizes, which go in the stream header; the decoder needs no parameter.
+Method string: `cm[:<level>]`, level 1..9 (default 6). The level sets the encoder's table sizes
+and, at 8–9, the `full` option; both go in the stream header, the decoder needs no parameter.
 
 | level | context table | history | match table | model memory |
 |---|---|---|---|---|
@@ -485,9 +485,9 @@ clear the full model.
 
 Stream header: `U8 version` (1), `U8 htbits` (10..24: 2^htbits buckets of 64 bytes), `U8 wbits`
 (16..27: history ring of 2^wbits bytes), `U8 mtbits` (12..25: match table of 2^mtbits
-entries), `U8 flags` (bit 0: the size follows; other bits 0), and if bit 0 is set `U32 size`
-(little endian, ≤ 16 MiB, the exact number of bytes the stream decodes to). The encoder sets
-bit 0 when the whole input fits in 16 MiB; the decoder then decodes everything at once and
+entries), `U8 flags` (bit 0: the size follows; bit 1: `full`; other bits 0), and if bit 0 is set `U32 size`
+(little endian, ≤ 64 MiB, the exact number of bytes the stream decodes to). The encoder sets
+bit 0 when the whole input fits in 64 MiB; the decoder then decodes everything at once and
 frees the model before the stages above it allocate theirs (so a `dict+lzp+cm` chain never
 holds the CM model and the LZP tables at the same time).
 
@@ -503,8 +503,9 @@ sequence of blocks of at most 64 KiB:
 | full | 1 bit, p = 1/2: 1 = 65536 bytes; 0 = 16 bits of length follow (p = 1/2, MSB first, 1..65535) |
 | data | the block's bytes, 8 bits each MSB first: predicted by the model if modelled, else p = 1/2 |
 
-In a text block the model leaves out its two sparse contexts (bytes 2–3 and 3–4 back); they
-help binary data much more than text, and text blocks code about 5–8% faster without them. The
+In a binary block the model uses the sparse context "bytes 2–3 back", and with `full` also
+"bytes 3–4 back" (about 2% smaller binaries, 8% slower); in a text block it uses neither: they
+help text little and cost about 4% each. The
 encoder marks a block as text when at least half of its bytes are printable ASCII (0x20–0x7E,
 tab, LF, CR) and fewer than 1/32 are zero (a heuristic; the decoder only reads the bit).
 The encoder stores a block raw ("not modelled") when it has at least 4096 bytes and its order-0

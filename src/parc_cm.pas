@@ -15,11 +15,13 @@
   Everything is integer arithmetic, so the output is the same on every platform.
 
   Method: cm[:<level>]  level 1..9 (default 6: 128 MB contexts + 16 MB history + 16 MB match
-  table, ~170 MB per stream). Inputs up to 1 MB get proportionally smaller tables.
+  table, ~170 MB per stream; 8-9 also keep a second sparse context in binary blocks: stronger on
+  binaries, ~8% slower). Inputs up to 1 MB get proportionally smaller tables.
 
   Stream (version 1, docs/formato/FORMATO-PARC.md §6.6):
     U8 version (= 1), U8 htbits, U8 wbits, U8 mtbits, U8 flags (bit 0: U32 size follows, for
-    inputs up to 16 MB; the decoder then decodes it all at once and frees the model), then one
+    inputs up to 64 MB; the decoder then decodes it all at once and frees the model; bit 1: the
+    second sparse context), then one
     arithmetic-coded stream: per block: bit "end" (p = 1/2); bit "modelled" (adaptive); bit
     "full" (p = 1/2), and if not full 16 bits of length (1..65535); then the bytes, MSB first,
     either predicted by the model or with p = 1/2. After the end bit the coder writes 4 bytes. }
@@ -99,11 +101,13 @@ function pcm_open(mem: Pointer; htbits, wbits, mtbits: LongWord; io: TPcmIo; ctx
   decoding: LongInt): LongInt; cdecl; external name 'pcm_open';
 procedure pcm_enc_block(mem: Pointer; src: PByte; n: LongWord); cdecl; external name 'pcm_enc_block';
 procedure pcm_enc_end(mem: Pointer); cdecl; external name 'pcm_enc_end';
+procedure pcm_set_full(mem: Pointer; full: LongInt); cdecl; external name 'pcm_set_full';
 function pcm_dec_block(mem: Pointer; dst: PByte): LongInt; cdecl; external name 'pcm_dec_block';
 
 const
   CM_SMALL = 1 shl 20;      // inputs up to this size get tables sized to them
-  CM_PROBE = 16 shl 20;     // inputs up to this size: the header carries the size and the
+  CM_FULL_LEVEL = 8;        // levels 8-9 keep both sparse contexts in binary blocks
+  CM_PROBE = 64 shl 20;     // inputs up to this size: the header carries the size and the
                             // decoder decodes the whole stream at once, then frees the model
 
 function ParseCmLevel(const Parts: TStringArray): Integer;
@@ -219,17 +223,19 @@ begin
   CmSizes(FLevel, Total, htb, wb, mtb);
   h[0] := CM_STREAM_VERSION; h[1] := htb; h[2] := wb; h[3] := mtb;
   hl := 5;
+  h[4] := 0;
+  if FLevel >= CM_FULL_LEVEL then h[4] := 2;
   if Total >= 0 then
   begin
-    h[4] := 1;
+    h[4] := h[4] or 1;
     h[5] := Byte(Total); h[6] := Byte(Total shr 8); h[7] := Byte(Total shr 16); h[8] := Byte(Total shr 24);
     hl := 9;
-  end
-  else h[4] := 0;
+  end;
   Emit(@h[0], hl);
   FModel := AllocModel(htb, wb, mtb, FRaw);
   if pcm_open(FModel, htb, wb, mtb, @EncIo, Self, 0) <> 0 then
     raise Exception.Create('cm: bad table sizes');
+  pcm_set_full(FModel, Ord(h[4] and 2 <> 0));
   FStarted := True;
 end;
 
@@ -338,10 +344,10 @@ begin
   if not Source.ReadExactOrEof(@h[0], 5) then Corrupt('cm: empty stream');
   if h[0] <> CM_STREAM_VERSION then Corrupt('cm: unknown stream version');
   if (h[1] < 10) or (h[1] > 24) or (h[2] < 16) or (h[2] > 27) or (h[3] < 12) or (h[3] > 25) or
-     (h[4] > 1) then
+     (h[4] > 3) then
     Corrupt('cm: bad header');
   total := -1;
-  if h[4] = 1 then
+  if h[4] and 1 <> 0 then
   begin
     Source.ReadExact(@h[5], 4);
     total := SizeInt(LongWord(h[5]) or (LongWord(h[6]) shl 8) or (LongWord(h[7]) shl 16) or
@@ -350,6 +356,7 @@ begin
   end;
   FModel := AllocModel(h[1], h[2], h[3], FRaw);
   pcm_open(FModel, h[1], h[2], h[3], @DecIo, Self, 1);
+  pcm_set_full(FModel, Ord(h[4] and 2 <> 0));
   if total < 0 then
   begin
     SetLength(FOut, CM_BLOCK);

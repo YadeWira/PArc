@@ -2,7 +2,7 @@
 # tests/cm.sh — context-mixing codec (cm: src/parc_cm.pas + src/cm/pcm_core.c), -mxx (CM max)
 # and -mx (fast-decode max).
 #  - test_cm (the stage alone): round trips of empty/1-byte/tiny/text/random/zero/mixed inputs and
-#    sizes around the 64 KB block, the 1 MB small-table limit and the 16 MB known-size limit, at
+#    sizes around the 64 KB block, the 1 MB small-table limit and the 64 MB known-size limit, at
 #    levels 1, 6 and 9; the same bytes for any write sizes; SSE2 == portable C
 #    (-DPCM_NO_SIMD); damaged streams (CM_FUZZ per file, default 300): data or a clean
 #    EArcCorrupt, never a crash or another exception.
@@ -37,8 +37,8 @@ head -c 400000 /dev/urandom > rnd
 head -c 1000000 /dev/zero > zeros
 { head -c 100000 rnd; head -c 500000 text; head -c 200000 zeros; head -c 150000 "$PARC"; head -c 70000 rnd; } > mix
 for n in 65535 65536 65537 1048575 1048576 1048577; do head -c $n mix > s$n; done
-{ head -c 16700000 /dev/urandom; head -c 77216 text; } > big16   # raw blocks: fast
-head -c 16777215 big16 > b16m1; { cat big16; printf 'xy'; } > b16p2
+{ head -c 67000000 /dev/urandom; head -c 108864 text; } > big16   # 64 MiB, raw blocks: fast
+head -c 67108863 big16 > b16m1; { cat big16; printf 'xy'; } > b16p2
 rt() {   # rt <level> <file>
   local l=$1 f=$2
   "$T" enc $l "$f" a.c 65536 || return 1
@@ -55,7 +55,7 @@ for f in one text mix; do
 done
 check "stage cm:9 mix" "rt 9 mix"
 for f in b16m1 big16 b16p2; do
-  check "stage cm:2 $f (16 MB limit)" "rt 2 $f"
+  check "stage cm:2 $f (64 MB limit)" "rt 2 $f"
 done
 check "random stays within 0.1%" '"$T" enc 6 rnd r.c 0 && [ $(stat -c%s r.c) -le $((400000 + 400)) ]'
 check "SSE2 == portable C (mix)" '"$T" enc 6 mix a.c 0 && "$TC" enc 6 mix c.c 0 && cmp -s a.c c.c'

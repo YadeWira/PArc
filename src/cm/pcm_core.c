@@ -90,7 +90,8 @@ typedef struct {
   U32 selb[3];
   U32 h2apm;                  /* order-2 hash for the second APM (bits 8-15) */
   U32 hh[NCH];                /* context hashes at byte boundary */
-  U32 nh;                     /* active hashed contexts: NCH, or NCH - 2 in text blocks */
+  U32 nh;                     /* active hashed contexts: nbin, or NCH - 2 in text blocks */
+  U32 nbin;                   /* in binary blocks: NCH - 1, or NCH with the 'full' option */
   U32 textp;                  /* probability of a text block */
   U8 *slot[NCH];
   U8 o0[256];
@@ -474,6 +475,7 @@ static void model_init(pcm_t *m) {
   m->x2[NM] = 256;
   for (i = 0; i < NCH; i++) m->slot[i] = ht_find(m, hash3(i + 1, 0, 0));
   m->nh = NCH;
+  m->nbin = NCH - 1;
   m->h2apm = hash3(0, 7, 0) & 0xff00;
   m->textp = 1u << 15;
   m->flagp = 1u << 15;
@@ -779,6 +781,12 @@ static U32 entropy0(const U8 *p, U32 n) {
 #define PCM_ERR_DATA -2
 
 /* mem: zeroed arena of pcm_memsize(...) bytes, 64-byte aligned */
+/* option of the stream header: full = 1 keeps both sparse contexts in binary blocks (slower,
+   stronger on binaries); call after pcm_open, before the first block */
+void pcm_set_full(void *mem, int full) {
+  ((pcm_t *)mem)->nbin = full ? NCH : NCH - 1;
+}
+
 int pcm_open(void *mem, U32 htbits, U32 wbits, U32 mtbits, pcm_io_fn io, void *ctx, int decoding) {
   pcm_t *m = (pcm_t *)mem;
   layout_t L;
@@ -819,10 +827,10 @@ static inline int dec_flagbit(pcm_t *m, U32 *fp) {
   return y;
 }
 
-/* text blocks leave out the two sparse contexts (7, 8): about 8% faster on text, where they
-   help little */
+/* binary blocks use the sparse context 7 (bytes 2-3 back), and 8 (bytes 3-4 back) too with the
+   'full' option; text blocks use neither (they help text little and cost about 4% each) */
 static void set_text(pcm_t *m, int text) {
-  U32 nh = text ? NCH - 2 : NCH;
+  U32 nh = text ? NCH - 2 : m->nbin;
   if (nh == m->nh) return;
   m->nh = nh;
   if (text) {

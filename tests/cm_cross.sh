@@ -54,7 +54,7 @@ cd "$W" || exit 2
 cat "$ROOT"/src/*.pas 2>/dev/null | head -c 400000 > text
 head -c 200000 /dev/urandom > rnd
 { head -c 70000 rnd; cat text; head -c 150000 "$ROOT/build/linux64/parc" 2>/dev/null; head -c 30000 rnd; cat text; } > mix
-CASES="6:text 6:mix 1:mix"
+CASES="6:text 6:mix 1:mix 9:mix"
 for c in $CASES; do
   f=${c#*:}; l=${c%%:*}
   R=ref_${f}_$l
