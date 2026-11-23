@@ -591,7 +591,8 @@ the header) plus 64 KiB, or plus the known size.
 `bwt` is PArc's block-sorting compressor (`src/parc_bwt.pas` and the C core in `src/bwt/`),
 written to replace FreeArc's GRZip (I. Grebnov, LGPL); it is not derived from it. It is LZP
 (the model of §6.5), the Burrows–Wheeler transform (libsais, Apache-2.0) and QLFC coding (the
-coders of libbsc 3.4.1, Apache-2.0, translated to C). **`grzip` blocks of older archives no
+coders of libbsc 3.4.1, Apache-2.0, translated to C; at `m4` libbsc's order-5 sort transform
+instead of the BWT). **`grzip` blocks of older archives no
 longer decode** (exit code 3); a `grzip:...` method string given to the compressor is written
 as `bwt:...`.
 
@@ -609,16 +610,20 @@ stream (`VInt` is LEB128):
 |---|---|
 | `VInt Len` | bytes the block decodes to, 1 ≤ Len ≤ block size |
 | `U8 mode` | 0 = stored: Len bytes follow; 1 = coded |
-| `U8 flags` | (coded) bits 0–1: coder (1 static, 2 adaptive, 3 fast; 0 invalid), bit 2: LZP applied (only if the header has LZP), bits 3–7 zero |
+| `U8 flags` | (coded) bits 0–1: coder (1 static, 2 adaptive, 3 fast; 0 invalid), bit 2: LZP applied (only if the header has LZP), bit 3: order-5 sort transform instead of the BWT, bits 4–7 zero |
 | LZP fields | (bit 2) `U8 escape`, `VInt minimum` (8..65535), `VInt NMain` (≤ Len), `VInt NLens` (≤ NMain + 2⌊Len/255⌋ + 2) |
-| `VInt Primary` | primary index of the BWT, 1 ≤ Primary ≤ M |
+| `VInt Primary` | primary index of the BWT, or the sort transform's index + 1; 1 ≤ Primary ≤ M |
 | `VInt CodedLen` | bytes of QLFC data, ≤ Len |
 | data | CodedLen bytes |
 
 M = NMain + NLens with LZP (1 ≤ M ≤ Len), else M = Len. Decoding a coded block: the QLFC data
 give M bytes (their first 32 bits, coded, must say M), the inverse BWT of those with Primary
 (libsais' convention: the index of the row of the original string, counted from 1; the
-string is not terminated) gives the BWT input, and with LZP that input is the main stream
+string is not terminated) — or with flag bit 3 the inverse of libbsc's order-5 sort transform
+(the cyclic rotations sorted by their first 5 bytes, ties by position; the output is the byte
+before each rotation; index = Primary − 1 is the row of the rotation at position 0, as
+libbsc's `bsc_st5_encode` returns it; the exact order is `parc_st5_forward` in
+`src/bwt/bwt_core.c`) — gives the BWT input, and with LZP that input is the main stream
 (NMain bytes) followed by the lengths stream (NLens bytes), decoded as in §6.5 with this
 block's minimum as both minimum and smallest length, no barrier, and b = min(the header's
 hash bits, ⌈log2 Len⌉ − 3), at least 10, as the table bits (at most one bucket per 8 bytes of
@@ -636,7 +641,8 @@ ranks, 11-bit for lengths), static (three counters averaged with fixed weights) 
 The exact model (states, rates, thresholds and tables) is the one in `src/bwt/qlfc.c` and
 `qlfc_tables.h`, which define the format, as libbsc's sources define its own.
 
-The encoder's choices (not needed to decode): blocks are cut where order-1 statistics change
+The encoder's choices (not needed to decode): `m4` uses the sort transform, the other levels
+the BWT; blocks are cut where order-1 statistics change
 (a solid block of many files becomes pieces of similar data, at least 64 KB); with `a` the
 blocks are at most 3/4 of the block size at `m1`..`m3` and half at `m4`, and the pieces of data
 found to be mixed at most 1/4; the LZP is skipped on blocks with few long repeats (estimated

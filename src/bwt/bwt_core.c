@@ -341,6 +341,232 @@ int32_t parc_seg_split(const uint8_t * p, int32_t n, int32_t stride, int32_t min
     return bi;
 }
 
+/*---------------------------------------------------------------------------*/
+/* Order-5 sort transform (ST5), from libbsc 3.4.1 st/st.cpp (Copyright (c) 2009-2026 Ilya Grebnov,  */
+/* Apache-2.0): bsc_st5_transform_serial and the serial inverse (bsc_unst_sort_serial and the three */
+/* reconstructions), translated to C. Changes: no allocation (the caller passes P and the buckets), */
+/* and the inverse checks every link it follows against n and returns -1 on damaged data.         */
+/*---------------------------------------------------------------------------*/
+
+#define ST_ALPHABET 256
+#define ST_SQRT 16
+
+/* T[0..n) in place -> ST5 output; T must have 28 bytes of room after n. P: n uint32;
+   bucket: 16 * 256 * 256 int32, zeroed by this function. Returns the index (0..n-1). */
+int32_t parc_st5_forward(uint8_t * T, uint32_t * P, int32_t * bucket, int32_t n)
+{
+    int32_t i;
+    if (n <= 1) return 0;
+    for (i = 0; i < 28; ++i) T[n + i] = T[i];
+    parc_bwt_memset(bucket, 0, (size_t)ST_SQRT * ST_ALPHABET * ST_ALPHABET * sizeof(int32_t));
+
+    uint8_t C0 = T[n - 2] & 0xf, C1 = T[n - 1];
+    for (i = 0; i < n; ++i)
+    {
+        uint8_t C2 = T[i];
+        bucket[(C0 << 16) | (C1 << 8) | C2]++;
+        C0 = C1 & 0xf; C1 = C2;
+    }
+    for (int32_t sum = 0, j = 0; j < ST_SQRT * ST_ALPHABET * ST_ALPHABET; ++j)
+    {
+        int32_t tmp = sum; sum += bucket[j]; bucket[j] = tmp;
+    }
+
+    int32_t pos = bucket[((T[2] & 0xf) << 16) | (T[3] << 8) | T[4]];
+
+    uint8_t L = T[n - 1];
+    uint32_t W = ((uint32_t)T[0] << 24) | ((uint32_t)T[1] << 16) | ((uint32_t)T[2] << 8) | T[3];
+    for (i = 0; i < n; ++i)
+    {
+        uint32_t V = (W & 0xfffff000) | L;
+        L = (uint8_t)(W >> 24); W = (W << 8) | T[i + 4];
+        P[bucket[W & 0x000fffff]++] = V;
+    }
+
+    parc_bwt_memset(bucket, 0, (size_t)ST_SQRT * ST_ALPHABET * ST_ALPHABET * sizeof(int32_t));
+
+    uint8_t P0 = T[n - 2], P1 = T[n - 1];
+    for (i = 0; i < n; ++i)
+    {
+        uint8_t P2 = T[i];
+        bucket[(P0 << 12) | (P1 << 4) | (P2 >> 4)]++;
+        P0 = P1; P1 = P2;
+    }
+    for (int32_t sum = 0, j = 0; j < ST_SQRT * ST_ALPHABET * ST_ALPHABET; ++j)
+    {
+        sum += bucket[j]; bucket[j] = sum;
+    }
+
+    for (i = n - 1; i >= pos; --i) T[--bucket[P[i] >> 12]] = (uint8_t)(P[i] & 0xff);
+    int32_t index = bucket[P[pos] >> 12];
+    for (i = pos - 1; i >= 0; --i) T[--bucket[P[i] >> 12]] = (uint8_t)(P[i] & 0xff);
+
+    return index;
+}
+
+/* inverse ST5 of T[0..n) in place; P: n uint32; bucket: 256 * 256 uint32. 0, or -1 if damaged. */
+int32_t parc_st5_inverse(uint8_t * T, uint32_t * P, uint32_t * bucket, int32_t n, int32_t start)
+{
+    uint32_t count[ST_ALPHABET], index[ST_ALPHABET];
+    int32_t group[ST_ALPHABET];
+    int32_t i, c, failBack = 0;
+
+    if (n <= 1) return (n == 1 && start == 0) || n == 0 ? 0 : -1;
+    if (start < 0 || start >= n) return -1;
+    parc_bwt_memset(P, 0, (size_t)n * sizeof(uint32_t));
+    parc_bwt_memset(bucket, 0, (size_t)ST_ALPHABET * ST_ALPHABET * sizeof(uint32_t));
+    parc_bwt_memset(count, 0, sizeof(count));
+
+    /* sort: the group boundaries of order 2, 3, 4 and 5 */
+    for (i = 0; i < n; ++i) count[T[i]]++;
+    for (int32_t sum = 0, cc = 0; cc < ST_ALPHABET; ++cc)
+    {
+        if (count[cc] >= 0x800000) failBack = 1;
+        int32_t tmp = sum; sum += (int32_t)count[cc]; count[cc] = (uint32_t)tmp;
+        if ((int32_t)count[cc] != sum)
+        {
+            uint32_t * bucket_p = &bucket[cc << 8];
+            for (i = (int32_t)count[cc]; i < sum; ++i) bucket_p[T[i]]++;
+        }
+    }
+    for (c = 0; c < ST_ALPHABET; ++c)
+        for (int32_t d = 0; d < c; ++d)
+        {
+            uint32_t tmp = bucket[(d << 8) | c]; bucket[(d << 8) | c] = bucket[(c << 8) | d]; bucket[(c << 8) | d] = tmp;
+        }
+
+    parc_bwt_memcpy(index, count, sizeof(index));
+    for (c = 0; c < ST_ALPHABET; ++c) group[c] = -1;
+    for (int32_t sum = 0, w = 0; w < ST_ALPHABET * ST_ALPHABET; ++w)
+    {
+        int32_t tmp = sum; sum += (int32_t)bucket[w]; bucket[w] = (uint32_t)tmp;
+        if (sum > n) return -1;
+        for (i = (int32_t)bucket[w]; i < sum; ++i)
+        {
+            uint8_t ch = T[i];
+            if (group[ch] != w) { group[ch] = w; P[index[ch]] = 0x80000000u; }
+            index[ch]++;
+        }
+    }
+    {
+        uint32_t mask0 = 0x80000000u, mask1 = 0x40000000u;   /* k = 5: one more round */
+        parc_bwt_memcpy(index, count, sizeof(index));
+        for (c = 0; c < ST_ALPHABET; ++c) group[c] = -1;
+        for (int32_t g = 0, j = 0; j < n; ++j)
+        {
+            if (P[j] & mask0) g = j;
+            uint8_t ch = T[j];
+            if (group[ch] != g) { group[ch] = g; P[index[ch]] += mask1; }
+            index[ch]++;
+        }
+    }
+
+    if (n < 0x800000)
+    {
+        /* case 1 */
+        parc_bwt_memcpy(index, count, sizeof(index));
+        for (c = 0; c < ST_ALPHABET; ++c) group[c] = -1;
+        for (int32_t g = 0, j = 0; j < n; ++j)
+        {
+            if (P[j] > 0) g = j;
+            uint8_t ch = T[j];
+            if (group[ch] < g) { group[ch] = j; P[j] = ((uint32_t)ch << 24) | index[ch]; }
+            else { P[j] = ((uint32_t)ch << 24) | 0x800000 | (uint32_t)group[ch]; P[group[ch]]++; }
+            index[ch]++;
+        }
+        for (int32_t p = start, j = n - 1; j >= 0; --j)
+        {
+            uint32_t u = P[p];
+            if (u & 0x800000)
+            {
+                p = (int32_t)(u & 0x7fffff);
+                if (p >= n) return -1;
+                u = P[p];
+            }
+            T[j] = (uint8_t)(u >> 24); P[p]--; p = (int32_t)(u & 0x7fffff);
+            if (p >= n) return -1;
+        }
+    }
+    else if (!failBack)
+    {
+        /* case 2 */
+        parc_bwt_memset(index, 0, sizeof(index));
+        for (c = 0; c < ST_ALPHABET; ++c) group[c] = -1;
+        for (int32_t g = 0, j = 0; j < n; ++j)
+        {
+            if (P[j] > 0) g = j;
+            uint8_t ch = T[j];
+            if (group[ch] < g) { group[ch] = j; P[j] = ((uint32_t)ch << 24) | index[ch]; }
+            else { P[j] = ((uint32_t)ch << 24) | 0x800000 | (uint32_t)(j - group[ch]); P[group[ch]]++; }
+            index[ch]++;
+        }
+        for (int32_t p = start, j = n - 1; j >= 0; --j)
+        {
+            uint32_t u = P[p];
+            if (u & 0x800000)
+            {
+                p = p - (int32_t)(u & 0x7fffff);
+                if (p < 0) return -1;
+                u = P[p];
+            }
+            uint8_t ch = (uint8_t)(u >> 24);
+            T[j] = ch; P[p]--; p = (int32_t)(u & 0x7fffff) + (int32_t)count[ch];
+            if (p >= n) return -1;
+        }
+    }
+    else
+    {
+        /* case 3: a symbol with 2^23 occurrences or more */
+        enum { FASTBITS = 10 };
+        uint8_t fastbits[1 << FASTBITS];
+        parc_bwt_memcpy(index, count, sizeof(index));
+        for (c = 0; c < ST_ALPHABET; ++c) group[c] = -1;
+        for (int32_t g = 0, j = 0; j < n; ++j)
+        {
+            if (P[j] > 0) g = j;
+            uint8_t ch = T[j];
+            if (group[ch] < g) { group[ch] = j; P[j] = index[ch]; }
+            else { P[j] = 0x80000000u | (uint32_t)group[ch]; P[group[ch]]++; }
+            index[ch]++;
+        }
+        int shift = 0; while (((n - 1) >> shift) >= (1 << FASTBITS)) shift++;
+        for (int32_t v = 0, cc = 0; cc < ST_ALPHABET; ++cc)
+        {
+            index[cc] = (cc + 1 < ST_ALPHABET) ? count[cc + 1] : (uint32_t)n;
+            if (count[cc] != index[cc])
+                for (; v <= (int32_t)((index[cc] - 1) >> shift); ++v) fastbits[v] = (uint8_t)cc;
+        }
+        if (P[start] & 0x80000000u)
+        {
+            start = (int32_t)(P[start] & 0x7fffffff);
+            if (start >= n) return -1;
+        }
+        {
+            int32_t s = fastbits[start >> shift];
+            while (index[s] <= (uint32_t)start) { if (++s >= ST_ALPHABET) return -1; }
+            T[0] = (uint8_t)s;
+        }
+        P[start]--; start = (int32_t)P[start] + 1;
+        if (start < 0 || start >= n) return -1;
+        for (int32_t p = start, j = n - 1; j >= 1; --j)
+        {
+            uint32_t u = P[p];
+            if (u & 0x80000000u)
+            {
+                p = (int32_t)(u & 0x7fffffff);
+                if (p >= n) return -1;
+                u = P[p];
+            }
+            int32_t s = fastbits[p >> shift];
+            while (index[s] <= (uint32_t)p) { if (++s >= ST_ALPHABET) return -1; }
+            T[j] = (uint8_t)s;
+            P[p]--; p = (int32_t)u;
+            if (p < 0 || p >= n) return -1;
+        }
+    }
+    return 0;
+}
+
 /* Forward BWT of T[0..n) into U (may be T), A: n int32 of scratch. Returns the primary index (1..n), or < 0. */
 int32_t parc_bwt_forward(const uint8_t * T, uint8_t * U, int32_t * A, int32_t n)
 {

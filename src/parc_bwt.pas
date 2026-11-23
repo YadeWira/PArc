@@ -8,7 +8,9 @@
       a block where the LZP takes away more than half of the data (tables, markup, databases:
       short repeats the BWT codes better itself) is filtered again with 4 times the minimum;
    2. the Burrows-Wheeler transform, built with libsais (Ilya Grebnov, Apache-2.0, vendored
-      unchanged in src/bwt/), which also does the inverse;
+      unchanged in src/bwt/), which also does the inverse; at m4 the order-5 sort transform of
+      libbsc (a radix sort on 5-byte contexts, much cheaper to build; translated to C in
+      bwt_core.c) instead;
    3. QLFC (quantized local frequency coding): the run heads of the BWT output are coded as
       move-to-front ranks plus run lengths, bit by bit with adaptive binary contexts.
       Three coders from libbsc 3.4.1 (Ilya Grebnov, Apache-2.0) translated to C in
@@ -39,10 +41,11 @@
       VInt Len (1..block size), U8 mode:
         0: Len stored bytes;
         1: U8 flags (bits 0-1: coder 1 static / 2 adaptive / 3 fast; bit 2: LZP applied;
-           others 0), [LZP: U8 escape, VInt minimum of this block (8..65535), VInt NMain,
+           bit 3: order-5 sort transform instead of the BWT; others 0), [LZP: U8 escape, VInt minimum of this block (8..65535), VInt NMain,
            VInt NLens], VInt Primary, VInt CodedLen, CodedLen bytes of QLFC data. The BWT
            input has M = NMain + NLens bytes with LZP (the main stream, then the lengths),
-           else M = Len; Primary is libsais' primary index (1..M).
+           else M = Len; Primary is libsais' primary index (1..M), or the sort transform's
+           index + 1.
     VInt = LEB128 (7 bits per byte, low group first). }
 unit parc_bwt;
 
@@ -152,6 +155,8 @@ type
 procedure parc_bwt_set_alloc(a: TBwtAllocFn; f: TBwtFreeFn); cdecl; external name 'parc_bwt_set_alloc';
 function parc_bwt_forward(T, U: PByte; A: PLongInt; n: LongInt): LongInt; cdecl; external name 'parc_bwt_forward';
 function parc_bwt_inverse(T, U: PByte; A: PLongInt; n, primary: LongInt): LongInt; cdecl; external name 'parc_bwt_inverse';
+function parc_st5_forward(T: PByte; P: PLongWord; bucket: PLongInt; n: LongInt): LongInt; cdecl; external name 'parc_st5_forward';
+function parc_st5_inverse(T: PByte; P, bucket: PLongWord; n, start: LongInt): LongInt; cdecl; external name 'parc_st5_inverse';
 function parc_qlfc_model_size(coder: LongInt): LongInt; cdecl; external name 'parc_qlfc_model_size';
 procedure parc_seg_init; cdecl; external name 'parc_seg_init';
 function parc_seg_split(p: PByte; n, stride, minSeg: LongInt; penalty: Int64; divShift: LongInt; work: PLongWord): LongInt;
@@ -191,7 +196,10 @@ end;
 const
   BWT_MAXTHREADS = 16;
   { Slack after the QLFC encoder's input (it reads ahead 16 bytes) and after its output }
-  IN_SLACK = 16;
+  IN_SLACK = 32;
+  { buckets of the sort transform: 16 * 256 * 256 to sort, 256 * 256 to invert }
+  ST_BUCKETS = 16 * 65536;
+  ST_IBUCKETS = 65536;
   OUT_SLACK = 8192;
   LZP_MAX_MIN = 65535;
   LZP_REDO_PCT = 50;
@@ -430,6 +438,8 @@ var
   Primary: LongInt;
   T: PByte;
   Coder: Integer;
+  UseSt: Boolean;
+  Bk: PLongInt;
 
   procedure Stored(X: PByte);
   begin
@@ -471,7 +481,7 @@ begin
       // minimum, the data are made of short repeats that the BWT codes better itself (tables,
       // markup, databases): the block is filtered again with 4 times the minimum (adaptive
       // coder only: the second pass costs time that the fast levels do not have)
-      if UseLzp and (P.Coder = BWT_CODER_ADAPTIVE) and ((Len - NMain) * 100 > Len * LZP_REDO_PCT) and
+      if UseLzp and (P.Level = 1) and (P.Coder = BWT_CODER_ADAPTIVE) and ((Len - NMain) * 100 > Len * LZP_REDO_PCT) and
          (4 * MinLen <= LZP_MAX_MIN) then
       begin
         MinLen := 4 * MinLen;
@@ -498,11 +508,23 @@ begin
     Main := nil;
     T := @Buf[0];
   end;
+  UseSt := (P.Level = 4) and (M >= 2);
   A := GetMem((SizeInt(M) + 1) * SizeOf(LongInt));
   Model := nil;
   Extra := nil;
   try
-    Primary := parc_bwt_forward(T, T, A, M);
+    if UseSt then
+    begin
+      // the order-5 sort transform (m4): a radix sort, much cheaper than the suffix sort
+      Bk := GetMem(ST_BUCKETS * SizeOf(LongInt));
+      try
+        Primary := parc_st5_forward(T, PLongWord(A), Bk, M) + 1;
+      finally
+        FreeMem(Bk);
+      end;
+    end
+    else
+      Primary := parc_bwt_forward(T, T, A, M);
     if Primary < 1 then raise EOutOfMemory.Create('bwt: suffix sorting failed');
     // the coder's output and scratch inside the suffix array when they fit
     OutCap := M;
@@ -536,6 +558,7 @@ begin
       H[n] := 1; Inc(n);
       Flags := Coder;
       if UseLzp then Flags := Flags or 4;
+      if UseSt then Flags := Flags or 8;
       H[n] := Flags; Inc(n);
       if UseLzp then
       begin
@@ -557,7 +580,17 @@ begin
     begin
       // does not compress: back to the input, stored
       if Extra <> nil then begin FreeMem(Extra); Extra := nil; end;
-      Ok := parc_bwt_inverse(T, T, A, M, Primary) = 0;
+      if UseSt then
+      begin
+        Bk := GetMem(ST_IBUCKETS * SizeOf(LongWord));
+        try
+          Ok := parc_st5_inverse(T, PLongWord(A), PLongWord(Bk), M, Primary - 1) = 0;
+        finally
+          FreeMem(Bk);
+        end;
+      end
+      else
+        Ok := parc_bwt_inverse(T, T, A, M, Primary) = 0;
       if Ok and UseLzp then
       begin
         SetLength(Orig, Len);
@@ -858,6 +891,7 @@ var
   A: PLongInt;
   Model: Pointer;
   r: LongInt;
+  Bk: PLongWord;
   Lp: TLzpParams;
   Hash: array of LongWord;
 begin
@@ -879,7 +913,17 @@ begin
   if r <> M then Corrupt('bwt: damaged block');
   A := GetMem((SizeInt(M) + 1) * SizeOf(LongInt));
   try
-    r := parc_bwt_inverse(@T[0], @T[0], A, M, Primary);
+    if Flags and 8 <> 0 then
+    begin
+      Bk := GetMem(ST_IBUCKETS * SizeOf(LongWord));
+      try
+        r := parc_st5_inverse(@T[0], PLongWord(A), Bk, M, Primary - 1);
+      finally
+        FreeMem(Bk);
+      end;
+    end
+    else
+      r := parc_bwt_inverse(@T[0], @T[0], A, M, Primary);
   finally
     FreeMem(A);
   end;
@@ -967,7 +1011,7 @@ begin
       1:
         begin
           Job.Flags := RdByte;
-          if (Job.Flags and not 7 <> 0) or ((Job.Flags and 3) = 0) or
+          if (Job.Flags and not 15 <> 0) or ((Job.Flags and 3) = 0) or
              ((Job.Flags and 4 <> 0) and (FPar.LzpMin = 0)) then Corrupt('bwt: invalid block flags');
           if Job.Flags and 4 <> 0 then
           begin

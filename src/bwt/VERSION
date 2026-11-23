@@ -12,6 +12,9 @@ libbsc 3.4.1 — Copyright (c) 2009-2026 Ilya Grebnov, Apache-2.0
   qlfc.c         translated from libbsc/coder/qlfc/qlfc.cpp, qlfc_model.h/.cpp,
                  coder/common/rangecoder.h and predictor.h; the changes are listed at its top
   qlfc_tables.h  libbsc/coder/common/tables.h with its platform.h include line replaced
+  bwt_core.c     parc_st5_forward / parc_st5_inverse: the serial order-5 sort transform and its
+                 inverse from libbsc/st/st.cpp, translated to C (no allocation; the inverse
+                 checks every link against the block and reports damaged data)
   LICENSE-libbsc its LICENSE
 
 PArc's own code (MIT): bwt_core.c — the runtime without the C library (memory functions, the
