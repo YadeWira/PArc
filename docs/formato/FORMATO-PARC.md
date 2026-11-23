@@ -498,8 +498,9 @@ give M bytes (their first 32 bits, coded, must say M), the inverse BWT of those 
 (libsais' convention: the index of the row of the original string, counted from 1; the
 string is not terminated) gives the BWT input, and with LZP that input is the main stream
 (NMain bytes) followed by the lengths stream (NLens bytes), decoded as in §6.5 with this
-block's minimum as both minimum and smallest length, no barrier, and the hash bits of the
-header (limited to the block as in §6.5) into Len bytes; without LZP it is the block.
+block's minimum as both minimum and smallest length, no barrier, and b = min(the header's
+hash bits, ⌈log2 Len⌉ − 3), at least 10, as the table bits (at most one bucket per 8 bytes of
+the block), into Len bytes; without LZP it is the block.
 
 QLFC (Grebnov's quantized local frequency coding, as coded by libbsc's `qlfc.cpp`): the BWT
 output is cut into runs of equal bytes; for each run, the move-to-front rank of its byte
@@ -514,10 +515,13 @@ The exact model (states, rates, thresholds and tables) is the one in `src/bwt/ql
 `qlfc_tables.h`, which define the format, as libbsc's sources define its own.
 
 The encoder's choices (not needed to decode): blocks are cut where order-1 statistics change
-(a solid block of many files becomes pieces of similar data, at least 64 KB); a block shorter
-than 64 bytes, or whose coded form is not smaller, is stored; with the adaptive coder, a
-block where the LZP removes more than half of the data is filtered again with 4 times the
-minimum.
+(a solid block of many files becomes pieces of similar data, at least 64 KB); with `a` the
+blocks are at most half the block size at `m2`..`m4` and 3/4 at `m1`, and the pieces of data
+found to be mixed at most 1/4; the LZP is skipped on blocks with few long repeats (estimated
+from content-defined samples); a block whose BWT output has fewer runs than 1/8 of its bytes is
+coded with the adaptive coder at any level; a block shorter than 64 bytes, or whose coded form
+is not smaller, is stored; with the adaptive coder, a block where the LZP removes more than
+half of the data is filtered again with 4 times the minimum.
 
 Decoder checks: version, header parameters, every field range above, the QLFC data (a read
 past CodedLen, a length or rank that does not fit, a decoded size other than M), the primary
