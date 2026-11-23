@@ -362,7 +362,7 @@ end;
 
 { Pool para decodificar bloques enteros a la vez (t, extracción a temporales): hasta el
   presupuesto de hilos y la cantidad de bloques, mientras sus decodificadores entren en
-  memoria. Cada bloque planea sus pools internos (4x4, grzip) con su parte del presupuesto. }
+  memoria. Cada bloque planea sus pools internos (4x4, bwt) con su parte del presupuesto. }
 function CreateBlockPool(A: TArchive; const Blocks: array of Integer): TJobPool;
 var
   Est: array of Int64;

@@ -4,7 +4,7 @@
     splitFileTypes     tipo de cada tanda de archivos: por arc.groups y, si el método tiene
                        grupos $text/$compressed, por contenido (detect_datatype, detect_mm);
     splitToSolidBlocks un grupo por método (ordenados por el texto del método) y cortes por
-                       -s, por el tamaño de bloque de dict/grzip/lzp y "nosolid" de tta/mm.
+                       -s, por el tamaño de bloque de dict/bwt/lzp y "nosolid" de tta/mm.
   Solo para archivos NUEVOS (del disco); los que vienen de un archivo existente los maneja
   CmdModify aparte. Los directorios no pasan por acá (van en su propio bloque, primero). }
 unit parc_filelist;

@@ -1,7 +1,7 @@
 { Trabajos en paralelo y el presupuesto global de hilos.
 
   Presupuesto: PARC_THREADS=N (por defecto, los núcleos) es el tope de hilos TRABAJANDO a la
-  vez en todo el proceso, sumando todos los niveles (bloques en paralelo, 4x4/grzip adentro,
+  vez en todo el proceso, sumando todos los niveles (bloques en paralelo, 4x4/bwt adentro,
   hashing de REP, el match finder multihilo de LZMA, la verificación/extracción en paralelo).
   Hay N fichas: el hilo principal empieza con una y los hilos de los pools toman una por
   trabajo. Quien se bloquea esperando a otro hilo (un trabajo, un semáforo del match finder)
@@ -15,7 +15,7 @@
     ese bloque; con muchos bloques, a los que escriben bloques.
   Los pools se dimensionan (hilos creados, bloques en vuelo) con ThreadShare: el presupuesto
   entero en el nivel de arriba, o la parte que le toca a cada trabajo de un pool externo; si
-  hay más trabajo que hilos, las etapas ordenadas (4x4, grzip) crecen hasta el presupuesto
+  hay más trabajo que hilos, las etapas ordenadas (4x4, bwt) crecen hasta el presupuesto
   (TJobPool.CanGrow).
 
   Decodificación de bloques independientes en paralelo, con la salida en orden (como el

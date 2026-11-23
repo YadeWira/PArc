@@ -1,6 +1,6 @@
 { MM — preprocesador multimedia de FreeArc (Compression/MM/mm.cpp).
   Filtro "diff" por canal, sin compresor propio: se usa como etapa previa de otro
-  método (p.ej. `mm+grzip`), y el grupo $bmp de arc.groups lo invoca así.
+  método (p.ej. `mm+bwt`), y el grupo $bmp de arc.groups lo invoca así.
 
   Stream:
     1 byte de flags:

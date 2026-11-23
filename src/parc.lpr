@@ -1020,7 +1020,7 @@ begin
   end;
 end;
 
-{ Bloques sólidos: sin -s, como FreeArc (sin tope de tamaño; solo los cortes de dict/grzip/
+{ Bloques sólidos: sin -s, como FreeArc (sin tope de tamaño; solo los cortes de dict/bwt/
   lzp y de tta/mm). Antes había un tope automático (64 MB en -m1..-m3, 32 MB en -m4..-mx)
   para repartir bloques entre hilos, pero hoy 4x4, LZMA multihilo y el presupuesto global ya
   usan los hilos dentro de un bloque, y partir cortaba las repeticiones entre archivos: set
@@ -1117,7 +1117,7 @@ end;
 
 { Agrupa entradas nuevas en bloques sólidos exactamente como FreeArc 0.67 (parc_filelist):
   orden gerpn, tipo por arc.groups y por contenido, un grupo por método y los cortes de -s,
-  de dict/grzip/lzp y de tta/mm. }
+  de dict/bwt/lzp y de tta/mm. }
 procedure GroupNewEntries(const Entries: TWriteEntryArray; const Idx: array of Integer;
   const MO: TModifyOptions; var Groups: TSolidGroupArray);
 var

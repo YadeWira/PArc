@@ -5,7 +5,7 @@
   uno cada PROGRESS_INTERVAL ms, así que ProgressAdd es barato. Un solo hilo reporta progreso
   (el que llama a WriteArchive/ExtractArchive); RequestCancel se puede llamar desde cualquiera.
   Los codificadores largos (lzma, dict) y TOutStage.Emit también llaman a CheckCancel, en hilos
-  del pool incluidos; lo que no se corta es un bloque de grzip ya en vuelo (≤ ~1 s). }
+  del pool incluidos; lo que no se corta es un bloque de bwt ya en vuelo (≤ ~1 s). }
 unit parc_progress;
 
 {$mode objfpc}{$H+}
