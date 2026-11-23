@@ -70,10 +70,10 @@ for f in text rep3 allbytes mix runs zeros; do
   done
 done
 
-# text compresses, the adaptive coder is smaller than the static one, random data stays its size
+# text compresses, m1 (adaptive coder) is never larger than m2 (m2 may also pick the adaptive coder per block), random data stays its size
 "$T" enc bwt:m1 text t1.b 0; "$T" enc bwt:m2 text t2.b 0; "$T" enc bwt rnd r.b 0
 a=$(stat -c %s text); b1=$(stat -c %s t1.b); b2=$(stat -c %s t2.b); r=$(stat -c %s r.b)
-ck "text: $a -> m1 $b1, m2 $b2" "[ $b1 -lt $((a / 4)) ] && [ $b1 -lt $b2 ]"
+ck "text: $a -> m1 $b1, m2 $b2" "[ $b1 -lt $((a / 4)) ] && [ $b1 -le $b2 ]"
 ck "rnd: 2000000 -> $r" "[ $r -le 2000100 ]"
 # a stream decoded with other parameters is rejected
 ck "other LZP minimum rejected" "! \"$T\" dec bwt:m1:l33 t1.b x.out >/dev/null 2>&1"
