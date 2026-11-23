@@ -101,6 +101,17 @@ function ParseLzpParams(const Params: TStringArray): TLzpParams;
 function LzpEncodeBlock(Inp: PByte; Len: SizeInt; const Par: TLzpParams; var Hash: array of LongWord;
   var Main, Lens: TBytes; out NMain, NLens: SizeInt; out Esc: Byte): Boolean;
 
+{ Decodes a coded block into Dst[0..Len); False if the data are inconsistent. Hash holds at least
+  2 shl LzpBlockHashBits(Len, HashBits) entries. (Also used by parc_bwt.) }
+function LzpDecodeBlock(Main: PByte; NMain: SizeInt; Lens: PByte; NLens: SizeInt; Esc: Byte;
+  Dst: PByte; Len: SizeInt; const Par: TLzpParams; HashBits: Integer; var Hash: array of LongWord): Boolean;
+
+{ The limits both sides apply to the parameters. }
+procedure LzpNormalize(var P: TLzpParams);
+
+{ Hash bits used for a block of Len bytes (the table has 2 shl this entries). }
+function LzpBlockHashBits(Len: SizeInt; Bits: Integer): Integer;
+
 implementation
 
 uses
@@ -169,6 +180,16 @@ begin
   if b < 10 then b := 10;
   if b > Bits then b := Bits;
   Result := b;
+end;
+
+procedure LzpNormalize(var P: TLzpParams);
+begin
+  Normalize(P);
+end;
+
+function LzpBlockHashBits(Len: SizeInt; Bits: Integer): Integer;
+begin
+  Result := BlockHashBits(Len, Bits);
 end;
 
 function Load64(p: PByte): QWord; inline;

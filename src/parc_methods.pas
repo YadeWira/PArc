@@ -56,7 +56,7 @@ implementation
 
 uses
   parc_crypt, StrUtils, parc_os, parc_lzma, parc_filters, parc_delta, parc_lz4, parc_orep, parc_lzp, parc_ppmd,
-  parc_dict, parc_grzip, parc_parallel, parc_tta, parc_mm, parc_dispack, parc_srep, parc_cm,
+  parc_dict, parc_bwt, parc_parallel, parc_tta, parc_mm, parc_dispack, parc_srep, parc_cm,
   parc_bcj2, parc_plz;
 
 var
@@ -460,8 +460,12 @@ begin
     'plz':
       // El stream dice su ventana: los parámetros son del compresor
       Result := TPlzStage.Create(Source);
+    'bwt':
+      Result := TBwtStage.Create(Source, Params);
     'grzip':
-      Result := TGrzipStage.Create(Source, Params);
+      // GRZip (LGPL) se reemplazó por el bwt propio (MIT) en PArc 0.0.6
+      raise EUnsupportedMethod.Create('method grzip (FreeArc GRZip) is no longer supported: ' +
+        'it was replaced by bwt (extract this archive with PArc 0.0.5)');
     'tta':
       Result := TTtaStage.Create(Source, ParseTtaParams(Params));
     'mm':

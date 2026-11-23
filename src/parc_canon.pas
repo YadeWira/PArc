@@ -22,7 +22,7 @@ function LimitAndCanonize(const Method: string; BlockSize: Int64): string;
 { Una etapa ya canónica achicada para que su codificador use a lo sumo MemLim bytes (aprox.):
   lzma con su estimación exacta (LzmaFitDictionary), tor búfer + hash, orep con OrepEncMemory,
   lzp/dict a la mitad,
-  grzip a 1/8 (BWT), ppmd el modelo, y el método interno de 4x4 con MemLim repartido entre sus
+  bwt a 1/6, ppmd el modelo, y el método interno de 4x4 con MemLim repartido entre sus
   hilos. cm, srep y los filtros no cambian. Lo usa el ajuste de la cadena entera
   (parc_encoders.FitEncodeMem), que mide con la estimación de cada codificador y repite. }
 function CanonStageMem(const Stage: string; MemLim: Int64): string;
@@ -40,12 +40,11 @@ var
 
 implementation
 
-uses SysUtils, Math, parc_os, parc_methods, parc_lzmaenc, parc_parallel, parc_orep, parc_plzenc;
+uses SysUtils, Math, parc_os, parc_methods, parc_lzmaenc, parc_parallel, parc_orep, parc_plzenc, parc_bwt;
 
 const
   KB = 1024; MB = 1024*1024; GB = Int64(1024)*1024*1024;
   INT_MAX = High(Integer);
-  GRZ_MaxBlockSize = 64*MB;   { C_GRZip; no alcanza a capar en el corpus }
 
 { --- showMem (Compression.hs:547-556) -------------------------------------- }
 
@@ -199,6 +198,7 @@ var
     Interno: string;
     I: Integer;
     OM: TOrepMethod;
+    BP: TBwtParams;
 
     function Pr(N: Integer): string;
     begin
@@ -302,34 +302,25 @@ begin
       Exit;
     end;
 
-    { --- grzip (C_GRZip.cpp/.h). Defaults: m1, 8mb, lzp on, mm32, h15.
-          SetBlockSize: BS=min(bs,GRZ_Max); h=min(h, 1+lb(BS-1)).
-          Show imprime l<h> SIEMPRE que EnableLZP. }
-    if Name = 'grzip' then
+    { --- bwt (parc_bwt, MIT; `grzip` is its old name and is written as bwt). The block is
+          limited to the data and to 1/6 of the memory limit; hash bits to 1 + log2(block). }
+    if (Name = 'bwt') or (Name = 'grzip') then
     begin
-      BS := Int64(0); M := 1; MML := 32; HSL := 15;
-      LZP := True; A := False;
-      for J := 0 to High(Parts) do
-      begin
-        if J = 0 then Continue;
-        L := LowerCase(Parts[J]);
-        if (L <> '') and (L[1] in ['0'..'9']) and (BS = 0) then BS := ParseMem(L, 0)
-        else if (Copy(L,1,1) = 'm') and (Length(L) >= 2) and (L[2] in ['0'..'9']) then M := Num(Copy(L,2,MaxInt), 1)
-        else if L = 'l' then LZP := False
-        else if Copy(L,1,1) = 'l' then MML := Num(Copy(L,2,MaxInt), 32)
-        else if Copy(L,1,1) = 'h' then HSL := Num(Copy(L,2,MaxInt), 15)
-        else if L = 'a' then A := True
-        else if BS = 0 then BS := ParseMem(L, 0);
+      try
+        BP := ParseBwtParams(Parts);
+      except
+        on EBwtParams do Exit(S);
       end;
-      if BS = 0 then BS := 8*MB;
+      BS := BP.BlockSize;
       if BS > Limit then BS := Limit;
-      if BS > GRZ_MaxBlockSize then BS := GRZ_MaxBlockSize;
-      if (MemLim > 0) and (BS > MemLim div 8) then BS := FitMem(MemLim div 8);
-      if HSL > 1 + LB(BS-1) then HSL := 1 + LB(BS-1);
-      Result := 'grzip:' + ShowMem(BS) + ':m' + IntToStr(M) + ':';
-      if LZP then Result := Result + ('l' + IntToStr(MML) + ':h' + IntToStr(HSL))
-             else Result := Result + 'l';
-      if A then Result := Result + (':a');
+      if (MemLim > 0) and (BS > MemLim div 6) then BS := FitMem(MemLim div 6);
+      if BS < 1 then BS := 1;
+      if (BS > 1) and (BP.LzpHash > 1 + LB(BS-1)) then BP.LzpHash := 1 + LB(BS-1);
+      if BP.LzpHash < 10 then BP.LzpHash := 10;
+      Result := 'bwt:' + ShowMem(BS) + ':m' + IntToStr(BP.Level) + ':';
+      if BP.LzpMin > 0 then Result := Result + ('l' + IntToStr(BP.LzpMin) + ':h' + IntToStr(BP.LzpHash))
+                       else Result := Result + 'l';
+      if BP.CoderSet <> 0 then Result := Result + (':e' + IntToStr(BP.CoderSet));
       Exit;
     end;
 

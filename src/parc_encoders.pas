@@ -136,7 +136,7 @@ implementation
 
 uses
   Math, parc_filters, parc_ppmd, parc_methods, parc_lzp, parc_parallel, parc_lzmaenc,
-  parc_orep, parc_delta, parc_dictenc, parc_ttaenc, parc_mmenc, parc_grzipenc,
+  parc_orep, parc_delta, parc_dictenc, parc_ttaenc, parc_mmenc, parc_bwt,
   parc_crypt, parc_canon, parc_lz4enc, parc_dispack, parc_srep, parc_cm, parc_bcj2, parc_plzenc;
 
 function StageName(const Stage: string): string; forward;
@@ -734,7 +734,8 @@ end;
 { Memoria de una etapa al comprimir un bloque de DataSize bytes. Lo exacto donde el codificador
   lo sabe (lzma, rep); lo demás, de lo que reserva cada uno:
   - ppmd: el modelo; plz: ventana + tablas; lzp: entrada + salida + hash;
-  - dict: ~3 veces el bloque; grzip: ~6 veces el bloque (BWT); dispack: ~3 veces su bloque;
+  - dict: ~3 veces el bloque; bwt: ~6 veces el bloque (BwtEncodeBlockMemory) por bloque en
+    vuelo; dispack: ~3 veces su bloque;
   - orep: lo que dice OrepEncMemory (anillo de la ventana + un bloque, tabla de anclas, búferes);
   - cm y srep guardan todo el bloque (cm: ~4 veces más sus modelos de 64 MB; srep: ~3 veces);
   - 4x4: los trabajos en vuelo (hasta los hilos, máx. 16) por (método interno + 2 bloques);
@@ -749,6 +750,7 @@ var
   Om: TOrepMethod;
   J: Integer;
   B: Int64;
+  Bp: TBwtParams;
 begin
   if IsCipherStage(Stage) then Exit(MB_);
   Parts := Stage.Split([':']);
@@ -783,7 +785,14 @@ begin
           Result := B + MB_;
         end;
       'dict': Result := 3 * FirstMemParam(Parts, 64 * MB_) + MB_;
-      'grzip': Result := 6 * FirstMemParam(Parts, 8 * MB_) + MB_;
+      'bwt', 'grzip':
+        begin
+          B := ParseBwtParams(Parts).BlockSize;
+          if (DataSize > 0) and (DataSize < B) then B := DataSize;
+          Bp := ParseBwtParams(Parts);
+          Bp.BlockSize := B;
+          Result := BwtEncodeBlockMemory(Bp);
+        end;
       'dispack', 'dispack070': Result := 3 * FirstMemParam(Parts, 8 * MB_) + MB_;
       'cm': Result := 4 * DataSize + 320 * MB_;
       'srep': Result := 3 * DataSize + 64 * MB_;
@@ -899,7 +908,7 @@ begin
         end;
       'lz4': if not Lz4EncAvailable(Stage) then Exit(False);
       'plz': if not PlzEncAvailable(Stage) then Exit(False);
-      'storing', 'exe', 'ppmd', 'lzp', 'lzma', 'orep', 'delta', 'dict', 'tta', 'mm', 'grzip', 'cm',
+      'storing', 'exe', 'ppmd', 'lzp', 'lzma', 'orep', 'delta', 'dict', 'tta', 'mm', 'bwt', 'grzip', 'cm',
       'dispack', 'dispack070', 'srep', 'bcj2', 'exe2': ;
     else
       Exit(False);
@@ -947,7 +956,7 @@ begin
     'dict':    Result := TDictEncStage.Create(Target, Parts);
     'lz4':     Result := TLz4EncStage.Create(Target, Parts);
     'plz':     Result := TPlzEncStage.Create(Target, Parts);
-    'grzip':   Result := TGrzipEncStage.Create(Target, Parts);
+    'bwt', 'grzip': Result := TBwtEncStage.Create(Target, Parts);
     'tta':     Result := TTtaEncStage.Create(Target, Parts);
     'mm':      Result := TMmEncStage.Create(Target, Parts);
     'lzma':

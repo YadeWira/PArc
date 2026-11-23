@@ -1,13 +1,14 @@
 #!/bin/sh
 # Compila PArc. Uso: ./build.sh [linux64|linux32|linuxarm64|macos|win64|win32|all] (default: linux64)
 # Todo es Pascal (con ensamblador en línea) salvo el núcleo de OREP (src/orep/orep_core.c, MIT,
-# C sin libc), que se compila acá con el gcc/clang de cada target y se enlaza estático (no hace
-# falta libstdc++ ni libgcc). Con -dOREP_NO_NATIVE se usa la referencia en Pascal (mismos bytes).
+# C sin libc) y el de `bwt` (src/bwt/bwt_core.c: libsais y QLFC, Apache-2.0, C sin libc), que se
+# compilan acá con el gcc/clang de cada target y se enlazan estáticos (no hace falta libstdc++
+# ni libgcc). Con -dOREP_NO_NATIVE se usa la referencia en Pascal (mismos bytes).
 # win32, linux32 y linuxarm64 (y win64 si está) usan el cross de PA-Lab en $FPC_CROSS.
 set -e
 cd "$(dirname "$0")"
 
-FPCFLAGS="-O3 -Xs -vewn -Fusrc -Fusrc/orep"
+FPCFLAGS="-O3 -Xs -vewn -Fusrc -Fusrc/orep -Fusrc/bwt"
 FPC_CROSS="${FPC_CROSS:-/mnt/IA_LAB/compartido/parc/fpc-cross}"
 
 # corep <dir> <cc> [opciones]: el núcleo en C de OREP -> <dir>/units/orep_core.o, que
@@ -20,6 +21,8 @@ corep() {
   extra=""
   case "$cc" in *clang*) ;; *) extra="-fno-tree-loop-distribute-patterns" ;; esac
   $cc $COREPFLAGS $extra "$@" -c src/orep/orep_core.c -o "$out/units/orep_core.o"
+  # the C core of `bwt` (libsais + QLFC, src/bwt/bwt_core.c), same rules: no libc
+  $cc -O3 -fno-builtin -ffreestanding -fno-stack-protector -w $extra "$@" -c src/bwt/bwt_core.c -o "$out/units/bwt_core.o"
 }
 
 build() {
