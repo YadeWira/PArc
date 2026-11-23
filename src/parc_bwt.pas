@@ -98,6 +98,7 @@ type
     FBufSize: SizeInt;           // input gathered before cutting it into blocks
     FMixedCap: SizeInt;          // with a: largest piece of a buffer that was cut
     FInFlight, FMemCap: Int64;   // input held by the queued jobs, and its cap
+    FQueueMin, FQueueMax: Integer;
     procedure SubmitJob(const Data: TBytes; Off, Len: SizeInt);
     procedure FlushBlock(Final: Boolean);
     procedure WriteOldest;
@@ -744,6 +745,10 @@ begin
   // half a queue more of input than the first queue holds: the jobs behind a slow one keep the
   // threads busy (ex2t on Silesia at T4: 1.76 s -> 1.34 s, +12 MB)
   FMemCap := Int64(Length(FQueue)) * FBufSize * 3 div 2;
+  FQueueMin := Length(FQueue);
+  // (not at m1: its blocks are slow enough for the threads not to wait, and its jobs need the
+  // most memory)
+  if FPar.Level = 1 then FQueueMax := FQueueMin else FQueueMax := 4 * FQueueMin;
 end;
 
 destructor TBwtEncStage.Destroy;
@@ -796,24 +801,24 @@ begin
       H[1] := 0;
     Emit(@H[0], hb);
   end;
-  // The queue grows (one more job and thread when every thread is busy and a token is free)
-  // only while the input held by the jobs in flight stays within 3/2 of what the first queue
-  // would hold with full blocks: small pieces of mixed data can use the threads that other solid blocks
-  // free, big blocks do not add up to more memory than GRZip's
-  if FCount = Length(FQueue) then
-  begin
-    if (FInFlight + Len <= FMemCap) and FPool.CanGrow(BWT_MAXTHREADS) then
+  // Past threads + 1 jobs the queue is bounded by memory, not by its length: it takes jobs while
+  // the input they hold stays within 3/2 of what threads + 1 full blocks hold (small pieces of mixed data queue up
+  // behind a slow block and keep the threads busy; big blocks do not add up to more memory than
+  // GRZip's), up to 4 times threads + 1 jobs (m2..m4); a thread is added when every one is busy (it
+  // runs when the budget has a token for it)
+  while (FCount = Length(FQueue)) or ((FCount >= FQueueMin) and (FInFlight + Len > FMemCap)) do
+    if (FCount = Length(FQueue)) and (FInFlight + Len <= FMemCap) and (FPool.MaxWorkers > 0) and
+       (Length(FQueue) < FQueueMax) then
     begin
       SetLength(Q, Length(FQueue) + 1);
       for i := 0 to FCount - 1 do Q[i] := FQueue[(FHead + i) mod Length(FQueue)];
       FQueue := Q;
       FHead := 0;
-      FPool.SetMaxWorkers(FPool.MaxWorkers + 1);
+      if FPool.CanGrow(BWT_MAXTHREADS) then FPool.SetMaxWorkers(FPool.MaxWorkers + 1);
     end
     else
       WriteOldest;
-  end
-  else if (FCount >= FPool.MaxWorkers) and (BudgetIdle > 0) and FPool.CanGrow(BWT_MAXTHREADS) then
+  if (FPool.MaxWorkers > 0) and (FCount >= FPool.MaxWorkers) and FPool.CanGrow(BWT_MAXTHREADS) then
     FPool.SetMaxWorkers(FPool.MaxWorkers + 1);
   Job := TBwtEncJob.Create;
   Job.Par := FPar;

@@ -1470,19 +1470,25 @@ archives with old `grzip` blocks are refused with exit code 3 ("extract with PAr
 
 Per block: **LZP** (the model of the own `lzp`, §6.5; the encoder runs in C with the same bytes,
 checked by `tests/bwt.sh`) only where 128-byte repeats are common (estimated from content-defined
-samples: it pays on collections of texts, loses on dictionaries and markup), with the adaptive
-coder a second pass with 4 times the minimum when the LZP takes away more than half of the
-block; then the BWT and QLFC: **fast** coder at `m4`, **static** at `m2`/`m3`, **adaptive**
-(3 counters + mixer) at `m1`, and the adaptive one for blocks with very few runs at any level.
+samples: it pays on collections of texts, loses on dictionaries and markup), at `m1`..`m3` a
+second pass with 4 times the minimum when the LZP takes away more than half of the block; then
+the transform and QLFC: at `m4` libbsc's **order-5 sort transform** (radix sort, translated to C
+with a bounded inverse) on blocks of 1 MB or more and the **fast** coder; the BWT and the
+**static** coder at `m2`/`m3`, **adaptive** (3 counters + mixer) at `m1`; blocks whose transform
+output has few runs (under 1/8 of the bytes against the fast coder, under 30 % against the
+static one) take the adaptive coder, which there costs little more and is 2–13 % smaller.
 The encoder **cuts blocks where order-1 statistics change** (a 1-in-8 sample, integer costs,
 a split must save 1/32 + 6 KB; −7 % on a solid block of many text formats), and with
-`a` uses blocks of 3/4 of the block size (half at `m4`) and quarter pieces of mixed data, which
-keeps the threads' memory below GRZip's. Blocks are coded and decoded in parallel within the
-`PARC_THREADS` budget; the output does not depend on the threads or the platform
+`a` uses blocks of 3/4 of the block size at `m1` (half at `m2`..`m4`) and quarter pieces of
+mixed data, which keeps the threads' memory below GRZip's. Blocks are coded and decoded in
+parallel within the `PARC_THREADS` budget; the pieces of a cut block go to their jobs as slices
+of the buffer (no copies), and the job queue grows past threads + 1 only while the input held by
+the queued jobs stays within 3/2 of what the first queue holds with full blocks; the output does not depend on the threads or the platform
 (`tests/filters_cross.sh`: same bytes on linux64, linux32, linuxarm64, win64, win32;
 `tests/determinism.sh`).
 
-Presets: same strings with `bwt` for `2t`, `ex2t`, `ex3t`, `ex4t`, `bmp`, `bmpfast`; `3t`
+Presets: same strings with `bwt` for `ex3t`, `ex4t`, `bmp`, `bmpfast`; `2t` and `ex2t` add `e1` (the
+static coder instead of `m4`'s fast one: smaller on mixed text, still faster than GRZip); `3t`
 (`-m3` text at one thread) is now `dict:p:64m:85% + bwt:m1:8m:32:h20:a` instead of
 `dict + lzp:64m + grzip:m3:8m:l:a`: bwt's own LZP and the adaptive coder are smaller, faster and
 use much less memory than the separate 64 MB `lzp` stage in front of the static coder.

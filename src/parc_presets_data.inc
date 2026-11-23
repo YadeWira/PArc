@@ -143,7 +143,7 @@ const
     'ex9binary = 4x4:i0:lzma:64mb:max',
     '',
     'ex1t = ex1b',
-    'ex2t = bwt:m4:48:h20:a:e1',  // PARC: transformada de orden 5, codificador estático y LZP desde 48 (más chico en texto mezclado)
+    'ex2t = bwt:m4:h20:a:e1',  // PARC: transformada de orden 5 y codificador estático
     'ex3t = bwt:m2:h20:a',
     'ex4t = bwt:m1:h20:a',
     'ex5t = dict:p: 64m:80% + lzp: 64m: 65:d1m:s32:h22:90% + xppmd:12:192m',  // PARC: 8:96->12:192
