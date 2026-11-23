@@ -58,6 +58,8 @@ typedef struct {
 
 typedef struct {
   i32 last;
+  const short_t *o;                /* the short stage's other channel (set by ttac_init; the
+                                      state must stay where it was initialised) */
   short_t s;
   ent_t e;
   lms_t f[3];
@@ -95,6 +97,7 @@ void ttac_init(void *st, i32 nch, i32 bits, const ttac_cfg *cfg)
   S->cfg = *cfg;
   for (c = 0; c < nch; c++) {
     chan_t *ch = &S->ch[c];
+    ch->o = nch == 1 ? &S->zs : c ? &S->ch[c - 1].s : &S->ch[nch - 1].s;
     for (j = 0; j < cfg->nf; j++) {
       ch->f[j].order = cfg->order[j];
       ch->f[j].shift = cfg->shift[j];
@@ -457,13 +460,7 @@ ALWAYS i32 enc_body(state_t *S, i32 *x, usize frames, u8 *rc, usize rccap, usize
   usize i;
   rce_t r;
   bw_t bw;
-  chan_t *chp[MAXCH];
-  const short_t *op[MAXCH];
   if (nc > MAXCH) return -1;
-  for (c = 0; c < nc; c++) {
-    chp[c] = &S->ch[c];
-    op[c] = nc > 1 ? &S->ch[c ? c - 1 : nc - 1].s : &S->zs;
-  }
   r.low = 0; r.range = 0xFFFFFFFFu; r.cache = 0; r.csize = 1; r.p = rc; r.end = rc + rccap;
   bw.acc = 0; bw.n = 0; bw.p = raw; bw.end = raw + rawcap;
   for (i = 0; i < frames; i++) {
@@ -474,8 +471,8 @@ ALWAYS i32 enc_body(state_t *S, i32 *x, usize frames, u8 *rc, usize rccap, usize
       xs[0] = ADD32(rr, s >> 1);
     }
     for (c = 0; c < nc; c++) {
-      chan_t *ch = chp[c];
-      const short_t *o = op[c];
+      chan_t *ch = S->ch + c;
+      const short_t *o = ch->o;
       i32 v = xs[c], e, p;
       /* fixed first order */
       e = SUB32(v, (i32)(((i64)ch->last * 31) >> 5));
@@ -520,14 +517,8 @@ ALWAYS i32 dec_body(state_t *S, i32 *x, usize frames, const u8 *rc, usize rclen,
   usize i;
   rcd_t r;
   br_t br;
-  chan_t *chp[MAXCH];
-  const short_t *op[MAXCH];
   if (rclen < 5 || rc[0] != 0) return 1;
   if (nc > MAXCH) return 1;
-  for (c = 0; c < nc; c++) {
-    chp[c] = &S->ch[c];
-    op[c] = nc > 1 ? &S->ch[c ? c - 1 : nc - 1].s : &S->zs;
-  }
 
   r.p = rc; r.end = rc + rclen; r.over = 0; r.range = 0xFFFFFFFFu; r.code = 0;
   for (k = 0; k < 5; k++) r.code = (r.code << 8) | *r.p++;
@@ -535,8 +526,8 @@ ALWAYS i32 dec_body(state_t *S, i32 *x, usize frames, const u8 *rc, usize rclen,
   for (i = 0; i < frames; i++) {
     i32 *xs = x + i * nc;
     for (c = 0; c < nc; c++) {
-      chan_t *ch = chp[c];
-      const short_t *o = op[c];
+      chan_t *ch = S->ch + c;
+      const short_t *o = ch->o;
       u32 u = ent_decode(&ch->e, &r, &br, fast);
       i32 e = (i32)(u >> 1) ^ -(i32)(u & 1), p, v;
       for (j = nf - 1; j >= 0; j--) {
