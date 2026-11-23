@@ -9,7 +9,7 @@ program parc;
 
 uses
   {$IFDEF UNIX}cthreads, BaseUnix,{$ENDIF}
-  Classes, SysUtils, Types, DateUtils, parc_os, parc_bytes, parc_methods, parc_archive, parc_extract, parc_writer, parc_encoders, parc_presets, parc_recovery, parc_progress, parc_filelist, parc_volume, parc_console, parc_parallel, parc_crypt, parc_select, parc_canon;
+  Classes, SysUtils, Types, DateUtils, parc_os, parc_bytes, parc_methods, parc_archive, parc_extract, parc_writer, parc_encoders, parc_presets, parc_recovery, parc_progress, parc_solid, parc_strmap, parc_volume, parc_console, parc_parallel, parc_crypt, parc_select, parc_canon;
 
 const
   PARC_VERSION = '0.0.5';
@@ -872,7 +872,7 @@ type
     Method, Fmt: string;
     MethodGiven: Boolean;    // -m explícito (con d, FreeArc recompila todo: --recompress)
     Recompress: Boolean;     // --recompress: rehacer todos los bloques viejos
-    Solid: TFaCrits;         // -s...: criterios de corte de los bloques sólidos (FaParseSolidOption)
+    Solid: TSolidLimits;     // -s...: límites de los bloques sólidos (ParseSolidSpec)
     SolidGiven: Boolean;     // -s explícito (no aplicar el tamaño de bloque automático)
     Sel: TSelectOptions;     // -x, -n, -sm/-sl, -ta/-tb/-tn/-to, --dirs/-ed, -ap
     EpMode: Integer;         // -ep: 0 sin rutas, 1 sin el directorio base; -1 = rutas completas
@@ -1025,7 +1025,7 @@ end;
   para repartir bloques entre hilos, pero hoy 4x4, LZMA multihilo y el presupuesto global ya
   usan los hilos dentro de un bloque, y partir cortaba las repeticiones entre archivos: set
   document -m6 43,8 -> 36,6 MB (FreeArc 36,6), exe -m6..-m9 -1,9 %, -m1 -0,9..-15 %. }
-function EffectiveSolid(const MO: TModifyOptions): TFaCrits;
+function EffectiveSolid(const MO: TModifyOptions): TSolidLimits;
 begin
   Result := MO.Solid;
 end;
@@ -1115,31 +1115,12 @@ begin
   end;
 end;
 
-{ Agrupa entradas nuevas en bloques sólidos exactamente como FreeArc 0.67 (parc_filelist):
-  orden gerpn, tipo por arc.groups y por contenido, un grupo por método y los cortes de -s,
-  de dict/bwt/lzp y de tta/mm. }
-procedure GroupNewEntries(const Entries: TWriteEntryArray; const Idx: array of Integer;
+{ Adds the planned blocks of Files (Idx[i] = entry of Files[i]) to Groups. }
+procedure AddPlanned(const Blocks: TPlanBlocks; const Idx: array of Integer;
   const MO: TModifyOptions; var Groups: TSolidGroupArray);
 var
-  GM: TGroupMethods;
-  Files: array of TFaFile;
-  Crits: TFaCrits;
-  Blocks: TFaBlocks;
   i, g, k: Integer;
 begin
-  if Length(Idx) = 0 then Exit;
-  GM := DecodeMethod(MO.Method, BudgetThreads);   // las alternativas "(a|b)" según los hilos efectivos, como -mtN
-  ApplyMcOps(GM, MO.McOps);
-  SetLength(Files, Length(Idx));
-  for i := 0 to High(Idx) do
-  begin
-    Files[i].Name := Entries[Idx[i]].StoredName;
-    Files[i].DiskPath := Entries[Idx[i]].DiskPath;
-    Files[i].Size := Entries[Idx[i]].Meta.Size;
-  end;
-  // -s: los criterios de FreeArc (FaParseSolidOption); sin -s, todo junto
-  Crits := EffectiveSolid(MO);
-  Blocks := FaSolidBlocks(Files, GM, Crits, FaDetectLevel(MO.Method));
   for i := 0 to High(Blocks) do
   begin
     g := Length(Groups);
@@ -1151,154 +1132,204 @@ begin
   end;
 end;
 
+{ Solid blocks for entries (parc_solid: order, kind by name and content, cuts). Hints[i] <> ''
+  is the method of the block an old file comes from: if a method of the list has the same
+  stages, the file keeps that kind. }
+procedure GroupEntries(const Entries: TWriteEntryArray; const Idx: array of Integer;
+  const Hints: array of string; const MO: TModifyOptions; var Groups: TSolidGroupArray);
+var
+  GM: TGroupMethods;
+  Files: array of TPlanFile;
+  i: Integer;
+begin
+  if Length(Idx) = 0 then Exit;
+  GM := DecodeMethod(MO.Method, BudgetThreads);   // las alternativas "(a|b)" según los hilos efectivos, como -mtN
+  ApplyMcOps(GM, MO.McOps);
+  SetLength(Files, Length(Idx));
+  for i := 0 to High(Idx) do
+  begin
+    Files[i] := Default(TPlanFile);
+    Files[i].Name := Entries[Idx[i]].StoredName;
+    if Entries[Idx[i]].SrcArc = nil then Files[i].DiskPath := Entries[Idx[i]].DiskPath;
+    Files[i].Size := Entries[Idx[i]].Meta.Size;
+    if i <= High(Hints) then Files[i].Hint := Hints[i];
+  end;
+  AddPlanned(PlanSolidBlocks(Files, GM, EffectiveSolid(MO)), Idx, MO, Groups);
+end;
+
+procedure GroupNewEntries(const Entries: TWriteEntryArray; const Idx: array of Integer;
+  const MO: TModifyOptions; var Groups: TSolidGroupArray);
+begin
+  GroupEntries(Entries, Idx, [], MO, Groups);
+end;
+
 { Clave para comparar nombres del archivo con los del disco (en Windows sin mayúsculas). }
 function NameKey(const Name: string): string;
 begin
   {$IFDEF WINDOWS}Result := LowerCase(Name);{$ELSE}Result := Name;{$ENDIF}
 end;
 
-{ Bloques de un archivo que se actualiza, como FreeArc 0.67 (join_lists + splitToSolidBlocks):
-  - lista 1: los archivos del archivo viejo en su orden; el que se reemplaza (a/u/f) queda en
-    su lugar pero ahora viene del disco; los borrados no están;
-  - lista 2: los nuevos del disco, en el orden de sort_files;
-  - merge por la clave gerpn (o una detrás de la otra si no se ordena);
-  - parc_filelist tipifica (los viejos, por el compresor de su bloque), agrupa por método y
-    corta con el splitBy de FreeArc, que conserva los bloques viejos que quedaron enteros.
-  Keep/Old: qué archivos viejos siguen y su entrada; NewIdx: las entradas del disco. }
+{ Blocks of an archive being updated (a/u/f/d/m, ch):
+  - an old block whose files all stay is copied as it is;
+  - an old block that loses or replaces files is rewritten: the files that stay, in their
+    order, with each replaced file (now from disk) in the place of its old version, using the
+    method of the list with the same stages as the old one (or the old method), cut again by
+    -s and the method's own limits; rewritten blocks with the same method are joined;
+  - new files that replace nothing are planned like a new archive.
+  With Recompress (an explicit -m with d/ch) every file is planned again; old files keep the
+  kind of their block's method when the list has a method with the same stages.
+  Keep/Old: which old files stay and their entry; NewIdx: the entries from disk. }
 procedure PlanUpdate(A: TArchive; const Keep: array of Boolean; const Old: array of Integer;
   const Entries: TWriteEntryArray; const NewIdx: array of Integer; const MO: TModifyOptions;
   Recompress: Boolean; var Groups: TSolidGroupArray);
 var
-  L1, L2, M: array of TFaFile;
-  E1, E2, EM: array of Integer;        // entrada de cada elemento de L1, L2, M
-  Used: array of Boolean;              // entrada nueva ya usada como reemplazo
-  ByName: TStringList;
-  BlockOf, PosOf, CountOf: array of Integer;
   GM: TGroupMethods;
-  Blocks: TFaBlocks;
-  Order: TIntegerDynArray;
-  b, j, k, n, pos, g, x, y: Integer;
-  Sorted: Boolean;
-  K1, K2: array of TFaMergeKey;
+  ByName: TStrIntMap;
+  Used: array of Boolean;
+  L, All: array of Integer;
+  Hints: array of string;
+  RM: array of string;
+  RL: array of array of Integer;
+  RC: array of Integer;
+  Files: array of TPlanFile;
+  Order: array of Integer;
+  b, j, k, n, r, g: Integer;
+  Whole: Boolean;
+  M: string;
 
-  function DiskFile(e: Integer): TFaFile;
+  function Signature(const Method: string): string;
+  var
+    St: TStringArray;
+    i, p: Integer;
   begin
-    Result := Default(TFaFile);
-    Result.Name := Entries[e].StoredName;
-    Result.DiskPath := Entries[e].DiskPath;
-    Result.Size := Entries[e].Meta.Size;
+    Result := '';
+    St := WithoutCipher(Method).Split(['+']);
+    for i := 0 to High(St) do
+    begin
+      p := Pos(':', St[i]);
+      if p > 0 then St[i] := Copy(St[i], 1, p - 1);
+      Result := Result + '+' + LowerCase(Trim(St[i]));
+    end;
+  end;
+
+  function RepackMethod(const OldMethod: string): string;
+  var
+    i: Integer;
+    S: string;
+  begin
+    S := Signature(OldMethod);
+    for i := 0 to High(GM) do
+      if Signature(GM[i].Method) = S then Exit(GM[i].Method);
+    Result := WithoutCipher(OldMethod);
   end;
 
 begin
-  GM := DecodeMethod(MO.Method, BudgetThreads);   // las alternativas "(a|b)" según los hilos efectivos, como -mtN
+  if Recompress then
+  begin
+    n := 0;
+    SetLength(All, Length(A.Files) + Length(NewIdx));
+    SetLength(Hints, Length(All));
+    for j := 0 to High(A.Files) do
+      if Keep[j] and not A.Files[j].IsDir and not A.Files[j].IsLink then
+      begin
+        All[n] := Old[j];
+        if (A.Files[j].DataBlock >= 0) and (A.Files[j].DataBlock <= High(A.DataBlocks)) then
+          Hints[n] := WithoutCipher(A.DataBlocks[A.Files[j].DataBlock].Method)
+        else
+          Hints[n] := '';
+        Inc(n);
+      end;
+    for k := 0 to High(NewIdx) do
+    begin
+      All[n] := NewIdx[k];
+      Hints[n] := '';
+      Inc(n);
+    end;
+    SetLength(All, n);
+    SetLength(Hints, n);
+    GroupEntries(Entries, All, Hints, MO, Groups);
+    Exit;
+  end;
+  GM := DecodeMethod(MO.Method, BudgetThreads);
   ApplyMcOps(GM, MO.McOps);
-  // Bloque, posición y cantidad de archivos (sin directorios) de cada archivo viejo
-  SetLength(BlockOf, Length(A.Files)); SetLength(PosOf, Length(A.Files)); SetLength(CountOf, Length(A.Files));
+  ByName.Init;
+  for k := 0 to High(NewIdx) do ByName.Put(NameKey(Entries[NewIdx[k]].StoredName), k);
+  SetLength(Used, Length(NewIdx));
+  RM := nil; RL := nil; RC := nil;
   for b := 0 to High(A.DataBlocks) do
   begin
     n := 0;
+    Whole := True;
+    SetLength(L, A.DataBlocks[b].FileCount);
     for j := A.DataBlocks[b].FirstFile to A.DataBlocks[b].FirstFile + A.DataBlocks[b].FileCount - 1 do
-      if not A.Files[j].IsDir and not A.Files[j].IsLink then Inc(n);
-    pos := 0;
-    for j := A.DataBlocks[b].FirstFile to A.DataBlocks[b].FirstFile + A.DataBlocks[b].FileCount - 1 do
-      if not A.Files[j].IsDir and not A.Files[j].IsLink then
-      begin
-        BlockOf[j] := b; PosOf[j] := pos; CountOf[j] := n;
-        Inc(pos);
-      end;
-  end;
-  // Las entradas nuevas por nombre, para poner cada reemplazo en el lugar del viejo
-  ByName := TStringList.Create;
-  try
-    ByName.Sorted := True;
-    ByName.Duplicates := dupIgnore;
-    for k := 0 to High(NewIdx) do ByName.AddObject(NameKey(Entries[NewIdx[k]].StoredName), TObject(PtrInt(k)));
-    SetLength(Used, Length(NewIdx));
-    SetLength(L1, Length(A.Files) + Length(NewIdx)); SetLength(E1, Length(L1));
-    n := 0;
-    for j := 0 to High(A.Files) do
     begin
-      if A.Files[j].IsDir or A.Files[j].IsLink then Continue;   // sin datos: van en el bloque de directorios
+      if (j < 0) or (j > High(A.Files)) or A.Files[j].IsDir or A.Files[j].IsLink then Continue;
       if Keep[j] then
       begin
-        L1[n] := Default(TFaFile);
-        L1[n].Name := A.Files[j].Name;
-        L1[n].Size := A.Files[j].Size;
-        L1[n].IsOld := True;
-        L1[n].OldBlock := BlockOf[j];
-        L1[n].OldPos := PosOf[j];
-        L1[n].OldBlockFiles := CountOf[j];
-        L1[n].OldMethod := A.DataBlocks[BlockOf[j]].Method;
-        E1[n] := Old[j];
+        L[n] := Old[j];
         Inc(n);
       end
       else
       begin
-        k := ByName.IndexOf(NameKey(A.Files[j].Name));
-        if k >= 0 then
+        Whole := False;
+        k := ByName.Get(NameKey(A.Files[j].Name));
+        if (k >= 0) and not Used[k] then
         begin
-          k := PtrInt(ByName.Objects[k]);
-          if not Used[k] then
-          begin
-            Used[k] := True;
-            L1[n] := DiskFile(NewIdx[k]); E1[n] := NewIdx[k]; Inc(n);
-          end;
+          Used[k] := True;
+          L[n] := NewIdx[k];
+          Inc(n);
         end;
       end;
     end;
-    SetLength(L1, n); SetLength(E1, n);
-  finally
-    ByName.Free;
-  end;
-  // Los que no estaban, en el orden de sort_files
-  SetLength(L2, Length(NewIdx)); SetLength(E2, Length(NewIdx));
-  n := 0;
-  for k := 0 to High(NewIdx) do
-    if not Used[k] then begin L2[n] := DiskFile(NewIdx[k]); E2[n] := NewIdx[k]; Inc(n); end;
-  SetLength(L2, n); SetLength(E2, n);
-  if FaSortEnabled(GM, MO.Solid) and (n > 1) then
-  begin
-    Order := FaSortFiles(L2);
-    M := Copy(L2); EM := Copy(E2);
-    for k := 0 to High(Order) do begin L2[k] := M[Order[k]]; E2[k] := EM[Order[k]]; end;
-  end;
-  // merge (Utils.hs): si el viejo es mayor, va el nuevo; si no (empate incluido), el viejo
-  SetLength(M, Length(L1) + Length(L2)); SetLength(EM, Length(M));
-  Sorted := FaSortEnabled(GM, MO.Solid);
-  if Sorted and (Length(L2) > 0) then
-  begin
-    SetLength(K1, Length(L1)); SetLength(K2, Length(L2));
-    for x := 0 to High(L1) do K1[x] := FaMergeKeyOf(L1[x]);
-    for y := 0 to High(L2) do K2[y] := FaMergeKeyOf(L2[y]);
-  end;
-  x := 0; y := 0; n := 0;
-  while (x < Length(L1)) or (y < Length(L2)) do
-    if (y >= Length(L2)) or ((x < Length(L1)) and
-       not (Sorted and (FaMergeCompareKeys(K1[x], K2[y]) > 0))) then
+    if n = 0 then Continue;
+    if Whole then
     begin
-      M[n] := L1[x]; EM[n] := E1[x]; Inc(x); Inc(n);
-    end
-    else
-    begin
-      M[n] := L2[y]; EM[n] := E2[y]; Inc(y); Inc(n);
-    end;
-  Blocks := FaSolidBlocks(M, GM, EffectiveSolid(MO), FaDetectLevel(MO.Method), True, not Recompress);
-  for k := 0 to High(Blocks) do
-  begin
-    g := Length(Groups);
-    SetLength(Groups, g + 1);
-    Groups[g] := Default(TSolidGroup);
-    if Blocks[k].CopyOld then
-    begin
+      g := Length(Groups);
+      SetLength(Groups, g + 1);
+      Groups[g] := Default(TSolidGroup);
+      Groups[g].Method := A.DataBlocks[b].Method;
       Groups[g].CopyFrom := A;
-      Groups[g].CopyBlock := Blocks[k].OldBlock;
-      Groups[g].Method := A.DataBlocks[Blocks[k].OldBlock].Method;
-    end
-    else
-      Groups[g].Method := McMethod(Blocks[k].Method, MO.McOps);
-    SetLength(Groups[g].Files, Length(Blocks[k].Files));
-    for j := 0 to High(Blocks[k].Files) do Groups[g].Files[j] := EM[Blocks[k].Files[j]];
+      Groups[g].CopyBlock := b;
+      Groups[g].Files := Copy(L, 0, n);
+      Continue;
+    end;
+    M := RepackMethod(A.DataBlocks[b].Method);
+    r := 0;
+    while (r < Length(RM)) and (RM[r] <> M) do Inc(r);
+    if r = Length(RM) then
+    begin
+      SetLength(RM, r + 1); SetLength(RL, r + 1); SetLength(RC, r + 1);
+      RM[r] := M; RL[r] := nil; RC[r] := 0;
+    end;
+    if RC[r] + n > Length(RL[r]) then SetLength(RL[r], 2 * (RC[r] + n));
+    for j := 0 to n - 1 do RL[r][RC[r] + j] := L[j];
+    Inc(RC[r], n);
   end;
+  // rewritten blocks: their files in order, cut again
+  for r := 0 to High(RM) do
+  begin
+    SetLength(Files, RC[r]);
+    SetLength(Order, RC[r]);
+    for j := 0 to RC[r] - 1 do
+    begin
+      Files[j] := Default(TPlanFile);
+      Files[j].Name := Entries[RL[r][j]].StoredName;
+      Files[j].Size := Entries[RL[r][j]].Meta.Size;
+      Order[j] := j;
+    end;
+    AddPlanned(SplitRun(RM[r], Files, Order, EffectiveSolid(MO)), Copy(RL[r], 0, RC[r]), MO, Groups);
+  end;
+  // new files
+  n := 0;
+  SetLength(All, Length(NewIdx));
+  for k := 0 to High(NewIdx) do
+    if not Used[k] then
+    begin
+      All[n] := NewIdx[k];
+      Inc(n);
+    end;
+  SetLength(All, n);
+  GroupNewEntries(Entries, All, MO, Groups);
 end;
 
 { Antepone Prefix (el módulo) a Target, a través de un temporal. }
@@ -2223,7 +2254,7 @@ begin
         // -s- no sólido; -s<mem> tope de bytes por bloque; -s<N>f tope de archivos
         else if Copy(S, 1, 3) = '-rr' then MO.Recovery := Copy(S, 4, MaxInt)
         else if S = '-r' then MO.Recursive := True
-        else if (Copy(S, 1, 2) = '-s') and FaParseSolidOption(Copy(S, 3, MaxInt), MO.Solid) then
+        else if (Copy(S, 1, 2) = '-s') and ParseSolidSpec(Copy(S, 3, MaxInt), MO.Solid) then
           MO.SolidGiven := True
         else if Copy(S, 1, 3) = '-hp' then HPwd := Copy(S, 4, MaxInt)
         else if Copy(S, 1, 2) = '-p' then DPwd := Copy(S, 3, MaxInt)
