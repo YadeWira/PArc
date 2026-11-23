@@ -479,6 +479,19 @@ static void model_init(pcm_t *m) {
   m->flagp = 1u << 15;
 }
 
+static inline int pred_hashed(pcm_t *m, I16 *x, U32 nib, const int nh) {
+  int i, ord = 0;
+  for (i = 0; i < nh; i++) {
+    U8 *sp = m->slot[i] + nib;
+    U32 s = *sp, k = (U32)(i + NCD) * 256 + s;
+    U32 v = m->sm[k] >> 20;
+    m->sp[i + NCD] = sp; m->smx[i + NCD] = k;
+    x[i + NCD] = m->st[v];
+    if (i < 4 && s) ord++;
+  }
+  return ord;
+}
+
 static inline int predict(pcm_t *m) {
   I16 *x = m->x;
   U32 c0 = m->c0, nib = m->nib;
@@ -496,15 +509,9 @@ static inline int predict(pcm_t *m) {
     m->sp[1] = sp; m->smx[1] = k;
     x[1] = m->st[v];
   }
-  /* hashed contexts (nibble slots) */
-  for (i = 0; i < (int)m->nh; i++) {
-    U8 *sp = m->slot[i] + nib;
-    U32 s = *sp, k = (U32)(i + NCD) * 256 + s;
-    U32 v = m->sm[k] >> 20;
-    m->sp[i + NCD] = sp; m->smx[i + NCD] = k;
-    x[i + NCD] = m->st[v];
-    if (i < 4 && s) ord++;
-  }
+  /* hashed contexts (nibble slots); constant counts so that the loops unroll */
+  if (m->nh == NCH) ord = pred_hashed(m, x, nib, NCH);
+  else ord = pred_hashed(m, x, nib, NCH - 2);
   /* match model */
   m->mctx = 0;
   x[XM] = 0; x[XM + 1] = 0;
@@ -556,29 +563,33 @@ static inline int predict(pcm_t *m) {
 
 static inline void update_byte(pcm_t *m);
 
+/* state maps and bit-history states of the first nc contexts */
+static inline void upd_ctx(pcm_t *m, int y, const int nc) {
+  U32 *sm = m->sm;
+  const I32 *rec = m->rec;
+  U8 *spl[NC];
+  U8 ns[NC];
+  I32 target = y ? (1 << 22) - 1 : 0;
+  int i;
+  for (i = 0; i < nc; i++) {
+    U32 *t = sm + m->smx[i];
+    U32 v = *t, n = v & 1023;
+    I32 pp = (I32)(v >> 10);
+    pp += (I32)(((I64)(target - pp) * rec[n]) >> 16);
+    if ((I32)n < P(2)) n++;
+    *t = ((U32)pp << 10) | n;
+    spl[i] = m->sp[i];
+    ns[i] = m->nex[*spl[i]][y];
+  }
+  for (i = 0; i < nc; i++) *spl[i] = ns[i];
+}
+
 static inline void update(pcm_t *m, int y) {
   int i;
   /* contexts */
-  {
-    U32 *sm = m->sm;
-    const I32 *rec = m->rec;
-    U8 *spl[NC];
-    U8 ns[NC];
-    I32 target = y ? (1 << 22) - 1 : 0;
-    int nc = NCD + (int)m->nh;
-    for (i = 0; i < nc; i++) {
-      U32 *t = sm + m->smx[i];
-      U32 v = *t, n = v & 1023;
-      I32 pp = (I32)(v >> 10);
-      pp += (I32)(((I64)(target - pp) * rec[n]) >> 16);
-      if ((I32)n < P(2)) n++;
-      *t = ((U32)pp << 10) | n;
-      spl[i] = m->sp[i];
-      ns[i] = m->nex[*spl[i]][y];
-    }
-    if (m->mctx) sm_update(m, sm + m->msmx, y, P(2));
-    for (i = 0; i < nc; i++) *spl[i] = ns[i];
-  }
+  if (m->nh == NCH) upd_ctx(m, y, NCD + NCH);
+  else upd_ctx(m, y, NCD + NCH - 2);
+  if (m->mctx) sm_update(m, m->sm + m->msmx, y, P(2));
   /* mixers */
   {
     I32 ee[NM];

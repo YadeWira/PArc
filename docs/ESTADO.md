@@ -8,8 +8,9 @@ and the other containers (`.zip`/`.7z`/`.rar`) lives in
 ## Layout
 
 ```
-src/                     Pascal sources (with inline assembler; no C/C++)
+src/                     Pascal sources (with inline assembler; C only in src/orep and src/cm)
 src/orep/                OREP 0.0.10 (MIT, vendored unchanged): orep.pas + orep_core.c, the long-range matcher
+src/cm/                  pcm_core.c: the model of PArc's own context-mixing codec `cm` (MIT, freestanding C)
 docs/                    manual (USO.md), format (formato/FORMATO-PARC.md), codecs
 tests/                   tests, codec oracles and fuzzers
 reference/freearc-0.67/  only Compression/: C codec sources and test oracle
@@ -204,7 +205,8 @@ What makes this possible (all inside `.parc`; the codecs are unchanged):
   `dict:m800:s250:75%`, 90% LZP and PPMd 18/512 MB for `-m6`+. `*.pak` left the
   `$compressed` group (FreeArc's `find_type` sends them to `$precomp`, i.e. compressed).
   Measurements and the remaining losses: TODO.md, "Presets retune".
-- **Context mixing (`cm`)**: lpaq1-style model ported to Pascal and used by `-mxx` on text and
+- **Context mixing (`cm`)**: (since 2026-11-23 PArc's own CM, see "Own context mixing" below;
+  what follows is the history of the lpaq1 port it replaced) lpaq1-style model ported to Pascal and used by `-mxx` on text and
   binaries (`-mxx` text: 1.81 MB vs 2.16 MB for FreeArc on the 20 MB corpus; binaries: 5.45 MB
   vs 5.93 MB). It stores incompressible blocks raw, and `-O3` plus hot-loop optimisations
   brought 20 MB text from ~31 s to ~22 s. Independent data blocks are compressed in
@@ -1293,6 +1295,7 @@ bash tests/plz_cross.sh           # plz: mismos bytes en linux64/linux32/linuxar
 bash tests/delta.sh               # delta: tablas sintéticas de cada formato, trozos al azar, asm == Pascal, dañados
 bash tests/lzp.sh                 # lzp: parámetros de los presets y extremos, trozos al azar, dañados
 bash tests/filters_cross.sh       # delta/lzp: mismos bytes en linux64/linux32/linuxarm64/win64/win32
+bash tests/cm_cross.sh            # cm: mismos bytes en linux64 (SSE2 y C)/linux32/linuxarm64 (NEON)/win64/win32
 # plz_bench: cualquier método en memoria por las cadenas (tamaño, CPU y pared)
 fpc -O3 -Fusrc -Fobuild/linux64/units -Flbuild/linux64/units -FUbuild/tests/units -FEbuild/tests tests/plz_bench.lpr
 # liberar/reusar un trabajo del pool apenas termina (ventana ampliada con -dPARC_RACE_TEST)
