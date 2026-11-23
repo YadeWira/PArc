@@ -1,7 +1,7 @@
 #!/bin/sh
 # Compila PArc. Uso: ./build.sh [linux64|linux32|linuxarm64|macos|win64|win32|all] (default: linux64)
 # Todo es Pascal (con ensamblador en línea) salvo el núcleo de OREP (src/orep/orep_core.c, MIT,
-# C sin libc), que se compila acá con el gcc/clang de cada target y se enlaza estático (no hace
+# C sin libc) y el modelo de cm (src/cm/pcm_core.c, MIT, C sin libc), que se compilan acá con el gcc/clang de cada target y se enlazan estáticos (no hace
 # falta libstdc++ ni libgcc). Con -dOREP_NO_NATIVE se usa la referencia en Pascal (mismos bytes).
 # win32, linux32 y linuxarm64 (y win64 si está) usan el cross de PA-Lab en $FPC_CROSS.
 set -e
@@ -20,6 +20,11 @@ corep() {
   extra=""
   case "$cc" in *clang*) ;; *) extra="-fno-tree-loop-distribute-patterns" ;; esac
   $cc $COREPFLAGS $extra "$@" -c src/orep/orep_core.c -o "$out/units/orep_core.o"
+  # the cm model (src/cm/pcm_core.c, MIT, also without libc)
+  # (32-bit x86 with -msse2 for the SSE2 mixer: same bytes as the portable C path)
+  sse=""
+  case "$cc $*" in *-m32*|*i686*) sse="-msse2" ;; esac
+  $cc $COREPFLAGS -O3 -funroll-loops $sse $extra "$@" -c src/cm/pcm_core.c -o "$out/units/pcm_core.o"
 }
 
 # cmm <dir> <cc> [opciones]: el núcleo en C de tta/mm (src/tta/mmtta_core.c, MIT, propio)

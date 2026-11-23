@@ -52,7 +52,7 @@ writes the same bytes.
   from source and linked statically):
   `storing`, `lzma`, `ppmd`, `grzip`, `dict`, `orep` (long-range matcher, MIT; replaces FreeArc's
   `rep`), `delta`, `plz`, `lzp`, `mm`,
-  `tta`, `4x4`, `exe` (BCJ x86), `lz4`, `dispack070` (DisPack), `srep` (SREP) and `cm` (context mixing), alone or in
+  `tta`, `4x4`, `exe` (BCJ x86), `lz4`, `dispack070` (own x86/x64 filter), `srep` (SREP) and `cm` (context mixing), alone or in
   chains (`exe+dispack070+lzma`, `srep+lzma`, …). `plz` is PArc's own LZ codec, the engine of
   `-m1`/`-m2` and of `$compressed` files up to `-m4`: it replaced FreeArc's Tornado (`tor`),
   which was removed after 0.0.5 — smaller, faster to compress and 2–3× faster to decompress
@@ -192,7 +192,7 @@ the code derived from GPL sources; the current inventory:
 | `ppmd` | LZMA SDK `Ppmd8` | public domain |
 | `lzma`, `exe` (BCJ) | LZMA SDK (+ FreeArc's `fast` additions in the encoder) | public domain (the FreeArc additions are GPL-derived) |
 | `lz4` | LZ4 1.11.1 | BSD-2 (notice kept) |
-| `rep`, `4x4`, `dict`, `mm`, `tta`, `grzip`, `dispack070`, `srep` | ports of FreeArc 0.67 `Compression/` | GPL-derived, pending rewrite |
+| `rep`, `4x4`, `dict`, `mm`, `tta`, `grzip`, `srep` | ports of FreeArc 0.67 `Compression/` | GPL-derived, pending rewrite |
 | `cm` | lpaq1 (Matt Mahoney) | GPL-2.0-derived, pending rewrite |
 
 The FreeArc-derived codec ports come from FreeArc 0.67 sources by Bulat Ziganshin and

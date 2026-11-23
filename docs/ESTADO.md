@@ -8,8 +8,9 @@ and the other containers (`.zip`/`.7z`/`.rar`) lives in
 ## Layout
 
 ```
-src/                     Pascal sources (with inline assembler; no C/C++)
+src/                     Pascal sources (with inline assembler; C only in src/orep and src/cm)
 src/orep/                OREP 0.0.10 (MIT, vendored unchanged): orep.pas + orep_core.c, the long-range matcher
+src/cm/                  pcm_core.c: the model of PArc's own context-mixing codec `cm` (MIT, freestanding C)
 docs/                    manual (USO.md), format (formato/FORMATO-PARC.md), codecs
 tests/                   tests, codec oracles and fuzzers
 reference/freearc-0.67/  only Compression/: C codec sources and test oracle
@@ -22,7 +23,7 @@ The rest of the FreeArc 0.67 tree is in git history (commit `82ea8d9`) and in Fr
 | phase | status |
 |---|---|
 | FreeArc/PArc bugs | ✅ closed (the `.arc` parity fixes remain as history; see tag `entrega-arc`) |
-| Ported codecs | ✅ closed (LZMA, LZ4, PPMd, 4x4, Dict, LZP, Delta, MM, TTA, GRZip, BCJ, DisPack, SREP; Tornado was ported too and removed after 0.0.5, replaced by the own `plz`; REP replaced by OREP, MIT, 2026-11) |
+| Ported codecs | ✅ closed (LZMA, LZ4, PPMd, 4x4, Dict, LZP, Delta, MM, TTA, GRZip, BCJ, SREP; DisPack replaced by an own x86/x64 filter 2026-11-23; Tornado was ported too and removed after 0.0.5, replaced by the own `plz`; REP replaced by OREP, MIT, 2026-11) |
 | `.arc` compatibility | ❌ dropped: rejected with a message pointing to FreeArc-ex |
 | GUI | ❌ dropped |
 | `.zip/.7z/.rar` containers | ➡ moved to FreeArc-ex (tag `entrega-arc`) |
@@ -80,7 +81,7 @@ negative = PArc smaller):
 | `-m5` | −1.3% | −0.9% | −0.9% | −0.5% |
 | `-m6`…`-m9` | −1.0% | −0.2% | −0.3% | −0.3% |
 | `-mx` (fast decode) | −1.0% | −0.2% | −0.4% | −0.3% |
-| `-mxx` (CM) | −16.1% | −8.2% | −8.2% | −7.5% |
+| `-mxx` (CM, lpaq1 port; the own `cm` of 2026-11-23 is smaller still, see below) | −16.1% | −8.2% | −8.2% | −7.5% |
 
 Speed on the 44 MB mixed corpus (wall-clock; FreeArc includes Wine startup):
 
@@ -204,7 +205,8 @@ What makes this possible (all inside `.parc`; the codecs are unchanged):
   `dict:m800:s250:75%`, 90% LZP and PPMd 18/512 MB for `-m6`+. `*.pak` left the
   `$compressed` group (FreeArc's `find_type` sends them to `$precomp`, i.e. compressed).
   Measurements and the remaining losses: TODO.md, "Presets retune".
-- **Context mixing (`cm`)**: lpaq1-style model ported to Pascal and used by `-mxx` on text and
+- **Context mixing (`cm`)**: (since 2026-11-23 PArc's own CM, see "Own context mixing" below;
+  what follows is the history of the lpaq1 port it replaced) lpaq1-style model ported to Pascal and used by `-mxx` on text and
   binaries (`-mxx` text: 1.81 MB vs 2.16 MB for FreeArc on the 20 MB corpus; binaries: 5.45 MB
   vs 5.93 MB). It stores incompressible blocks raw, and `-O3` plus hot-loop optimisations
   brought 20 MB text from ~31 s to ~22 s. Independent data blocks are compressed in
@@ -1254,11 +1256,211 @@ alone encodes 5–25 % faster and decodes faster with h22/h23, 5–20 % slower w
 
 Found on the way: `parc a -m2 -mt1` corrupted some images (mm + plz short reads), fixed in dc7aca9.
 
+## Own x86/x86-64 filter replacing DisPack (2026-11-23)
+
+`dispack` / `dispack070` / `exe2` are now PArc's own filter (`src/parc_dispack.pas` +
+`src/parc_dispack_walk.inc`, MIT; stream in `formato/FORMATO-PARC.md` §6.6). Written from the
+Intel/AMD opcode maps and the PE/ELF specifications, without reading DisPack's code (clean-room;
+`tests/dispack_ref.cpp`, the C oracle, is gone). Old `dispack070` blocks no longer decode.
+
+Design: code regions come from PE (i386/AMD64, not .NET) and ELF (i386/x86-64) headers found in
+the data (sections/segments with their bitness and virtual address), or from a near-call density
+test in 4 KB windows outside known executables. One walker, compiled twice (encoder/decoder),
+parses every instruction (prefixes, REX, 0F/0F38/0F3A, VEX/EVEX, ModRM/SIB, 16-bit addressing)
+and splits it into 8 streams: OP keeps the opcode **with** ModRM, SIB, disp8, imm8 and rel8;
+D32, ADDR (absolute [disp32], moffs, RIP-relative converted to absolute), I16, I32, CALL and JMP
+(rel32 → absolute) hold the 32-bit fields, big-endian; RAW the non-code bytes. Measured and
+rejected (worse with lzma and plz): one stream per field (+2-7 %), MTF table of
+call targets (+0.3..1.2 %), jump-table detection (+0.4..10 %), little-endian addresses,
+routing push/mov imm32 to ADDR, big-endian disp32. The stage is streaming (8 MB blocks with a
+64 KB look-ahead for headers that cross a block end) instead of buffering the whole input.
+
+Measured (work area `/mnt/IA_LAB/agentes/PArc/xfilter/`: `data/` corpus copies, `scripts/`,
+`final.txt`): five sets — pe32 (34 MB: 15 MSVC/Delphi/VB/mingw PE32 from the corpus), pe64 (56 MB:
+corpus PE32+, wine x86_64 DLLs, zpaq x64), elf32 (18 MB: i386 libs), elf64 (41 MB: gcc, Go, Rust,
+FPC binaries), mixed (40 MB: an installer with compressed payload, codebook data, a resource-heavy
+DLL). `dispack+<back end>` with main (old) and this branch (new), `-mt1`/`-mt4` pinned
+(`taskset`), best of 3 runs interleaved, compression and `t` times, max RSS:
+
+| set | back end | T | size old → new | Δ | comp s old / new | dec s old / new | comp MB old / new | dec MB old / new |
+|---|---|---|---|---|---|---|---|---|
+| pe32 | filter only | T1 | 33,652,862 → 34,245,126 | +1.76% | 0.55 / 0.25 | 0.29 / 0.14 | 167 / 27 | 72 / 20 |
+| pe32 | filter only | T4 | 33,652,862 → 34,245,126 | +1.76% | 0.56 / 0.27 | 0.30 / 0.16 | 167 / 27 | 72 / 20 |
+| pe32 | plz:2 | T1 | 12,722,607 → 12,354,831 | -2.89% | 0.90 / 0.61 | 0.41 / 0.28 | 180 / 80 | 84 / 31 |
+| pe32 | plz:2 | T4 | 12,722,607 → 12,354,831 | -2.89% | 0.90 / 0.58 | 0.41 / 0.27 | 180 / 78 | 82 / 30 |
+| pe32 | plz:4 | T1 | 10,931,943 → 10,710,372 | -2.03% | 1.46 / 1.20 | 0.41 / 0.28 | 222 / 135 | 136 / 86 |
+| pe32 | plz:4 | T4 | 10,931,943 → 10,710,372 | -2.03% | 1.45 / 1.21 | 0.43 / 0.29 | 223 / 136 | 134 / 86 |
+| pe32 | lzma L5 | T1 | 9,411,541 → 9,159,066 | -2.68% | 7.98 / 8.53 | 0.76 / 0.70 | 458 / 384 | 105 / 53 |
+| pe32 | lzma L5 | T4 | 9,411,541 → 9,159,066 | -2.68% | 6.41 / 6.36 | 0.86 / 0.75 | 490 / 440 | 106 / 53 |
+| pe32 | lzma max | T1 | 9,286,378 → 9,032,873 | -2.73% | 11.99 / 10.64 | 0.89 / 0.65 | 458 / 385 | 105 / 53 |
+| pe32 | lzma max | T4 | 9,286,378 → 9,032,873 | -2.73% | 7.75 / 8.04 | 0.88 / 0.73 | 491 / 442 | 105 / 53 |
+| pe64 | filter only | T1 | 55,980,419 → 56,206,144 | +0.40% | 0.52 / 0.27 | 0.23 / 0.14 | 189 / 40 | 71 / 20 |
+| pe64 | filter only | T4 | 55,980,419 → 56,206,144 | +0.40% | 0.52 / 0.28 | 0.22 / 0.13 | 189 / 41 | 71 / 20 |
+| pe64 | plz:2 | T1 | 17,486,893 → 17,136,577 | -2.00% | 1.20 / 0.83 | 0.45 / 0.32 | 203 / 86 | 82 / 30 |
+| pe64 | plz:2 | T4 | 17,486,893 → 17,136,577 | -2.00% | 1.11 / 0.83 | 0.42 / 0.35 | 203 / 88 | 81 / 30 |
+| pe64 | plz:4 | T1 | 14,949,183 → 14,571,754 | -2.52% | 2.49 / 2.29 | 0.45 / 0.36 | 244 / 160 | 135 / 86 |
+| pe64 | plz:4 | T4 | 14,949,183 → 14,571,754 | -2.52% | 2.45 / 2.17 | 0.45 / 0.36 | 244 / 159 | 134 / 86 |
+| pe64 | lzma L5 | T1 | 12,584,020 → 12,198,607 | -3.06% | 17.52 / 18.98 | 1.05 / 0.94 | 672 / 583 | 126 / 75 |
+| pe64 | lzma L5 | T4 | 12,584,020 → 12,198,607 | -3.06% | 12.66 / 11.51 | 1.17 / 0.90 | 700 / 629 | 126 / 75 |
+| pe64 | lzma max | T1 | 12,285,702 → 11,895,607 | -3.18% | 24.54 / 27.91 | 1.00 / 0.92 | 671 / 584 | 126 / 75 |
+| pe64 | lzma max | T4 | 12,285,702 → 11,895,607 | -3.18% | 15.96 / 15.35 | 1.03 / 0.88 | 692 / 628 | 126 / 75 |
+| elf32 | filter only | T1 | 17,466,219 → 17,786,778 | +1.84% | 0.29 / 0.15 | 0.14 / 0.08 | 88 / 30 | 41 / 20 |
+| elf32 | filter only | T4 | 17,466,219 → 17,786,778 | +1.84% | 0.29 / 0.15 | 0.14 / 0.08 | 88 / 29 | 40 / 20 |
+| elf32 | plz:2 | T1 | 6,287,426 → 6,209,548 | -1.24% | 0.55 / 0.37 | 0.23 / 0.16 | 113 / 86 | 51 / 30 |
+| elf32 | plz:2 | T4 | 6,287,426 → 6,209,548 | -1.24% | 0.52 / 0.47 | 0.24 / 0.17 | 112 / 86 | 51 / 30 |
+| elf32 | plz:4 | T1 | 5,648,620 → 5,536,572 | -1.98% | 1.36 / 1.03 | 0.33 / 0.22 | 119 / 93 | 70 / 54 |
+| elf32 | plz:4 | T4 | 5,648,620 → 5,536,572 | -1.98% | 0.92 / 0.76 | 0.24 / 0.17 | 118 / 94 | 71 / 54 |
+| elf32 | lzma L5 | T1 | 4,759,584 → 4,598,083 | -3.39% | 4.66 / 5.48 | 0.41 / 0.38 | 272 / 248 | 58 / 38 |
+| elf32 | lzma L5 | T4 | 4,759,584 → 4,598,083 | -3.39% | 3.96 / 3.92 | 0.51 / 0.38 | 288 / 266 | 58 / 38 |
+| elf32 | lzma max | T1 | 4,630,720 → 4,464,856 | -3.58% | 7.68 / 7.93 | 0.45 / 0.37 | 270 / 247 | 59 / 38 |
+| elf32 | lzma max | T4 | 4,630,720 → 4,464,856 | -3.58% | 5.07 / 4.94 | 0.45 / 0.37 | 287 / 266 | 59 / 38 |
+| elf64 | filter only | T1 | 39,959,976 → 40,766,286 | +2.02% | 0.71 / 0.32 | 0.36 / 0.20 | 172 / 35 | 77 / 20 |
+| elf64 | filter only | T4 | 39,959,976 → 40,766,286 | +2.02% | 0.71 / 0.32 | 0.36 / 0.20 | 172 / 35 | 76 / 20 |
+| elf64 | plz:2 | T1 | 14,871,974 → 14,547,590 | -2.18% | 1.20 / 0.76 | 0.51 / 0.35 | 187 / 85 | 87 / 30 |
+| elf64 | plz:2 | T4 | 14,871,974 → 14,547,590 | -2.18% | 1.16 / 0.80 | 0.53 / 0.36 | 187 / 85 | 87 / 30 |
+| elf64 | plz:4 | T1 | 13,361,075 → 12,963,686 | -2.97% | 2.28 / 1.90 | 0.55 / 0.40 | 229 / 140 | 136 / 87 |
+| elf64 | plz:4 | T4 | 13,361,075 → 12,963,686 | -2.97% | 2.22 / 1.86 | 0.54 / 0.42 | 229 / 142 | 134 / 87 |
+| elf64 | lzma L5 | T1 | 11,272,583 → 10,936,562 | -2.98% | 13.60 / 13.44 | 1.09 / 0.88 | 517 / 448 | 117 / 60 |
+| elf64 | lzma L5 | T4 | 11,272,583 → 10,936,562 | -2.98% | 8.82 / 8.65 | 1.13 / 0.85 | 548 / 495 | 116 / 60 |
+| elf64 | lzma max | T1 | 10,997,471 → 10,636,062 | -3.29% | 19.69 / 18.79 | 1.06 / 0.87 | 517 / 448 | 117 / 60 |
+| elf64 | lzma max | T4 | 10,997,471 → 10,636,062 | -3.29% | 11.55 / 11.81 | 0.98 / 0.89 | 545 / 495 | 117 / 60 |
+| mixed | filter only | T1 | 40,098,951 → 40,111,415 | +0.03% | 0.28 / 0.16 | 0.11 / 0.05 | 173 / 30 | 71 / 20 |
+| mixed | filter only | T4 | 40,098,951 → 40,111,415 | +0.03% | 0.30 / 0.16 | 0.12 / 0.04 | 173 / 30 | 70 / 20 |
+| mixed | plz:2 | T1 | 19,155,066 → 19,133,962 | -0.11% | 0.65 / 0.47 | 0.23 / 0.17 | 186 / 78 | 81 / 31 |
+| mixed | plz:2 | T4 | 19,155,066 → 19,133,962 | -0.11% | 0.67 / 0.47 | 0.23 / 0.18 | 186 / 82 | 80 / 30 |
+| mixed | plz:4 | T1 | 18,732,295 → 18,710,693 | -0.12% | 1.33 / 1.09 | 0.25 / 0.21 | 245 / 135 | 135 / 88 |
+| mixed | plz:4 | T4 | 18,732,295 → 18,710,693 | -0.12% | 1.35 / 1.21 | 0.26 / 0.21 | 246 / 134 | 136 / 88 |
+| mixed | lzma L5 | T1 | 18,173,859 → 18,158,235 | -0.09% | 8.19 / 7.44 | 1.04 / 0.93 | 518 / 432 | 109 / 59 |
+| mixed | lzma L5 | T4 | 18,173,859 → 18,158,235 | -0.09% | 4.94 / 4.98 | 0.99 / 0.97 | 546 / 498 | 108 / 59 |
+| mixed | lzma max | T1 | 18,095,812 → 18,077,226 | -0.10% | 11.83 / 10.82 | 1.06 / 0.91 | 518 / 432 | 112 / 59 |
+| mixed | lzma max | T4 | 18,095,812 → 18,077,226 | -0.10% | 7.05 / 7.04 | 1.04 / 1.00 | 545 / 500 | 108 / 59 |
+
+
+- Size: −1.2 … −3.6 % on code with every back end; −0.1 % on the mixed set. Against `bcj2`
+  (experimental, not in presets) the new filter wins with every LZMA back end (pe32 L5 9.16 vs
+  9.83 MB, elf64 10.94 vs 11.78 MB, …); with plz `bcj2` is smaller because it compresses its own
+  streams with LZMA inside, at 10-25× the time (pe32 plz:4: 9.70 MB in 15 s vs 10.71 MB in 1.2 s).
+- Lost cell, by design: the filter's output stored alone is 0.0-2.0 % *larger* than DisPack's
+  (DisPack turns calls into 1-byte MTF indices; that costs 0.3-1.2 % after every back end, so it
+  was rejected). Filter time is 2× faster both ways and memory 4-8× lower (27-40 MB vs 170-190 MB
+  compressing, 20 MB vs 70 MB decompressing).
+- LZMA compression time is the back end's and is a tie: cells where new looks slower in the table
+  (pe32/elf32 L5 T1, pe64 max T1) were re-measured on an idle core, 3-4 alternating runs:
+  pe64 max T1 best 26.72 s new vs 27.03 s old; elf32 L5 T1 5.29 vs 5.32 s; pe32 L5 T1 9.29 vs 9.64 s.
+  The server had load ~30 during the matrix (±10 % per cell).
+- Tests: `tests/dispack.sh` (84 checks), `tests/filters_cross.sh` (dispack identical on linux64,
+  linux32, linuxarm64, win64, win32), full suite green.
+
+## Own context mixing `cm` replacing the lpaq1 port (2026-11-23)
+
+`cm` (used by `-mxx`: `xx$text = dict+lzp+cm`, `xx$binary`/`xx$obj = orep+exe+delta+cm`) was a
+Pascal port of lpaq1 (GPL). It is now PArc's own model (`src/parc_cm.pas` + `src/cm/pcm_core.c`,
+MIT, freestanding C built by `build.sh` like OREP's core), designed from the published
+descriptions of bitwise context mixing; no lpaq/paq/FreeArc code was read. Old `cm` blocks no
+longer decode (new stream with a version byte, [FORMATO-PARC.md §6.7](formato/FORMATO-PARC.md)).
+
+Model, per bit: bit-history states (bounded (n0, n1, last bit) counters, one byte) for order 0
+and 1 (direct tables) and orders 2, 3, 4, 6, word, word bigram, an indirect context (the two
+bytes that last followed the previous byte) and sparse contexts (bytes 2–3 back; with
+`cm:8`/`cm:9` also bytes 3–4 back) in a hash table of 64-byte buckets of four nibble slots;
+adaptive state maps; a match model; six mixers of 16 inputs (16-bit weights; SSE2 on x86,
+including the 32-bit builds with `-msse2`, NEON on aarch64, bit-exact portable C otherwise)
+selected by the partial byte, match state, order × bit position, byte 2 back, byte 3 back and
+byte classes; a second-layer mixer and two interpolated APMs. Blocks of 64 KB: near-random ones
+(order-0 entropy > 7.92 bits/byte) are coded raw, text-like ones (≥ 50% printable, < 1/32
+zeros) skip the sparse contexts. Streams up to 64 MB carry their size: the decoder decodes them
+at once and frees the model before `lzp`/`dict` allocate theirs (like the old port, which always
+decoded everything at once), so a chain never holds both. Memory per stream: level 6 ≈ 170 MB
+(old: ≈ 200 MB plus 4× the data when compressing); blocks under 1 MB get smaller tables.
+
+Measured on silesia files and corpus sets (`/mnt/IA_LAB/agentes/PArc/cm/data`: silesia
+`dickens`, `xml`, `ooffice`, `sao`, `x-ray`, `reymont`, `osdb`, `mr`, the first 8–12 MB of
+`samba`, `mozilla`, `webster`, `nci`; `exe.tar` = 16 Windows executables/DLLs of the corpus,
+`mix.tar` = 82 files of every category), main (a93a44b, old) against this branch (new), Linux
+x86-64, one core per job (cores 40–51 of a shared 64-thread Xeon E5-2697A v4; the machine was
+loaded by other jobs, so times vary by ±5%; each figure is the best of two runs of old and new
+alternating on the same core). Times are wall clock of `parc a` and `parc t`; memory is peak
+RSS. Sizes include the archive.
+
+`-mcm` alone, `PARC_THREADS=1`:
+
+| data | old size | new size | size | comp old → new (s) | dec old → new (s) | mem comp old → new (MB) | mem dec old → new (MB) |
+|---|---|---|---|---|---|---|---|
+| dickens | 2193807 | 2177921 | -0.72% | 15.51 → 14.02 | 16.13 → 14.62 | 219 → 188 | 211 → 181 |
+| exe.tar | 3572147 | 3338387 | -6.54% | 20.80 → 19.02 | 21.86 → 18.47 | 219 → 189 | 214 → 184 |
+| mix.tar | 2532113 | 2435826 | -3.80% | 12.91 → 10.89 | 13.55 → 11.34 | 219 → 181 | 209 → 180 |
+| moz12 | 5054473 | 5014123 | -0.80% | 22.03 → 14.92 | 23.75 → 15.20 | 223 → 188 | 215 → 183 |
+| mr | 2207247 | 2183547 | -1.07% | 14.46 → 12.93 | 15.36 → 12.76 | 219 → 188 | 210 → 182 |
+| nci6 | 298551 | 283548 | -5.03% | 7.04 → 6.16 | 7.32 → 6.34 | 204 → 181 | 204 → 178 |
+| ooffice | 2257024 | 2099016 | -7.00% | 11.59 → 10.19 | 11.88 → 10.74 | 211 → 181 | 206 → 178 |
+| osdb | 2335130 | 2264231 | -3.04% | 17.08 → 16.88 | 19.00 → 16.82 | 219 → 189 | 210 → 181 |
+| reymont | 1047348 | 980171 | -6.41% | 9.34 → 8.27 | 9.51 → 8.50 | 214 → 181 | 206 → 178 |
+| samba8 | 1993040 | 1973197 | -1.00% | 12.91 → 11.85 | 13.60 → 11.76 | 215 → 181 | 208 → 179 |
+| sao | 4434518 | 4392730 | -0.94% | 15.59 → 14.33 | 16.42 → 14.71 | 223 → 180 | 209 → 179 |
+| web8 | 1245098 | 1230933 | -1.14% | 11.17 → 10.26 | 11.80 → 10.59 | 215 → 181 | 207 → 180 |
+| xml | 340471 | 322936 | -5.15% | 6.83 → 6.29 | 7.14 → 6.55 | 204 → 181 | 203 → 177 |
+| x-ray | 3731554 | 3689429 | -1.13% | 14.96 → 13.20 | 15.43 → 13.63 | 219 → 188 | 210 → 180 |
+| **total** | 33242521 | 32385995 | -2.58% | 192.22 → 169.21 | 202.75 → 172.03 | | |
+
+`-mxx`, `PARC_THREADS=1`:
+
+| data | old size | new size | size | comp old → new (s) | dec old → new (s) | mem comp old → new (MB) | mem dec old → new (MB) |
+|---|---|---|---|---|---|---|---|
+| dickens | 2161026 | 2146879 | -0.65% | 12.90 → 10.70 | 12.53 → 11.18 | 303 → 265 | 207 → 178 |
+| exe.tar | 3445583 | 3248073 | -5.73% | 19.63 → 18.00 | 21.13 → 19.80 | 230 → 198 | 214 → 184 |
+| mix.tar | 2525369 | 2453164 | -2.86% | 12.27 → 9.82 | 12.43 → 9.99 | 228 → 189 | 209 → 180 |
+| moz12 | 4983787 | 4952018 | -0.64% | 20.17 → 14.38 | 21.17 → 14.12 | 234 → 198 | 216 → 184 |
+| ooffice | 1905377 | 1784763 | -6.33% | 11.04 → 9.50 | 11.11 → 9.86 | 222 → 188 | 207 → 179 |
+| osdb | 2338294 | 2268209 | -3.00% | 17.79 → 16.41 | 17.74 → 16.51 | 230 → 198 | 211 → 183 |
+| reymont | 992136 | 955124 | -3.73% | 5.74 → 5.36 | 5.78 → 5.21 | 281 → 252 | 202 → 175 |
+| samba8 | 1995155 | 1969468 | -1.29% | 12.11 → 10.19 | 12.19 → 11.01 | 224 → 190 | 209 → 180 |
+| web8 | 1242542 | 1220390 | -1.78% | 8.40 → 8.13 | 8.54 → 7.27 | 290 → 258 | 204 → 176 |
+| xml | 327866 | 314416 | -4.10% | 4.14 → 3.60 | 4.24 → 3.53 | 283 → 257 | 200 → 175 |
+| **total** | 21917135 | 21312504 | -2.76% | 124.19 → 106.09 | 126.86 → 108.48 | | |
+
+`PARC_THREADS=4` (`textdir` = dickens + xml + reymont + 8 MB of webster; `exe`, `mix` = the
+folders of the tars above), `-mxx` and `-mcm`:
+
+| data | old size | new size | size | comp old → new (s) | dec old → new (s) | mem comp old → new (MB) | mem dec old → new (MB) |
+|---|---|---|---|---|---|---|---|
+| exe | 3441037 | 3244252 | -5.72% | 20.37 → 19.81 | 21.01 → 20.31 | 231 → 198 | 214 → 184 |
+| mix | 2526017 | 2442935 | -3.29% | 9.14 → 8.22 | 9.19 → 8.99 | 439 → 358 | 403 → 322 |
+| textdir | 4773051 | 4642601 | -2.73% | 32.00 → 27.94 | 32.50 → 30.13 | 368 → 316 | 220 → 187 |
+| **total** | 10740105 | 10329788 | -3.82% | 61.51 → 55.97 | 62.70 → 59.43 | | |
+
+| data | old size | new size | size | comp old → new (s) | dec old → new (s) | mem comp old → new (MB) | mem dec old → new (MB) |
+|---|---|---|---|---|---|---|---|
+| exe | 3569331 | 3331427 | -6.67% | 20.83 → 18.62 | 21.67 → 19.72 | 224 → 188 | 214 → 183 |
+| mix | 2527167 | 2434571 | -3.66% | 17.62 → 14.38 | 16.81 → 14.10 | 214 → 188 | 208 → 179 |
+| textdir | 4805925 | 4682119 | -2.58% | 42.53 → 42.39 | 45.88 → 41.65 | 238 → 205 | 232 → 201 |
+| **total** | 10902423 | 10448117 | -4.17% | 80.98 → 75.39 | 84.36 → 75.47 | | |
+
+`-mcm`, `PARC_THREADS=1`, the linux32 builds (old: FPC i386 code; new: the SSE2 mixer, same bytes
+as linux64):
+
+| data | old size | new size | size | comp old → new (s) | dec old → new (s) | mem comp old → new (MB) | mem dec old → new (MB) |
+|---|---|---|---|---|---|---|---|
+| dickens | 2193807 | 2177921 | -0.72% | 30.57 → 19.07 | 28.71 → 19.88 | 216 → 188 | 210 → 181 |
+| exe.tar | 3572147 | 3338387 | -6.54% | 39.72 → 27.16 | 39.63 → 28.07 | 217 → 188 | 213 → 183 |
+| mix.tar | 2532113 | 2435826 | -3.80% | 32.05 → 21.84 | 32.84 → 21.82 | 217 → 179 | 208 → 179 |
+| ooffice | 2257024 | 2099016 | -7.00% | 27.75 → 20.35 | 29.25 → 20.59 | 208 → 180 | 206 → 177 |
+| web8 | 1245098 | 1230933 | -1.14% | 21.17 → 16.51 | 22.25 → 15.61 | 213 → 179 | 206 → 179 |
+| xml | 340471 | 322936 | -5.15% | 11.85 → 8.19 | 12.18 → 8.53 | 204 → 180 | 202 → 176 |
+| **total** | 12140660 | 11605019 | -4.41% | 163.11 → 113.12 | 164.86 → 114.50 | | |
+
+The model is compute-bound (about 1,100 instructions per bit; a 1 MB table runs as fast as the
+128 MB one), so speed comes from SSE2/NEON mixers, unrolled loops and leaving out contexts
+where they do not pay (sparse ones in text blocks). `cm:8`/`cm:9` (second sparse context in
+binary blocks) are about 2% smaller on binaries and 8% slower; level 6 is the default.
+Tests: `tests/cm.sh` (stage round trips, write sizes, SSE2 == C, 900 damaged streams, PArc
+round trips, `PARC_THREADS=1` == 4), `tests/cm_cross.sh` (same bytes on linux64 SSE2 and C,
+linux32, linuxarm64 NEON, win64, win32).
+
 ## Verified platforms (0.0.2)
 
 | platform | binary | tests |
 |---|---|---|
-| Linux x64 | `parc` | full suite: CLI, stdio, volumes, RS, encryption, DisPack, SREP, BCJ, Tornado, crypto vectors, fixes, LZMA and fuzz |
+| Linux x64 | `parc` | full suite: CLI, stdio, volumes, RS, encryption, dispack, SREP, BCJ, Tornado, crypto vectors, fixes, LZMA and fuzz |
 | Windows 10 x64 | win64 | `a/l/t/x`, `u/f/d`, `-p`, `-rr`, `-v`, UTF-8 names and an archive created on Linux |
 | Windows 10 x64 (WOW64) | win32 | same basic tests and a cross-checked archive on Linux |
 | Windows 7 SP1 x64 | win32 and win64 | create/test/extract, encryption and Linux ↔ Windows cross-check |
@@ -1295,6 +1497,7 @@ bash tests/lzp.sh                 # lzp: parámetros de los presets y extremos, 
 bash tests/filters_cross.sh       # delta/lzp: mismos bytes en linux64/linux32/linuxarm64/win64/win32
 bash tests/mmtta.sh               # tta/mm: detección, ida y vuelta en todos los niveles, trozos al azar, C con y sin SIMD, dañados, presets
 bash tests/mmtta_cross.sh         # tta/mm: mismos bytes en linux64/linux32/linuxarm64 (QEMU)/win64/win32 (Wine)
+bash tests/cm_cross.sh            # cm: mismos bytes en linux64 (SSE2 y C)/linux32/linuxarm64 (NEON)/win64/win32
 # plz_bench: cualquier método en memoria por las cadenas (tamaño, CPU y pared)
 fpc -O3 -Fusrc -Fobuild/linux64/units -Flbuild/linux64/units -FUbuild/tests/units -FEbuild/tests tests/plz_bench.lpr
 # liberar/reusar un trabajo del pool apenas termina (ventana ampliada con -dPARC_RACE_TEST)
