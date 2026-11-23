@@ -1340,6 +1340,19 @@ folders of the tars above), `-mxx` and `-mcm`:
 | textdir | 4805925 | 4682119 | -2.58% | 42.53 → 42.39 | 45.88 → 41.65 | 238 → 205 | 232 → 201 |
 | **total** | 10902423 | 10448117 | -4.17% | 80.98 → 75.39 | 84.36 → 75.47 | | |
 
+`-mcm`, `PARC_THREADS=1`, the linux32 builds (old: FPC i386 code; new: the SSE2 mixer, same bytes
+as linux64):
+
+| data | old size | new size | size | comp old → new (s) | dec old → new (s) | mem comp old → new (MB) | mem dec old → new (MB) |
+|---|---|---|---|---|---|---|---|
+| dickens | 2193807 | 2177921 | -0.72% | 30.57 → 19.07 | 28.71 → 19.88 | 216 → 188 | 210 → 181 |
+| exe.tar | 3572147 | 3338387 | -6.54% | 39.72 → 27.16 | 39.63 → 28.07 | 217 → 188 | 213 → 183 |
+| mix.tar | 2532113 | 2435826 | -3.80% | 32.05 → 21.84 | 32.84 → 21.82 | 217 → 179 | 208 → 179 |
+| ooffice | 2257024 | 2099016 | -7.00% | 27.75 → 20.35 | 29.25 → 20.59 | 208 → 180 | 206 → 177 |
+| web8 | 1245098 | 1230933 | -1.14% | 21.17 → 16.51 | 22.25 → 15.61 | 213 → 179 | 206 → 179 |
+| xml | 340471 | 322936 | -5.15% | 11.85 → 8.19 | 12.18 → 8.53 | 204 → 180 | 202 → 176 |
+| **total** | 12140660 | 11605019 | -4.41% | 163.11 → 113.12 | 164.86 → 114.50 | | |
+
 The model is compute-bound (about 1,100 instructions per bit; a 1 MB table runs as fast as the
 128 MB one), so speed comes from SSE2/NEON mixers, unrolled loops and leaving out contexts
 where they do not pay (sparse ones in text blocks). `cm:8`/`cm:9` (second sparse context in
