@@ -81,7 +81,7 @@ negative = PArc smaller):
 | `-m5` | −1.3% | −0.9% | −0.9% | −0.5% |
 | `-m6`…`-m9` | −1.0% | −0.2% | −0.3% | −0.3% |
 | `-mx` (fast decode) | −1.0% | −0.2% | −0.4% | −0.3% |
-| `-mxx` (CM) | −16.1% | −8.2% | −8.2% | −7.5% |
+| `-mxx` (CM, lpaq1 port; the own `cm` of 2026-11-23 is smaller still, see below) | −16.1% | −8.2% | −8.2% | −7.5% |
 
 Speed on the 44 MB mixed corpus (wall-clock; FreeArc includes Wine startup):
 
@@ -1255,6 +1255,98 @@ alone encodes 5–25 % faster and decodes faster with h22/h23, 5–20 % slower w
 (0.47 vs 0.40 s for 93 MB), which is lost in the chains' seconds of PPMd/BWT.
 
 Found on the way: `parc a -m2 -mt1` corrupted some images (mm + plz short reads), fixed in dc7aca9.
+
+## Own context mixing `cm` replacing the lpaq1 port (2026-11-23)
+
+`cm` (used by `-mxx`: `xx$text = dict+lzp+cm`, `xx$binary`/`xx$obj = orep+exe+delta+cm`) was a
+Pascal port of lpaq1 (GPL). It is now PArc's own model (`src/parc_cm.pas` + `src/cm/pcm_core.c`,
+MIT, freestanding C built by `build.sh` like OREP's core), designed from the published
+descriptions of bitwise context mixing; no lpaq/paq/FreeArc code was read. Old `cm` blocks no
+longer decode (new stream with a version byte, [FORMATO-PARC.md §6.6](formato/FORMATO-PARC.md)).
+
+Model, per bit: bit-history states (bounded (n0, n1, last bit) counters, one byte) for order 0
+and 1 (direct tables) and orders 2, 3, 4, 6, word, word bigram, an indirect context (the two
+bytes that last followed the previous byte) and sparse contexts (bytes 2–3 back; with
+`cm:8`/`cm:9` also bytes 3–4 back) in a hash table of 64-byte buckets of four nibble slots;
+adaptive state maps; a match model; six mixers of 16 inputs (16-bit weights; SSE2 on x86,
+including the 32-bit builds with `-msse2`, NEON on aarch64, bit-exact portable C otherwise)
+selected by the partial byte, match state, order × bit position, byte 2 back, byte 3 back and
+byte classes; a second-layer mixer and two interpolated APMs. Blocks of 64 KB: near-random ones
+(order-0 entropy > 7.92 bits/byte) are coded raw, text-like ones (≥ 50% printable, < 1/32
+zeros) skip the sparse contexts. Streams up to 64 MB carry their size: the decoder decodes them
+at once and frees the model before `lzp`/`dict` allocate theirs (like the old port, which always
+decoded everything at once), so a chain never holds both. Memory per stream: level 6 ≈ 170 MB
+(old: ≈ 200 MB plus 4× the data when compressing); blocks under 1 MB get smaller tables.
+
+Measured on silesia files and corpus sets (`/mnt/IA_LAB/agentes/PArc/cm/data`: silesia
+`dickens`, `xml`, `ooffice`, `sao`, `x-ray`, `reymont`, `osdb`, `mr`, the first 8–12 MB of
+`samba`, `mozilla`, `webster`, `nci`; `exe.tar` = 16 Windows executables/DLLs of the corpus,
+`mix.tar` = 82 files of every category), main (a93a44b, old) against this branch (new), Linux
+x86-64, one core per job (cores 40–51 of a shared 64-thread Xeon E5-2697A v4; the machine was
+loaded by other jobs, so times vary by ±5%; each figure is the best of two runs of old and new
+alternating on the same core). Times are wall clock of `parc a` and `parc t`; memory is peak
+RSS. Sizes include the archive.
+
+`-mcm` alone, `PARC_THREADS=1`:
+
+| data | old size | new size | size | comp old → new (s) | dec old → new (s) | mem comp old → new (MB) | mem dec old → new (MB) |
+|---|---|---|---|---|---|---|---|
+| dickens | 2193807 | 2177921 | -0.72% | 15.51 → 14.02 | 16.13 → 14.62 | 219 → 188 | 211 → 181 |
+| exe.tar | 3572147 | 3338387 | -6.54% | 20.80 → 19.02 | 21.86 → 18.47 | 219 → 189 | 214 → 184 |
+| mix.tar | 2532113 | 2435826 | -3.80% | 12.91 → 10.89 | 13.55 → 11.34 | 219 → 181 | 209 → 180 |
+| moz12 | 5054473 | 5014123 | -0.80% | 22.03 → 14.92 | 23.75 → 15.20 | 223 → 188 | 215 → 183 |
+| mr | 2207247 | 2183547 | -1.07% | 14.46 → 12.93 | 15.36 → 12.76 | 219 → 188 | 210 → 182 |
+| nci6 | 298551 | 283548 | -5.03% | 7.04 → 6.16 | 7.32 → 6.34 | 204 → 181 | 204 → 178 |
+| ooffice | 2257024 | 2099016 | -7.00% | 11.59 → 10.19 | 11.88 → 10.74 | 211 → 181 | 206 → 178 |
+| osdb | 2335130 | 2264231 | -3.04% | 17.08 → 16.88 | 19.00 → 16.82 | 219 → 189 | 210 → 181 |
+| reymont | 1047348 | 980171 | -6.41% | 9.34 → 8.27 | 9.51 → 8.50 | 214 → 181 | 206 → 178 |
+| samba8 | 1993040 | 1973197 | -1.00% | 12.91 → 11.85 | 13.60 → 11.76 | 215 → 181 | 208 → 179 |
+| sao | 4434518 | 4392730 | -0.94% | 15.59 → 14.33 | 16.42 → 14.71 | 223 → 180 | 209 → 179 |
+| web8 | 1245098 | 1230933 | -1.14% | 11.17 → 10.26 | 11.80 → 10.59 | 215 → 181 | 207 → 180 |
+| xml | 340471 | 322936 | -5.15% | 6.83 → 6.29 | 7.14 → 6.55 | 204 → 181 | 203 → 177 |
+| x-ray | 3731554 | 3689429 | -1.13% | 14.96 → 13.20 | 15.43 → 13.63 | 219 → 188 | 210 → 180 |
+| **total** | 33242521 | 32385995 | -2.58% | 192.22 → 169.21 | 202.75 → 172.03 | | |
+
+`-mxx`, `PARC_THREADS=1`:
+
+| data | old size | new size | size | comp old → new (s) | dec old → new (s) | mem comp old → new (MB) | mem dec old → new (MB) |
+|---|---|---|---|---|---|---|---|
+| dickens | 2161026 | 2146879 | -0.65% | 12.90 → 10.70 | 12.53 → 11.18 | 303 → 265 | 207 → 178 |
+| exe.tar | 3445583 | 3248073 | -5.73% | 19.63 → 18.00 | 21.13 → 19.80 | 230 → 198 | 214 → 184 |
+| mix.tar | 2525369 | 2453164 | -2.86% | 12.27 → 9.82 | 12.43 → 9.99 | 228 → 189 | 209 → 180 |
+| moz12 | 4983787 | 4952018 | -0.64% | 20.17 → 14.38 | 21.17 → 14.12 | 234 → 198 | 216 → 184 |
+| ooffice | 1905377 | 1784763 | -6.33% | 11.04 → 9.50 | 11.11 → 9.86 | 222 → 188 | 207 → 179 |
+| osdb | 2338294 | 2268209 | -3.00% | 17.79 → 16.41 | 17.74 → 16.51 | 230 → 198 | 211 → 183 |
+| reymont | 992136 | 955124 | -3.73% | 5.74 → 5.36 | 5.78 → 5.21 | 281 → 252 | 202 → 175 |
+| samba8 | 1995155 | 1969468 | -1.29% | 12.11 → 10.19 | 12.19 → 11.01 | 224 → 190 | 209 → 180 |
+| web8 | 1242542 | 1220390 | -1.78% | 8.40 → 8.13 | 8.54 → 7.27 | 290 → 258 | 204 → 176 |
+| xml | 327866 | 314416 | -4.10% | 4.14 → 3.60 | 4.24 → 3.53 | 283 → 257 | 200 → 175 |
+| **total** | 21917135 | 21312504 | -2.76% | 124.19 → 106.09 | 126.86 → 108.48 | | |
+
+`PARC_THREADS=4` (`textdir` = dickens + xml + reymont + 8 MB of webster; `exe`, `mix` = the
+folders of the tars above), `-mxx` and `-mcm`:
+
+| data | old size | new size | size | comp old → new (s) | dec old → new (s) | mem comp old → new (MB) | mem dec old → new (MB) |
+|---|---|---|---|---|---|---|---|
+| exe | 3441037 | 3244252 | -5.72% | 20.37 → 19.81 | 21.01 → 20.31 | 231 → 198 | 214 → 184 |
+| mix | 2526017 | 2442935 | -3.29% | 9.14 → 8.22 | 9.19 → 8.99 | 439 → 358 | 403 → 322 |
+| textdir | 4773051 | 4642601 | -2.73% | 32.00 → 27.94 | 32.50 → 30.13 | 368 → 316 | 220 → 187 |
+| **total** | 10740105 | 10329788 | -3.82% | 61.51 → 55.97 | 62.70 → 59.43 | | |
+
+| data | old size | new size | size | comp old → new (s) | dec old → new (s) | mem comp old → new (MB) | mem dec old → new (MB) |
+|---|---|---|---|---|---|---|---|
+| exe | 3569331 | 3331427 | -6.67% | 20.83 → 18.62 | 21.67 → 19.72 | 224 → 188 | 214 → 183 |
+| mix | 2527167 | 2434571 | -3.66% | 17.62 → 14.38 | 16.81 → 14.10 | 214 → 188 | 208 → 179 |
+| textdir | 4805925 | 4682119 | -2.58% | 42.53 → 42.39 | 45.88 → 41.65 | 238 → 205 | 232 → 201 |
+| **total** | 10902423 | 10448117 | -4.17% | 80.98 → 75.39 | 84.36 → 75.47 | | |
+
+The model is compute-bound (about 1,100 instructions per bit; a 1 MB table runs as fast as the
+128 MB one), so speed comes from SSE2/NEON mixers, unrolled loops and leaving out contexts
+where they do not pay (sparse ones in text blocks). `cm:8`/`cm:9` (second sparse context in
+binary blocks) are about 2% smaller on binaries and 8% slower; level 6 is the default.
+Tests: `tests/cm.sh` (stage round trips, write sizes, SSE2 == C, 900 damaged streams, PArc
+round trips, `PARC_THREADS=1` == 4), `tests/cm_cross.sh` (same bytes on linux64 SSE2 and C,
+linux32, linuxarm64 NEON, win64, win32).
 
 ## Verified platforms (0.0.2)
 
