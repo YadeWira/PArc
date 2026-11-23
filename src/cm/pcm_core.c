@@ -15,7 +15,7 @@
 #include <stdint.h>
 #include <stddef.h>
 
-#if defined(__SSE2__)
+#if defined(__SSE2__) && !defined(PCM_NO_SIMD)
 #include <emmintrin.h>
 #define PCM_SSE2 1
 #endif
@@ -42,11 +42,11 @@ typedef U32 (*pcm_io_fn)(void *ctx, U8 *buf, U32 n);
 #define IOBUF 65536u
 
 /* tuning parameters (constants in the product build) */
-#define PCM_TDEF {24, 16, 1023, 6, 2, 0, 1024, 6, 0, 0, 0, 0, 0, 0, 0, 0}
+#define PCM_TDEF {8, 2, 1023, 5, 2, 1, 1024, 6, 0, 2, 0, 0, 0, 0, 0, 3, 0, 0, 3, 0}
 #ifdef PCM_TUNE
-int pcm_T[16] = PCM_TDEF;
+int pcm_T[24] = PCM_TDEF;
 #else
-static const int pcm_T[16] = PCM_TDEF;
+static const int pcm_T[24] = PCM_TDEF;
 #endif
 #define P(i) pcm_T[i]
 
@@ -65,7 +65,7 @@ typedef struct {
   I32 rec[1024];              /* 65536/(n+1.5) */
   U32 smi0[256];              /* initial state-map values */
   /* arena pointers */
-  U8 *ht, *buf, *o1;
+  U8 *ht, *buf, *o1, *o2s;
   U32 *mt;
   U32 *sm;                    /* NC*256 state maps + 64 match map */
   I16 *w1, *w2;
@@ -105,15 +105,21 @@ static const short sq33[33] = {1, 2, 4, 6, 10, 17, 27, 45, 74, 120, 194, 311, 48
   4069, 4079, 4086, 4090, 4092, 4094, 4095};
 
 /* bit-history states: (n0, n1, last bit) with bounded counts */
-static const U8 bound_tab[8] = {40, 30, 20, 12, 9, 7, 7, 0};
+static const U8 bound_tabs[5][9] = {
+  {40, 30, 20, 12, 9, 7, 7, 0, 7},
+  {30, 24, 16, 12, 9, 7, 7, 0, 10},
+  {40, 30, 20, 12, 9, 7, 7, 7, 9},
+  {50, 30, 20, 12, 9, 7, 7, 0, 6},
+  {24, 18, 14, 11, 9, 7, 7, 0, 12}};
+#define bound_tab bound_tabs[P(18)]
 
 static int st_ok(int a, int b) {
   int lo = a < b ? a : b, hi = a < b ? b : a;
-  if (lo > 6) return 0;
+  if (lo > 7) return 0;
   return hi <= bound_tab[lo];
 }
 
-static int st_haslb(int a, int b) { return a > 0 && b > 0 && a + b <= 7; }
+static int st_haslb(int a, int b) { return a > 0 && b > 0 && a + b <= bound_tab[8]; }
 
 static void build_states(pcm_t *m, U8 *sa, U8 *sb, U8 *sl, int *ns) {
   int n = 0, t, a, l;
@@ -186,7 +192,7 @@ static void init_tables(pcm_t *m) {
 /* ------------------------------------------------------------------------ */
 /* arena layout */
 
-typedef struct { size_t ht, buf, o1, mt, sm, w1, w2, a1, a2, a3, iob, total; } layout_t;
+typedef struct { size_t ht, buf, o1, o2s, mt, sm, w1, w2, a1, a2, a3, iob, total; } layout_t;
 
 #define A2N 65536u
 #define A3N 65536u
@@ -196,6 +202,7 @@ static void layout(U32 htbits, U32 wbits, U32 mtbits, layout_t *L) {
   L->ht = o;  o += (size_t)64 << htbits;
   L->buf = o; o += (size_t)1 << wbits;
   L->o1 = o;  o += 65536;
+  L->o2s = o;  o += 65536;
   L->mt = o;  o += (size_t)4 << mtbits;
   L->sm = o;  o += 4 * (NC * 256 + 64);
   L->w1 = o;  o += 2 * NSETS * NI;
@@ -364,7 +371,7 @@ static inline int predict(pcm_t *m) {
   I32 pm, p;
   /* direct contexts */
   {
-    U8 *sp = m->o0 + c0;
+    U8 *sp = P(16) ? m->o2s + (((m->c4 >> 8) & 255) << 8) + c0 : m->o0 + c0;
     U32 s = *sp, k = s;
     U32 v = m->sm[k] >> 20;
     m->sp[0] = sp; m->smx[0] = k;
@@ -410,9 +417,16 @@ static inline int predict(pcm_t *m) {
   m->sel[0] = c0;
   m->sel[1] = 256 + m->mctx;
   m->sel[2] = 256 + 48 + ord * 8 + m->bpos;
-  m->sel[3] = 256 + 48 + 48 + (m->c4 & 255);
+  switch (P(5)) {
+    case 1: m->sel[3] = 256 + 48 + 48 + ((m->c4 >> 8) & 255); break;
+    case 2: m->sel[3] = 256 + 48 + 48 + (((m->c4 >> 4) & 15) << 3 | m->bpos) * 2; if (m->sel[3] >= NSETS) m->sel[3] = NSETS - 1; break;
+    case 3: m->sel[3] = 256 + 48 + 48 + ((m->c4 * 0x9E3779B1u) >> 24); break;
+    default: m->sel[3] = 256 + 48 + 48 + (m->c4 & 255);
+  }
   for (i = 0; i < NM; i++) {
-    I32 d = dot16(x, m->w1 + m->sel[i] * NI, NI) >> 12;
+    I32 d;
+    if (P(19) && i >= P(19)) { m->x2[i] = 0; m->p1[i] = 2048; continue; }
+    d = dot16(x, m->w1 + m->sel[i] * NI, NI) >> 12;
     if (d > 2047) d = 2047;
     if (d < -2047) d = -2047;
     m->st1[i] = d;
@@ -428,11 +442,18 @@ static inline int predict(pcm_t *m) {
   /* secondary estimation */
   {
     I32 q1 = apm_p(m, m->a1, pm, c0, &m->ai1, &m->aw1);
-    I32 q2 = apm_p(m, m->a2, pm, (c0 | ((m->c4 & 255) << 8)) & (A2N - 1), &m->ai2, &m->aw2);
+    U32 c2x = P(17) ? (c0 | ((hash3(m->c4 & 0xffff, 3, 0) >> 24) << 8)) : (c0 | ((m->c4 & 255) << 8));
+    I32 q2 = apm_p(m, m->a2, pm, c2x & (A2N - 1), &m->ai2, &m->aw2);
     U32 c3 = m->mlen ? (m->mbyte << 8 | c0) ^ ((m->mlen < 16 ? m->mlen : 15) << 12)
                      : (hash3(m->c4 & 0xffff, 7, 0) & 0xff00) | c0;
     I32 q3 = apm_p(m, m->a3, pm, c3 & (A3N - 1), &m->ai3, &m->aw3);
-    p = (2 * pm + q1 + 3 * q2 + 2 * q3 + 4) >> 3;
+    switch (P(15)) {
+      case 1: p = (pm + q1 + q2 + q3 + 2) >> 2; break;
+      case 2: p = (q1 + 2 * q2 + q3 + 2) >> 2; break;
+      case 3: p = (pm + 3 * q2 + 2 * q3 + 3) / 6; break;
+      case 4: p = (pm + q1 + 4 * q2 + 2 * q3 + 4) >> 3; break;
+      default: p = (2 * pm + q1 + 3 * q2 + 2 * q3 + 4) >> 3;
+    }
   }
   if (p < 1) p = 1;
   if (p > 4095) p = 4095;
@@ -445,14 +466,27 @@ static inline void update_byte(pcm_t *m);
 static inline void update(pcm_t *m, int y) {
   int i;
   /* contexts */
-  for (i = 0; i < NC; i++) {
-    U8 *sp = m->sp[i];
-    sm_update(m, m->sm + m->smx[i], y, P(2));
-    *sp = m->nex[*sp][y];
+  {
+    U32 *sm = m->sm;
+    const I32 *rec = m->rec;
+    U8 *spl[NC];
+    U8 ns[NC];
+    I32 target = y ? (1 << 22) - 1 : 0;
+    for (i = 0; i < NC; i++) {
+      U32 *t = sm + m->smx[i];
+      U32 v = *t, n = v & 1023;
+      I32 pp = (I32)(v >> 10);
+      pp += (I32)(((I64)(target - pp) * rec[n]) >> 16);
+      if ((I32)n < P(2)) n++;
+      *t = ((U32)pp << 10) | n;
+      spl[i] = m->sp[i];
+      ns[i] = m->nex[*spl[i]][y];
+    }
+    if (m->mctx) sm_update(m, sm + m->msmx, y, P(2));
+    for (i = 0; i < NC; i++) *spl[i] = ns[i];
   }
-  if (m->mctx) sm_update(m, m->sm + m->msmx, y, P(2));
   /* mixers */
-  for (i = 0; i < NM; i++) {
+  for (i = 0; i < (P(19) ? P(19) : NM); i++) {
     I32 e = (((y << 12) - m->p1[i]) * m->lr1) >> 4;
     train16(m->x, m->w1 + m->sel[i] * NI, NI, e);
   }
@@ -639,10 +673,10 @@ int pcm_open(void *mem, U32 htbits, U32 wbits, U32 mtbits, pcm_io_fn io, void *c
   pcm_t *m = (pcm_t *)mem;
   layout_t L;
   U8 *base = (U8 *)mem;
-  if (htbits < 10 || htbits > 26 || wbits < 16 || wbits > 30 || mtbits < 12 || mtbits > 28) return PCM_ERR_PARAM;
+  if (htbits < 10 || htbits > 24 || wbits < 16 || wbits > 27 || mtbits < 12 || mtbits > 25) return PCM_ERR_PARAM;
   layout(htbits, wbits, mtbits, &L);
   m->htbits = htbits; m->wbits = wbits; m->mtbits = mtbits;
-  m->ht = base + L.ht; m->buf = base + L.buf; m->o1 = base + L.o1;
+  m->ht = base + L.ht; m->buf = base + L.buf; m->o1 = base + L.o1; m->o2s = base + L.o2s;
   m->mt = (U32 *)(base + L.mt); m->sm = (U32 *)(base + L.sm);
   m->w1 = (I16 *)(base + L.w1); m->w2 = (I16 *)(base + L.w2);
   m->a1 = (U16 *)(base + L.a1); m->a2 = (U16 *)(base + L.a2); m->a3 = (U16 *)(base + L.a3);

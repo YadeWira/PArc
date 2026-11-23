@@ -310,7 +310,7 @@ begin
   FStarted := True;
   if not Source.ReadExactOrEof(@h[0], 4) then Corrupt('cm: empty stream');
   if h[0] <> CM_STREAM_VERSION then Corrupt('cm: unknown stream version');
-  if (h[1] < 10) or (h[1] > 26) or (h[2] < 16) or (h[2] > 30) or (h[3] < 12) or (h[3] > 28) then
+  if (h[1] < 10) or (h[1] > 24) or (h[2] < 16) or (h[2] > 27) or (h[3] < 12) or (h[3] > 25) then
     Corrupt('cm: bad table sizes');
   FModel := AllocModel(h[1], h[2], h[3], FRaw);
   SetLength(FOut, CM_BLOCK);

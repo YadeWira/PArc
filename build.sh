@@ -21,7 +21,7 @@ corep() {
   case "$cc" in *clang*) ;; *) extra="-fno-tree-loop-distribute-patterns" ;; esac
   $cc $COREPFLAGS $extra "$@" -c src/orep/orep_core.c -o "$out/units/orep_core.o"
   # the cm model (src/cm/pcm_core.c, MIT, also without libc)
-  $cc $COREPFLAGS $extra "$@" -c src/cm/pcm_core.c -o "$out/units/pcm_core.o"
+  $cc $COREPFLAGS -O3 -funroll-loops $extra "$@" -c src/cm/pcm_core.c -o "$out/units/pcm_core.o"
 }
 
 build() {
