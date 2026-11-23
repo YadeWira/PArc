@@ -245,19 +245,21 @@ int32_t parc_lzp_encode(const uint8_t * in, int32_t len, int32_t minLen, int32_t
 
 /* Share of long repeats in in[0..len), in per mille, estimated from content-defined anchors (about
    one position in 32, chosen by its 4 bytes, so repeats are found at any offset): the share of
-   anchors whose next 32 bytes were already seen at an earlier anchor. tab: 65536 entries. */
+   anchors whose next 128 bytes (a signature of 4 words spread over them) were already seen at an
+   earlier anchor. Repeats that short are common in dictionaries and markup, where the LZP does
+   not pay; long ones (copies of texts, of files) are where it does. tab: 65536 entries. */
 int32_t parc_repeat_share(const uint8_t * in, int32_t len, uint32_t * tab)
 {
     int64_t anchors = 0, hits = 0;
     int32_t i;
     parc_bwt_memset(tab, 0, 65536 * sizeof(uint32_t));
-    for (i = 0; i + 40 <= len; i++)
+    for (i = 0; i + 136 <= len; i++)
     {
         uint32_t v; __builtin_memcpy(&v, in + i, 4);
         if (((v * 0x9E3779B1u) >> 27) != 0) continue;
         anchors++;
-        uint64_t k = (lzp_load64(in + i) * 0x9E3779B97F4A7C15ull) ^ (lzp_load64(in + i + 8) * 0xC2B2AE3D27D4EB4Full) ^
-                     (lzp_load64(in + i + 16) * 0x165667B19E3779F9ull) ^ (lzp_load64(in + i + 24) * 0x27D4EB2F165667C5ull);
+        uint64_t k = (lzp_load64(in + i) * 0x9E3779B97F4A7C15ull) ^ (lzp_load64(in + i + 40) * 0xC2B2AE3D27D4EB4Full) ^
+                     (lzp_load64(in + i + 80) * 0x165667B19E3779F9ull) ^ (lzp_load64(in + i + 120) * 0x27D4EB2F165667C5ull);
         uint32_t slot = (uint32_t)(k >> 48), chk = (uint32_t)k | 1;
         if (tab[slot] == chk) hits++; else tab[slot] = chk;
     }

@@ -389,8 +389,9 @@ const
   { A block whose BWT output has fewer runs than 1/FEW_RUNS of its bytes is coded with the
     adaptive coder at every level }
   FEW_RUNS = 8;
-  { LZP only when at least this share (per mille) of the block looks like long repeats }
-  LZP_MIN_SHARE = 70;
+  { LZP only when at least this share (per mille) of the block looks like long repeats (of 128
+    bytes or more) }
+  LZP_MIN_SHARE = 30;
 
 function RepeatShare(P: PByte; n: SizeInt): Integer;
 var
@@ -454,7 +455,8 @@ begin
   NMain := 0; NLens := 0; Esc := 0;
   MinLen := P.LzpMin;
   // the LZP costs about as much as the sort of a few MB: on data with few long repeats (one
-  // language's prose, most binaries) it gains nothing and is skipped
+  // language's prose, dictionaries, most binaries) it gains nothing, or even loses, and is
+  // skipped
   if (MinLen > 0) and (RepeatShare(@Buf[0], Len) < LZP_MIN_SHARE) then MinLen := 0;
   if MinLen > 0 then
   begin
