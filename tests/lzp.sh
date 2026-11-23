@@ -12,7 +12,8 @@ T=$B/test_filters
 W=${LZP_WORK:-${TMPDIR:-/tmp}/parc_lzp}
 FUZZ=${LZP_FUZZ:-300}
 mkdir -p "$B/filtunits"
-fpc -O3 -Fu"$ROOT/src" -FU"$B/filtunits" -FE"$B" "$ROOT/tests/test_filters.lpr" >/dev/null || { echo "no compila test_filters"; exit 2; }
+gcc -O3 -fno-builtin -ffreestanding -fno-stack-protector -fno-tree-loop-distribute-patterns -fno-pie -w -c "$ROOT/src/bwt/bwt_core.c" -o "$B/filtunits/bwt_core.o" || { echo "no compila bwt_core.c"; exit 2; }
+fpc -O3 -Fu"$ROOT/src" -Fo"$B/filtunits" -FU"$B/filtunits" -FE"$B" "$ROOT/tests/test_filters.lpr" >/dev/null || { echo "no compila test_filters"; exit 2; }
 rm -rf -- "${W:?}"; mkdir -p "$W" && cd "$W" || exit 2
 fail=0; pass=0
 ck() { if eval "$2"; then pass=$((pass+1)); else fail=$((fail+1)); echo "  FAIL $1"; fi; }

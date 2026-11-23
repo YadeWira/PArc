@@ -1,5 +1,5 @@
 { test_filters: helper of tests/delta.sh, tests/lzp.sh and tests/filters_cross.sh
-  for PArc's own filters (src/parc_delta.pas, parc_lzp.pas).
+  for PArc's own filters and codecs (src/parc_delta.pas, parc_lzp.pas, parc_bwt.pas).
     test_filters enc <method> <in> <out> <chunk>   encode, writing in pieces of <chunk> bytes
                                                    (0 = random sizes, fixed seed)
     test_filters dec <method> <in> <out>           decode, reading in random-sized pieces
@@ -14,7 +14,7 @@ program test_filters;
 {$mode objfpc}{$H+}
 
 uses
-  SysUtils, Classes, parc_bytes, parc_stream, parc_outstream, parc_delta, parc_lzp;
+  {$IFDEF UNIX}cthreads,{$ENDIF} SysUtils, Classes, parc_bytes, parc_stream, parc_outstream, parc_delta, parc_lzp, parc_bwt;
 
 function MinCompr(const Parts: TStringArray): Integer;
 var
@@ -34,6 +34,7 @@ begin
   case Parts[0] of
     'delta': Result := TDeltaEncStage.Create(Sink, Parts);
     'lzp': Result := TLzpEncStage.Create(Sink, ParseLzpParams(Parts), MinCompr(Parts));
+    'bwt': Result := TBwtEncStage.Create(Sink, Parts);
   else
     raise Exception.Create('unknown method ' + Method);
   end;
@@ -47,6 +48,7 @@ begin
   case Parts[0] of
     'delta': Result := TDeltaStage.Create(Src);
     'lzp': Result := TLzpStage.Create(Src, ParseLzpParams(Parts));
+    'bwt': Result := TBwtStage.Create(Src, Parts);
   else
     raise Exception.Create('unknown method ' + Method);
   end;
