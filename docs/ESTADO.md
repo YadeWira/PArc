@@ -22,7 +22,7 @@ The rest of the FreeArc 0.67 tree is in git history (commit `82ea8d9`) and in Fr
 | phase | status |
 |---|---|
 | FreeArc/PArc bugs | ✅ closed (the `.arc` parity fixes remain as history; see tag `entrega-arc`) |
-| Ported codecs | ✅ closed (LZMA, LZ4, PPMd, 4x4, Dict, LZP, Delta, MM, TTA, GRZip, BCJ, DisPack, SREP; Tornado was ported too and removed after 0.0.5, replaced by the own `plz`; REP replaced by OREP, MIT, 2026-11) |
+| Ported codecs | ✅ closed (LZMA, LZ4, PPMd, 4x4, Dict, LZP, Delta, MM, TTA, GRZip, BCJ, SREP; DisPack replaced by an own x86/x64 filter 2026-11-23; Tornado was ported too and removed after 0.0.5, replaced by the own `plz`; REP replaced by OREP, MIT, 2026-11) |
 | `.arc` compatibility | ❌ dropped: rejected with a message pointing to FreeArc-ex |
 | GUI | ❌ dropped |
 | `.zip/.7z/.rar` containers | ➡ moved to FreeArc-ex (tag `entrega-arc`) |
@@ -1254,11 +1254,106 @@ alone encodes 5–25 % faster and decodes faster with h22/h23, 5–20 % slower w
 
 Found on the way: `parc a -m2 -mt1` corrupted some images (mm + plz short reads), fixed in dc7aca9.
 
+## Own x86/x86-64 filter replacing DisPack (2026-11-23)
+
+`dispack` / `dispack070` / `exe2` are now PArc's own filter (`src/parc_dispack.pas` +
+`src/parc_dispack_walk.inc`, MIT; stream in `formato/FORMATO-PARC.md` §6.6). Written from the
+Intel/AMD opcode maps and the PE/ELF specifications, without reading DisPack's code (clean-room;
+`tests/dispack_ref.cpp`, the C oracle, is gone). Old `dispack070` blocks no longer decode.
+
+Design: code regions come from PE (i386/AMD64, not .NET) and ELF (i386/x86-64) headers found in
+the data (sections/segments with their bitness and virtual address), or from a near-call density
+test in 4 KB windows outside known executables. One walker, compiled twice (encoder/decoder),
+parses every instruction (prefixes, REX, 0F/0F38/0F3A, VEX/EVEX, ModRM/SIB, 16-bit addressing)
+and splits it into 8 streams: OP keeps the opcode **with** ModRM, SIB, disp8, imm8 and rel8;
+D32, ADDR (absolute [disp32], moffs, RIP-relative converted to absolute), I16, I32, CALL and JMP
+(rel32 → absolute) hold the 32-bit fields, big-endian; RAW the non-code bytes. Measured and
+rejected (worse with lzma and plz): one stream per field (+2-7 %), MTF table of
+call targets (+0.3..1.2 %), jump-table detection (+0.4..10 %), little-endian addresses,
+routing push/mov imm32 to ADDR, big-endian disp32. The stage is streaming (8 MB blocks with a
+64 KB look-ahead for headers that cross a block end) instead of buffering the whole input.
+
+Measured (work area `/mnt/IA_LAB/agentes/PArc/xfilter/`: `data/` corpus copies, `scripts/`,
+`final.txt`): five sets — pe32 (34 MB: 15 MSVC/Delphi/VB/mingw PE32 from the corpus), pe64 (56 MB:
+corpus PE32+, wine x86_64 DLLs, zpaq x64), elf32 (18 MB: i386 libs), elf64 (41 MB: gcc, Go, Rust,
+FPC binaries), mixed (40 MB: an installer with compressed payload, codebook data, a resource-heavy
+DLL). `dispack+<back end>` with main (old) and this branch (new), `-mt1`/`-mt4` pinned
+(`taskset`), best of 3 runs interleaved, compression and `t` times, max RSS:
+
+| set | back end | T | size old → new | Δ | comp s old / new | dec s old / new | comp MB old / new | dec MB old / new |
+|---|---|---|---|---|---|---|---|---|
+| pe32 | filter only | T1 | 33,652,862 → 34,245,126 | +1.76% | 0.55 / 0.25 | 0.29 / 0.14 | 167 / 27 | 72 / 20 |
+| pe32 | filter only | T4 | 33,652,862 → 34,245,126 | +1.76% | 0.56 / 0.27 | 0.30 / 0.16 | 167 / 27 | 72 / 20 |
+| pe32 | plz:2 | T1 | 12,722,607 → 12,354,831 | -2.89% | 0.90 / 0.61 | 0.41 / 0.28 | 180 / 80 | 84 / 31 |
+| pe32 | plz:2 | T4 | 12,722,607 → 12,354,831 | -2.89% | 0.90 / 0.58 | 0.41 / 0.27 | 180 / 78 | 82 / 30 |
+| pe32 | plz:4 | T1 | 10,931,943 → 10,710,372 | -2.03% | 1.46 / 1.20 | 0.41 / 0.28 | 222 / 135 | 136 / 86 |
+| pe32 | plz:4 | T4 | 10,931,943 → 10,710,372 | -2.03% | 1.45 / 1.21 | 0.43 / 0.29 | 223 / 136 | 134 / 86 |
+| pe32 | lzma L5 | T1 | 9,411,541 → 9,159,066 | -2.68% | 7.98 / 8.53 | 0.76 / 0.70 | 458 / 384 | 105 / 53 |
+| pe32 | lzma L5 | T4 | 9,411,541 → 9,159,066 | -2.68% | 6.41 / 6.36 | 0.86 / 0.75 | 490 / 440 | 106 / 53 |
+| pe32 | lzma max | T1 | 9,286,378 → 9,032,873 | -2.73% | 11.99 / 10.64 | 0.89 / 0.65 | 458 / 385 | 105 / 53 |
+| pe32 | lzma max | T4 | 9,286,378 → 9,032,873 | -2.73% | 7.75 / 8.04 | 0.88 / 0.73 | 491 / 442 | 105 / 53 |
+| pe64 | filter only | T1 | 55,980,419 → 56,206,144 | +0.40% | 0.52 / 0.27 | 0.23 / 0.14 | 189 / 40 | 71 / 20 |
+| pe64 | filter only | T4 | 55,980,419 → 56,206,144 | +0.40% | 0.52 / 0.28 | 0.22 / 0.13 | 189 / 41 | 71 / 20 |
+| pe64 | plz:2 | T1 | 17,486,893 → 17,136,577 | -2.00% | 1.20 / 0.83 | 0.45 / 0.32 | 203 / 86 | 82 / 30 |
+| pe64 | plz:2 | T4 | 17,486,893 → 17,136,577 | -2.00% | 1.11 / 0.83 | 0.42 / 0.35 | 203 / 88 | 81 / 30 |
+| pe64 | plz:4 | T1 | 14,949,183 → 14,571,754 | -2.52% | 2.49 / 2.29 | 0.45 / 0.36 | 244 / 160 | 135 / 86 |
+| pe64 | plz:4 | T4 | 14,949,183 → 14,571,754 | -2.52% | 2.45 / 2.17 | 0.45 / 0.36 | 244 / 159 | 134 / 86 |
+| pe64 | lzma L5 | T1 | 12,584,020 → 12,198,607 | -3.06% | 17.52 / 18.98 | 1.05 / 0.94 | 672 / 583 | 126 / 75 |
+| pe64 | lzma L5 | T4 | 12,584,020 → 12,198,607 | -3.06% | 12.66 / 11.51 | 1.17 / 0.90 | 700 / 629 | 126 / 75 |
+| pe64 | lzma max | T1 | 12,285,702 → 11,895,607 | -3.18% | 24.54 / 27.91 | 1.00 / 0.92 | 671 / 584 | 126 / 75 |
+| pe64 | lzma max | T4 | 12,285,702 → 11,895,607 | -3.18% | 15.96 / 15.35 | 1.03 / 0.88 | 692 / 628 | 126 / 75 |
+| elf32 | filter only | T1 | 17,466,219 → 17,786,778 | +1.84% | 0.29 / 0.15 | 0.14 / 0.08 | 88 / 30 | 41 / 20 |
+| elf32 | filter only | T4 | 17,466,219 → 17,786,778 | +1.84% | 0.29 / 0.15 | 0.14 / 0.08 | 88 / 29 | 40 / 20 |
+| elf32 | plz:2 | T1 | 6,287,426 → 6,209,548 | -1.24% | 0.55 / 0.37 | 0.23 / 0.16 | 113 / 86 | 51 / 30 |
+| elf32 | plz:2 | T4 | 6,287,426 → 6,209,548 | -1.24% | 0.52 / 0.47 | 0.24 / 0.17 | 112 / 86 | 51 / 30 |
+| elf32 | plz:4 | T1 | 5,648,620 → 5,536,572 | -1.98% | 1.36 / 1.03 | 0.33 / 0.22 | 119 / 93 | 70 / 54 |
+| elf32 | plz:4 | T4 | 5,648,620 → 5,536,572 | -1.98% | 0.92 / 0.76 | 0.24 / 0.17 | 118 / 94 | 71 / 54 |
+| elf32 | lzma L5 | T1 | 4,759,584 → 4,598,083 | -3.39% | 4.66 / 5.48 | 0.41 / 0.38 | 272 / 248 | 58 / 38 |
+| elf32 | lzma L5 | T4 | 4,759,584 → 4,598,083 | -3.39% | 3.96 / 3.92 | 0.51 / 0.38 | 288 / 266 | 58 / 38 |
+| elf32 | lzma max | T1 | 4,630,720 → 4,464,856 | -3.58% | 7.68 / 7.93 | 0.45 / 0.37 | 270 / 247 | 59 / 38 |
+| elf32 | lzma max | T4 | 4,630,720 → 4,464,856 | -3.58% | 5.07 / 4.94 | 0.45 / 0.37 | 287 / 266 | 59 / 38 |
+| elf64 | filter only | T1 | 39,959,976 → 40,766,286 | +2.02% | 0.71 / 0.32 | 0.36 / 0.20 | 172 / 35 | 77 / 20 |
+| elf64 | filter only | T4 | 39,959,976 → 40,766,286 | +2.02% | 0.71 / 0.32 | 0.36 / 0.20 | 172 / 35 | 76 / 20 |
+| elf64 | plz:2 | T1 | 14,871,974 → 14,547,590 | -2.18% | 1.20 / 0.76 | 0.51 / 0.35 | 187 / 85 | 87 / 30 |
+| elf64 | plz:2 | T4 | 14,871,974 → 14,547,590 | -2.18% | 1.16 / 0.80 | 0.53 / 0.36 | 187 / 85 | 87 / 30 |
+| elf64 | plz:4 | T1 | 13,361,075 → 12,963,686 | -2.97% | 2.28 / 1.90 | 0.55 / 0.40 | 229 / 140 | 136 / 87 |
+| elf64 | plz:4 | T4 | 13,361,075 → 12,963,686 | -2.97% | 2.22 / 1.86 | 0.54 / 0.42 | 229 / 142 | 134 / 87 |
+| elf64 | lzma L5 | T1 | 11,272,583 → 10,936,562 | -2.98% | 13.60 / 13.44 | 1.09 / 0.88 | 517 / 448 | 117 / 60 |
+| elf64 | lzma L5 | T4 | 11,272,583 → 10,936,562 | -2.98% | 8.82 / 8.65 | 1.13 / 0.85 | 548 / 495 | 116 / 60 |
+| elf64 | lzma max | T1 | 10,997,471 → 10,636,062 | -3.29% | 19.69 / 18.79 | 1.06 / 0.87 | 517 / 448 | 117 / 60 |
+| elf64 | lzma max | T4 | 10,997,471 → 10,636,062 | -3.29% | 11.55 / 11.81 | 0.98 / 0.89 | 545 / 495 | 117 / 60 |
+| mixed | filter only | T1 | 40,098,951 → 40,111,415 | +0.03% | 0.28 / 0.16 | 0.11 / 0.05 | 173 / 30 | 71 / 20 |
+| mixed | filter only | T4 | 40,098,951 → 40,111,415 | +0.03% | 0.30 / 0.16 | 0.12 / 0.04 | 173 / 30 | 70 / 20 |
+| mixed | plz:2 | T1 | 19,155,066 → 19,133,962 | -0.11% | 0.65 / 0.47 | 0.23 / 0.17 | 186 / 78 | 81 / 31 |
+| mixed | plz:2 | T4 | 19,155,066 → 19,133,962 | -0.11% | 0.67 / 0.47 | 0.23 / 0.18 | 186 / 82 | 80 / 30 |
+| mixed | plz:4 | T1 | 18,732,295 → 18,710,693 | -0.12% | 1.33 / 1.09 | 0.25 / 0.21 | 245 / 135 | 135 / 88 |
+| mixed | plz:4 | T4 | 18,732,295 → 18,710,693 | -0.12% | 1.35 / 1.21 | 0.26 / 0.21 | 246 / 134 | 136 / 88 |
+| mixed | lzma L5 | T1 | 18,173,859 → 18,158,235 | -0.09% | 8.19 / 7.44 | 1.04 / 0.93 | 518 / 432 | 109 / 59 |
+| mixed | lzma L5 | T4 | 18,173,859 → 18,158,235 | -0.09% | 4.94 / 4.98 | 0.99 / 0.97 | 546 / 498 | 108 / 59 |
+| mixed | lzma max | T1 | 18,095,812 → 18,077,226 | -0.10% | 11.83 / 10.82 | 1.06 / 0.91 | 518 / 432 | 112 / 59 |
+| mixed | lzma max | T4 | 18,095,812 → 18,077,226 | -0.10% | 7.05 / 7.04 | 1.04 / 1.00 | 545 / 500 | 108 / 59 |
+
+
+- Size: −1.2 … −3.6 % on code with every back end; −0.1 % on the mixed set. Against `bcj2`
+  (experimental, not in presets) the new filter wins with every LZMA back end (pe32 L5 9.16 vs
+  9.83 MB, elf64 10.94 vs 11.78 MB, …); with plz `bcj2` is smaller because it compresses its own
+  streams with LZMA inside, at 10-25× the time (pe32 plz:4: 9.70 MB in 15 s vs 10.71 MB in 1.2 s).
+- Lost cell, by design: the filter's output stored alone is 0.0-2.0 % *larger* than DisPack's
+  (DisPack turns calls into 1-byte MTF indices; that costs 0.3-1.2 % after every back end, so it
+  was rejected). Filter time is 2× faster both ways and memory 4-8× lower (27-40 MB vs 170-190 MB
+  compressing, 20 MB vs 70 MB decompressing).
+- LZMA compression time is the back end's and is a tie: cells where new looks slower in the table
+  (pe32/elf32 L5 T1, pe64 max T1) were re-measured on an idle core, 3-4 alternating runs:
+  pe64 max T1 best 26.72 s new vs 27.03 s old; elf32 L5 T1 5.29 vs 5.32 s; pe32 L5 T1 9.29 vs 9.64 s.
+  The server had load ~30 during the matrix (±10 % per cell).
+- Tests: `tests/dispack.sh` (84 checks), `tests/filters_cross.sh` (dispack identical on linux64,
+  linux32, linuxarm64, win64, win32), full suite green.
+
 ## Verified platforms (0.0.2)
 
 | platform | binary | tests |
 |---|---|---|
-| Linux x64 | `parc` | full suite: CLI, stdio, volumes, RS, encryption, DisPack, SREP, BCJ, Tornado, crypto vectors, fixes, LZMA and fuzz |
+| Linux x64 | `parc` | full suite: CLI, stdio, volumes, RS, encryption, dispack, SREP, BCJ, Tornado, crypto vectors, fixes, LZMA and fuzz |
 | Windows 10 x64 | win64 | `a/l/t/x`, `u/f/d`, `-p`, `-rr`, `-v`, UTF-8 names and an archive created on Linux |
 | Windows 10 x64 (WOW64) | win32 | same basic tests and a cross-checked archive on Linux |
 | Windows 7 SP1 x64 | win32 and win64 | create/test/extract, encryption and Linux ↔ Windows cross-check |
