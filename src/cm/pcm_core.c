@@ -37,12 +37,12 @@ typedef U32 (*pcm_io_fn)(void *ctx, U8 *buf, U32 n);
 #define NCH 7                 /* hashed contexts */
 #define NC (NCD + NCH)
 #define NI 24                 /* mixer inputs (multiple of 8) */
-#define NM 4                  /* first layer mixers */
-#define NSETS (256 + 48 + 48 + 256)
+#define NM 6                  /* first layer mixers */
+#define NSETS (256 + 48 + 48 + 256 + 256 + 256)
 #define IOBUF 65536u
 
 /* tuning parameters (constants in the product build) */
-#define PCM_TDEF {8, 2, 1023, 5, 2, 1, 1024, 6, 0, 2, 0, 0, 0, 0, 0, 3, 0, 0, 3, 0}
+#define PCM_TDEF {8, 2, 1023, 5, 2, 1, 1024, 6, 0, 2, 0, 0, 0, 0, 0, 3, 0, 0, 3, 0, 2, 6}
 #ifdef PCM_TUNE
 int pcm_T[24] = PCM_TDEF;
 #else
@@ -74,6 +74,8 @@ typedef struct {
   /* model state */
   U32 c0, bpos, c4, c8, pos, nib;
   U32 wh, wh1;                /* word hashes */
+  U32 wlen;
+  U32 selb[3];
   U32 hh[NCH];                /* context hashes at byte boundary */
   U8 *slot[NCH];
   U8 o0[256];
@@ -315,6 +317,65 @@ static inline void train16(const I16 *x, I16 *w, int n, I32 e) {
 #endif
 }
 
+/* the NM first-layer mixers at once: d[k] = dot(x, w + sel[k]*NI) */
+static inline void dot_all(const I16 *x, const I16 *w, const U32 *sel, I32 *d) {
+#ifdef PCM_SSE2
+  __m128i x0 = _mm_loadu_si128((const __m128i *)x);
+  __m128i x1 = _mm_loadu_si128((const __m128i *)(x + 8));
+  __m128i x2 = _mm_loadu_si128((const __m128i *)(x + 16));
+  __m128i s[NM];
+  int k;
+  for (k = 0; k < NM; k++) {
+    const I16 *wk = w + sel[k] * NI;
+    __m128i a = _mm_madd_epi16(x0, _mm_loadu_si128((const __m128i *)wk));
+    a = _mm_add_epi32(a, _mm_madd_epi16(x1, _mm_loadu_si128((const __m128i *)(wk + 8))));
+    a = _mm_add_epi32(a, _mm_madd_epi16(x2, _mm_loadu_si128((const __m128i *)(wk + 16))));
+    s[k] = a;
+  }
+  {
+    /* transpose-add 4 at a time */
+    __m128i t0 = _mm_unpacklo_epi32(s[0], s[1]), t1 = _mm_unpackhi_epi32(s[0], s[1]);
+    __m128i t2 = _mm_unpacklo_epi32(s[2], s[3]), t3 = _mm_unpackhi_epi32(s[2], s[3]);
+    __m128i u0 = _mm_add_epi32(t0, t1), u1 = _mm_add_epi32(t2, t3);
+    __m128i r = _mm_add_epi32(_mm_unpacklo_epi64(u0, u1), _mm_unpackhi_epi64(u0, u1));
+    _mm_storeu_si128((__m128i *)d, r);
+    t0 = _mm_unpacklo_epi32(s[4], s[5]); t1 = _mm_unpackhi_epi32(s[4], s[5]);
+    u0 = _mm_add_epi32(t0, t1);
+    u0 = _mm_add_epi32(u0, _mm_srli_si128(u0, 8));
+    d[4] = _mm_cvtsi128_si32(u0);
+    d[5] = _mm_cvtsi128_si32(_mm_srli_si128(u0, 4));
+  }
+#else
+  int k;
+  for (k = 0; k < NM; k++) d[k] = dot16(x, w + sel[k] * NI, NI);
+#endif
+}
+
+/* train the NM mixers: e[k] per mixer */
+static inline void train_all(const I16 *x, I16 *w, const U32 *sel, const I32 *e) {
+#ifdef PCM_SSE2
+  __m128i x0 = _mm_slli_epi16(_mm_loadu_si128((const __m128i *)x), 3);
+  __m128i x1 = _mm_slli_epi16(_mm_loadu_si128((const __m128i *)(x + 8)), 3);
+  __m128i x2 = _mm_slli_epi16(_mm_loadu_si128((const __m128i *)(x + 16)), 3);
+  __m128i one = _mm_set1_epi16(1);
+  int k;
+  for (k = 0; k < NM; k++) {
+    I16 *wk = w + sel[k] * NI;
+    __m128i ev = _mm_set1_epi16((short)e[k]);
+    __m128i t;
+    t = _mm_srai_epi16(_mm_add_epi16(_mm_mulhi_epi16(x0, ev), one), 1);
+    _mm_storeu_si128((__m128i *)wk, _mm_adds_epi16(_mm_loadu_si128((const __m128i *)wk), t));
+    t = _mm_srai_epi16(_mm_add_epi16(_mm_mulhi_epi16(x1, ev), one), 1);
+    _mm_storeu_si128((__m128i *)(wk + 8), _mm_adds_epi16(_mm_loadu_si128((const __m128i *)(wk + 8)), t));
+    t = _mm_srai_epi16(_mm_add_epi16(_mm_mulhi_epi16(x2, ev), one), 1);
+    _mm_storeu_si128((__m128i *)(wk + 16), _mm_adds_epi16(_mm_loadu_si128((const __m128i *)(wk + 16)), t));
+  }
+#else
+  int k;
+  for (k = 0; k < NM; k++) train16(x, w + sel[k] * NI, NI, e[k]);
+#endif
+}
+
 static inline I32 apm_p(pcm_t *m, U16 *t, I32 pr, U32 ctx, U32 *ix, U32 *iw) {
   I32 s = m->st[pr] + 2048;
   U32 lo = (U32)s >> 7, w = (U32)s & 127;
@@ -368,6 +429,7 @@ static inline int predict(pcm_t *m) {
   I16 *x = m->x;
   U32 c0 = m->c0, nib = m->nib;
   int i, ord = 0;
+  U32 pat = 0;
   I32 pm, p;
   /* direct contexts */
   {
@@ -392,6 +454,7 @@ static inline int predict(pcm_t *m) {
     x[2 * (i + NCD) + 1] = (I16)(P(4) ? ((I32)v - 2048) >> P(4) : 0);
     }
     if (i < 4 && s) ord++;
+    pat |= (s != 0) << i;
   }
   /* match model */
   if (m->mlen) {
@@ -417,21 +480,46 @@ static inline int predict(pcm_t *m) {
   m->sel[0] = c0;
   m->sel[1] = 256 + m->mctx;
   m->sel[2] = 256 + 48 + ord * 8 + m->bpos;
+  if (P(5) == 1 && P(20) == 2 && P(21) == 6) {
+    m->sel[3] = m->selb[0];
+    m->sel[4] = m->selb[1];
+    m->sel[5] = m->selb[2] + (m->bpos >= 4) * 64;
+  } else {
   switch (P(5)) {
     case 1: m->sel[3] = 256 + 48 + 48 + ((m->c4 >> 8) & 255); break;
     case 2: m->sel[3] = 256 + 48 + 48 + (((m->c4 >> 4) & 15) << 3 | m->bpos) * 2; if (m->sel[3] >= NSETS) m->sel[3] = NSETS - 1; break;
     case 3: m->sel[3] = 256 + 48 + 48 + ((m->c4 * 0x9E3779B1u) >> 24); break;
     default: m->sel[3] = 256 + 48 + 48 + (m->c4 & 255);
   }
+  {
+    int k;
+    for (k = 4; k < 6; k++) {
+      U32 v = 0, opt = P(16 + k);
+      switch (opt) {
+        case 1: v = (pat & 31) * 2 + (m->mlen != 0); break;
+        case 2: v = (m->c4 >> 16) & 255; break;
+        case 3: v = (m->mlen < 15 ? m->mlen : 15) * 8 + m->bpos; break;
+        case 4: v = (m->wlen < 15 ? m->wlen : 15) * 8 + m->bpos; break;
+        case 5: v = (pat & 127) * 2 + (m->mlen != 0); break;
+        case 6: v = ((m->c4 >> 6) & 3) | (((m->c4 >> 14) & 3) << 2) | (((m->c4 >> 22) & 3) << 4) | (m->bpos >= 4) << 6; break;
+      }
+      m->sel[k] = opt ? 256 + 48 + 48 + 256 + (k - 4) * 256 + v : 0;
+    }
+  }
+  }
+  {
+  I32 dd[NM];
+  dot_all(x, m->w1, m->sel, dd);
   for (i = 0; i < NM; i++) {
     I32 d;
-    if (P(19) && i >= P(19)) { m->x2[i] = 0; m->p1[i] = 2048; continue; }
-    d = dot16(x, m->w1 + m->sel[i] * NI, NI) >> 12;
+    if ((P(19) && i >= P(19)) || (i >= 4 && !P(16 + i))) { m->x2[i] = 0; m->p1[i] = 2048; continue; }
+    d = dd[i] >> 12;
     if (d > 2047) d = 2047;
     if (d < -2047) d = -2047;
     m->st1[i] = d;
     m->p1[i] = m->sq[d + 2048];
     m->x2[i] = (I16)d;
+  }
   }
   m->sel2 = c0;
   {
@@ -441,7 +529,7 @@ static inline int predict(pcm_t *m) {
   m->pm = pm;
   /* secondary estimation */
   {
-    I32 q1 = apm_p(m, m->a1, pm, c0, &m->ai1, &m->aw1);
+    I32 q1 = P(15) == 3 ? 0 : apm_p(m, m->a1, pm, c0, &m->ai1, &m->aw1);
     U32 c2x = P(17) ? (c0 | ((hash3(m->c4 & 0xffff, 3, 0) >> 24) << 8)) : (c0 | ((m->c4 & 255) << 8));
     I32 q2 = apm_p(m, m->a2, pm, c2x & (A2N - 1), &m->ai2, &m->aw2);
     U32 c3 = m->mlen ? (m->mbyte << 8 | c0) ^ ((m->mlen < 16 ? m->mlen : 15) << 12)
@@ -450,7 +538,7 @@ static inline int predict(pcm_t *m) {
     switch (P(15)) {
       case 1: p = (pm + q1 + q2 + q3 + 2) >> 2; break;
       case 2: p = (q1 + 2 * q2 + q3 + 2) >> 2; break;
-      case 3: p = (pm + 3 * q2 + 2 * q3 + 3) / 6; break;
+      case 3: p = ((pm + 3 * q2 + 2 * q3) * 10923 + 32768) >> 16; break;
       case 4: p = (pm + q1 + 4 * q2 + 2 * q3 + 4) >> 3; break;
       default: p = (2 * pm + q1 + 3 * q2 + 2 * q3 + 4) >> 3;
     }
@@ -486,15 +574,16 @@ static inline void update(pcm_t *m, int y) {
     for (i = 0; i < NC; i++) *spl[i] = ns[i];
   }
   /* mixers */
-  for (i = 0; i < (P(19) ? P(19) : NM); i++) {
-    I32 e = (((y << 12) - m->p1[i]) * m->lr1) >> 4;
-    train16(m->x, m->w1 + m->sel[i] * NI, NI, e);
+  {
+    I32 ee[NM];
+    for (i = 0; i < NM; i++) ee[i] = (((y << 12) - m->p1[i]) * m->lr1) >> 4;
+    train_all(m->x, m->w1, m->sel, ee);
   }
   {
     I32 e = (((y << 12) - m->pm) * m->lr2) >> 4;
     train16(m->x2, m->w2 + m->sel2 * 8, 8, e);
   }
-  apm_u(m->a1, m->ai1, m->aw1, y, P(3));
+  if (P(15) != 3) apm_u(m->a1, m->ai1, m->aw1, y, P(3));
   apm_u(m->a2, m->ai2, m->aw2, y, P(3));
   apm_u(m->a3, m->ai3, m->aw3, y, P(3));
   /* bit state */
@@ -535,11 +624,13 @@ static inline void update_byte(pcm_t *m) {
   m->c0 = 1; m->bpos = 0; m->nib = 1;
   /* word */
   if (is_word(c)) {
-    U32 lc = (c - 'A' < 26u) ? c + 32 : c;
+    U32 lc;
+    m->wlen++;
+    lc = (c - 'A' < 26u) ? c + 32 : c;
     m->wh = (m->wh + lc + 1) * 0x2F0B4C27u;
-  } else if (m->wh) {
-    m->wh1 = m->wh;
-    m->wh = 0;
+  } else {
+    m->wlen = 0;
+    if (m->wh) { m->wh1 = m->wh; m->wh = 0; }
   }
   /* match model */
   {
@@ -560,6 +651,13 @@ static inline void update_byte(pcm_t *m) {
     }
     m->mt[mh] = m->pos;
     if (m->mlen) m->mbyte = m->buf[m->mptr & wmask];
+  }
+  /* byte-level mixer selectors */
+  {
+    U32 c4 = m->c4;
+    m->selb[0] = 256 + 48 + 48 + ((c4 >> 8) & 255);
+    m->selb[1] = 256 + 48 + 48 + 256 + ((c4 >> 16) & 255);
+    m->selb[2] = 256 + 48 + 48 + 512 + (((c4 >> 6) & 3) | (((c4 >> 14) & 3) << 2) | (((c4 >> 22) & 3) << 4));
   }
   /* contexts */
   {
