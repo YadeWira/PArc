@@ -12,18 +12,23 @@
   2. Order. Files are sorted by home group, lower-case extension, directory and base name.
      Then "twins" are pulled together: a file whose base name already appeared earlier in the
      same (group, extension) run is moved right behind the first file with that name, so the
-     copies of a file kept in several directories (versions, backups) end up adjacent, where
-     even a small dictionary sees them. The order does not depend on the method, the thread
-     count or the platform (byte comparisons on UTF-8 names).
+     copies of a file kept in several directories (versions, other targets, backups) end up
+     adjacent, where even a small window sees them. The order does not depend on the thread
+     count or the platform (byte comparisons on UTF-8 names). With -s- (or -s1f), or when
+     every method stores, the order does not matter and files keep the order they were found
+     in (folder by folder).
 
   3. Kind. The kind of a file selects its method in the `-m` group list: the first group of the
      list (after the default) that is in the file's group set, otherwise the default. If the
-     list has a `$text` or `$compressed` method, the content decides for files whose name says
-     default, text or compressed: big files are sampled at several evenly spread places (64 KB
-     each) and every sample must agree; small files are judged together with their neighbours
-     of the same extension (whole files until 64 KB). A `$wav`/`$bmp` file that does not look
-     like samples or pixels (parc_mmdet) falls back to the next group. Reading is done by a
-     job pool (one job per batch of files), and the result only depends on the bytes.
+     list has a `$text` or `$compressed` method, the content is checked: big files are sampled
+     at 3 (from 128 KB) or 5 (from 8 MB) evenly spread places, 64 KB each, and the verdict of
+     more than half of the samples counts; small files are judged together with their
+     neighbours of the same kind and extension (whole files until 64 KB). Text moves default
+     and compressed files to `$text`; compressed data moves any file to `$compressed` (cheap
+     to code and no gain from the heavier methods); binary data moves text or compressed
+     files to their next group. A `$wav`/`$bmp` file that does not look like samples or pixels
+     (parc_mmdet) falls back to the next group. Reading is done by a job pool (batches of
+     files), and the result only depends on the bytes.
 
   4. Blocks. For each kind, its files (in the order of step 2) are cut into solid blocks:
      - `tta`/`mm` without an explicit sample layout: one file per block (the layout is
@@ -382,7 +387,6 @@ type
     K: TFileKeys;
     Names: array of string;
     Rank: TIntArray;
-    DirFirst: Boolean;
     function CmpKey(a, b: Integer): Integer;
     function CmpRank(a, b: Integer): Integer;
   end;
@@ -391,11 +395,6 @@ function TSorter.CmpKey(a, b: Integer): Integer;
 begin
   Result := K[a].Home - K[b].Home;
   if Result <> 0 then Exit;
-  if DirFirst then
-  begin
-    Result := CompareStr(K[a].Dir, K[b].Dir);
-    if Result <> 0 then Exit;
-  end;
   Result := CompareStr(K[a].Ext, K[b].Ext);
   if Result <> 0 then Exit;
   Result := CompareStr(K[a].Dir, K[b].Dir);
@@ -495,10 +494,7 @@ begin
     S.K := K;
     SetLength(S.Names, Length(Files));
     for i := 0 to High(Files) do S.Names[i] := Files[i].Name;
-    if GetEnvironmentVariable('PARC_X_NOSORT') = '1' then Exit;
-    S.DirFirst := GetEnvironmentVariable('PARC_X_DIRFIRST') = '1';
     MergeSort(Result, @S.CmpKey);
-    if GetEnvironmentVariable('PARC_X_NOTWIN') = '1' then Exit;
     // twins: rank = position of the first file with the same base name in the same
     // (home group, extension) run
     SetLength(S.Rank, Length(Files));
@@ -811,6 +807,11 @@ begin
   for i := 0 to High(St) do Result := Result + '+' + StageName(St[i]);
 end;
 
+function IsStoringMethod(const Method: string): Boolean;
+begin
+  Result := (Signature(Method) = '+storing') or (Trim(Method) = '');
+end;
+
 function GmIndex(const GM: TGroupMethods; const G: string): Integer;
 var
   i: Integer;
@@ -849,7 +850,7 @@ var
   Part: TPlanBlocks;
   Starts: TIntArray;
   Tmp: TPlanBlock;
-  Data: Boolean;
+  Data, Solid: Boolean;
 
   procedure AddUnit(Kd: TCheckKind; F, C: Integer);
   var
@@ -865,8 +866,24 @@ var
 begin
   Result := nil;
   if Length(Files) = 0 then Exit;
-  K := MakeKeys(Files);
-  Order := OrderOf(Files, K);
+  // The order only matters inside solid blocks: with -s- (or -s1f) or when everything is
+  // stored, the files keep the order they were found in (folder by folder).
+  Solid := False;
+  for i := 0 to High(GM) do
+    if not IsStoringMethod(GM[i].Method) then Solid := True;
+  for i := 0 to High(Limits) do
+    if (Limits[i].Rule = srNone) or ((Limits[i].Rule = srCount) and (Limits[i].Value <= 1)) then
+      Solid := False;
+  // (one method and no order: nothing to look at)
+  if Solid or (Length(GM) > 1) then K := MakeKeys(Files)
+  else SetLength(K, Length(Files));
+  if Solid then
+    Order := OrderOf(Files, K)
+  else
+  begin
+    SetLength(Order, Length(Files));
+    for i := 0 to High(Order) do Order[i] := i;
+  end;
 
   // kind by name
   SetLength(GmBit, Length(GM));
@@ -900,7 +917,8 @@ begin
   while i < Length(Order) do
   begin
     t := Kind[Order[i]];
-    Data := ((iText > 0) or (iComp > 0)) and ((t = 0) or (t = iText) or (t = iComp));
+    // text can only replace default, text or compressed; compressed data replaces any kind
+    Data := ((iText > 0) and ((t = 0) or (t = iText) or (t = iComp))) or (iComp > 0);
     if (Files[Order[i]].DiskPath = '') or (Files[Order[i]].Size = 0) or (Files[Order[i]].Hint <> '') then
     begin
       Inc(i);
@@ -980,7 +998,7 @@ begin
         end
         else
           case Units[u].Verdict of
-            vText: if iText > 0 then Kind[i] := iText;
+            vText: if (iText > 0) and ((t = 0) or (t = iComp)) then Kind[i] := iText;
             vComp: if iComp > 0 then Kind[i] := iComp;
             vBin:  if (t = iText) or (t = iComp) then Kind[i] := KindOf(GM, GmBit, K[i].Groups,
                      (QWord(1) shl Max(0, GmBit[t])));

@@ -1,6 +1,6 @@
 #!/bin/bash
 # tests/block_order.sh — orden de los bloques sólidos (SortGroupsBySize): de mayor a menor
-# tamaño, estable (los empates en orden gerpn), y el archivo se extrae igual. Con -s- hay un
+# tamaño, estable (los empates en el orden de entrada), y el archivo se extrae igual. Con -s- hay un
 # bloque por archivo: los tamaños crecen con el nombre (el peor caso de la vieja inserción
 # cuadrática) y con empates salteados.
 set -u
@@ -22,7 +22,7 @@ for i in range(n):
     open('%s/f%06d.%s' % (d, i, ext), 'wb').write(bytes((j * 31 + i % 13) % 97 + 32 for j in range(size)))
 PY
 
-# Orden de referencia: con -m0 todos los bloques pesan 0, así que quedan en orden gerpn
+# Orden de referencia: con -m0 todos los bloques pesan 0, así que quedan en el orden de entrada
 names() { "$PARC" l "$1" | awk '$3 ~ /^[0-9]+$/ && $4 != "<DIR>" {print $3, $5}'; }
 # Los tamaños de los bloques de datos (lb) no crecen; el primero, de directorios, no cuenta
 lb_desc() { awk '/^Data blocks/ {d = 1} d && $1 == "data" {sub("orig=", "", $3); v = $3 + 0

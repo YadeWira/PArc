@@ -74,8 +74,8 @@ ck "wav -> tta, one per block"  'meth rtm3.parc src/snd/tone.wav | grep -q "^tta
 ck "random .wav -> not tta"     '! meth rtm3.parc src/bin/fake.wav | grep -q "tta"'
 
 # order: twins next to each other, grouped by extension
-ck "twins together"             'P l rtm0.parc | grep -A1 "src/a/same.dat" | tail -1 | grep -q "src/z/same.dat"'
-ck "extension runs"             '[ "$(P l rtm0.parc | grep -n "\.c$" | cut -d: -f1 | awk "NR > 1 && \$1 != p + 1 {bad = 1} {p = \$1} END {print bad + 0}")" = 0 ]'
+ck "twins together"             'P l rtm1.parc | grep -A1 "src/a/same.dat" | tail -1 | grep -q "src/z/same.dat"'
+ck "extension runs"             '[ "$(P l rtm1.parc | grep -n "\.c$" | cut -d: -f1 | awk "NR > 1 && \$1 != p + 1 {bad = 1} {p = \$1} END {print bad + 0}")" = 0 ]'
 
 # cap of block-local stages: 4 bwt blocks of 64 KB = 256 KB per solid block
 python3 -c '

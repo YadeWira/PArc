@@ -130,10 +130,13 @@ compressor). For example `-morep:96m:l256+exe+delta+lzma:96m`. The presets use
 clipped to the block. `orep` searches with up to 4 threads of its own, taken from `PARC_THREADS`
 (see `PARC_OREP_THREADS`).
 
-When updating (`a`, `u`, `f`), solid blocks that remain intact are copied without recompression;
-`--recompress` forces rebuilding them. With `d` and an explicit `-m`, the whole archive is
-recompressed with that method, just like FreeArc (a "copying" command:
-`is_COPYING_COMMAND` in `Cmdline.hs`).
+When updating (`a`, `u`, `f`), solid blocks that remain intact are copied without recompression.
+A block that loses files, or has a file replaced by a newer one, is rewritten: its remaining
+files in their order, the new version in the place of the old one, with the preset's method of
+the same kind (or the block's old method). New files that replace nothing go into new blocks,
+so adding files never rewrites existing blocks. `--recompress` forces rebuilding everything.
+With `d` and an explicit `-m`, the whole archive is recompressed with that method (a "copying"
+command, as in FreeArc).
 
 ### Commands that rewrite or extend an archive
 
@@ -191,8 +194,11 @@ work. There is no unlock (as in FreeArc).
 
 ### Solid blocks: `-s`
 
-Without `-s`, archives are solid like FreeArc's: a block is only cut where a method needs it
-(the dictionary of `dict`/`bwt`/`lzp`, `tta`/`mm` data) or where the file group changes. The
+Without `-s`, archives are solid: a block is only cut where the file kind changes (each kind has
+its own method), where a method needs it (a solid block holds at most one `dict` or `lzp` block
+or four `bwt` blocks; `tta`/`mm` without an explicit sample layout take one file per block).
+Inside a block files are ordered by file group, extension, folder and name, and files with the
+same name in different folders are put next to each other. The
 threads are used inside each block (4x4, multithreaded LZMA). Use `-s-`, `-s...` or an explicit
 `-s<N>m` to cut blocks, for example to extract single files faster.
 
