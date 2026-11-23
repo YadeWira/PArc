@@ -1456,6 +1456,43 @@ Tests: `tests/cm.sh` (stage round trips, write sizes, SSE2 == C, 900 damaged str
 round trips, `PARC_THREADS=1` == 4), `tests/cm_cross.sh` (same bytes on linux64 SSE2 and C,
 linux32, linuxarm64 NEON, win64, win32).
 
+## Own `tta` and `mm` replacing FreeArc's (2026-11-23)
+
+Same method as `plz`, `delta` and `lzp`: written from published ideas, PArc's code used only for
+the interface (method names and parameters, presets, file grouping, tests), then measured against
+`main` until it is at least as good. Nothing from FreeArc's `Compression/MM` (or TTA, or Monkey's
+Audio code) is left: `src/parc_mmenc.pas`, `src/parc_ttaenc.pas` and `tests/mm_tta` are gone and
+`src/parc_tta.pas`, `src/parc_mm.pas`, `src/parc_mmdet.pas` are new. The hot loops are freestanding C
+in `src/tta/mmtta_core.c` (SSE2 intrinsics on x86-64, plain C elsewhere with the same bytes),
+built by `build.sh` for every target next to OREP's core. Streams: `formato/FORMATO-PARC.md`
+§6.8 (`tta`) and §6.9 (`mm`); older `tta`/`mm` blocks no longer decode. Work area:
+`/mnt/IA_LAB/agentes/PArc/mmtta/` (data copies in `data/`, scripts in `scripts/`, CSVs in `logs/`).
+
+**`tta`** (lossless audio, `$wav` presets: `wav = tta`, `wavfast = tta:m1`). Per channel: fixed
+first-order prediction, a short sign-sign adaptive stage over the channel's last four values and
+the neighbouring channel (stereo goes through lossless mid/side first), a cascade of sign-sign
+LMS filters on 16-bit history (16 taps at `m1`, 32 at `m2`, 256 + 16 from `m3`), and an adaptive
+binary range coder for the residual: its bit length as a 3-level tree around the length the
+running mean expects, then one or two modeled bits under the leading one and the rest raw. The
+coder is branchless (data-dependent branches cost more than the arithmetic). Frames of 2^17
+samples bound the coded bytes; a frame that does not compress is stored with the state rolled
+back. The format comes from WAV/RIFX/AIFF/AIFC headers (the old one found only WAV) or sample
+statistics. Levels: `m1` LMS 16, no short stage, raw mantissa; `m2` LMS 32 + short stage; `m3`..`m5`
+LMS 256+16 + short stage, one modeled mantissa bit; `m6`.. two modeled bits; `m9` also a final
+short stage. On the tuning set (16.65 MB for the old `tta`): `m1` 16.61, `m2` 16.33, `m3` 16.06 MB.
+
+**`mm`** (filter before grzip/plz/lzma, `$bmp` presets and `ex1`). Layout from container headers
+(WAV/AIFF, BMP and bare DIB, TGA, binary PGM/PPM, uncompressed TIFF: the header also gives the row
+length) or statistics (plus the frame phase and, for 8-bit pixels, the row length searched as the
+distance where the bytes repeat best: TIFFs whose directory is at the end). Images are predicted
+from their neighbours (left, up, a+b−c, LOCO-I MED or the average) with the residuals of R and B
+optionally minus G's; audio from one or two samples back. The predictor is the cheapest on a
+128 KB sample; the filter is skipped when a fast LZ estimate says the raw sample compresses
+better (synthetic and palette images: without that test some of them grew up to 77 % under
+grzip). The old `mm` was a byte-oriented per-channel delta and left TGA/TIFF/PPM alone.
+
+<!-- mmtta-table -->
+
 ## Verified platforms (0.0.2)
 
 | platform | binary | tests |
