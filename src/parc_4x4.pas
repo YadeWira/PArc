@@ -112,7 +112,7 @@ const
   REPEAT_SHARE = 0.04;          // repeated share of a noise run from which it is packed
   NOISE_EST_RANDOM = 0.96;      // the same in a block that is near-random as a whole
   NOISE_MINE0_RANDOM = 0.98;    // and the order-0 entropy from which its cells are tried
-  NOISE_EST = 0.995;            // LZ estimate (over the cell's size) from which a cell is noise
+  NOISE_EST = 0.9995;            // LZ estimate (over the cell's size) from which a cell is noise
   EST_WINDOW = 1 shl 20;        // match distance of the estimate
   GEAR_SHIFT = 55;              // anchors: about one every 2^(64-GEAR_SHIFT) bytes
   MB = 1 shl 20;
@@ -583,7 +583,6 @@ begin
   FNoise := ANoise;
   // plz and lz4 go through near-random data faster than the analysis would
   if InnerKindOf(AInner) in [IK_PLZ, IK_LZ4] then FNoise := 2;
-  if GetEnvironmentVariable('PARC_4X4_NOISE') <> '' then FNoise := StrToFloat(GetEnvironmentVariable('PARC_4X4_NOISE'));  // DEBUG
   FHint := AHint;
   Threads := PoolWorkers(FX_MAXTHREADS);
   if Threads > 0 then SetLength(FQueue, Threads + 1) else SetLength(FQueue, 1);
@@ -616,7 +615,7 @@ begin
     FTarget := FTail;
     Exit;
   end;
-  if (FHint <= 0) or (FPool.MaxWorkers < 1) or (GetEnvironmentVariable('PARC_4X4_NOTAIL') <> '') then Exit;  // DEBUG
+  if (FHint <= 0) or (FPool.MaxWorkers < 1) then Exit;
   N := BudgetThreads;
   if N > FX_MAXTHREADS then N := FX_MAXTHREADS;
   if N < 2 then Exit;
