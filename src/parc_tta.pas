@@ -62,14 +62,11 @@ type
   { predictor configuration of a level (the layout of ttac_cfg in tta_core.c) }
   TAcConfig = record
     NF: LongInt;                          // sign-sign LMS filters (0..3)
-    Order, Shift: array[0..2] of LongInt;
-    S4Own, S4Cross: LongInt;              // short stage: own taps (0..4), cross taps (0..2)
-    S4Shift, S4Step: LongInt;
-    ShortFirst: LongInt;                  // 1: short stage before the LMS filters
+    Order, Shift: array[0..2] of LongInt; // order (multiple of 16, <= 1024), output shift
+    A1, A2, A3: LongInt;                  // LMS steps for large / medium / small inputs
+    S2Shift, S2Step: LongInt;             // short stage: weight scale, step
     MS: LongInt;                          // 1: stereo mid/side
-    ProbShift, MeanShift: LongInt;
-    A1, A2, A3, Decay: LongInt;           // LMS steps (large / medium / small value), decay of older steps
-    X1, X2, X3, X4: LongInt;              // reserved
+    R1, R2, R3, R4: LongInt;              // reserved (0)
   end;
 
   TAcFormat = record
@@ -87,7 +84,7 @@ type
     FX: array of LongInt;                 // a frame of samples, interleaved
     FRc, FRaw: TBytes;
   public
-    constructor Create(const Fmt: TAcFormat);
+    constructor Create(const Fmt: TAcFormat; const ACfg: TAcConfig);
     destructor Destroy; override;
     property Fmt: TAcFormat read FFmt;
     property Cfg: TAcConfig read FCfg;
@@ -220,42 +217,87 @@ end;
 function TtaLevelConfig(Level, Bits: Integer): TAcConfig;
 begin
   FillChar(Result, SizeOf(Result), 0);
-  Result.S4Own := 2;
-  Result.S4Cross := 2;
-  Result.S4Shift := 12;
-  Result.S4Step := 4;
+  Result.A1 := 32; Result.A2 := 16; Result.A3 := 8;
+  Result.S2Shift := 12;
+  Result.S2Step := 4;
   Result.MS := 1;
-  Result.ShortFirst := 1;
-  Result.ProbShift := 5;
-  Result.MeanShift := 4;
-  Result.A1 := 32; Result.A2 := 16; Result.A3 := 8; Result.Decay := 0;
   case Level of
     0, 1:
       begin
+        // one LMS of 16, no short stage, mantissa raw
         Result.NF := 1;
-        Result.Order[0] := 16; Result.Shift[0] := 11;
+        Result.Order[0] := 16; Result.Shift[0] := 12;
+        Result.R1 := 7;
       end;
     2:
       begin
-        Result.NF := 2;
-        Result.Order[0] := 64; Result.Shift[0] := 12;
-        Result.Order[1] := 16; Result.Shift[1] := 11;
+        // one LMS of 32, short stage, mantissa raw
+        Result.NF := 1;
+        Result.Order[0] := 32; Result.Shift[0] := 13;
+        Result.R1 := 5;
       end;
     3, 4, 5:
       begin
+        // LMS 256 + 16, short stage, one modeled mantissa bit
         Result.NF := 2;
-        Result.Order[0] := 256; Result.Shift[0] := 13;
-        Result.Order[1] := 16; Result.Shift[1] := 11;
+        Result.Order[0] := 256; Result.Shift[0] := 15;
+        Result.Order[1] := 16; Result.Shift[1] := 12;
+        Result.R1 := 1;
       end;
   else
     begin
-      Result.NF := 3;
-      Result.Order[0] := 1024; Result.Shift[0] := 15;
-      Result.Order[1] := 256; Result.Shift[1] := 13;
-      Result.Order[2] := 16; Result.Shift[2] := 11;
+      // as 3, two modeled mantissa bits
+      Result.NF := 2;
+      Result.Order[0] := 256; Result.Shift[0] := 15;
+      Result.Order[1] := 16; Result.Shift[1] := 12;
     end;
   end;
   if TtaCfgOverride then Result := TtaCfgValue;
+end;
+
+{ the configuration in the stream header: U8 NF, NF x (U16 order, U8 shift), U8 A1, A2, A3,
+  S2Shift, S2Step, MS, R1 }
+function CfgBytes(const C: TAcConfig): TBytes;
+var
+  j, n: Integer;
+begin
+  SetLength(Result, 1 + 3 * C.NF + 7);
+  Result[0] := C.NF;
+  n := 1;
+  for j := 0 to C.NF - 1 do
+  begin
+    Result[n] := Byte(C.Order[j]);
+    Result[n + 1] := Byte(C.Order[j] shr 8);
+    Result[n + 2] := C.Shift[j];
+    Inc(n, 3);
+  end;
+  Result[n] := C.A1; Result[n + 1] := C.A2; Result[n + 2] := C.A3;
+  Result[n + 3] := C.S2Shift; Result[n + 4] := C.S2Step; Result[n + 5] := C.MS; Result[n + 6] := C.R1;
+end;
+
+function ReadCfg(S: TInStage): TAcConfig;
+var
+  b: array[0..6] of Byte;
+  j: Integer;
+begin
+  FillChar(Result, SizeOf(Result), 0);
+  S.ReadExact(@b[0], 1);
+  Result.NF := b[0];
+  if Result.NF > 3 then Corrupt('tta: invalid configuration');
+  for j := 0 to Result.NF - 1 do
+  begin
+    S.ReadExact(@b[0], 3);
+    Result.Order[j] := b[0] or (b[1] shl 8);
+    Result.Shift[j] := b[2];
+    if (Result.Order[j] < 16) or (Result.Order[j] > 1024) or (Result.Order[j] mod 16 <> 0) or
+       (Result.Shift[j] < 1) or (Result.Shift[j] > 24) then
+      Corrupt('tta: invalid configuration');
+  end;
+  S.ReadExact(@b[0], 7);
+  Result.A1 := b[0]; Result.A2 := b[1]; Result.A3 := b[2];
+  Result.S2Shift := b[3]; Result.S2Step := b[4]; Result.MS := b[5]; Result.R1 := b[6];
+  if (Result.S2Shift < 1) or (Result.S2Shift > 24) or (Result.MS > 1) or (Result.R1 > 7) then
+    Corrupt('tta: invalid configuration');
 end;
 
 { ---------------------------------------------------------------------------------------- }
@@ -379,13 +421,13 @@ end;
 { ---------------------------------------------------------------------------------------- }
 { codec }
 
-constructor TAcCodec.Create(const Fmt: TAcFormat);
+constructor TAcCodec.Create(const Fmt: TAcFormat; const ACfg: TAcConfig);
 var
   Frames: SizeInt;
 begin
   inherited Create;
   FFmt := Fmt;
-  FCfg := TtaLevelConfig(Fmt.Level, Fmt.Bits);
+  FCfg := ACfg;
   FStateSize := ttac_state_size(Fmt.NumChan);
   FStateMem := GetMem(FStateSize + 64);
   FState := Pointer((PtrUInt(FStateMem) + 63) and not PtrUInt(63));
@@ -502,6 +544,8 @@ var
   Fmt: TAcFormat;
   R: Double;
   Hdr: array[0..5] of Byte;
+  Cfg: TAcConfig;
+  CB: TBytes;
 begin
   Ok := False;
   FillChar(L, SizeOf(L), 0);
@@ -551,7 +595,10 @@ begin
   Hdr[4] := Fmt.Flags;
   Hdr[5] := Fmt.Level;
   Emit(@Hdr[0], 6);
-  FCodec := TAcCodec.Create(Fmt);
+  Cfg := TtaLevelConfig(Fmt.Level, Fmt.Bits);
+  CB := CfgBytes(Cfg);
+  Emit(@CB[0], Length(CB));
+  FCodec := TAcCodec.Create(Fmt, Cfg);
   FSampleBytes := Fmt.NumChan * (Fmt.Bits div 8);
   FFrameBytes := (TTA_FRAME_VALUES div Fmt.NumChan) * FSampleBytes;
   if FFrameBytes < FSampleBytes then FFrameBytes := FSampleBytes;
@@ -777,7 +824,7 @@ begin
      ((Fmt.Flags and ACF_FLOAT <> 0) and (Fmt.Bits <> 32)) or ((Fmt.Flags and ACF_U8 <> 0) and (Fmt.Bits <> 8)) or
      (Fmt.Level < 1) or (Fmt.Level > TTA_MAX_LEVEL) then
     Corrupt('tta: invalid format');
-  FCodec := TAcCodec.Create(Fmt);
+  FCodec := TAcCodec.Create(Fmt, ReadCfg(Source));
 end;
 
 function TTtaStage.NextChunk: Boolean;
