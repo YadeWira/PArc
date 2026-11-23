@@ -1,34 +1,51 @@
-{ Detección del tipo de datos de un bloque: '$compressed', '$text' o 'default'.
+{ Data type of a chunk for the file grouping: '$compressed', '$text' or 'default'.
 
-  Port exacto de detect_datatype() de FreeArc (Compression/MM/mmdet.cpp). FreeArc la
-  llama sobre trozos de 64 KB del archivo y con el resultado elige el grupo de
-  métodos ($compressed -> storing/rep, $text -> ppmd/dict, etc.).
-
-  El algoritmo junta tres estadísticas en una sola pasada:
-    - la frecuencia de cada byte (para el order-0 y los "caracteres normales");
-    - matches LZ con una tabla hash de 16384 entradas indexada por el valor de 16 bits
-      (little-endian) en la posición; solo cuentan los de distancia < 256, y de ellos
-      cuántos repiten una de las últimas 4 distancias (repdist);
-    - la longitud total de los matches (sumlen).
-
-  Detalles del C que hay que reproducir al pie de la letra, porque mueven el umbral:
-    - los últimos 10 bytes no se recorren (p < buf+bufsize-10), y con bufsize <= 10 no
-      se recorre nada;
-    - el bucle de 4 en 4 compara value32 ANTES de mirar el límite, por eso p puede
-      pasarse del límite hasta 3 bytes; tras los bucles se cuenta además el byte en p
-      (count[*p]++) sin tocar la tabla, y el p++ del for lo saltea;
-    - sumlen solo suma si o-q < 256 con q ya avanzado (o-q puede ser negativo);
-    - order0 usa log(bufsize/count[i]) con DIVISIÓN ENTERA, y el log() del runtime C;
-    - las comparaciones finales se hacen en double. }
+  PArc's own detector (2026-11, MIT; nothing from FreeArc). It answers the question the
+  grouping asks: which family of chains suits these bytes?
+    - '$compressed': nothing to gain (order-0 entropy near 8 bits, few byte pairs repeated
+      within 256 bytes): the fast chains of $compressed;
+    - '$text': a context model (the $text chains: ppmd, bwt, cm) should beat an LZ coder;
+    - 'default' otherwise (the LZ chains with filters).
+  Statistics (integers only):
+    1. whole chunk: byte histogram -> order-0 entropy H0 and the share of letters;
+    2. a sample of up to SAMPLE_MAX bytes from the middle. Above 7.6 bits only the byte pairs
+       seen again within 256 bytes; below: order-1 entropy H1 (pair counts), how often the
+       byte that followed the same 3 (5) bytes last time comes again (a cheap measure of what
+       high-order contexts predict) and the share of bytes a greedy LZ parse (4-byte hash)
+       covers with matches.
+  '$text' is a linear score of those numbers above a threshold, fitted on 5,800 chunks of the
+  sample corpus against the real sizes of the -m5 chains ($text = dict+lzp+ppmd:13, default =
+  orep+exe+delta+lzma bt4), with the share of chunks sent to ppmd (which decompresses several
+  times slower than lzma) held at what the previous detector sent. Every platform gives the
+  same answer (fixed-point logarithms from an integer algorithm). }
 unit parc_filetype;
 
 {$mode objfpc}{$H+}
+{$R-}{$Q-}
+{$pointermath on}
 
 interface
 
-// Clasifica Buf[0..BufSize-1]. Con Buf = nil devuelve la lista de tipos que sabe
-// reconocer: '$compressed $text' (como el C).
+type
+  TDatatypeStats = record
+    Size: Integer;
+    H0: Integer;          // order-0 entropy of the chunk, 1/256 bit per byte
+    Letters: Integer;     // letters per 1024 bytes of the chunk
+    Spaces: Integer;      // space, tab, CR, LF per 1024 bytes of the chunk
+    Controls: Integer;    // other bytes below 32 (and 127) per 1024 bytes of the chunk
+    Sample: Integer;      // bytes of the sample
+    H1: Integer;          // order-1 entropy of the sample (pair counts), 1/256 bit per byte
+    Hit3, Hit5: Integer;  // next byte as after the same 3 / 5 bytes last time, per 1024
+    MatchBytes: Integer;  // bytes in LZ matches, per 1024
+    NearPairs: Integer;   // pairs seen again within 256 bytes, per 1024 (only H0 >= 7.6 bits)
+  end;
+
+{ Type of Buf[0..BufSize-1]. With Buf = nil: the list of types it can answer. }
 function DetectDatatype(Buf: PByte; BufSize: Integer): string;
+
+{ The statistics behind the answer (tests, tuning), and the answer from them. }
+function DatatypeStats(Buf: PByte; BufSize: Integer): TDatatypeStats;
+function DatatypeOfStats(const S: TDatatypeStats): string;
 
 implementation
 
@@ -36,167 +53,290 @@ uses
   SysUtils;
 
 const
-  TABLE_SIZE = 16384;
-  K020: Double = 0.20;
-  K090: Double = 0.90;
-  K095: Double = 0.95;
-  K010: Double = 0.10;
+  SAMPLE_MAX = 16384;
+  LOG_ONE = 256;                    // fixed point of the logarithms
+  LOG_TABLE = 1 shl 17;             // LogTab covers 0..LOG_TABLE-1
+  HASH_BITS = 12;
+  CTX_BITS = 13;
 
-// log() de la biblioteca C, no Ln de FPC: Ln se calcula en x87 extendido y al
-// redondear a double difiere en 1 ulp de log() de glibc en 247 de los enteros
-// 1..2^20, lo que puede mover el umbral order0 > 0.95*bufsize. FreeArc llama al log()
-// de su runtime C, así que usamos el mismo (libm en Unix, msvcrt en Windows).
-{$IFDEF UNIX}
-function c_log(x: Double): Double; cdecl; external 'm' name 'log';
-{$ELSE}
-function c_log(x: Double): Double; cdecl; external 'msvcrt.dll' name 'log';
-{$ENDIF}
+  // '$compressed': H0 >= 7.62 bits and at most 11 % of the pairs repeated within 256 bytes
+  COMPRESSED_H0 = 1951;
+  COMPRESSED_NEAR = 115;
+  // '$text': W_* . stats > TEXT_BIAS (weights per unit of each field), only below 7.6 bits
+  TEXT_MAX_H0 = 1946;
+  {$I parc_filetype_weights.inc}
 
 type
-  TCounts = array[0..255] of Integer;
-
-// value16/value32 de Common.h: lectura little-endian sin alinear.
-function Value16(p: PByte): Word; inline;
-begin
-  Result := Word(p[0]) or (Word(p[1]) shl 8);
-end;
-
-function Value32(p: PByte): LongWord; inline;
-begin
-  Result := LongWord(p[0]) or (LongWord(p[1]) shl 8) or
-            (LongWord(p[2]) shl 16) or (LongWord(p[3]) shl 24);
-end;
-
-function Hash(p: PByte): Integer; inline;
-begin
-  Result := Value16(p) mod TABLE_SIZE;
-end;
-
-// Orden descendente; como son enteros sueltos, el resultado no depende de la
-// estabilidad del qsort del C.
-procedure SortDesc(var c: TCounts);
-var
-  i, j, v: Integer;
-begin
-  for i := 1 to 255 do
-  begin
-    v := c[i];
-    j := i - 1;
-    while (j >= 0) and (c[j] < v) do
-    begin
-      c[j + 1] := c[j];
-      Dec(j);
-    end;
-    c[j + 1] := v;
+  { Working tables of one call (from a small pool: detection runs on several threads) }
+  PTables = ^TTables;
+  TTables = record
+    C1: array[0..65535] of Word;              // pair counts (all 0 between calls)
+    Touched: array[0..SAMPLE_MAX] of Word;    // the cells of C1 in use
+    LzHead: array[0..(1 shl HASH_BITS) - 1] of LongInt;
+    NearPos: array[0..65535] of LongWord;     // Gen shl 16 + last position + 1 of each pair
+    Gen: LongWord;
+    Last3, Last5: array[0..(1 shl CTX_BITS) - 1] of Byte;
+    Next: PTables;
   end;
+
+var
+  LogTab: array of Integer;        // LogTab[x] = round(256 * log2(x)), LogTab[0] = 0
+  Pool: PTables = nil;
+  PoolLock: TRTLCriticalSection;
+
+{ ------------------------------------------------------------------------------------------ }
+
+{ 256 * log2(x) for x >= 1, rounded, by repeated squaring of the mantissa (integers only). }
+function FixLog2(x: QWord): Integer;
+var
+  k, i, r: Integer;
+  m: QWord;      // mantissa in [1, 2) as Q30
+begin
+  k := 0;
+  while (x shr (k + 1)) <> 0 do Inc(k);
+  if k >= 30 then m := x shr (k - 30) else m := x shl (30 - k);
+  r := 0;
+  for i := 1 to 9 do      // 9 fraction bits, rounded to 8
+  begin
+    m := (m * m) shr 30;
+    r := r shl 1;
+    if m >= (QWord(2) shl 30) then
+    begin
+      m := m shr 1;
+      r := r or 1;
+    end;
+  end;
+  Result := k * LOG_ONE + (r + 1) shr 1;
+end;
+
+function L2(x: QWord): Integer; inline;
+begin
+  if x < LOG_TABLE then Result := LogTab[x] else Result := FixLog2(x);
+end;
+
+procedure BuildLogTable;
+var
+  i: Integer;
+begin
+  SetLength(LogTab, LOG_TABLE);
+  LogTab[0] := 0;
+  for i := 1 to LOG_TABLE - 1 do LogTab[i] := FixLog2(i);
+end;
+
+function TakeTables: PTables;
+begin
+  EnterCriticalSection(PoolLock);
+  Result := Pool;
+  if Result <> nil then Pool := Result^.Next;
+  LeaveCriticalSection(PoolLock);
+  if Result = nil then
+  begin
+    New(Result);
+    FillChar(Result^.C1, SizeOf(Result^.C1), 0);
+    FillChar(Result^.NearPos, SizeOf(Result^.NearPos), 0);
+    Result^.Gen := 0;
+  end;
+end;
+
+procedure GiveTables(T: PTables);
+begin
+  EnterCriticalSection(PoolLock);
+  T^.Next := Pool;
+  Pool := T;
+  LeaveCriticalSection(PoolLock);
+end;
+
+{ ------------------------------------------------------------------------------------------ }
+
+{ Bytes of P[0..N-1] that a greedy LZ parse covers with matches of 4+ bytes (4-byte hash,
+  last position only). }
+function MatchCover(T: PTables; P: PByte; N: Integer): Integer;
+var
+  i, j, Len: Integer;
+  h, v: LongWord;
+begin
+  FillChar(T^.LzHead, SizeOf(T^.LzHead), $FF);
+  Result := 0;
+  i := 0;
+  while i + 4 <= N do
+  begin
+    v := PLongWord(P + i)^;
+    h := LongWord(v * LongWord(2654435761)) shr (32 - HASH_BITS);
+    j := T^.LzHead[h];
+    T^.LzHead[h] := i;
+    if (j >= 0) and (PLongWord(P + j)^ = v) then
+    begin
+      Len := 4;
+      while (i + Len < N) and (P[j + Len] = P[i + Len]) do Inc(Len);
+      Inc(Result, Len);
+      Inc(i, Len);
+    end
+    else
+      Inc(i);
+  end;
+end;
+
+function DatatypeStats(Buf: PByte; BufSize: Integer): TDatatypeStats;
+var
+  T: PTables;
+  Hist: array[0..3, 0..255] of LongInt;
+  Row: array[0..255] of LongInt;
+  i, Letters, Near, n, Cell, h3, h5, NT: Integer;
+  S: PByte;
+  Acc: Int64;
+  v, Stamp, c3, c5: LongWord;
+  w: Word;
+begin
+  Result := Default(TDatatypeStats);
+  Result.Size := BufSize;
+  if (Buf = nil) or (BufSize <= 0) then Exit;
+  // whole chunk: histogram (four tables, so that runs of a byte do not stall)
+  FillChar(Hist, SizeOf(Hist), 0);
+  i := 0;
+  while i + 4 <= BufSize do
+  begin
+    Inc(Hist[0, Buf[i]]); Inc(Hist[1, Buf[i + 1]]); Inc(Hist[2, Buf[i + 2]]); Inc(Hist[3, Buf[i + 3]]);
+    Inc(i, 4);
+  end;
+  while i < BufSize do
+  begin
+    Inc(Hist[0, Buf[i]]);
+    Inc(i);
+  end;
+  Acc := Int64(BufSize) * L2(BufSize);
+  for i := 0 to 255 do
+  begin
+    n := Hist[0, i] + Hist[1, i] + Hist[2, i] + Hist[3, i];
+    Hist[0, i] := n;
+    if n > 0 then Dec(Acc, Int64(n) * L2(n));
+  end;
+  Result.H0 := Acc div BufSize;
+  Letters := 0;
+  for i := Ord('A') to Ord('Z') do Inc(Letters, Hist[0, i] + Hist[0, i + 32]);
+  Result.Letters := Int64(Letters) * 1024 div BufSize;
+  n := Hist[0, 9] + Hist[0, 10] + Hist[0, 13] + Hist[0, 32];
+  Result.Spaces := Int64(n) * 1024 div BufSize;
+  n := Hist[0, 127] - Hist[0, 9] - Hist[0, 10] - Hist[0, 13];
+  for i := 0 to 31 do Inc(n, Hist[0, i]);
+  Result.Controls := Int64(n) * 1024 div BufSize;
+  // the sample, from the middle
+  n := BufSize;
+  if n > SAMPLE_MAX then n := SAMPLE_MAX;
+  Result.Sample := n;
+  S := Buf + (BufSize - n) div 2;
+  T := TakeTables;
+  try
+    if Result.H0 >= TEXT_MAX_H0 then
+    begin
+      // only the "$compressed" question is left: pairs repeated within 256 bytes
+      Inc(T^.Gen);
+      if T^.Gen > $FFFF then
+      begin
+        FillChar(T^.NearPos, SizeOf(T^.NearPos), 0);
+        T^.Gen := 1;
+      end;
+      Stamp := T^.Gen shl 16;
+      Near := 0;
+      for i := 1 to n - 1 do
+      begin
+        w := S[i - 1] shl 8 or S[i];
+        v := T^.NearPos[w];
+        if (v and $FFFF0000 = Stamp) and (LongWord(i + 1) - (v and $FFFF) < 256) then Inc(Near);
+        T^.NearPos[w] := Stamp or LongWord(i + 1);
+      end;
+      if n > 1 then Result.NearPairs := Int64(Near) * 1024 div (n - 1);
+      Exit;
+    end;
+    FillChar(T^.Last3, SizeOf(T^.Last3), 0);
+    FillChar(T^.Last5, SizeOf(T^.Last5), 0);
+    h3 := 0; h5 := 0; NT := 0;
+    for i := 1 to n - 1 do
+    begin
+      // pair counts (order-1 entropy)
+      w := S[i - 1] shl 8 or S[i];
+      if T^.C1[w] = 0 then
+      begin
+        T^.Touched[NT] := w;
+        Inc(NT);
+      end;
+      Inc(T^.C1[w]);
+      // the byte that followed the same 3 / 5 bytes last time
+      if i >= 5 then
+      begin
+        c3 := LongWord((LongWord(S[i - 3]) or LongWord(S[i - 2]) shl 8 or LongWord(S[i - 1]) shl 16) *
+          LongWord(2654435761)) shr (32 - CTX_BITS);
+        c5 := LongWord(((LongWord(S[i - 4]) or LongWord(S[i - 3]) shl 8 or LongWord(S[i - 2]) shl 16 or
+          LongWord(S[i - 1]) shl 24) xor (LongWord(S[i - 5]) shl 13)) * LongWord(2246822519)) shr (32 - CTX_BITS);
+        if T^.Last3[c3] = S[i] then Inc(h3);
+        if T^.Last5[c5] = S[i] then Inc(h5);
+        T^.Last3[c3] := S[i];
+        T^.Last5[c5] := S[i];
+      end;
+    end;
+    if n > 1 then
+    begin
+      // H(X1 | X0) = (sum_rows r*log r - sum_cells c*log c) / pairs
+      FillChar(Row, SizeOf(Row), 0);
+      Acc := 0;
+      for i := 0 to NT - 1 do
+      begin
+        Cell := T^.Touched[i];
+        Inc(Row[Cell shr 8], T^.C1[Cell]);
+        Dec(Acc, Int64(T^.C1[Cell]) * L2(T^.C1[Cell]));
+        T^.C1[Cell] := 0;
+      end;
+      for i := 0 to 255 do
+        if Row[i] > 0 then Inc(Acc, Int64(Row[i]) * L2(Row[i]));
+      Result.H1 := Acc div (n - 1);
+    end;
+    if n > 5 then
+    begin
+      Result.Hit3 := Int64(h3) * 1024 div (n - 5);
+      Result.Hit5 := Int64(h5) * 1024 div (n - 5);
+    end;
+    Result.MatchBytes := Int64(MatchCover(T, S, n)) * 1024 div n;
+  finally
+    GiveTables(T);
+  end;
+end;
+
+function DatatypeOfStats(const S: TDatatypeStats): string;
+var
+  Score: Int64;
+begin
+  Result := 'default';
+  if S.Size < 16 then Exit;
+  if (S.H0 >= COMPRESSED_H0) and (S.NearPairs <= COMPRESSED_NEAR) then Exit('$compressed');
+  if S.H0 >= TEXT_MAX_H0 then Exit;
+  Score := Int64(W_H0) * S.H0 + Int64(W_H1) * S.H1 + Int64(W_LETTERS) * S.Letters +
+    Int64(W_HIT3) * S.Hit3 + Int64(W_HIT5) * S.Hit5 + Int64(W_MATCH) * S.MatchBytes +
+    Int64(W_SPACES) * S.Spaces + Int64(W_CONTROLS) * S.Controls;
+  if S.Letters > TEXT_LETTER_STEP then Inc(Score, W_LETTER_STEP);
+  if Score > TEXT_BIAS then Result := '$text';
 end;
 
 function DetectDatatype(Buf: PByte; BufSize: Integer): string;
-var
-  count: TCounts;
-  table: array of PByte;
-  matches, repdists, sumlen, i, x, y, sums, total, normal_chars: Integer;
-  dist: array[0..3] of Integer;
-  p, q, o, lim: PByte;
-  pq: PtrInt;
-  order0, lg, ln2, term: Double;
 begin
-  if Buf = nil then
-    Exit('$compressed $text');
-
-  FillChar(count, SizeOf(count), 0);
-  matches := 0; repdists := 0; sumlen := 0;
-  FillChar(dist, SizeOf(dist), 0);
-
-  if BufSize > 10 then
-  begin
-    SetLength(table, TABLE_SIZE);   // inicializada a nil, como calloc
-    lim := Buf + (BufSize - 10);
-    p := Buf;
-    while p < lim do
-    begin
-      q := table[Hash(p)];
-      if (q <> nil) and (Value16(p) = Value16(q)) then
-      begin
-        pq := p - q;
-        if pq < 256 then
-        begin
-          Inc(matches);
-          x := Integer(pq);
-          for i := 0 to 3 do
-          begin
-            y := dist[i]; dist[i] := x; x := y;
-            if x = pq then begin Inc(repdists); Break; end;
-          end;
-        end;
-        // Saltear el match actualizando contadores y tabla
-        o := p;
-        while (Value32(p) = Value32(q)) and (p < lim) do
-        begin
-          Inc(count[p[0]]); table[Hash(p)]     := p;
-          Inc(count[p[1]]); table[Hash(p + 1)] := p + 1;
-          Inc(count[p[2]]); table[Hash(p + 2)] := p + 2;
-          Inc(count[p[3]]); table[Hash(p + 3)] := p + 3;
-          Inc(p, 4); Inc(q, 4);
-        end;
-        while (p^ = q^) and (p < lim) do
-        begin
-          Inc(count[p^]); table[Hash(p)] := p;
-          Inc(p); Inc(q);
-        end;
-        Inc(count[p^]);
-        if o - q < 256 then
-          sumlen := sumlen + Integer(p - o);
-      end
-      else
-      begin
-        Inc(count[p^]);
-        table[Hash(p)] := p;
-      end;
-      Inc(p);
-    end;
-    table := nil;
-  end;
-
-  // Compresión con modelo order-0 (bufsize/count[i] es división entera en el C)
-  order0 := 0;
-  ln2 := c_log(2.0);
-  for i := 0 to 255 do
-    if count[i] <> 0 then
-    begin
-      lg := c_log(Double(BufSize div count[i]));
-      term := count[i] * lg;
-      term := term / ln2;
-      term := term / 8;
-      order0 := order0 + term;
-    end;
-
-  // Cantidad de símbolos que ocupan el 90% del texto
-  sums := 0; total := BufSize; normal_chars := 256;
-  SortDesc(count);
-  for i := 0 to 255 do
-  begin
-    if count[i] > BufSize * K020 then
-    begin
-      total := total - count[i];
-      Continue;
-    end;
-    sums := sums + count[i];
-    if sums > total * K090 then
-    begin
-      normal_chars := i;
-      Break;
-    end;
-  end;
-
-  if (order0 > K095 * BufSize) and (sumlen < K010 * BufSize) then
-    Result := '$compressed'
-  else if (17 <= normal_chars) and (normal_chars <= 80)
-          and (repdists < K020 * matches)
-          and (sumlen > K010 * BufSize) then
-    Result := '$text'
-  else
-    Result := 'default';
+  if Buf = nil then Exit('$compressed $text');
+  Result := DatatypeOfStats(DatatypeStats(Buf, BufSize));
 end;
 
+procedure FreePool;
+var
+  T: PTables;
+begin
+  while Pool <> nil do
+  begin
+    T := Pool;
+    Pool := T^.Next;
+    Dispose(T);
+  end;
+end;
+
+initialization
+  InitCriticalSection(PoolLock);
+  BuildLogTable;
+finalization
+  FreePool;
+  DoneCriticalSection(PoolLock);
 end.
