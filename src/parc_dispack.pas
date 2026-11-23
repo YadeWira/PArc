@@ -834,13 +834,21 @@ end;
 
 procedure TDisPackEncStage.DoWrite(Buf: PByte; Count: SizeInt);
 var
-  n: SizeInt;
+  n, Cap: SizeInt;
 begin
-  if Length(FBuf) = 0 then SetLength(FBuf, FBlock + XF_LOOK + XF_PAD);
   while Count > 0 do
   begin
     n := FBlock + XF_LOOK - FLen;
     if n > Count then n := Count;
+    if FLen + n + XF_PAD > Length(FBuf) then
+    begin
+      { grow with the data (small inputs never take a whole block) }
+      Cap := 2 * Length(FBuf);
+      if Cap < FLen + n + XF_PAD then Cap := FLen + n + XF_PAD;
+      if Cap < 1 shl 16 then Cap := 1 shl 16;
+      if Cap > FBlock + XF_LOOK + XF_PAD then Cap := FBlock + XF_LOOK + XF_PAD;
+      SetLength(FBuf, Cap);
+    end;
     Move(Buf^, FBuf[FLen], n);
     Inc(FLen, n);
     Inc(Buf, n);
@@ -856,6 +864,7 @@ end;
 procedure TDisPackEncStage.DoFinish;
 var
   n: SizeInt;
+  s: Integer;
 begin
   if FLen > 0 then FillChar(FBuf[FLen], XF_PAD, 0);
   while FLen > 0 do
@@ -864,6 +873,9 @@ begin
     if n > FBlock then n := FBlock;
     ProcessBlock(n);
   end;
+  { the back end finishes after this: give the memory back first }
+  FBuf := nil;
+  for s := 0 to XF_NSTREAMS - 1 do FCtx.Buf[s] := nil;
   inherited DoFinish;
 end;
 
