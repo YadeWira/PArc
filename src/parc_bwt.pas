@@ -316,12 +316,12 @@ end;
 
 { LzpEncodeBlock of parc_lzp (one minimum, no barrier) by the C core: same bytes, faster. Main
   holds Len bytes, Lens Len bytes. }
-function LzpEncode(Inp: PByte; Len: SizeInt; const Lp: TLzpParams; var Hash: array of LongWord; var Main: TBytes;
+function LzpEncode(Inp: PByte; Len: SizeInt; const Lp: TLzpParams; Hash: PLongWord; var Main: TBytes;
   Lens: PByte; out NMain, NLens: SizeInt; out Esc: Byte): Boolean;
 var
   nm, nl: LongInt;
 begin
-  Result := parc_lzp_encode(Inp, Len, Lp.MinMatchLen, LzpBlockHashBits(Len, Lp.HashSizeLog), @Hash[0], @Main[0],
+  Result := parc_lzp_encode(Inp, Len, Lp.MinMatchLen, LzpBlockHashBits(Len, Lp.HashSizeLog), Hash, @Main[0],
     Lens, Len, nm, nl, Esc) <> 0;
   NMain := nm;
   NLens := nl;
@@ -347,7 +347,7 @@ begin
   r1 := LzpEncodeBlock(Inp, Len, Lp, Hash, M1, L1, a1, b1, e1);
   L2 := GetMem(Len + 1);
   try
-    r2 := LzpEncode(Inp, Len, Lp, Hash, M2, L2, a2, b2, e2);
+    r2 := LzpEncode(Inp, Len, Lp, @Hash[0], M2, L2, a2, b2, e2);
     Result := (r1 = r2) and (not r1 or ((a1 = a2) and (b1 = b2) and (e1 = e2) and
       CompareMem(@M1[0], @M2[0], a1) and ((b1 = 0) or CompareMem(@L1[0], L2, b1))));
   finally
@@ -420,6 +420,7 @@ var
   Lp: TLzpParams;
   Hash: array of LongWord;
   Lens: PByte;
+  HashP: PLongWord;
   Esc, Flags: Byte;
   UseLzp, Ok: Boolean;
   MinLen: Integer;
@@ -459,10 +460,11 @@ begin
   begin
     SetLength(Main, Len + IN_SLACK);
     Lp := LzpParamsOf(P, Len, MinLen);
-    SetLength(Hash, SizeInt(2) shl LzpBlockHashBits(Len, Lp.HashSizeLog));
+    // (the core clears the table)
+    HashP := GetMem((SizeInt(2) shl LzpBlockHashBits(Len, Lp.HashSizeLog)) * SizeOf(LongWord));
     Lens := GetMem(Len);
     try
-      UseLzp := LzpEncode(@Buf[0], Len, Lp, Hash, Main, Lens, NMain, NLens, Esc);
+      UseLzp := LzpEncode(@Buf[0], Len, Lp, HashP, Main, Lens, NMain, NLens, Esc);
       // When the LZP takes away more than LZP_REDO_PCT % of the block with the method's
       // minimum, the data are made of short repeats that the BWT codes better itself (tables,
       // markup, databases): the block is filtered again with 4 times the minimum (adaptive
@@ -472,13 +474,13 @@ begin
       begin
         MinLen := 4 * MinLen;
         Lp := LzpParamsOf(P, Len, MinLen);
-        UseLzp := LzpEncode(@Buf[0], Len, Lp, Hash, Main, Lens, NMain, NLens, Esc);
+        UseLzp := LzpEncode(@Buf[0], Len, Lp, HashP, Main, Lens, NMain, NLens, Esc);
       end;
       if UseLzp and (NLens > 0) then Move(Lens^, Main[NMain], NLens);
     finally
       FreeMem(Lens);
+      FreeMem(HashP);
     end;
-    Hash := nil;
   end;
   // the sort works in place: on the LZP output (the input is no longer needed: if the block
   // does not compress it is rebuilt), or on the input itself (restored by the inverse BWT)
