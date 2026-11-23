@@ -23,7 +23,8 @@
      list has a `$text` or `$compressed` method, the content is checked: big files are sampled
      at 3 (from 128 KB) or 5 (from 8 MB) evenly spread places, 64 KB each, and the verdict of
      more than half of the samples counts; small files are judged together with their
-     neighbours of the same kind and extension (whole files until 64 KB). Text moves default
+     neighbours of the same kind and extension (runs of up to 1 MB: whole files from the
+     start of the run, and from its middle file, until 64 KB each; both must agree). Text moves default
      and compressed files to `$text`; compressed data moves any file to `$compressed` (cheap
      to code and no gain from the heavier methods); binary data moves text or compressed
      files to their next group. A `$wav`/`$bmp` file that does not look like samples or pixels
@@ -106,7 +107,8 @@ uses
 const
   KB = 1024;
   MB = 1024 * KB;
-  SAMPLE = 64 * KB;          // bytes per content sample
+  SAMPLE = 64 * KB;          // bytes of a content sample
+  RUN_BYTES = 1024 * KB;     // small files judged together, up to this many bytes
   SMALL_FILE = 64 * KB;      // below this, files are judged in runs with their neighbours
   MIN_JUDGE = 4 * KB;        // fewer bytes than this: no verdict (the name decides)
   RUN_FILES = 256;           // at most this many small files per run
@@ -609,6 +611,29 @@ var
   V, W: TVerdict;
   Votes: array[TVerdict] of Integer;
   F: ^TPlanFile;
+
+  { Whole files of the run from position From on, until Want bytes; returns the bytes read. }
+  function ReadRun(From, Want: Integer): Integer;
+  var
+    j: Integer;
+    G: ^TPlanFile;
+    Fr: TFileStream;
+  begin
+    Result := 0;
+    j := From;
+    while (j < Units[u].First + Units[u].Count) and (Result < Want) do
+    begin
+      G := @Files[Order[j]];
+      if OpenRead(G^.DiskPath, Fr) then
+      try
+        Inc(Result, ReadAt(Fr, 0, @Buf[Result], Want - Result));
+      finally
+        Fr.Free;
+      end;
+      Inc(j);
+    end;
+  end;
+
 begin
   SetLength(Buf, SAMPLE);
   for u := UFirst to UFirst + UCount - 1 do
@@ -639,9 +664,13 @@ begin
           else Samples := 5;
           for k := 0 to Samples - 1 do
           begin
-            if Samples = 1 then P := 0
-            else P := (Size - SAMPLE) * k div (Samples - 1);
-            n := ReadAt(Fs, P, @Buf[0], SAMPLE);
+            if Samples = 1 then
+              n := ReadAt(Fs, 0, @Buf[0], SAMPLE)
+            else
+            begin
+              P := (Size - SAMPLE) * k div (Samples - 1);
+              n := ReadAt(Fs, P, @Buf[0], SAMPLE);
+            end;
             Inc(Votes[VerdictOf(@Buf[0], n)]);
           end;
         finally
@@ -656,20 +685,27 @@ begin
       end
       else
       begin
-        // a run of small files: their bytes one after another, up to one sample
-        n := 0;
-        for i := First to First + Count - 1 do
+        // a run of small files: their bytes one after another; a long run is judged by
+        // two samples, from its first file and from the file in its middle
+        Size := 0;
+        for i := First to First + Count - 1 do Inc(Size, Files[Order[i]].Size);
+        if Size <= SAMPLE then
+          Verdict := VerdictOf(@Buf[0], ReadRun(First, SAMPLE))
+        else
         begin
-          if n >= SAMPLE then Break;
-          F := @Files[Order[i]];
-          if OpenRead(F^.DiskPath, Fs) then
-          try
-            Inc(n, ReadAt(Fs, 0, @Buf[n], SAMPLE - n));
-          finally
-            Fs.Free;
+          P := 0;
+          i := First;
+          while (i < First + Count - 1) and (2 * (P + Files[Order[i]].Size) <= Size) do
+          begin
+            Inc(P, Files[Order[i]].Size);
+            Inc(i);
           end;
+          V := VerdictOf(@Buf[0], ReadRun(First, SAMPLE));
+          W := VerdictOf(@Buf[0], ReadRun(i, SAMPLE));
+          if V = vNone then V := W
+          else if (W <> vNone) and (W <> V) then V := vMixed;
+          Verdict := V;
         end;
-        Verdict := VerdictOf(@Buf[0], n);
       end;
     end;
 end;
@@ -941,7 +977,7 @@ begin
       n := 0;
       while (j < Length(Order)) and (j - i < RUN_FILES) and (Kind[Order[j]] = t) and
             (K[Order[j]].Ext = K[Order[i]].Ext) and (Files[Order[j]].DiskPath <> '') and
-            (Files[Order[j]].Size > 0) and (Files[Order[j]].Size < SMALL_FILE) and (n < SAMPLE) do
+            (Files[Order[j]].Size > 0) and (Files[Order[j]].Size < SMALL_FILE) and (n < RUN_BYTES) do
       begin
         Inc(n, Files[Order[j]].Size);
         Inc(j);
@@ -963,7 +999,7 @@ begin
       n := 0;
       while (j < nu) and (j - u < 64) and (n < 4 * MB) do
       begin
-        if Units[j].Kind = ckData then Inc(n, SAMPLE * Min(5, 1 + Files[Order[Units[j].First]].Size div (16 * MB)))
+        if Units[j].Kind = ckData then Inc(n, 2 * SAMPLE)
         else Inc(n, SAMPLE);
         Inc(j);
       end;
