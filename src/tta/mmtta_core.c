@@ -823,10 +823,15 @@ ALWAYS u8 mm_p8(const i32 kind, u32 a, u32 b, u32 c)
   switch (kind) {
   case 2: return (u8)b;
   case 3: return (u8)(a + b - c);
-  case 4:
-    mx = a > b ? a : b;
-    mn = a < b ? a : b;
-    return (u8)(c >= mx ? mn : c <= mn ? mx : a + b - c);
+  case 4: {
+    /* branchless: the comparisons only make masks (they are unpredictable) */
+    u32 m1, m2;
+    mx = a ^ ((a ^ b) & (0u - (u32)(b > a)));
+    mn = a ^ b ^ mx;
+    m1 = 0u - (u32)(c >= mx);
+    m2 = 0u - (u32)(c <= mn);
+    return (u8)((mn & m1) | (~m1 & ((mx & m2) | (~m2 & (a + b - c)))));
+  }
   case 5: return (u8)((a + b) >> 1);
   default: return (u8)a;
   }
@@ -923,6 +928,30 @@ ALWAYS void mm2_dec8(mm_t *m, u8 *buf, const u8 *prev, usize nrows,
       for (i = 0; i < n; i++) cur[i] = (u8)(cur[i] + up[i]);
     } else {
       for (i = 0; i < N && i < n; i++) cur[i] = (u8)(cur[i] + up[i]);
+#if defined(__SSE2__) && !defined(TTAC_NO_SIMD)
+      if (N >= 3 && w >= 3) {
+        /* a whole pixel per step: the channels' serial chains side by side in one register
+           (4-byte loads; the last pixel of the row goes scalar so nothing is read past it) */
+        __m128i av = _mm_cvtsi32_si128((i32)(cur[0] | ((u32)cur[1] << 8) | ((u32)cur[2] << 16) |
+                                             (N == 4 ? (u32)cur[3] << 24 : 0)));
+        __m128i cv = _mm_cvtsi32_si128((i32)(up[0] | ((u32)up[1] << 8) | ((u32)up[2] << 16) |
+                                             (N == 4 ? (u32)up[3] << 24 : 0)));
+        for (x = 1; x < w - 1; x++) {
+          u32 rv, bv4, o;
+          __m128i bv, v;
+          __builtin_memcpy(&rv, cur + x * N, 4);
+          __builtin_memcpy(&bv4, up + x * N, 4);
+          bv = _mm_cvtsi32_si128((i32)bv4);
+          v = _mm_add_epi8(_mm_cvtsi32_si128((i32)rv), mm_p8v(kind, av, bv, cv));
+          o = (u32)_mm_cvtsi128_si32(v);
+          if (N == 4) __builtin_memcpy(cur + x * N, &o, 4);
+          else { cur[x * N] = (u8)o; cur[x * N + 1] = (u8)(o >> 8); cur[x * N + 2] = (u8)(o >> 16); }
+          av = v;
+          cv = bv;
+        }
+        i = (w - 1) * N;
+      }
+#endif
       for (; i < n; i++) cur[i] = (u8)(cur[i] + mm_p8(kind, cur[i - N], up[i], up[i - N]));
     }
   }
