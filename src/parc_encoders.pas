@@ -41,21 +41,6 @@ type
     constructor Create(ATarget: TOutStage);
   end;
 
-  { dispack (C_DisPack.cpp, DISPACK_METHOD::compress): junta tramos de 16 KB que parecen
-    ejecutable, los filtra con DisPackFilter y los escribe con tag; el resto va como datos.
-    Acá se acumula el bloque entero y se codifica en DoFinish. }
-  TDisPackEncStage = class(TOutStage)
-  private
-    FData: TBytes;
-    FLen: SizeInt;
-    FBlockSize: Integer;
-  protected
-    procedure DoWrite(Buf: PByte; Count: SizeInt); override;
-    procedure DoFinish; override;
-  public
-    constructor Create(ATarget: TOutStage; ABlockSize: Integer);
-  end;
-
   { 4x4 al comprimir (_4x4MTCompressor, C_4x4.cpp): U32 versión 0 y, por cada bloque de
     BlockSize bytes, [Int32 tamaño original, o -1 si se guardó sin comprimir][U32 largo][datos].
     Los bloques se comprimen en paralelo con el método interno y se escriben en orden. }
@@ -734,7 +719,7 @@ end;
 { Memoria de una etapa al comprimir un bloque de DataSize bytes. Lo exacto donde el codificador
   lo sabe (lzma, rep); lo demás, de lo que reserva cada uno:
   - ppmd: el modelo; plz: ventana + tablas; lzp: entrada + salida + hash;
-  - dict: ~3 veces el bloque; grzip: ~6 veces el bloque (BWT); dispack: ~3 veces su bloque;
+  - dict: ~3 veces el bloque; grzip: ~6 veces el bloque (BWT); dispack: ~2 veces su bloque;
   - orep: lo que dice OrepEncMemory (anillo de la ventana + un bloque, tabla de anclas, búferes);
   - cm y srep guardan todo el bloque (cm: ~4 veces más sus modelos de 64 MB; srep: ~3 veces);
   - 4x4: los trabajos en vuelo (hasta los hilos, máx. 16) por (método interno + 2 bloques);
@@ -784,7 +769,13 @@ begin
         end;
       'dict': Result := 3 * FirstMemParam(Parts, 64 * MB_) + MB_;
       'grzip': Result := 6 * FirstMemParam(Parts, 8 * MB_) + MB_;
-      'dispack', 'dispack070': Result := 3 * FirstMemParam(Parts, 8 * MB_) + MB_;
+      'dispack', 'dispack070':
+        begin
+          // the block plus look-ahead, and the streams (about the block again)
+          B := DispackBlockSize(Parts);
+          if (DataSize > 0) and (DataSize < B) then B := DataSize;
+          Result := 2 * B + 2 * MB_;
+        end;
       'cm': Result := 4 * DataSize + 320 * MB_;
       'srep': Result := 3 * DataSize + 64 * MB_;
       'lz4': Result := 3 * FirstMemParam(Parts, MB_) + MB_;
@@ -1025,45 +1016,6 @@ begin
       Emit(@Flag, 1);
       Emit(@Enc[0], Length(Enc));
     end;
-  end;
-  inherited DoFinish;
-end;
-
-{ TDisPackEncStage }
-
-constructor TDisPackEncStage.Create(ATarget: TOutStage; ABlockSize: Integer);
-begin
-  inherited Create(ATarget);
-  FBlockSize := ABlockSize;
-  if FBlockSize <= 0 then FBlockSize := DISPACK_BLOCK;
-  FData := nil;
-  FLen := 0;
-end;
-
-procedure TDisPackEncStage.DoWrite(Buf: PByte; Count: SizeInt);
-var
-  Cap: SizeInt;
-begin
-  if Count <= 0 then Exit;
-  if FLen + Count > Length(FData) then
-  begin
-    Cap := Length(FData);
-    if Cap = 0 then Cap := 64 * 1024;
-    while Cap < FLen + Count do Cap := Cap * 2;
-    SetLength(FData, Cap);
-  end;
-  Move(Buf^, FData[FLen], Count);
-  Inc(FLen, Count);
-end;
-
-procedure TDisPackEncStage.DoFinish;
-var
-  Enc: TBytes;
-begin
-  if FLen > 0 then
-  begin
-    Enc := DispackEncode(@FData[0], FLen, FBlockSize);
-    if Length(Enc) > 0 then Emit(@Enc[0], Length(Enc));
   end;
   inherited DoFinish;
 end;

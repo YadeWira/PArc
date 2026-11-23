@@ -1,1060 +1,1096 @@
-{ DisPack 0.70 (Compression/DisPack/DisPack.cpp): filtro para código x86 antes de comprimir.
-  Desarma el flujo de instrucciones en "streams" (opcodes, ModRM, desplazamientos, inmediatos,
-  destinos de call/jump) y convierte los destinos relativos en absolutos, con una tabla de
-  funciones por move-to-front. Es reversible byte a byte: un opcode que no se entiende se
-  guarda con el escape 0xF1.
+{ dispack: PArc's own filter for x86 and x86-64 machine code (MIT; it replaces FreeArc's DisPack
+  0.70 and is not derived from it). Method names `dispack`, `dispack070` and the preset `exe2`.
 
-  El bloque guardado es el flujo de DISPACK_METHOD (C_DisPack.cpp): [CHUNK_SIZE u32] y después
-  tramos con tag: TAG_DATA (datos tal cual) o TAG_EXE (un tramo filtrado con DisPackFilter). }
+  Executable code compresses poorly as it is: every instruction mixes opcodes, register fields,
+  displacements, immediates and relative branch targets, each with its own statistics, and a call
+  to the same function has a different relative offset from every place it is called. The filter
+  decodes the instructions (own length decoder written from the Intel and AMD opcode maps) and
+  sends each field to its own stream:
+
+    OP     prefixes, opcode bytes (with the VEX/EVEX payload) and escapes
+    MODRM  ModRM bytes             SIB    SIB bytes
+    D8     8-bit displacements     D32    32-bit (and 16-bit) base-relative displacements
+    ADDR   absolute addresses: [disp32] without a base register, moffs, and RIP-relative
+           displacements converted to absolute (x86-64)
+    I8 / I16 / I32   immediates (I32 also takes the 64-bit ones)
+    CALL   E8 targets as absolute addresses      JMP    E9 / 0F 8x targets as absolute
+    J8     8-bit relative branches               JT     entries of jump tables in the code
+    RAW    the bytes that are not code
+  Absolute addresses are written most significant byte first (their high bytes repeat and
+  predict the rest). Every decision of the walker is made from bytes the decoder has already
+  rebuilt, so it is exact for any input; garbage parsed as code is only less compressible.
+
+  Which bytes are code: the encoder looks for PE (i386 / AMD64, not .NET) and ELF (i386 /
+  x86-64) headers in the data and takes their code sections (PE) or executable segments (ELF)
+  with their bitness and virtual addresses; spans without headers are classified by a density
+  test of near calls (E8 with a small offset) in 4 KB windows, 64-bit when REX.W prefixes are
+  common. Inside sections from a header, runs of 32-bit pointers or image-relative offsets into
+  the same section (switch tables of MSVC and others) go to the JT stream.
+
+  Stream (version 1; docs/formato/FORMATO-PARC.md §6.6):
+    U8 version (= 1), then blocks until the end of the stream:
+      VInt Len (bytes of the block, 1..block size), VInt NReg (code regions),
+      NReg x ( VInt Gap (raw bytes before the region), VInt RegLen, U8 Mode (0 = 32-bit,
+               1 = 64-bit), U32 Va (virtual address of its first byte), U32 ImageBase ),
+      XF_NSTREAMS x VInt StreamLen,
+      zero padding to a multiple of 4 bytes from the version byte, then the streams in order,
+      each followed by zero padding to a multiple of 4.
+    VInt is LEB128 (7 bits per byte, low group first). U32 little endian.
+  The block's bytes are: Gap raw bytes (from RAW), the region (decoded from the streams), ...,
+  and the rest of the block from RAW. }
 unit parc_dispack;
 
 {$mode objfpc}{$H+}
+{$R-}{$Q-}
+{$pointermath on}
+{$inline on}
 
 interface
 
 uses
-  SysUtils, parc_stream, parc_bytes;
+  SysUtils, parc_stream, parc_outstream;
 
 const
-  DISPACK_TAG_DATA = $C71B3AE1;
-  DISPACK_TAG_EXE  = $C71B3AE2;
-  DISPACK_CHUNK    = 16 * 1024;            // CHUNK_SIZE de C_DisPack.cpp
-  DISPACK_BLOCK    = 8 * 1024 * 1024;      // BlockSize por defecto
+  XF_VERSION = 1;
+  DISPACK_BLOCK = 8 * 1024 * 1024;        // default block
+  XF_MAX_BLOCK = 1 shl 30;
 
-{ Filtra Src (Origin = dirección base del tramo) y devuelve el flujo de streams. }
-function DisPackFilter(Src: PByte; SrcLen: Integer; Origin: LongWord; out OutLen: Integer): TBytes;
-
-{ Deshace DisPackFilter: DstLen tiene que ser el tamaño original. }
-function DisPackUnFilter(Src: PByte; SrcLen: Integer; Dst: PByte; DstLen: Integer; Memory: LongWord): Boolean;
-
-{ Bloque completo, como DISPACK_METHOD::compress/decompress. }
-function DispackEncode(Src: PByte; SrcLen: Integer; BlockSize: Integer): TBytes;
-
-{ BlockSize de los parámetros de dispack (parse_DISPACK: :b<mem>, o una memoria suelta;
-  :x queda en el texto pero no cambia el flujo). Default 8 MB. }
-function DispackBlockSize(const Params: TStringArray): Integer;
-function DispackDecode(Src: PByte; SrcLen: Integer; Dst: PByte; DstLen: Integer; BlockSize: Integer): Boolean;
+  XS_OP = 0; XS_MODRM = 1; XS_SIB = 2; XS_D8 = 3; XS_D32 = 4; XS_ADDR = 5; XS_I8 = 6;
+  XS_I16 = 7; XS_I32 = 8; XS_CALL = 9; XS_JMP = 10; XS_J8 = 11; XS_JT = 12; XS_RAW = 13;
+  XF_NSTREAMS = 14;
 
 type
-  { Descomprime un bloque dispack (wrapper) como un stream. }
+  TXfRegion = record
+    Start, Len: Int64;        // absolute in the stream (encoder) or in the block
+    Mode: Byte;               // 32 or 64
+    Va, ImageBase: LongWord;
+    Tables: Boolean;          // look for jump tables (sections from a header)
+  end;
+  TXfRegionArray = array of TXfRegion;
+
+  TXfCtx = record
+    P, E: array[0..XF_NSTREAMS - 1] of PByte;   // current position, end (decoder)
+    Buf: array[0..XF_NSTREAMS - 1] of array of Byte;   // encoder buffers
+    Mtf: array[0..255] of LongWord;                     // recent call targets
+  end;
+
+  { Encoder stage. Params = the method split on ':' (Params[0] = 'dispack'/'dispack070'). }
+  TDisPackEncStage = class(TOutStage)
+  private
+    FBlock: SizeInt;
+    FBuf: array of Byte;
+    FLen: SizeInt;
+    FBase: Int64;                 // stream position of FBuf[0]
+    FRegs: TXfRegionArray;        // code ranges found in headers (absolute)
+    FNRegs: Integer;
+    FSpans: TXfRegionArray;       // whole executables found (no heuristic inside)
+    FNSpans: Integer;
+    FHeaderDone: Boolean;
+    FOutPos: QWord;
+    FCtx: TXfCtx;
+    procedure AddReg(const R: TXfRegion);
+    procedure AddSpan(AStart, ALen: Int64);
+    procedure ScanHeaders(N: SizeInt);
+    procedure ProcessBlock(N: SizeInt);
+    procedure DumpBlock(const Rs: TXfRegionArray; NR: Integer; const Len: array of SizeInt);
+    procedure Out(Buf: PByte; Count: SizeInt);
+  protected
+    procedure DoWrite(Buf: PByte; Count: SizeInt); override;
+    procedure DoFinish; override;
+  public
+    constructor Create(ATarget: TOutStage; ABlockSize: SizeInt);
+  end;
+
   TDisPackStage = class(TInStage)
   private
-    FData: TBytes;
-    FLen, FPos: Integer;
-    FChunkSize, FBlockSize: LongWord;
-    FBase: LongWord;
-    FStarted: Boolean;
-    FOut: TBytes;
-    FOutPos, FOutLen: Integer;
-    function NextPiece: Boolean;
+    FMaxBlock: SizeInt;
+    FIn: array of Byte;
+    FOut: array of Byte;
+    FOutLen, FOutPos: SizeInt;
+    FInPos: QWord;
+    FStarted, FEof: Boolean;
+    function RdByte: Byte;
+    function RdVInt: QWord;
+    function NextBlock: Boolean;
   public
-    constructor Create(ASource: TInStage; ABlockSize: LongWord);
+    constructor Create(ASource: TInStage; ABlockSize: SizeInt);
     function Read(Buf: PByte; Count: SizeInt): SizeInt; override;
   end;
 
+{ Block size of the method parameters: b<mem> or a bare memory size; x is accepted and ignored.
+  Default 8 MB. }
+function DispackBlockSize(const Params: TStringArray): Integer;
+
+{ The encoder's choice of code regions in Data[0..Len) (Base = stream position of Data[0]),
+  exposed for tests: headers and the heuristic. }
+function XfFindRegions(Data: PByte; Len: SizeInt): TXfRegionArray;
+
+{ Whole-buffer helpers (tests): encode Src into a dispack stream and back. }
+function XfEncodeBuf(Src: PByte; Len: SizeInt; BlockSize: SizeInt): TBytes;
+
+var
+  XfDumpDir: string = '';    // tests: append each stream to <dir>/s<k>.bin and list the regions
+
 implementation
 
+uses
+  parc_bytes;
+
 const
-  MAXINSTR = 15;
-  ST_OP = 0;
-  ST_SIB = 1;
-  ST_CALL_IDX = 2;
-  ST_DISP8_R0 = 3;                 // .. ST_DISP8_R0+7
-  ST_JUMP8 = 11;
-  ST_IMM8 = 12;
-  ST_IMM16 = 13;
-  ST_IMM32 = 14;
-  ST_DISP32 = 15;
-  ST_ADDR32 = 16;
-  ST_CALL32 = 17;
-  ST_JUMP32 = 18;
-  ST_MAX = 19;
-  ST_MODRM = ST_OP;
-  ST_OP2 = ST_OP;
-  ST_AJUMP32 = ST_JUMP32;
-  ST_JUMPTBL_COUNT = ST_OP;
+  XF_ESC = $D6;              // SALC: undefined in 64-bit mode, unused by compilers
+  XF_SUB_LIT = 0;            // ESC 0: the byte D6 itself
+  XF_MAXINSN = 64;           // ESC 1..63: that many raw bytes (end of a region)
+  XF_SUB_VA = $80;           // ESC 80..BF: jump table of 2..65 addresses
+  XF_SUB_RVA = $C0;          // ESC C0..FF: jump table of 2..65 image-relative addresses (>= 3)
+  XF_JT_MAX = 65;
+  XF_MAXPFX = 14;
+  XF_SLACK = 32 * 1024;      // free bytes per stream between checks (64 instructions)
+  XF_LOOK = 64 * 1024;       // look-ahead for headers that cross a block end
+  XF_PAD = 64;               // zero bytes after the plain data (the walker may read past)
+  XF_WIN = 4096;             // heuristic window
 
-  fNM = $0; fAM = $1; fMR = $2; fMEXTRA = $3; fMODE = $3;
-  fNI = $0; fBI = $4; fWI = $8; fDI = $c; fTYPE = $c;
-  fAD = $0; fDA = $4; fBR = $8; fDR = $c; fERR = $f;
-
-  OP_2BYTE = $0f; OP_OSIZE = $66; OP_CALLF = $9a; OP_RETNI = $c2; OP_RETN = $c3;
-  OP_ENTER = $c8; OP_INT3 = $cc; OP_INTO = $ce; OP_CALLN = $e8; OP_JMPF = $ea; OP_ICEBP = $f1;
-  ESCAPE = OP_ICEBP;
-  JUMPTAB = OP_INTO;
-
-  Table1: array[0..255] of Byte = (
-$02,$02,$02,$02,$04,$0c,$00,$00,$02,$02,$02,$02,$04,$0c,$00,$00,
-$02,$02,$02,$02,$04,$0c,$00,$00,$02,$02,$02,$02,$04,$0c,$00,$00,
-$02,$02,$02,$02,$04,$0c,$00,$00,$02,$02,$02,$02,$04,$0c,$00,$00,
-$02,$02,$02,$02,$04,$0c,$00,$00,$02,$02,$02,$02,$04,$0c,$00,$00,
-$00,$00,$00,$00,$00,$00,$00,$00,$00,$00,$00,$00,$00,$00,$00,$00,
-$00,$00,$00,$00,$00,$00,$00,$00,$00,$00,$00,$00,$00,$00,$00,$00,
-$00,$00,$02,$02,$00,$00,$00,$00,$0c,$0e,$04,$06,$00,$00,$00,$00,
-$09,$09,$09,$09,$09,$09,$09,$09,$09,$09,$09,$09,$09,$09,$09,$09,
-$06,$0e,$06,$06,$02,$02,$02,$02,$02,$02,$02,$02,$02,$02,$02,$02,
-$00,$00,$00,$00,$00,$00,$00,$00,$00,$00,$05,$00,$00,$00,$00,$00,
-$01,$01,$01,$01,$00,$00,$00,$00,$04,$0c,$00,$00,$00,$00,$00,$00,
-$04,$04,$04,$04,$04,$04,$04,$04,$0c,$0c,$0c,$0c,$0c,$0c,$0c,$0c,
-$06,$06,$08,$00,$02,$02,$06,$0e,$04,$00,$08,$00,$00,$04,$0f,$00,
-$02,$02,$02,$02,$04,$04,$00,$00,$02,$02,$02,$02,$02,$02,$02,$02,
-$09,$09,$09,$09,$04,$04,$04,$04,$0d,$0d,$01,$09,$00,$00,$00,$00,
-$00,$0f,$00,$00,$00,$00,$03,$03,$00,$00,$00,$00,$00,$00,$03,$03);
-
-  Table2: array[0..255] of Byte = (
-$0f,$0f,$0f,$0f,$0f,$0f,$00,$0f,$00,$00,$0f,$0f,$0f,$0f,$0f,$0f,
-$02,$02,$02,$02,$02,$02,$02,$02,$02,$0f,$0f,$0f,$0f,$0f,$0f,$0f,
-$02,$02,$02,$02,$0f,$0f,$0f,$0f,$02,$02,$02,$02,$02,$02,$02,$02,
-$00,$00,$00,$00,$00,$00,$0f,$00,$0f,$0f,$0f,$0f,$0f,$0f,$0f,$0f,
-$02,$02,$02,$02,$02,$02,$02,$02,$02,$02,$02,$02,$02,$02,$02,$02,
-$02,$02,$02,$02,$02,$02,$02,$02,$02,$02,$02,$02,$02,$02,$02,$02,
-$02,$02,$02,$02,$02,$02,$02,$02,$02,$02,$02,$02,$02,$02,$02,$02,
-$06,$06,$06,$06,$02,$02,$02,$00,$0f,$0f,$0f,$0f,$0f,$0f,$02,$02,
-$0d,$0d,$0d,$0d,$0d,$0d,$0d,$0d,$0d,$0d,$0d,$0d,$0d,$0d,$0d,$0d,
-$02,$02,$02,$02,$02,$02,$02,$02,$02,$02,$02,$02,$02,$02,$02,$02,
-$00,$00,$00,$02,$06,$02,$02,$02,$0f,$0f,$0f,$02,$06,$02,$0f,$02,
-$02,$02,$02,$02,$02,$02,$02,$02,$0f,$0f,$0f,$02,$02,$02,$02,$02,
-$02,$02,$02,$02,$02,$02,$02,$02,$00,$00,$00,$00,$00,$00,$00,$00,
-$02,$02,$02,$02,$02,$02,$02,$02,$02,$02,$02,$02,$02,$02,$02,$02,
-$02,$02,$02,$02,$02,$02,$02,$02,$02,$02,$02,$02,$02,$02,$02,$02,
-$02,$02,$02,$02,$02,$02,$02,$02,$02,$02,$02,$02,$02,$02,$02,$0f);
-
-  TableX: array[0..31] of Byte = (
-$06,$0f,$02,$02,$02,$02,$02,$02,$0e,$0f,$02,$02,$02,$02,$02,$02,
-$02,$02,$0f,$0f,$0f,$0f,$0f,$0f,$02,$02,$02,$0f,$02,$0f,$02,$0f);
-
-function IsTag(V: LongWord): Boolean; inline;
-begin
-  Result := (V xor DISPACK_TAG_DATA) < $10;
-end;
+  { table entries }
+  XF_IMM = $0F;
+  XF_MODRM = $10;
+  XF_PFX = $20;
+  XF_0F = $40;
+  XF_VEX = $80;
+  XI_NONE = 0; XI_B = 1; XI_W = 2; XI_Z = 3; XI_V = 4; XI_ENTER = 5; XI_FAR = 6;
+  XI_MOFFS = 7; XI_G3B = 8; XI_G3Z = 9; XI_REL8 = 10; XI_CALL = 11; XI_JMP = 12;
 
 type
-  TByteBuf = record
-    Data: TBytes;
-    Len, Cap: Integer;
+  TXfTab = array[0..255] of Byte;
+  PXfTab = ^TXfTab;
+
+var
+  XfTab32, XfTab64, XfTab0F: TXfTab;
+  XfMap: array[0..XF_NSTREAMS - 1] of Integer;
+  XfNoJT, XfLE: Boolean;
+  XfMtfSize, XfJtVa, XfJtRva: Integer;
+
+procedure InitExperiments;
+var
+  s: string;
+  i, k: Integer;
+  L: TStringArray;
+begin
+  for i := 0 to XF_NSTREAMS - 1 do XfMap[i] := i;
+  s := GetEnvironmentVariable('XF_MAP');
+  if s <> '' then
+  begin
+    L := s.Split([',']);
+    for i := 0 to High(L) do
+      if i < XF_NSTREAMS then
+      begin
+        k := StrToInt(L[i]);
+        XfMap[i] := k;
+      end;
   end;
-
-function Load16LE(P: PByte): Word; inline;
-begin
-  Result := Word(P[0]) or (Word(P[1]) shl 8);
+  XfNoJT := GetEnvironmentVariable('XF_NOJT') <> '';
+  XfLE := GetEnvironmentVariable('XF_LE') <> '';
+  XfJtVa := StrToIntDef(GetEnvironmentVariable('XF_JTVA'), 0);
+  XfJtRva := StrToIntDef(GetEnvironmentVariable('XF_JTRVA'), 0);
+  XfMtfSize := StrToIntDef(GetEnvironmentVariable('XF_MTF'), 0);
 end;
 
-function Load32LE(P: PByte): LongWord; inline;
+function LoadLE32(P: PByte): LongWord; inline;
 begin
+{$IFDEF ENDIAN_LITTLE}
+  Result := Unaligned(PLongWord(P)^);
+{$ELSE}
   Result := LongWord(P[0]) or (LongWord(P[1]) shl 8) or (LongWord(P[2]) shl 16) or (LongWord(P[3]) shl 24);
+{$ENDIF}
 end;
 
-function Load16BE(P: PByte): Word; inline;
+procedure StoreLE32(P: PByte; V: LongWord); inline;
 begin
-  Result := (Word(P[0]) shl 8) or Word(P[1]);
+{$IFDEF ENDIAN_LITTLE}
+  Unaligned(PLongWord(P)^) := V;
+{$ELSE}
+  P[0] := Byte(V); P[1] := Byte(V shr 8); P[2] := Byte(V shr 16); P[3] := Byte(V shr 24);
+{$ENDIF}
 end;
 
-function Load32BE(P: PByte): LongWord; inline;
+function LoadBE32(P: PByte): LongWord; inline;
 begin
+  if XfLE then Exit(LoadLE32(P));
   Result := (LongWord(P[0]) shl 24) or (LongWord(P[1]) shl 16) or (LongWord(P[2]) shl 8) or LongWord(P[3]);
 end;
 
-procedure Store16LE(P: PByte; V: Word); inline;
+procedure StoreBE32(P: PByte; V: LongWord); inline;
 begin
-  P[0] := Byte(V and $FF); P[1] := Byte((V shr 8) and $FF);
+  if XfLE then begin StoreLE32(P, V); Exit; end;
+  P[0] := Byte(V shr 24); P[1] := Byte(V shr 16); P[2] := Byte(V shr 8); P[3] := Byte(V);
 end;
 
-procedure Store32LE(P: PByte; V: LongWord); inline;
+function LoadLE16(P: PByte): LongWord; inline;
 begin
-  P[0] := Byte(V and $FF); P[1] := Byte((V shr 8) and $FF);
-  P[2] := Byte((V shr 16) and $FF); P[3] := Byte((V shr 24) and $FF);
+  Result := LongWord(P[0]) or (LongWord(P[1]) shl 8);
 end;
 
-procedure Buf8(var B: TByteBuf; V: Byte); inline;
-begin
-  if B.Len = B.Cap then
-  begin
-    if B.Cap = 0 then B.Cap := 256 else B.Cap := B.Cap * 2;
-    SetLength(B.Data, B.Cap);
-  end;
-  B.Data[B.Len] := V;
-  Inc(B.Len);
-end;
+{ ---------------------------------------------------------------- opcode tables }
 
-procedure Buf16B(var B: TByteBuf; V: Word); inline;   // big endian
-begin
-  Buf8(B, Byte(V shr 8));
-  Buf8(B, Byte(V));
-end;
-
-procedure Buf32B(var B: TByteBuf; V: LongWord); inline;   // big endian
-begin
-  Buf8(B, Byte(V shr 24));
-  Buf8(B, Byte(V shr 16));
-  Buf8(B, Byte(V shr 8));
-  Buf8(B, Byte(V));
-end;
-
-function DisPackFilter(Src: PByte; SrcLen: Integer; Origin: LongWord; out OutLen: Integer): TBytes;
-var
-  Buf: array[0..ST_MAX - 1] of TByteBuf;
-  FuncTable: array[0..255] of LongWord;
-  NextIsFunc: Boolean;
-  CodeStart, CodeEnd: LongWord;
-  Sizes: array[0..ST_MAX - 1] of Integer;
-  Pos, Used, I, Total: Integer;
-  CurAvail, Cur: Integer;
-  CurP: PByte;
-  CurFail: Boolean;
-
-  procedure Put8(St: Integer; V: Byte); inline;
-  begin Buf8(Buf[St], V); end;
-
-  procedure Put16(St: Integer; V: Word); inline;
-  begin Buf16B(Buf[St], V); end;
-
-  procedure Put32(St: Integer; V: LongWord); inline;
-  begin Buf32B(Buf[St], V); end;
-
-  function Take8: Byte;
-  begin
-    if Cur >= CurAvail then begin CurFail := True; Result := 0; end
-    else begin Result := CurP[Cur]; Inc(Cur); end;
-  end;
-
-  function Take16LE: Word;
-  begin
-    if Cur + 2 > CurAvail then begin CurFail := True; Result := 0; end
-    else begin Result := Load16LE(CurP + Cur); Inc(Cur, 2); end;
-  end;
-
-  function Take32LE: LongWord;
-  begin
-    if Cur + 4 > CurAvail then begin CurFail := True; Result := 0; end
-    else begin Result := Load32LE(CurP + Cur); Inc(Cur, 4); end;
-  end;
-
-  procedure Copy8(St: Integer); inline;
-  begin Put8(St, Take8); end;
-
-  procedure Copy16(St: Integer); inline;
-  begin Put16(St, Take16LE); end;
-
-  procedure Copy32(St: Integer); inline;
-  begin Put32(St, Take32LE); end;
-
-  procedure MoveToFront(Pos: Integer; Val: LongWord); inline;
-  begin
-    while Pos > 0 do
-    begin
-      FuncTable[Pos] := FuncTable[Pos - 1];
-      Dec(Pos);
-    end;
-    FuncTable[0] := Val;
-  end;
-
-  procedure AddMTF(Val: LongWord); inline;
-  begin MoveToFront(255, Val); end;
-
-  function FindMTF(Val: LongWord): Integer;
-  var i: Integer;
-  begin
-    for i := 0 to 254 do
-      if FuncTable[i] = Val then
-      begin
-        MoveToFront(i, Val);
-        Exit(i);
-      end;
-    AddMTF(Val);
-    Result := -1;
-  end;
-
-  function DetectJumpTable(P: PByte; Avail: Integer; Addr: LongWord): Integer;
-  var nMax, Count: Integer; Coded: LongWord;
-  begin
-    Result := 0;
-    nMax := Integer((CodeEnd - Addr) div 4);
-    if nMax > Avail div 4 then nMax := Avail div 4;
-    Count := 0;
-    while Count < nMax do
-    begin
-      Coded := Load32LE(P + Count * 4);
-      if (Coded >= CodeStart) and (Coded < CodeEnd) then Inc(Count) else Break;
-    end;
-    if Count < 3 then Count := 0;
-    Result := Count;
-  end;
-
-  function ProcessInstr(P: PByte; Avail: Integer; Memory: LongWord; out BytesUsed: Integer): Boolean;
-  var
-    NJump, Count, Remaining, I2, JCur, Idx, Code, Code2, Flags, ModRM, Sib: Integer;
-    O16: Boolean;
-    Target, Coded: LongWord;
-  begin
-    BytesUsed := 0;
-    NJump := DetectJumpTable(P, Avail, Memory);
-    if NJump > 0 then
-    begin
-      Remaining := NJump;
-      JCur := 0;
-      while Remaining > 0 do
-      begin
-        if Remaining < 256 then Count := Remaining else Count := 256;
-        Put8(ST_OP, JUMPTAB);
-        Put8(ST_JUMPTBL_COUNT, Byte(Count - 1));
-        for I2 := 0 to Count - 1 do
-        begin
-          Coded := Load32LE(P + JCur);
-          Inc(JCur, 4);
-          Idx := FindMTF(Coded);
-          Put8(ST_CALL_IDX, Byte(Idx + 1));
-          if Idx = -1 then Put32(ST_CALL32, Coded);
-        end;
-        Dec(Remaining, Count);
-      end;
-      BytesUsed := NJump * 4;
-      Exit(True);
-    end;
-
-    CurP := P; CurAvail := Avail; Cur := 0; CurFail := False;
-
-    Code := Take8;
-    Code2 := 0;
-    O16 := False;
-    if CurFail then Exit(False);
-
-    if NextIsFunc and (Code <> OP_INT3) then
-    begin
-      AddMTF(Memory);
-      NextIsFunc := False;
-    end;
-
-    if Code = OP_OSIZE then
-    begin
-      O16 := True;
-      Code := Take8;
-      if CurFail then Exit(False);
-    end;
-
-    if Code = OP_2BYTE then
-    begin
-      Code2 := Take8;
-      if CurFail then Exit(False);
-      Flags := Table2[Code2];
-    end
-    else
-      Flags := Table1[Code];
-
-    if (Code = OP_RETNI) or (Code = OP_RETN) or (Code = OP_INT3) then
-      NextIsFunc := True;
-
-    if Flags = fMEXTRA then
-    begin
-      // usa el ModRM que viene, sin consumirlo (parse_4x4: *instr)
-      if Cur >= CurAvail then Exit(False);
-      Flags := TableX[((P[Cur] shr 3) and 7) or ((Code and $01) shl 3) or ((Code and $08) shl 1)];
-    end;
-
-    if Flags <> fERR then
-    begin
-      if O16 then Put8(ST_OP, OP_OSIZE);
-      Put8(ST_OP, Code);
-      if Code = OP_2BYTE then Put8(ST_OP2, Code2);
-
-      if (Code = OP_CALLF) or (Code = OP_JMPF) or (Code = OP_ENTER) then
-        Copy16(ST_IMM16);
-
-      if (Flags and fMODE) = fMR then
-      begin
-        ModRM := Take8;
-        if CurFail then Exit(False);
-        Put8(ST_MODRM, ModRM);
-        Sib := 0;
-        if ((ModRM and $07) = 4) and (ModRM < $c0) then
-        begin
-          Sib := Take8;
-          if CurFail then Exit(False);
-          Put8(ST_SIB, Sib);
-        end;
-        if (ModRM and $c0) = $40 then Copy8(ST_DISP8_R0 + (ModRM and $07));
-        if ((ModRM and $c0) = $80) or ((ModRM and $c7) = $05) or
-           ((ModRM < $40) and ((Sib and $07) = 5)) then
-        begin
-          if (ModRM and $c7) = $05 then Copy32(ST_ADDR32) else Copy32(ST_DISP32);
-        end;
-      end;
-
-      if (Flags and fMODE) = fAM then
-      begin
-        case Flags and fTYPE of
-          fAD: Copy32(ST_ADDR32);
-          fDA: Copy32(ST_AJUMP32);
-          fBR: Copy8(ST_JUMP8);
-          fDR:
-            begin
-              Target := Take32LE;
-              if CurFail then Exit(False);
-              Inc(Target, LongWord(Cur) + Memory);   // (instr - start) = Cur después del fetch
-              if Code <> OP_CALLN then
-                Put32(ST_JUMP32, Target)
-              else
-              begin
-                Idx := FindMTF(Target);
-                Put8(ST_CALL_IDX, Byte(Idx + 1));
-                if Idx = -1 then Put32(ST_CALL32, Target);
-              end;
-            end;
-        end;
-      end
-      else
-        case Flags and fTYPE of
-          fBI: Copy8(ST_IMM8);
-          fWI: Copy16(ST_IMM16);
-          fDI:
-            if not O16 then Copy32(ST_IMM32) else Copy16(ST_IMM16);
-        end;
-
-      if CurFail then Exit(False);
-      BytesUsed := Cur;
-      Exit(True);
-    end
-    else
-    begin
-      Put8(ST_OP, ESCAPE);
-      Put8(ST_OP, P[0]);
-      BytesUsed := 1;
-      Exit(True);
-    end;
-  end;
-
-  procedure SaveCheckpoints;
-  var i: Integer;
-  begin
-    for i := 0 to ST_MAX - 1 do Sizes[i] := Buf[i].Len;
-  end;
-
-  procedure RestoreCheckpoints;
-  var i: Integer;
-  begin
-    for i := 0 to ST_MAX - 1 do Buf[i].Len := Sizes[i];
-  end;
-
-begin
-  Result := nil;
-  for I := 0 to ST_MAX - 1 do
-  begin
-    Buf[I].Data := nil; Buf[I].Len := 0; Buf[I].Cap := 0;
-  end;
-  FillChar(FuncTable, SizeOf(FuncTable), 0);
-  NextIsFunc := True;
-  CodeStart := Origin;
-  CodeEnd := Origin + LongWord(SrcLen);
-
-  Pos := 0;
-  if SrcLen > MAXINSTR then
-    while Pos < SrcLen - MAXINSTR do
-    begin
-      if not ProcessInstr(Src + Pos, SrcLen - Pos, Origin + LongWord(Pos), Used) then Break;
-      Inc(Pos, Used);
-    end;
-
-  // Últimos bytes: si una instrucción se pasa del final, se deshace y se guarda como escape.
-  while Pos < SrcLen do
-  begin
-    SaveCheckpoints;
-    if not ProcessInstr(Src + Pos, SrcLen - Pos, Origin + LongWord(Pos), Used) or (Pos + Used > SrcLen) then
-    begin
-      RestoreCheckpoints;
-      Break;
-    end;
-    Inc(Pos, Used);
-  end;
-
-  while Pos < SrcLen do
-  begin
-    Put8(ST_OP, ESCAPE);
-    Put8(ST_OP, Src[Pos]);
-    Inc(Pos);
-  end;
-
-  Total := ST_MAX * 4;
-  for I := 0 to ST_MAX - 1 do Inc(Total, Buf[I].Len);
-  SetLength(Result, Total);
-  for I := 0 to ST_MAX - 1 do Store32LE(@Result[I * 4], LongWord(Buf[I].Len));
-  Total := ST_MAX * 4;
-  for I := 0 to ST_MAX - 1 do
-  begin
-    if Buf[I].Len > 0 then Move(Buf[I].Data[0], Result[Total], Buf[I].Len);
-    Inc(Total, Buf[I].Len);
-  end;
-  OutLen := Length(Result);
-end;
-
-function DisPackUnFilter(Src: PByte; SrcLen: Integer; Dst: PByte; DstLen: Integer; Memory: LongWord): Boolean;
-var
-  Stream, StreamEnd: array[0..ST_MAX - 1] of Integer;
-  FuncTable: array[0..255] of LongWord;
-  NextIsFunc: Boolean;
-  Hdr, Cur, OutPos, Code, Code2, Flags, ModRM, Sib, Idx, Count, I: Integer;
-  O16: Boolean;
-  Target, Mem: LongWord;
-
-  procedure MoveToFront(Pos: Integer; Val: LongWord);
-  begin
-    while Pos > 0 do
-    begin
-      FuncTable[Pos] := FuncTable[Pos - 1];
-      Dec(Pos);
-    end;
-    FuncTable[0] := Val;
-  end;
-
-  procedure AddMTF(Val: LongWord); inline;
-  begin MoveToFront(255, Val); end;
-
-  function SrcRoom(St, N: Integer): Boolean; inline;
-  begin Result := Stream[St] + N <= StreamEnd[St]; end;
-
-  function DstRoom(N: Integer): Boolean; inline;
-  begin Result := OutPos + N <= DstLen; end;
-
-  function GetStream8(St: Integer; out V: Integer): Boolean;
-  begin
-    if not SrcRoom(St, 1) then Exit(False);
-    V := Src[Stream[St]]; Inc(Stream[St]); Result := True;
-  end;
-
-  function GetStream16B(St: Integer; out V: Word): Boolean;
-  begin
-    if not SrcRoom(St, 2) then Exit(False);
-    V := Load16BE(Src + Stream[St]); Inc(Stream[St], 2); Result := True;
-  end;
-
-  function GetStream32B(St: Integer; out V: LongWord): Boolean;
-  begin
-    if not SrcRoom(St, 4) then Exit(False);
-    V := Load32BE(Src + Stream[St]); Inc(Stream[St], 4); Result := True;
-  end;
-
-  function PutOut8(V: Byte): Boolean;
-  begin
-    if not DstRoom(1) then Exit(False);
-    Dst[OutPos] := V; Inc(OutPos); Result := True;
-  end;
-
-  function PutOut16LE(V: Word): Boolean;
-  begin
-    if not DstRoom(2) then Exit(False);
-    Store16LE(Dst + OutPos, V); Inc(OutPos, 2); Result := True;
-  end;
-
-  function PutOut32LE(V: LongWord): Boolean;
-  begin
-    if not DstRoom(4) then Exit(False);
-    Store32LE(Dst + OutPos, V); Inc(OutPos, 4); Result := True;
-  end;
-
-  function CopyStream8(St: Integer): Boolean;
-  var V: Integer;
-  begin
-    Result := GetStream8(St, V) and PutOut8(V);
-  end;
-
-  function CopyStream16(St: Integer): Boolean;
-  var V: Word;
-  begin
-    Result := GetStream16B(St, V) and PutOut16LE(V);
-  end;
-
-  function CopyStream32(St: Integer): Boolean;
-  var V: LongWord;
-  begin
-    Result := GetStream32B(St, V) and PutOut32LE(V);
-  end;
-
-  function TakeMTF(Idx: Integer; out Target: LongWord): Boolean;
-  begin
-    Result := True;
-    if Idx <> 0 then
-    begin
-      Target := FuncTable[Idx - 1];
-      MoveToFront(Idx - 1, Target);
-    end
-    else if GetStream32B(ST_CALL32, Target) then
-      AddMTF(Target)
-    else
-      Result := False;
-  end;
-
-var
-  StartPos: Integer;
-begin
-  Result := False;
-  if SrcLen < ST_MAX * 4 then Exit;
-
-  Hdr := 0;
-  Cur := ST_MAX * 4;
-  for I := 0 to ST_MAX - 1 do
-  begin
-    Stream[I] := Cur;
-    Inc(Cur, Integer(Load32LE(Src + Hdr)));
-    Inc(Hdr, 4);
-    if Cur > SrcLen then Exit;
-    StreamEnd[I] := Cur;
-  end;
-  if Cur <> SrcLen then Exit;
-
-  FillChar(FuncTable, SizeOf(FuncTable), 0);
-  NextIsFunc := True;
-  OutPos := 0;
-
-  while Stream[ST_OP] < StreamEnd[ST_OP] do
-  begin
-    StartPos := OutPos;
-    Mem := Memory + LongWord(OutPos);
-
-    if not GetStream8(ST_OP, Code) then Exit;
-    if Code = JUMPTAB then
-    begin
-      if not GetStream8(ST_JUMPTBL_COUNT, Count) then Exit;
-      Inc(Count);
-      for I := 0 to Count - 1 do
-      begin
-        if not GetStream8(ST_CALL_IDX, Idx) then Exit;
-        if not TakeMTF(Idx, Target) then Exit;
-        if not PutOut32LE(Target) then Exit;
-      end;
-      Continue;
-    end;
-
-    if NextIsFunc and (Code <> OP_INT3) then
-    begin
-      AddMTF(Mem);
-      NextIsFunc := False;
-    end;
-
-    if Code = ESCAPE then
-    begin
-      if not CopyStream8(ST_OP) then Exit;
-      Continue;
-    end;
-
-    if not PutOut8(Byte(Code)) then Exit;
-
-    Flags := 0;
-    O16 := False;
-    if Code = OP_OSIZE then
-    begin
-      O16 := True;
-      if not GetStream8(ST_OP, Code) then Exit;
-      if not PutOut8(Byte(Code)) then Exit;
-    end;
-
-    if (Code = OP_RETNI) or (Code = OP_RETN) or (Code = OP_INT3) then
-      NextIsFunc := True;
-
-    if Code = OP_2BYTE then
-    begin
-      if not GetStream8(ST_OP2, Code2) then Exit;
-      if not PutOut8(Byte(Code2)) then Exit;
-      Flags := Table2[Code2];
-    end
-    else
-      Flags := Table1[Code];
-
-    if (Code = OP_CALLF) or (Code = OP_JMPF) or (Code = OP_ENTER) then
-      if not CopyStream16(ST_IMM16) then Exit;
-
-    if (Flags and fMR) <> 0 then
-    begin
-      if not GetStream8(ST_MODRM, ModRM) then Exit;
-      if not PutOut8(Byte(ModRM)) then Exit;
-      Sib := 0;
-      if Flags = fMEXTRA then
-        Flags := TableX[((ModRM shr 3) and 7) or ((Code and $01) shl 3) or ((Code and $08) shl 1)];
-      if ((ModRM and $07) = 4) and (ModRM < $c0) then
-      begin
-        if not GetStream8(ST_SIB, Sib) then Exit;
-        if not PutOut8(Byte(Sib)) then Exit;
-      end;
-      if (ModRM and $c0) = $40 then
-        if not CopyStream8(ST_DISP8_R0 + (ModRM and $07)) then Exit;
-      if ((ModRM and $c0) = $80) or ((ModRM and $c7) = $05) or
-         ((ModRM < $40) and ((Sib and $07) = 5)) then
-      begin
-        if (ModRM and $c7) = 5 then
-        begin
-          if not CopyStream32(ST_ADDR32) then Exit;
-        end
-        else if not CopyStream32(ST_DISP32) then Exit;
-      end;
-    end;
-
-    if (Flags and fMODE) = fAM then
-    begin
-      case Flags and fTYPE of
-        fAD: if not CopyStream32(ST_ADDR32) then Exit;
-        fDA: if not CopyStream32(ST_AJUMP32) then Exit;
-        fBR: if not CopyStream8(ST_JUMP8) then Exit;
-        fDR:
-          begin
-            if Code = OP_CALLN then
-            begin
-              if not GetStream8(ST_CALL_IDX, Idx) then Exit;
-              if not TakeMTF(Idx, Target) then Exit;
-            end
-            else if not GetStream32B(ST_JUMP32, Target) then Exit;
-            Dec(Target, LongWord(OutPos - StartPos) + 4 + Mem);
-            if not PutOut32LE(Target) then Exit;
-          end;
-      end;
-    end
-    else
-      case Flags and fTYPE of
-        fBI: if not CopyStream8(ST_IMM8) then Exit;
-        fWI: if not CopyStream16(ST_IMM16) then Exit;
-        fDI:
-          if not O16 then
-          begin
-            if not CopyStream32(ST_IMM32) then Exit;
-          end
-          else if not CopyStream16(ST_IMM16) then Exit;
-      end;
-  end;
-
-  Result := OutPos = DstLen;
-end;
-
-{ detect (C_DisPack.cpp): ¿el tramo parece código de ejecutable? }
-function DetectExe(P: PByte; Len: Integer): Boolean;
-var
-  e8, exe, obj, i: Integer;
-begin
-  Result := False;
-  if Len <= 0 then Exit;
-  e8 := 0; exe := 0; obj := 0;
-  i := 0;
-  while i + 5 < Len do
-  begin
-    if P[i] = $E8 then
-    begin
-      Inc(e8);
-      if (P[i + 4] = $FF) and (P[i + 5] <> $FF) then Inc(exe);
-      if (P[i + 4] = 0) and (P[i + 5] <> 0) then Inc(obj);
-    end;
-    Inc(i);
-  end;
-  if e8 = 0 then Exit;
-  Result := (e8 / Len >= 0.002) and ((exe + obj) / e8 >= 0.20) and (exe / e8 >= 0.01);
-end;
-
-procedure BufRaw(var B: TByteBuf; P: PByte; N: Integer); inline;
-begin
-  if N <= 0 then Exit;
-  if B.Len + N > B.Cap then
-  begin
-    while B.Len + N > B.Cap do
-      if B.Cap = 0 then B.Cap := 256 else B.Cap := B.Cap * 2;
-    SetLength(B.Data, B.Cap);
-  end;
-  Move(P^, B.Data[B.Len], N);
-  Inc(B.Len, N);
-end;
-
-procedure Buf32LE(var B: TByteBuf; V: LongWord); inline;
-var T: array[0..3] of Byte;
-begin
-  Store32LE(@T[0], V);
-  BufRaw(B, @T[0], 4);
-end;
-
-function ParseDispackMem(const S: string; out Value: QWord): Boolean;
+procedure InitTables;
 var
   i: Integer;
-  Num: QWord;
-  c: Char;
-begin
-  // parseMem de FreeArc: sufijo b/k/m/g; sin sufijo es 2^N ("24" = 16 MB)
-  Result := False;
-  i := 1;
-  if (i <= Length(S)) and (S[i] = '=') then Inc(i);
-  if (i > Length(S)) or not (S[i] in ['0'..'9']) then Exit;
-  Num := 0;
-  while (i <= Length(S)) and (S[i] in ['0'..'9']) do
+  procedure S1(Lo, Hi, F: Integer);
+  var
+    k: Integer;
   begin
-    if Num > (High(QWord) div 10) then Exit;
-    Num := Num * 10 + Ord(S[i]) - Ord('0');
-    Inc(i);
+    for k := Lo to Hi do
+    begin
+      XfTab32[k] := F;
+      XfTab64[k] := F;
+    end;
   end;
-  if i <= Length(S) then c := LowerCase(S[i]) else c := '^';
-  case c of
-    'b': Value := Num;
-    'k': Value := Num shl 10;
-    'm': Value := Num shl 20;
-    'g': Value := Num shl 30;
-    '^': begin
-           if Num > 40 then Exit;
-           Value := QWord(1) shl Num;
-         end;
+  procedure S2(Lo, Hi, F: Integer);
+  var
+    k: Integer;
+  begin
+    for k := Lo to Hi do XfTab0F[k] := F;
+  end;
+begin
+  FillChar(XfTab32, SizeOf(XfTab32), 0);
+  FillChar(XfTab64, SizeOf(XfTab64), 0);
+  FillChar(XfTab0F, SizeOf(XfTab0F), 0);
+  { one-byte map }
+  for i := 0 to 7 do            // ALU rows 00..3F
+  begin
+    S1(i * 8, i * 8 + 3, XF_MODRM);
+    S1(i * 8 + 4, i * 8 + 4, XI_B);
+    S1(i * 8 + 5, i * 8 + 5, XI_Z);
+  end;
+  XfTab32[$0F] := XF_0F; XfTab64[$0F] := XF_0F;
+  S1($26, $26, XF_PFX); S1($2E, $2E, XF_PFX); S1($36, $36, XF_PFX); S1($3E, $3E, XF_PFX);
+  for i := $40 to $4F do XfTab64[i] := XF_PFX;          // REX
+  XfTab32[$62] := XF_VEX; XfTab64[$62] := XF_VEX;         // BOUND / EVEX
+  S1($63, $63, XF_MODRM);
+  S1($64, $67, XF_PFX);
+  S1($68, $68, XI_Z); S1($69, $69, XF_MODRM or XI_Z);
+  S1($6A, $6A, XI_B); S1($6B, $6B, XF_MODRM or XI_B);
+  S1($70, $7F, XI_REL8);
+  S1($80, $80, XF_MODRM or XI_B); S1($81, $81, XF_MODRM or XI_Z);
+  S1($82, $83, XF_MODRM or XI_B);
+  S1($84, $8F, XF_MODRM);
+  XfTab32[$9A] := XI_FAR;
+  S1($A0, $A3, XI_MOFFS);
+  S1($A8, $A8, XI_B); S1($A9, $A9, XI_Z);
+  S1($B0, $B7, XI_B); S1($B8, $BF, XI_V);
+  S1($C0, $C1, XF_MODRM or XI_B); S1($C2, $C2, XI_W);
+  S1($C4, $C5, XF_VEX);
+  S1($C6, $C6, XF_MODRM or XI_B); S1($C7, $C7, XF_MODRM or XI_Z);
+  S1($C8, $C8, XI_ENTER); S1($CA, $CA, XI_W); S1($CD, $CD, XI_B);
+  S1($D0, $D3, XF_MODRM);
+  XfTab32[$D4] := XI_B; XfTab32[$D5] := XI_B;
+  S1($D8, $DF, XF_MODRM);
+  S1($E0, $E3, XI_REL8); S1($E4, $E7, XI_B);
+  S1($E8, $E8, XI_CALL); S1($E9, $E9, XI_JMP);
+  XfTab32[$EA] := XI_FAR;
+  S1($EB, $EB, XI_REL8);
+  S1($F0, $F0, XF_PFX); S1($F2, $F3, XF_PFX);
+  S1($F6, $F6, XF_MODRM or XI_G3B); S1($F7, $F7, XF_MODRM or XI_G3Z);
+  S1($FE, $FF, XF_MODRM);
+  { two-byte map 0F xx (38 and 3A are handled by the walker) }
+  S2($00, $03, XF_MODRM); S2($0D, $0D, XF_MODRM); S2($0F, $0F, XF_MODRM or XI_B);
+  S2($10, $2F, XF_MODRM);
+  S2($40, $6F, XF_MODRM);
+  S2($70, $73, XF_MODRM or XI_B); S2($74, $76, XF_MODRM); S2($78, $7F, XF_MODRM);
+  S2($80, $8F, XI_JMP);
+  S2($90, $9F, XF_MODRM);
+  S2($A3, $A3, XF_MODRM); S2($A4, $A4, XF_MODRM or XI_B); S2($A5, $A5, XF_MODRM);
+  S2($AB, $AB, XF_MODRM); S2($AC, $AC, XF_MODRM or XI_B); S2($AD, $AF, XF_MODRM);
+  S2($B0, $B9, XF_MODRM); S2($BA, $BA, XF_MODRM or XI_B); S2($BB, $BF, XF_MODRM);
+  S2($C0, $C1, XF_MODRM); S2($C2, $C2, XF_MODRM or XI_B); S2($C3, $C3, XF_MODRM);
+  S2($C4, $C6, XF_MODRM or XI_B); S2($C7, $C7, XF_MODRM);
+  S2($D0, $FF, XF_MODRM);
+end;
+
+{ ---------------------------------------------------------------- stream buffers }
+
+procedure XfEnsure(var C: TXfCtx);
+var
+  s: Integer;
+  Used, Cap: SizeInt;
+begin
+  for s := 0 to XF_NSTREAMS - 1 do
+  begin
+    Cap := Length(C.Buf[s]);
+    if Cap = 0 then Used := 0 else Used := C.P[s] - PByte(@C.Buf[s][0]);
+    if Cap - Used < XF_SLACK then
+    begin
+      Cap := 2 * Cap;
+      if Cap < Used + 2 * XF_SLACK then Cap := Used + 2 * XF_SLACK;
+      SetLength(C.Buf[s], Cap);
+      C.P[s] := PByte(@C.Buf[s][0]) + Used;
+    end;
+  end;
+end;
+
+function XfCheck(const C: TXfCtx): Boolean;
+var
+  s: Integer;
+begin
+  for s := 0 to XF_NSTREAMS - 1 do
+    if C.P[s] > C.E[s] then Exit(False);
+  Result := True;
+end;
+
+{ ---------------------------------------------------------------- the walker }
+
+{$DEFINE XF_ENC}
+{$MACRO ON}
+{$DEFINE XF_NAME:=XfEncodeRegion}
+{$I parc_dispack_walk.inc}
+{$UNDEF XF_ENC}
+{$DEFINE XF_NAME:=XfDecodeRegion}
+{$I parc_dispack_walk.inc}
+
+{ ---------------------------------------------------------------- headers }
+
+{ PE at P[0..Avail): code sections of an i386 / AMD64 image that is not .NET }
+function ParsePE(P: PByte; Avail: SizeInt; Base: Int64; var Regs: TXfRegionArray; var NRegs: Integer;
+  out Span: Int64): Boolean;
+var
+  Lfa, Opt, Sec, OptSize, NSec, Magic, NDD, i: SizeInt;
+  Machine: LongWord;
+  ImageBase, VSize, VAddr, RawSize, RawPtr, Chars, Len: LongWord;
+  Mode: Byte;
+  R: TXfRegion;
+  Ends: Int64;
+begin
+  Result := False;
+  Span := 0;
+  if Avail < $40 then Exit;
+  Lfa := LoadLE32(P + $3C);
+  if (Lfa < $40) or (Lfa > XF_LOOK - 256) or (Lfa + 24 + $60 > Avail) then Exit;
+  if LoadLE32(P + Lfa) <> $00004550 then Exit;
+  Machine := LoadLE16(P + Lfa + 4);
+  if Machine = $14C then Mode := 32
+  else if Machine = $8664 then Mode := 64
+  else Exit;
+  NSec := LoadLE16(P + Lfa + 6);
+  OptSize := LoadLE16(P + Lfa + 20);
+  Opt := Lfa + 24;
+  if (NSec < 1) or (NSec > 96) or (OptSize < $60) or (Opt + OptSize + 40 * NSec > Avail) then Exit;
+  Magic := LoadLE16(P + Opt);
+  if (Magic = $10B) and (Mode = 32) then
+  begin
+    ImageBase := LoadLE32(P + Opt + 28);
+    NDD := LoadLE32(P + Opt + 92);
+    if (NDD > 14) and (OptSize >= 96 + 15 * 8) and (LoadLE32(P + Opt + 96 + 14 * 8 + 4) <> 0) then Exit;
+  end
+  else if (Magic = $20B) and (Mode = 64) then
+  begin
+    ImageBase := LoadLE32(P + Opt + 24);
+    NDD := LoadLE32(P + Opt + 108);
+    if (NDD > 14) and (OptSize >= 112 + 15 * 8) and (LoadLE32(P + Opt + 112 + 14 * 8 + 4) <> 0) then Exit;
+  end
   else
     Exit;
+  Sec := Opt + OptSize;
+  Ends := 0;
+  for i := 0 to NSec - 1 do
+  begin
+    VSize := LoadLE32(P + Sec + 40 * i + 8);
+    VAddr := LoadLE32(P + Sec + 40 * i + 12);
+    RawSize := LoadLE32(P + Sec + 40 * i + 16);
+    RawPtr := LoadLE32(P + Sec + 40 * i + 20);
+    Chars := LoadLE32(P + Sec + 40 * i + 36);
+    if (RawPtr >= 1 shl 30) or (RawSize >= 1 shl 30) then Continue;
+    if Int64(RawPtr) + RawSize > Ends then Ends := Int64(RawPtr) + RawSize;
+    if Chars and ($20 or $20000000) = 0 then Continue;
+    Len := RawSize;
+    if (VSize > 0) and (VSize < Len) then Len := VSize;
+    if Len < 16 then Continue;
+    R.Start := Base + RawPtr;
+    R.Len := Len;
+    R.Mode := Mode;
+    R.Va := ImageBase + VAddr;
+    R.ImageBase := ImageBase;
+    R.Tables := True;
+    if NRegs = Length(Regs) then SetLength(Regs, 2 * NRegs + 8);
+    Regs[NRegs] := R;
+    Inc(NRegs);
+    Result := True;
   end;
-  Result := True;
+  Span := Ends;
+end;
+
+{ ELF at P[0..Avail): executable PT_LOAD segments of an i386 / x86-64 file }
+function ParseELF(P: PByte; Avail: SizeInt; Base: Int64; var Regs: TXfRegionArray; var NRegs: Integer;
+  out Span: Int64): Boolean;
+var
+  Cls, Machine, PhOff, PhEnt, PhNum, i: SizeInt;
+  E: PByte;
+  Off, Sz, VAddr, Flags, Typ: QWord;
+  R: TXfRegion;
+  Mode: Byte;
+begin
+  Result := False;
+  Span := 0;
+  if (Avail < 64) or (P[5] <> 1) then Exit;
+  Cls := P[4];
+  Machine := LoadLE16(P + 18);
+  if (Cls = 1) and (Machine = 3) then
+  begin
+    Mode := 32;
+    PhOff := LoadLE32(P + 28);
+    PhEnt := LoadLE16(P + 42);
+    PhNum := LoadLE16(P + 44);
+    if PhEnt < 32 then Exit;
+  end
+  else if (Cls = 2) and (Machine = 62) then
+  begin
+    Mode := 64;
+    if LoadLE32(P + 36) <> 0 then Exit;
+    PhOff := LoadLE32(P + 32);
+    PhEnt := LoadLE16(P + 54);
+    PhNum := LoadLE16(P + 56);
+    if PhEnt < 56 then Exit;
+  end
+  else
+    Exit;
+  if (PhNum < 1) or (PhNum > 256) or (PhOff < 32) or (PhOff + PhEnt * PhNum > Avail) then Exit;
+  for i := 0 to PhNum - 1 do
+  begin
+    E := P + PhOff + PhEnt * i;
+    if Mode = 32 then
+    begin
+      Typ := LoadLE32(E); Off := LoadLE32(E + 4); VAddr := LoadLE32(E + 8);
+      Sz := LoadLE32(E + 16); Flags := LoadLE32(E + 24);
+    end
+    else
+    begin
+      Typ := LoadLE32(E); Flags := LoadLE32(E + 4); Off := LoadLE32(E + 8);
+      if LoadLE32(E + 12) <> 0 then Continue;
+      VAddr := LoadLE32(E + 16);
+      Sz := LoadLE32(E + 32);
+      if LoadLE32(E + 36) <> 0 then Continue;
+    end;
+    if Typ <> 1 then Continue;
+    if (Off >= 1 shl 31) or (Sz >= 1 shl 31) then Continue;
+    if Int64(Off + Sz) > Span then Span := Off + Sz;
+    if (Flags and 1 = 0) or (Sz < 16) then Continue;
+    R.Start := Base + Int64(Off);
+    R.Len := Sz;
+    R.Mode := Mode;
+    R.Va := LongWord(VAddr);
+    R.ImageBase := LongWord(VAddr - Off);
+    R.Tables := False;
+    if NRegs = Length(Regs) then SetLength(Regs, 2 * NRegs + 8);
+    Regs[NRegs] := R;
+    Inc(NRegs);
+    Result := True;
+  end;
+end;
+
+{ Heuristic for spans without headers: 4 KB windows with many near calls are code. }
+procedure HeuristicRegions(P: PByte; Len: SizeInt; Base: Int64; var Regs: TXfRegionArray; var NRegs: Integer);
+var
+  w, i, e, Calls, Rex, RunStart, RunRex, RunCalls: SizeInt;
+  b: Byte;
+  R: TXfRegion;
+
+  procedure Flush(EndPos: SizeInt);
+  begin
+    if (RunStart >= 0) and (EndPos - RunStart >= XF_WIN) then
+    begin
+      R.Start := Base + RunStart;
+      R.Len := EndPos - RunStart;
+      if RunRex * 2 > RunCalls then R.Mode := 64 else R.Mode := 32;
+      R.Va := LongWord(Base + RunStart);
+      R.ImageBase := 0;
+      R.Tables := False;
+      if NRegs = Length(Regs) then SetLength(Regs, 2 * NRegs + 8);
+      Regs[NRegs] := R;
+      Inc(NRegs);
+    end;
+    RunStart := -1;
+  end;
+
+begin
+  RunStart := -1;
+  RunRex := 0;
+  RunCalls := 0;
+  w := 0;
+  while w + XF_WIN <= Len do
+  begin
+    Calls := 0;
+    Rex := 0;
+    e := w + XF_WIN - 5;
+    i := w;
+    while i < e do
+    begin
+      b := P[i];
+      if b = $E8 then
+      begin
+        if (P[i + 4] = 0) or (P[i + 4] = $FF) then Inc(Calls);
+      end
+      else if (b = $48) or (b = $4C) then
+      begin
+        case P[i + 1] of
+          $89, $8B, $8D, $83, $85, $63, $C7, $81, $39, $3B: Inc(Rex);
+        end;
+      end;
+      Inc(i);
+    end;
+    if Calls >= 16 then
+    begin
+      if RunStart < 0 then
+      begin
+        RunStart := w;
+        RunRex := 0;
+        RunCalls := 0;
+      end;
+      Inc(RunRex, Rex);
+      Inc(RunCalls, Calls);
+    end
+    else
+      Flush(w);
+    Inc(w, XF_WIN);
+  end;
+  Flush(w);
+end;
+
+function XfFindRegions(Data: PByte; Len: SizeInt): TXfRegionArray;
+var
+  NRegs, i: Integer;
+  Span: Int64;
+begin
+  Result := nil;
+  NRegs := 0;
+  for i := 0 to Len - 4 do
+    if ((Data[i] = Ord('M')) and (Data[i + 1] = Ord('Z')) and
+        ParsePE(Data + i, Len - i, i, Result, NRegs, Span)) or
+       ((Data[i] = $7F) and (Data[i + 1] = Ord('E')) and (Data[i + 2] = Ord('L')) and (Data[i + 3] = Ord('F')) and
+        ParseELF(Data + i, Len - i, i, Result, NRegs, Span)) then ;
+  if NRegs = 0 then HeuristicRegions(Data, Len, 0, Result, NRegs);
+  SetLength(Result, NRegs);
+end;
+
+{ ---------------------------------------------------------------- encoder }
+
+procedure PutVInt(var B: TBytes; var N: SizeInt; V: QWord);
+begin
+  repeat
+    if N >= Length(B) then SetLength(B, 2 * Length(B) + 64);
+    if V < $80 then
+    begin
+      B[N] := V;
+      Inc(N);
+      Exit;
+    end;
+    B[N] := (V and $7F) or $80;
+    Inc(N);
+    V := V shr 7;
+  until False;
+end;
+
+procedure PutByte(var B: TBytes; var N: SizeInt; V: Byte);
+begin
+  if N >= Length(B) then SetLength(B, 2 * Length(B) + 64);
+  B[N] := V;
+  Inc(N);
+end;
+
+procedure PutU32(var B: TBytes; var N: SizeInt; V: LongWord);
+var
+  k: Integer;
+begin
+  for k := 0 to 3 do PutByte(B, N, Byte(V shr (8 * k)));
 end;
 
 function DispackBlockSize(const Params: TStringArray): Integer;
 var
   k: Integer;
-  V: QWord;
+  p: string;
+  m: QWord;
 begin
   Result := DISPACK_BLOCK;
   for k := 1 to High(Params) do
   begin
-    if Params[k] = '' then Continue;
-    if LowerCase(Params[k]) = 'x' then Continue;
-    if (Length(Params[k]) > 1) and ((Params[k][1] = 'b') or (Params[k][1] = 'B')) then
-    begin
-      if ParseDispackMem(Copy(Params[k], 2, MaxInt), V) and (V > 0) then Result := Integer(V);
-    end
-    else if ParseDispackMem(Params[k], V) and (V > 0) then
-      Result := Integer(V);
+    p := LowerCase(Params[k]);
+    if (p = '') or (p = 'x') then Continue;
+    if p[1] = 'b' then Delete(p, 1, 1);
+    if ParseMemSize(p, m) and (m >= 1) and (m <= XF_MAX_BLOCK) then Result := m;
   end;
-  if Result < 64 * 1024 then Result := 64 * 1024;
 end;
 
-function DispackEncode(Src: PByte; SrcLen: Integer; BlockSize: Integer): TBytes;
-var
-  Out: TByteBuf;
-  Pos, P0, Len, InSize, OutLen: Integer;
-  Base: LongWord;
-  First: Boolean;
-  Filtered: TBytes;
+constructor TDisPackEncStage.Create(ATarget: TOutStage; ABlockSize: SizeInt);
 begin
-  Result := nil;
-  if BlockSize <= 0 then BlockSize := DISPACK_BLOCK;
-  Out.Data := nil; Out.Len := 0; Out.Cap := 0;
-  Base := 1 shl 30;
-  First := True;
-  Pos := 0;
-  while True do
-  begin
-    P0 := Pos; InSize := 0; Len := 0;
-    repeat
-      if Pos >= SrcLen then begin Len := 0; Break; end;
-      Len := SrcLen - Pos;
-      if Len > DISPACK_CHUNK then Len := DISPACK_CHUNK;
-      if not DetectExe(Src + Pos, Len) then Break;
-      Inc(Pos, Len);
-      Inc(InSize, Len);
-      Len := 0;
-      if InSize > BlockSize - DISPACK_CHUNK then Break;
-    until False;
-
-    if (InSize = 0) and (Len = 0) then Break;
-    if First then
-    begin
-      Buf32LE(Out, LongWord(DISPACK_CHUNK));
-      First := False;
-    end;
-
-    if InSize > 0 then
-    begin
-      Filtered := DisPackFilter(Src + P0, InSize, Base, OutLen);
-      Buf32LE(Out, LongWord(DISPACK_TAG_EXE));
-      Buf32LE(Out, LongWord(InSize));
-      Buf32LE(Out, LongWord(OutLen));
-      BufRaw(Out, @Filtered[0], OutLen);
-    end;
-
-    if Len > 0 then
-    begin
-      if (Len <> DISPACK_CHUNK) or IsTag(Load32LE(Src + Pos)) then
-      begin
-        Buf32LE(Out, LongWord(DISPACK_TAG_DATA));
-        Buf32LE(Out, LongWord(Len));
-      end;
-      BufRaw(Out, Src + Pos, Len);
-      Inc(Pos, Len);
-    end;
-
-    Inc(Base, LongWord(InSize + Len));
-    if Base >= LongWord(3) shl 30 then Dec(Base, LongWord(2) shl 30);
-  end;
-
-  SetLength(Result, Out.Len);
-  if Out.Len > 0 then Move(Out.Data[0], Result[0], Out.Len);
+  inherited Create(ATarget);
+  FBlock := ABlockSize;
+  if FBlock <= 0 then FBlock := DISPACK_BLOCK;
+  if FBlock > XF_MAX_BLOCK then FBlock := XF_MAX_BLOCK;
+  FLen := 0;
+  FBase := 0;
+  FNRegs := 0;
+  FNSpans := 0;
 end;
 
-function DispackDecode(Src: PByte; SrcLen: Integer; Dst: PByte; DstLen: Integer; BlockSize: Integer): Boolean;
-var
-  Pos, OutPos, Chunk, Tag, Len, OutSize, InSize: Integer;
-  Base: LongWord;
+procedure TDisPackEncStage.Out(Buf: PByte; Count: SizeInt);
 begin
-  Result := False;
-  if BlockSize <= 0 then BlockSize := DISPACK_BLOCK;
-  if SrcLen < 4 then Exit;
-  Chunk := Integer(Load32LE(Src));
-  if (Chunk <= 0) or (Chunk > BlockSize) then Exit;
-  Pos := 4; OutPos := 0; Base := 1 shl 30;
-  while Pos < SrcLen do
-  begin
-    if SrcLen - Pos < 4 then Exit;
-    Tag := Integer(Load32LE(Src + Pos));
-    Inc(Pos, 4);
-
-    if (not IsTag(LongWord(Tag))) or (LongWord(Tag) = DISPACK_TAG_DATA) then
-    begin
-      if LongWord(Tag) = DISPACK_TAG_DATA then
-      begin
-        if SrcLen - Pos < 4 then Exit;
-        Len := Integer(Load32LE(Src + Pos));
-        Inc(Pos, 4);
-      end
-      else
-      begin
-        // el tag es en realidad el comienzo de los datos
-        Len := Chunk;
-        if OutPos + Len > DstLen then Exit;
-        Store32LE(Dst + OutPos, LongWord(Tag));
-        if SrcLen - Pos < Len - 4 then Exit;
-        Move(Src[Pos], Dst[OutPos + 4], Len - 4);
-        Inc(Pos, Len - 4);
-        Inc(OutPos, Len);
-        Inc(Base, LongWord(Len));
-        if Base >= LongWord(3) shl 30 then Dec(Base, LongWord(2) shl 30);
-        Continue;
-      end;
-      if (Len < 0) or (Pos + Len > SrcLen) or (OutPos + Len > DstLen) then Exit;
-      Move(Src[Pos], Dst[OutPos], Len);
-      Inc(Pos, Len); Inc(OutPos, Len);
-      Inc(Base, LongWord(Len));
-    end
-    else if LongWord(Tag) = DISPACK_TAG_EXE then
-    begin
-      if SrcLen - Pos < 8 then Exit;
-      OutSize := Integer(Load32LE(Src + Pos));
-      InSize := Integer(Load32LE(Src + Pos + 4));
-      Inc(Pos, 8);
-      if (OutSize < 0) or (InSize < 0) or
-         (OutSize > BlockSize) or (InSize > BlockSize + BlockSize div 4 + 1024) then Exit;
-      if (Pos + InSize > SrcLen) or (OutPos + OutSize > DstLen) then Exit;
-      if not DisPackUnFilter(Src + Pos, InSize, Dst + OutPos, OutSize, Base) then Exit;
-      Inc(Pos, InSize); Inc(OutPos, OutSize);
-      Inc(Base, LongWord(OutSize));
-    end
-    else
-      Exit;
-
-    if Base >= LongWord(3) shl 30 then Dec(Base, LongWord(2) shl 30);
-  end;
-
-  Result := OutPos = DstLen;
+  if Count <= 0 then Exit;
+  Emit(Buf, Count);
+  Inc(FOutPos, Count);
 end;
 
-{ TDisPackStage }
+procedure TDisPackEncStage.AddReg(const R: TXfRegion);
+begin
+  if FNRegs = Length(FRegs) then SetLength(FRegs, 2 * FNRegs + 8);
+  FRegs[FNRegs] := R;
+  Inc(FNRegs);
+end;
 
-constructor TDisPackStage.Create(ASource: TInStage; ABlockSize: LongWord);
+procedure TDisPackEncStage.AddSpan(AStart, ALen: Int64);
+begin
+  if FNSpans = Length(FSpans) then SetLength(FSpans, 2 * FNSpans + 8);
+  FSpans[FNSpans].Start := AStart;
+  FSpans[FNSpans].Len := ALen;
+  Inc(FNSpans);
+end;
+
+procedure TDisPackEncStage.ScanHeaders(N: SizeInt);
 var
-  Cap, N: Integer;
+  i: SizeInt;
+  P: PByte;
+  Span: Int64;
+begin
+  P := @FBuf[0];
+  for i := 0 to N - 1 do
+  begin
+    if (P[i] = Ord('M')) and (P[i + 1] = Ord('Z')) then
+    begin
+      if ParsePE(P + i, FLen - i, FBase + i, FRegs, FNRegs, Span) then AddSpan(FBase + i, Span);
+    end
+    else if (P[i] = $7F) and (P[i + 1] = Ord('E')) and (P[i + 2] = Ord('L')) and (P[i + 3] = Ord('F')) then
+    begin
+      if ParseELF(P + i, FLen - i, FBase + i, FRegs, FNRegs, Span) then AddSpan(FBase + i, Span);
+    end;
+  end;
+end;
+
+procedure TDisPackEncStage.DumpBlock(const Rs: TXfRegionArray; NR: Integer; const Len: array of SizeInt);
+var
+  s, i: Integer;
+  F: THandle;
+  Fn: string;
+begin
+  for s := 0 to XF_NSTREAMS - 1 do
+  begin
+    Fn := XfDumpDir + '/s' + IntToStr(s) + '.bin';
+    if FileExists(Fn) then F := FileOpen(Fn, fmOpenWrite) else F := FileCreate(Fn);
+    FileSeek(F, 0, fsFromEnd);
+    if Len[s] > 0 then FileWrite(F, FCtx.Buf[s][0], Len[s]);
+    FileClose(F);
+  end;
+  for i := 0 to NR - 1 do
+    WriteLn(StdErr, Format('region %d+%d mode %d va %x ib %x tables %d', [FBase + Rs[i].Start, Rs[i].Len,
+      Rs[i].Mode, Rs[i].Va, Rs[i].ImageBase, Ord(Rs[i].Tables)]));
+end;
+
+procedure TDisPackEncStage.ProcessBlock(N: SizeInt);
+var
+  BE: Int64;
+  Rs, Hs: TXfRegionArray;
+  NR, NH, i, j, k, s: Integer;
+  R: TXfRegion;
+  Prev, A, Z, GapStart, GapEnd: SizeInt;
+  Hdr: TBytes;
+  HN: SizeInt;
+  Len: array[0..XF_NSTREAMS - 1] of SizeInt;
+  Zero: array[0..3] of Byte;
+  Raw: PByte;
+begin
+  BE := FBase + N;
+  ScanHeaders(N);
+
+  { regions from headers inside this block, sorted, without overlaps }
+  NR := 0;
+  SetLength(Rs, FNRegs + 1);
+  for i := 0 to FNRegs - 1 do
+  begin
+    R := FRegs[i];
+    if (R.Start >= BE) or (R.Start + R.Len <= FBase) then Continue;
+    if R.Start < FBase then
+    begin
+      Inc(R.Va, LongWord(FBase - R.Start));
+      Dec(R.Len, FBase - R.Start);
+      R.Start := FBase;
+    end;
+    if R.Start + R.Len > BE then R.Len := BE - R.Start;
+    R.Start := R.Start - FBase;
+    j := NR;
+    while (j > 0) and (Rs[j - 1].Start > R.Start) do
+    begin
+      Rs[j] := Rs[j - 1];
+      Dec(j);
+    end;
+    Rs[j] := R;
+    Inc(NR);
+  end;
+  { drop overlaps }
+  k := 0;
+  for i := 0 to NR - 1 do
+  begin
+    if (k > 0) and (Rs[i].Start < Rs[k - 1].Start + Rs[k - 1].Len) then Continue;
+    Rs[k] := Rs[i];
+    Inc(k);
+  end;
+  NR := k;
+
+  { heuristic in the gaps that are not inside an executable found by its header }
+  NH := 0;
+  Hs := nil;
+  Prev := 0;
+  for i := 0 to NR do
+  begin
+    if i < NR then GapEnd := Rs[i].Start else GapEnd := N;
+    GapStart := Prev;
+    if GapEnd - GapStart >= XF_WIN then
+    begin
+      { cut out the spans of known executables }
+      A := GapStart;
+      while A < GapEnd do
+      begin
+        Z := GapEnd;
+        for j := 0 to FNSpans - 1 do
+          if (FSpans[j].Start - FBase < Z) and (FSpans[j].Start + FSpans[j].Len - FBase > A) then
+          begin
+            if FSpans[j].Start - FBase <= A then
+            begin
+              A := FSpans[j].Start + FSpans[j].Len - FBase;
+              if A >= GapEnd then Break;
+            end
+            else
+              Z := FSpans[j].Start - FBase;
+          end;
+        if A >= GapEnd then Break;
+        if Z > GapEnd then Z := GapEnd;
+        if Z - A >= XF_WIN then HeuristicRegions(@FBuf[A], Z - A, A, Hs, NH);
+        A := Z;
+      end;
+    end;
+    if i < NR then Prev := Rs[i].Start + Rs[i].Len;
+  end;
+  if NH > 0 then
+  begin
+    SetLength(Rs, NR + NH);
+    for i := 0 to NH - 1 do
+    begin
+      R := Hs[i];
+      R.Va := LongWord(FBase + R.Start);
+      j := NR;
+      while (j > 0) and (Rs[j - 1].Start > R.Start) do
+      begin
+        Rs[j] := Rs[j - 1];
+        Dec(j);
+      end;
+      Rs[j] := R;
+      Inc(NR);
+    end;
+  end;
+
+  { encode }
+  for s := 0 to XF_NSTREAMS - 1 do
+    if Length(FCtx.Buf[s]) > 0 then FCtx.P[s] := @FCtx.Buf[s][0] else FCtx.P[s] := nil;
+  XfEnsure(FCtx);
+  FillChar(FCtx.Mtf, SizeOf(FCtx.Mtf), 0);
+  SetLength(Hdr, 256);
+  HN := 0;
+  PutVInt(Hdr, HN, N);
+  PutVInt(Hdr, HN, NR);
+  Prev := 0;
+  for i := 0 to NR - 1 do
+  begin
+    R := Rs[i];
+    PutVInt(Hdr, HN, R.Start - Prev);
+    PutVInt(Hdr, HN, R.Len);
+    PutByte(Hdr, HN, Ord(R.Mode = 64));
+    PutU32(Hdr, HN, R.Va);
+    PutU32(Hdr, HN, R.ImageBase);
+    { raw gap }
+    if R.Start > Prev then
+    begin
+      if Length(FCtx.Buf[XS_RAW]) - (FCtx.P[XS_RAW] - PByte(@FCtx.Buf[XS_RAW][0])) < R.Start - Prev + XF_SLACK then
+      begin
+        k := FCtx.P[XS_RAW] - PByte(@FCtx.Buf[XS_RAW][0]);
+        SetLength(FCtx.Buf[XS_RAW], k + (R.Start - Prev) + 2 * XF_SLACK);
+        FCtx.P[XS_RAW] := PByte(@FCtx.Buf[XS_RAW][0]) + k;
+      end;
+      Move(FBuf[Prev], FCtx.P[XS_RAW]^, R.Start - Prev);
+      Inc(FCtx.P[XS_RAW], R.Start - Prev);
+    end;
+    XfEnsure(FCtx);
+    XfEncodeRegion(FCtx, @FBuf[R.Start], R.Len, R);
+    Prev := R.Start + R.Len;
+  end;
+  if N > Prev then
+  begin
+    k := FCtx.P[XS_RAW] - PByte(@FCtx.Buf[XS_RAW][0]);
+    if Length(FCtx.Buf[XS_RAW]) - k < N - Prev then
+    begin
+      SetLength(FCtx.Buf[XS_RAW], k + (N - Prev) + XF_SLACK);
+      FCtx.P[XS_RAW] := PByte(@FCtx.Buf[XS_RAW][0]) + k;
+    end;
+    Move(FBuf[Prev], FCtx.P[XS_RAW]^, N - Prev);
+    Inc(FCtx.P[XS_RAW], N - Prev);
+  end;
+  for s := 0 to XF_NSTREAMS - 1 do
+  begin
+    Len[s] := FCtx.P[s] - PByte(@FCtx.Buf[s][0]);
+    PutVInt(Hdr, HN, Len[s]);
+  end;
+
+  if XfDumpDir <> '' then DumpBlock(Rs, NR, Len);
+
+  { write }
+  FillChar(Zero, SizeOf(Zero), 0);
+  if not FHeaderDone then
+  begin
+    Zero[0] := XF_VERSION;
+    Out(@Zero[0], 1);
+    Zero[0] := 0;
+    FHeaderDone := True;
+  end;
+  Out(@Hdr[0], HN);
+  Out(@Zero[0], (4 - FOutPos and 3) and 3);
+  for s := 0 to XF_NSTREAMS - 1 do
+  begin
+    Out(@FCtx.Buf[s][0], Len[s]);
+    Out(@Zero[0], (4 - FOutPos and 3) and 3);
+  end;
+
+  { drop the block }
+  Raw := @FBuf[0];
+  Move(Raw[N], Raw[0], FLen - N);
+  Dec(FLen, N);
+  FBase := BE;
+  FillChar(Raw[FLen], XF_PAD, 0);
+  k := 0;
+  for i := 0 to FNRegs - 1 do
+    if FRegs[i].Start + FRegs[i].Len > FBase then
+    begin
+      FRegs[k] := FRegs[i];
+      Inc(k);
+    end;
+  FNRegs := k;
+  k := 0;
+  for i := 0 to FNSpans - 1 do
+    if FSpans[i].Start + FSpans[i].Len > FBase then
+    begin
+      FSpans[k] := FSpans[i];
+      Inc(k);
+    end;
+  FNSpans := k;
+end;
+
+procedure TDisPackEncStage.DoWrite(Buf: PByte; Count: SizeInt);
+var
+  n: SizeInt;
+begin
+  if Length(FBuf) = 0 then SetLength(FBuf, FBlock + XF_LOOK + XF_PAD);
+  while Count > 0 do
+  begin
+    n := FBlock + XF_LOOK - FLen;
+    if n > Count then n := Count;
+    Move(Buf^, FBuf[FLen], n);
+    Inc(FLen, n);
+    Inc(Buf, n);
+    Dec(Count, n);
+    if FLen = FBlock + XF_LOOK then
+    begin
+      FillChar(FBuf[FLen], XF_PAD, 0);
+      ProcessBlock(FBlock);
+    end;
+  end;
+end;
+
+procedure TDisPackEncStage.DoFinish;
+var
+  n: SizeInt;
+begin
+  if FLen > 0 then FillChar(FBuf[FLen], XF_PAD, 0);
+  while FLen > 0 do
+  begin
+    n := FLen;
+    if n > FBlock then n := FBlock;
+    ProcessBlock(n);
+  end;
+  inherited DoFinish;
+end;
+
+function XfEncodeBuf(Src: PByte; Len: SizeInt; BlockSize: SizeInt): TBytes;
+var
+  Sink: TMemSink;
+  St: TDisPackEncStage;
+begin
+  Sink := TMemSink.Create;
+  St := TDisPackEncStage.Create(Sink, BlockSize);
+  try
+    if Len > 0 then St.Write(Src, Len);
+    St.Finish;
+    Result := Sink.Bytes;
+  finally
+    St.Free;
+  end;
+end;
+
+{ ---------------------------------------------------------------- decoder }
+
+constructor TDisPackStage.Create(ASource: TInStage; ABlockSize: SizeInt);
 begin
   inherited Create(ASource);
-  FBlockSize := ABlockSize;
-  if FBlockSize = 0 then FBlockSize := DISPACK_BLOCK;
-  FBase := 1 shl 30;
-  Cap := 64 * 1024;
-  SetLength(FData, Cap);
-  FLen := 0;
-  while True do
-  begin
-    if FLen = Cap then
-    begin
-      Cap := Cap * 2;
-      SetLength(FData, Cap);
-    end;
-    N := ASource.Read(@FData[FLen], Cap - FLen);
-    if N <= 0 then Break;
-    Inc(FLen, N);
-  end;
-  FPos := 0;
+  FMaxBlock := ABlockSize;
+  if FMaxBlock <= 0 then FMaxBlock := DISPACK_BLOCK;
 end;
 
-function TDisPackStage.NextPiece: Boolean;
+function TDisPackStage.RdByte: Byte;
+begin
+  Source.ReadExact(@Result, 1);
+  Inc(FInPos);
+end;
+
+function TDisPackStage.RdVInt: QWord;
 var
-  Tag, Len, OutSize, InSize: Integer;
+  b: Byte;
+  Sh: Integer;
+begin
+  Result := 0;
+  Sh := 0;
+  repeat
+    b := RdByte;
+    if Sh >= 63 then Corrupt('dispack: bad number');
+    Result := Result or (QWord(b and $7F) shl Sh);
+    Inc(Sh, 7);
+  until b < $80;
+end;
+
+function TDisPackStage.NextBlock: Boolean;
+var
+  b: Byte;
+  N, NReg, Gap, RLen, Pad, Total, Pos, RawLeft: QWord;
+  Regs: TXfRegionArray;
+  Lens: array[0..XF_NSTREAMS - 1] of QWord;
+  i, s: Integer;
+  C: TXfCtx;
+  P: PByte;
+  Prev: SizeInt;
 begin
   Result := False;
   if not FStarted then
   begin
-    if FLen - FPos < 4 then raise EArcCorrupt.Create('dispack: missing block size');
-    FChunkSize := Load32LE(@FData[FPos]);
-    Inc(FPos, 4);
-    if (FChunkSize = 0) or (FChunkSize > FBlockSize) then
-      raise EArcCorrupt.Create('dispack: invalid block size');
     FStarted := True;
-  end;
-  if FPos >= FLen then Exit(False);
-  if FLen - FPos < 4 then raise EArcCorrupt.Create('dispack: tag incompleto');
-  Tag := Integer(Load32LE(@FData[FPos]));
-  Inc(FPos, 4);
-
-  if (not IsTag(LongWord(Tag))) or (LongWord(Tag) = DISPACK_TAG_DATA) then
-  begin
-    if LongWord(Tag) = DISPACK_TAG_DATA then
+    if not Source.ReadExactOrEof(@b, 1) then
     begin
-      if FLen - FPos < 4 then raise EArcCorrupt.Create('dispack: missing length');
-      Len := Integer(Load32LE(@FData[FPos]));
-      Inc(FPos, 4);
-    end
-    else
-    begin
-      Len := Integer(FChunkSize);
-      if FLen - FPos < Len - 4 then raise EArcCorrupt.Create('dispack: tramo corto');
-      SetLength(FOut, Len);
-      Store32LE(@FOut[0], LongWord(Tag));
-      Move(FData[FPos], FOut[4], Len - 4);
-      Inc(FPos, Len - 4);
-      Inc(FBase, LongWord(Len));
-      if FBase >= LongWord(3) shl 30 then Dec(FBase, LongWord(2) shl 30);
-      FOutPos := 0; FOutLen := Len;
-      Exit(True);
+      FEof := True;
+      Exit;
     end;
-    if (Len < 0) or (FPos + Len > FLen) then raise EArcCorrupt.Create('dispack: tramo corto');
-    SetLength(FOut, Len);
-    if Len > 0 then Move(FData[FPos], FOut[0], Len);
-    Inc(FPos, Len);
-    Inc(FBase, LongWord(Len));
-  end
-  else if LongWord(Tag) = DISPACK_TAG_EXE then
+    Inc(FInPos);
+    if b <> XF_VERSION then Corrupt('dispack: unknown stream version');
+  end;
+  if not Source.ReadExactOrEof(@b, 1) then
   begin
-    if FLen - FPos < 8 then raise EArcCorrupt.Create('dispack: cabecera corta');
-    OutSize := Integer(Load32LE(@FData[FPos]));
-    InSize := Integer(Load32LE(@FData[FPos + 4]));
-    Inc(FPos, 8);
-    if (OutSize < 0) or (InSize < 0) or
-       (OutSize > Integer(FBlockSize)) or
-       (InSize > Integer(FBlockSize + FBlockSize div 4 + 1024)) then
-      raise EArcCorrupt.Create('dispack: invalid size');
-    if FPos + InSize > FLen then raise EArcCorrupt.Create('dispack: tramo corto');
-    SetLength(FOut, OutSize);
-    if not DisPackUnFilter(@FData[FPos], InSize, @FOut[0], OutSize, FBase) then
-      raise EArcCorrupt.Create('dispack: could not unfilter');
-    Inc(FPos, InSize);
-    Inc(FBase, LongWord(OutSize));
-  end
-  else
-    raise EArcCorrupt.Create('dispack: tag desconocido');
+    FEof := True;
+    Exit;
+  end;
+  Inc(FInPos);
+  { VInt N, first byte already read }
+  N := b and $7F;
+  if b >= $80 then N := N or (RdVInt shl 7);
+  if (N < 1) or (N > QWord(FMaxBlock)) then Corrupt('dispack: bad block size');
+  NReg := RdVInt;
+  if NReg > N div 16 + 1 then Corrupt('dispack: bad region count');
+  SetLength(Regs, NReg);
+  Pos := 0;
+  for i := 0 to NReg - 1 do
+  begin
+    Gap := RdVInt;
+    RLen := RdVInt;
+    if (Gap > N - Pos) or (RLen < 1) or (RLen > N - Pos - Gap) then Corrupt('dispack: bad region');
+    Regs[i].Start := Pos + Gap;
+    Regs[i].Len := RLen;
+    Pos := Pos + Gap + RLen;
+    b := RdByte;
+    if b > 1 then Corrupt('dispack: bad region mode');
+    Regs[i].Mode := 32 + 32 * b;
+    Source.ReadExact(@Regs[i].Va, 4);
+    Source.ReadExact(@Regs[i].ImageBase, 4);
+    Inc(FInPos, 8);
+{$IFDEF ENDIAN_BIG}
+    Regs[i].Va := SwapEndian(Regs[i].Va);
+    Regs[i].ImageBase := SwapEndian(Regs[i].ImageBase);
+{$ENDIF}
+  end;
+  Total := 0;
+  for s := 0 to XF_NSTREAMS - 1 do
+  begin
+    Lens[s] := RdVInt;
+    if Lens[s] > 2 * N + 64 then Corrupt('dispack: bad stream size');
+    Total := Total + (Lens[s] + 3) and not QWord(3);
+  end;
+  if Total > 4 * N + 4096 then Corrupt('dispack: bad stream sizes');
+  Pad := (4 - FInPos and 3) and 3;
+  if Length(FIn) < Total + Pad + XF_SLACK then SetLength(FIn, Total + Pad + XF_SLACK);
+  Source.ReadExact(@FIn[0], Total + Pad);
+  Inc(FInPos, Total + Pad);
+  FillChar(FIn[Total + Pad], XF_SLACK, 0);
+  for i := 0 to Pad - 1 do
+    if FIn[i] <> 0 then Corrupt('dispack: bad padding');
+  P := @FIn[Pad];
+  for s := 0 to XF_NSTREAMS - 1 do
+  begin
+    C.P[s] := P;
+    C.E[s] := P + Lens[s];
+    for i := Lens[s] to ((Lens[s] + 3) and not QWord(3)) - 1 do
+      if P[i] <> 0 then Corrupt('dispack: bad padding');
+    Inc(P, (Lens[s] + 3) and not QWord(3));
+  end;
 
-  if FBase >= LongWord(3) shl 30 then Dec(FBase, LongWord(2) shl 30);
-  FOutPos := 0; FOutLen := Length(FOut);
+  if Length(FOut) < N + XF_PAD then SetLength(FOut, N + XF_PAD);
+  FillChar(C.Mtf, SizeOf(C.Mtf), 0);
+  Prev := 0;
+  for i := 0 to NReg do
+  begin
+    if i < NReg then RLen := Regs[i].Start - Prev else RLen := N - Prev;
+    RawLeft := C.E[XS_RAW] - C.P[XS_RAW];
+    if RLen > RawLeft then Corrupt('dispack: raw stream too short');
+    Move(C.P[XS_RAW]^, FOut[Prev], RLen);
+    Inc(C.P[XS_RAW], RLen);
+    if i = NReg then Break;
+    if not XfDecodeRegion(C, @FOut[Regs[i].Start], Regs[i].Len, Regs[i]) then
+      Corrupt('dispack: damaged code stream');
+    Prev := Regs[i].Start + Regs[i].Len;
+  end;
+  for s := 0 to XF_NSTREAMS - 1 do
+    if C.P[s] <> C.E[s] then Corrupt('dispack: stream size mismatch');
+  FOutLen := N;
+  FOutPos := 0;
   Result := True;
 end;
 
 function TDisPackStage.Read(Buf: PByte; Count: SizeInt): SizeInt;
 var
-  N: SizeInt;
+  n: SizeInt;
 begin
-  while FOutPos >= FOutLen do
-    if not NextPiece then Exit(0);
-  N := FOutLen - FOutPos;
-  if N > Count then N := Count;
-  Move(FOut[FOutPos], Buf^, N);
-  Inc(FOutPos, N);
-  Result := N;
+  Result := 0;
+  while Count > 0 do
+  begin
+    if FOutPos >= FOutLen then
+    begin
+      if FEof or not NextBlock then Break;
+    end;
+    n := FOutLen - FOutPos;
+    if n > Count then n := Count;
+    Move(FOut[FOutPos], Buf^, n);
+    Inc(FOutPos, n);
+    Inc(Buf, n);
+    Inc(Result, n);
+    Dec(Count, n);
+  end;
 end;
 
+initialization
+  InitTables;
+  InitExperiments;
 end.
