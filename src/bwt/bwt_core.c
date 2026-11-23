@@ -287,13 +287,23 @@ static int64_t seg_log2_fixed(uint64_t x)
 static inline int64_t seg_flogf(uint32_t f) { return f <= 1 ? 0 : (int64_t)f * seg_log2_fixed(f); }
 
 static int32_t seg_d[65536];      /* seg_flogf(f + 1) - seg_flogf(f), built by parc_seg_init */
+static int32_t seg_l[65536];      /* seg_log2_fixed(x) */
 
 void parc_seg_init(void)
 {
     for (uint32_t f = 0; f < 65536; ++f) seg_d[f] = (int32_t)(seg_flogf(f + 1) - seg_flogf(f));
+    seg_l[0] = 0;
+    for (uint32_t x = 1; x < 65536; ++x) seg_l[x] = (int32_t)seg_log2_fixed(x);
 }
 
-static inline int64_t seg_dd(uint32_t f) { return f < 65536 ? seg_d[f] : seg_flogf(f + 1) - seg_flogf(f); }
+/* d(f) = (f + 1) log2 (f + 1) - f log2 f; above the table, log2 f + log2 e (exact to 1e-5 bit), with
+   log2 f from the top 16 bits */
+static inline int64_t seg_dd(uint32_t f)
+{
+    if (f < 65536) return seg_d[f];
+    int s = (31 - __builtin_clz(f)) - 15;
+    return (int64_t)seg_l[f >> s] + ((int64_t)s << 16) + 94548;
+}
 
 int32_t parc_seg_split(const uint8_t * p, int32_t n, int32_t stride, int32_t minSeg, int64_t penalty, int32_t divShift,
     uint32_t * work)
