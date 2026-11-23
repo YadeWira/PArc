@@ -45,31 +45,22 @@ typedef U32 (*pcm_io_fn)(void *ctx, U8 *buf, U32 n);
 #error "the context list (update_byte, set_text) assumes 9 hashed contexts"
 #endif
 #define NC (NCD + NCH)
-#ifndef PCM_NI
-#define PCM_NI 16
-#endif
-#define NI PCM_NI                 /* mixer inputs (multiple of 8) */
-#if NI == 24
-#define XI(i) (2 * (i))           /* input of context i (and XI(i)+1 the second one) */
-#define X2ON 1
-#else
-#define XI(i) (i)
-#define X2ON 0
-#endif
-#define XM XI(NC)                 /* match model inputs: XM, XM+1 */
+#define NI 16                 /* mixer inputs: NC contexts, 2 match, bias at 15 */
+#define XM NC                 /* match model inputs: XM, XM+1 */
 #define NM 6                  /* first layer mixers */
 #define NSETS (256 + 48 + 48 + 256 + 256 + 256)
 #define IOBUF 65536u
 
-/* tuning parameters (constants in the product build) */
-#define PCM_TDEF {8, 2, 1023, 5, 2, 1, 1024, 6, 0, 2, 0, 0, 1, 0, 0, 3, 0, 0, 3, 0, 2, 6, 0, 3, 8, 3}
+/* tuning parameters (constants in the product build; -DPCM_TUNE makes them variables):
+   0 lr1: layer-1 mixer rate, 1 lr2: layer-2 rate, 2 state-map count limit, 3 APM rate (shift),
+   4 initial layer-1 weight, 5 minimum match length */
+#define PCM_TDEF {8, 2, 1023, 5, 1024, 6}
 #ifdef PCM_TUNE
-int pcm_T[32] = PCM_TDEF;
+int pcm_T[8] = PCM_TDEF;
 #else
-static const int pcm_T[32] = PCM_TDEF;
+static const int pcm_T[8] = PCM_TDEF;
 #endif
 #define P(i) pcm_T[i]
-#define SMR (P(22) ? 8 : 1)
 
 /* ------------------------------------------------------------------------ */
 
@@ -86,17 +77,16 @@ typedef struct {
   I32 rec[1024];              /* 65536/(n+1.5) */
   U32 smi0[256];              /* initial state-map values */
   /* arena pointers */
-  U8 *ht, *buf, *o1, *o2s;
-  U16 *ind1, *ind2;
+  U8 *ht, *buf, *o1;
+  U16 *ind1;
   U32 *mt;
   U32 *sm;                    /* NC*256 state maps + 64 match map */
   I16 *w1, *w2;
-  U16 *a1, *a2, *a3;
+  U16 *a2, *a3;
   U8 *iob;
   /* model state */
   U32 c0, bpos, c4, c8, pos, nib;
   U32 wh, wh1;                /* word hashes */
-  U32 wlen;
   U32 selb[3];
   U32 hh[NCH];                /* context hashes at byte boundary */
   U32 nh;                     /* active hashed contexts: NCH, or NCH - 2 in text blocks */
@@ -113,7 +103,7 @@ typedef struct {
   U32 sel[NM];
   U32 sel2;
   I32 pm, pr;
-  U32 ai1, ai2, ai3, aw1, aw2, aw3;
+  U32 ai2, ai3, aw2, aw3;
   I32 lr1, lr2;
   /* coder */
   U32 rlo, rhi, xv;
@@ -131,13 +121,9 @@ static const short sq33[33] = {1, 2, 4, 6, 10, 17, 27, 45, 74, 120, 194, 311, 48
   4069, 4079, 4086, 4090, 4092, 4094, 4095};
 
 /* bit-history states: (n0, n1, last bit) with bounded counts */
-static const U8 bound_tabs[5][9] = {
-  {40, 30, 20, 12, 9, 7, 7, 0, 7},
-  {30, 24, 16, 12, 9, 7, 7, 0, 10},
-  {40, 30, 20, 12, 9, 7, 7, 7, 9},
-  {50, 30, 20, 12, 9, 7, 7, 0, 6},
-  {24, 18, 14, 11, 9, 7, 7, 0, 12}};
-#define bound_tab bound_tabs[P(18)]
+/* bound_tab[m] = largest count allowed when the other count is m; [8] = largest total that
+   still keeps the last bit */
+static const U8 bound_tab[9] = {50, 30, 20, 12, 9, 7, 7, 0, 6};
 
 static int st_ok(int a, int b) {
   int lo = a < b ? a : b, hi = a < b ? b : a;
@@ -167,10 +153,7 @@ static void build_states(pcm_t *m, U8 *sa, U8 *sb, U8 *sl, int *ns) {
         int c[2], lb;
         c[0] = sa[s]; c[1] = sb[s];
         c[y]++;
-        if (P(9) == 0) { if (c[1 - y] >= 3) c[1 - y] = c[1 - y] / 2 + 1; }
-        else if (P(9) == 1) { int o = c[1 - y]; if (o >= 3) { int r = 1; while ((1 << r) <= o) r++; c[1 - y] = r; } }
-        else if (P(9) == 2) { if (c[1 - y] >= 2) c[1 - y] = (c[1 - y] + 1) / 2; }
-        else { if (c[1 - y] >= 4) c[1 - y] = c[1 - y] / 3 + 2; }
+        if (c[1 - y] >= 2) c[1 - y] = (c[1 - y] + 1) / 2;   /* nonstationary: halve the other */
         while (!st_ok(c[0], c[1])) {
           if (c[1 - y] > 0) c[1 - y]--; else c[y]--;
         }
@@ -218,7 +201,7 @@ static void init_tables(pcm_t *m) {
 /* ------------------------------------------------------------------------ */
 /* arena layout */
 
-typedef struct { size_t ht, buf, o1, o2s, ind1, ind2, mt, sm, w1, w2, a1, a2, a3, iob, total; } layout_t;
+typedef struct { size_t ht, buf, o1, ind1, mt, sm, w1, w2, a2, a3, iob, total; } layout_t;
 
 #define A2N 65536u
 #define A3N 65536u
@@ -228,14 +211,11 @@ static void layout(U32 htbits, U32 wbits, U32 mtbits, layout_t *L) {
   L->ht = o;  o += (size_t)64 << htbits;
   L->buf = o; o += (size_t)1 << wbits;
   L->o1 = o;  o += 65536;
-  L->o2s = o;  o += 65536;
   L->ind1 = o;  o += 2 * 256;
-  L->ind2 = o;  o += 2 * 65536;
   L->mt = o;  o += (size_t)4 << mtbits;
-  L->sm = o;  o += 4 * (NC * 2048 + 64);
+  L->sm = o;  o += 4 * (NC * 256 + 64);
   L->w1 = o;  o += 2 * NSETS * NI;
   L->w2 = o;  o += 2 * 1024 * 8;
-  L->a1 = o;  o += 2 * 256 * 33;
   L->a2 = o;  o += 2 * (size_t)A2N * 33;
   L->a3 = o;  o += 2 * (size_t)A3N * 33;
   o = (o + 63) & ~(size_t)63;
@@ -473,19 +453,22 @@ static inline void sm_update(pcm_t *m, U32 *t, int y, int limit) {
 static void model_init(pcm_t *m) {
   int i, j;
   init_tables(m);
-  for (i = 0; i < NC * 2048 + 64; i++) m->sm[i] = m->smi0[i & 255];
-  for (i = NC * 2048; i < NC * 2048 + 64; i++) m->sm[i] = (1u << 31);
+  for (i = 0; i < NC * 256; i++) m->sm[i] = m->smi0[i & 255];
+  for (i = NC * 256; i < NC * 256 + 64; i++) m->sm[i] = (1u << 31);
   for (i = 0; i < NSETS; i++)
-    for (j = 0; j < NI; j++) m->w1[i * NI + j] = (I16)(j < XM + 2 && (!X2ON || (j & 1) == 0) ? P(6) : 0);
+    for (j = 0; j < NI; j++) m->w1[i * NI + j] = (I16)(j < XM + 2 ? P(4) : 0);
   for (i = 0; i < 256; i++)
     for (j = 0; j < 8; j++) m->w2[i * 8 + j] = (I16)(j < NM ? 4096 / NM : 0);
   for (i = 256; i < 1024; i++)
     for (j = 0; j < 8; j++) m->w2[i * 8 + j] = (I16)(j < NM ? 4096 / NM : 0);
-  for (i = 0; i < 256 * 33; i++) m->a1[i] = (U16)(m->sq[((i % 33) - 16) * 128 + 2048 > 4095 ? 4095 : ((i % 33) - 16) * 128 + 2048] * 16);
-  for (i = 0; i < (int)(A2N * 33); i++) m->a2[i] = m->a1[i % 33];
-  for (i = 0; i < (int)(A3N * 33); i++) m->a3[i] = m->a1[i % 33];
+  {
+    U16 a0[33];   /* each APM row starts as the identity: squash of its bucket */
+    for (j = 0; j < 33; j++) a0[j] = (U16)(m->sq[(j - 16) * 128 + 2048 > 4095 ? 4095 : (j - 16) * 128 + 2048] * 16);
+    for (i = 0; i < (int)(A2N * 33); i++) m->a2[i] = a0[i % 33];
+    for (i = 0; i < (int)(A3N * 33); i++) m->a3[i] = a0[i % 33];
+  }
   m->c0 = 1; m->bpos = 0; m->nib = 1;
-  m->lr1 = P(14) ? P(14) : P(0); m->lr2 = P(1);
+  m->lr1 = P(0); m->lr2 = P(1);
   m->x[NI - 1] = 256;
   m->x2[NM] = 256;
   for (i = 0; i < NCH; i++) m->slot[i] = ht_find(m, hash3(i + 1, 0, 0));
@@ -498,32 +481,31 @@ static inline int predict(pcm_t *m) {
   I16 *x = m->x;
   U32 c0 = m->c0, nib = m->nib;
   int i, ord = 0;
-  U32 pat = 0;
-  U32 bsm = P(22) ? m->bpos * 256 : 0;
   I32 pm, p;
-  /* direct contexts */
+  /* direct contexts: order 0 and order 1 */
   {
-    U8 *sp = P(16) == 1 ? m->o2s + (((m->c4 >> 8) & 255) << 8) + c0 : m->o0 + c0;
-    U32 s = *sp, k = s + bsm;
+    U8 *sp = m->o0 + c0;
+    U32 s = *sp, k = s;
     U32 v = m->sm[k] >> 20;
     m->sp[0] = sp; m->smx[0] = k;
-    x[XI(0)] = m->st[v]; if (X2ON) x[XI(0) + 1] = (I16)(P(4) ? ((I32)v - 2048) >> P(4) : 0);
+    x[0] = m->st[v];
     sp = m->o1 + ((m->c4 & 255) << 8) + c0;
-    s = *sp; k = 256 * SMR + s + bsm; v = m->sm[k] >> 20;
+    s = *sp; k = 256 + s; v = m->sm[k] >> 20;
     m->sp[1] = sp; m->smx[1] = k;
-    x[XI(1)] = m->st[v]; if (X2ON) x[XI(1) + 1] = (I16)(P(4) ? ((I32)v - 2048) >> P(4) : 0);
+    x[1] = m->st[v];
   }
+  /* hashed contexts (nibble slots) */
   for (i = 0; i < (int)m->nh; i++) {
     U8 *sp = m->slot[i] + nib;
-    U32 s = *sp, k = (U32)(i + NCD) * 256 * SMR + s + bsm;
+    U32 s = *sp, k = (U32)(i + NCD) * 256 + s;
     U32 v = m->sm[k] >> 20;
     m->sp[i + NCD] = sp; m->smx[i + NCD] = k;
-    x[XI(i + NCD)] = m->st[v];
-    if (X2ON) x[XI(i + NCD) + 1] = (I16)(P(4) ? ((I32)v - 2048) >> P(4) : 0);
+    x[i + NCD] = m->st[v];
     if (i < 4 && s) ord++;
-    pat |= (s != 0) << i;
   }
   /* match model */
+  m->mctx = 0;
+  x[XM] = 0; x[XM + 1] = 0;
   if (m->mlen) {
     U32 eb = m->mbyte | 256;
     if ((eb >> (8 - m->bpos)) == c0) {
@@ -531,82 +513,38 @@ static inline int predict(pcm_t *m) {
       U32 v;
       lb = l < 16 ? l : (l < 32 ? 16 : (l < 64 ? 17 : (l < 128 ? 18 : (l < 256 ? 19 : 20))));
       m->mctx = lb * 2 + bit;
-      m->msmx = NC * 2048 + m->mctx;
+      m->msmx = NC * 256 + m->mctx;
       v = m->sm[m->msmx] >> 20;
       x[XM] = m->st[v];
       x[XM + 1] = (I16)(bit ? (lb << 6) : -(I32)(lb << 6));
-    } else {
-      m->mlen = 0; m->mctx = 0;
-      x[XM] = 0; x[XM + 1] = 0;
-    }
-  } else {
-    m->mctx = 0;
-    x[XM] = 0; x[XM + 1] = 0;
+    } else
+      m->mlen = 0;
   }
-  /* mixer layer 1 */
+  /* mixer layer 1: weight sets by partial byte, match state, order and bit position, byte 2
+     back, byte 3 back, classes of the last three bytes */
   m->sel[0] = c0;
   m->sel[1] = 256 + m->mctx;
   m->sel[2] = 256 + 48 + ord * 8 + m->bpos;
-  if (P(5) == 1 && P(20) == 2 && P(21) == 6) {
-    m->sel[3] = m->selb[0];
-    m->sel[4] = m->selb[1];
-    m->sel[5] = m->selb[2] + (m->bpos >= 4) * 64;
-  } else {
-  switch (P(5)) {
-    case 1: m->sel[3] = 256 + 48 + 48 + ((m->c4 >> 8) & 255); break;
-    case 2: m->sel[3] = 256 + 48 + 48 + (((m->c4 >> 4) & 15) << 3 | m->bpos) * 2; if (m->sel[3] >= NSETS) m->sel[3] = NSETS - 1; break;
-    case 3: m->sel[3] = 256 + 48 + 48 + ((m->c4 * 0x9E3779B1u) >> 24); break;
-    default: m->sel[3] = 256 + 48 + 48 + (m->c4 & 255);
-  }
-  {
-    int k;
-    for (k = 4; k < 6; k++) {
-      U32 v = 0, opt = P(16 + k);
-      switch (opt) {
-        case 1: v = (pat & 31) * 2 + (m->mlen != 0); break;
-        case 2: v = (m->c4 >> 16) & 255; break;
-        case 3: v = (m->mlen < 15 ? m->mlen : 15) * 8 + m->bpos; break;
-        case 4: v = (m->wlen < 15 ? m->wlen : 15) * 8 + m->bpos; break;
-        case 5: v = (pat & 127) * 2 + (m->mlen != 0); break;
-        case 6: v = ((m->c4 >> 6) & 3) | (((m->c4 >> 14) & 3) << 2) | (((m->c4 >> 22) & 3) << 4) | (m->bpos >= 4) << 6; break;
-      }
-      m->sel[k] = opt ? 256 + 48 + 48 + 256 + (k - 4) * 256 + v : 0;
-    }
-  }
-  }
-  {
-  I32 dd[NM];
+  m->sel[3] = m->selb[0];
+  m->sel[4] = m->selb[1];
+  m->sel[5] = m->selb[2] + (m->bpos >= 4) * 64;
   dot_all(x, m->w1, m->sel, m->x2);
   for (i = 0; i < NM; i++) m->p1[i] = m->sq[m->x2[i] + 2048];
-  }
-  switch (P(25)) {
-    case 1: m->sel2 = (m->mlen != 0) * 256 + c0; break;
-    case 2: m->sel2 = ord * 8 + m->bpos; break;
-    case 3: m->sel2 = ((m->c4 & 255) >> 5) * 8 * 0 + (m->mlen ? 1 + (m->mlen > 15) : 0) * 256 + c0; break;
-    default: m->sel2 = c0;
-  }
+  /* layer 2: by match state and partial byte */
+  m->sel2 = (m->mlen ? 1 + (m->mlen > 15) : 0) * 256 + c0;
   {
     I32 d = dot16(m->x2, m->w2 + m->sel2 * 8, 8) >> 12;
     pm = squash(m, d);
   }
   m->pm = pm;
-  /* secondary estimation */
+  /* secondary estimation: order 1, and match byte (or an order-2 hash) */
   {
-    I32 q1 = P(15) == 3 ? 0 : apm_p(m, m->a1, pm, c0, &m->ai1, &m->aw1);
-    U32 c2x = P(17) ? (c0 | ((hash3(m->c4 & 0xffff, 3, 0) >> 24) << 8)) : (c0 | ((m->c4 & 255) << 8));
+    U32 c2x = c0 | ((m->c4 & 255) << 8);
     I32 q2 = apm_p(m, m->a2, pm, c2x & (A2N - 1), &m->ai2, &m->aw2);
     U32 c3 = m->mlen ? (m->mbyte << 8 | c0) ^ ((m->mlen < 16 ? m->mlen : 15) << 12)
                      : (hash3(m->c4 & 0xffff, 7, 0) & 0xff00) | c0;
     I32 q3 = apm_p(m, m->a3, pm, c3 & (A3N - 1), &m->ai3, &m->aw3);
-    switch (P(15)) {
-      case 1: p = (pm + q1 + q2 + q3 + 2) >> 2; break;
-      case 2: p = (q1 + 2 * q2 + q3 + 2) >> 2; break;
-      case 3: p = ((pm + 3 * q2 + 2 * q3) * 10923 + 32768) >> 16; break;
-      case 4: p = (pm + q1 + 4 * q2 + 2 * q3 + 4) >> 3; break;
-      case 5: p = (pm + 3 * q2 + 2) >> 2; break;
-      case 6: p = (pm + 3 * q3 + 2) >> 2; break;
-      default: p = (2 * pm + q1 + 3 * q2 + 2 * q3 + 4) >> 3;
-    }
+    p = ((pm + 3 * q2 + 2 * q3) * 10923 + 32768) >> 16;      /* (pm + 3 q2 + 2 q3) / 6 */
   }
   if (p < 1) p = 1;
   if (p > 4095) p = 4095;
@@ -649,7 +587,6 @@ static inline void update(pcm_t *m, int y) {
     I32 e = (((y << 12) - m->pm) * m->lr2) >> 4;
     train16(m->x2, m->w2 + m->sel2 * 8, 8, e);
   }
-  if (P(15) != 3) apm_u(m->a1, m->ai1, m->aw1, y, P(3));
   apm_u(m->a2, m->ai2, m->aw2, y, P(3));
   apm_u(m->a3, m->ai3, m->aw3, y, P(3));
   /* bit state */
@@ -663,7 +600,7 @@ static inline void update(pcm_t *m, int y) {
     m->nib = 1;
   } else {
     m->nib = (m->nib << 1) | (U32)y;
-    if (P(12) && m->bpos == 3) {
+    if (m->bpos == 3) {   /* prefetch both candidates of the next nibble's slots */
       U32 h0 = (m->c0 << 1) * 0x6F4F2A35u, h1 = ((m->c0 << 1) | 1) * 0x6F4F2A35u;
       for (i = 0; i < (int)m->nh; i++) {
         __builtin_prefetch(ht_bucket(m, m->hh[i] + h0));
@@ -674,8 +611,6 @@ static inline void update(pcm_t *m, int y) {
 }
 
 static inline int is_word(U32 c) {
-  if (P(13) == 1) return (c - 'a' < 26u) || (c - 'A' < 26u) || (c - '0' < 10u) || c >= 128 || c < 32;
-  if (P(13) == 2) return c != 32 && c != 10 && c != ',' && c != '.';
   return (c - 'a' < 26u) || (c - 'A' < 26u) || c >= 128;
 }
 
@@ -685,24 +620,21 @@ static inline void update_byte(pcm_t *m) {
   int i;
   m->buf[m->pos & wmask] = (U8)c;
   m->pos++;
-  /* indirect: what followed the previous one/two bytes */
+  /* indirect: the last two bytes that followed each byte value */
   {
-    U32 p1 = m->c4 & 255, p2 = m->c4 & 0xffff;
+    U32 p1 = m->c4 & 255;
     m->ind1[p1] = (U16)((m->ind1[p1] << 8) | c);
-    m->ind2[p2] = (U16)((m->ind2[p2] << 8) | c);
   }
   m->c8 = (m->c8 << 8) | (m->c4 >> 24);
   m->c4 = (m->c4 << 8) | c;
   m->c0 = 1; m->bpos = 0; m->nib = 1;
   /* word */
   if (is_word(c)) {
-    U32 lc;
-    m->wlen++;
-    lc = (c - 'A' < 26u) ? c + 32 : c;
+    U32 lc = (c - 'A' < 26u) ? c + 32 : c;
     m->wh = (m->wh + lc + 1) * 0x2F0B4C27u;
-  } else {
-    m->wlen = 0;
-    if (m->wh) { m->wh1 = m->wh; m->wh = 0; }
+  } else if (m->wh) {
+    m->wh1 = m->wh;
+    m->wh = 0;
   }
   /* match model */
   {
@@ -718,7 +650,7 @@ static inline void update_byte(pcm_t *m) {
       if (cand && m->pos - cand < wmask - 64) {
         U32 l = 0;
         while (l < 32 && l < cand && m->buf[(cand - 1 - l) & wmask] == m->buf[(m->pos - 1 - l) & wmask]) l++;
-        if (l >= (U32)P(7)) { m->mlen = l; m->mptr = cand; }
+        if (l >= (U32)P(5)) { m->mlen = l; m->mptr = cand; }
       }
     }
     m->mt[mh] = m->pos;
@@ -840,10 +772,10 @@ int pcm_open(void *mem, U32 htbits, U32 wbits, U32 mtbits, pcm_io_fn io, void *c
   if (htbits < 10 || htbits > 24 || wbits < 16 || wbits > 27 || mtbits < 12 || mtbits > 25) return PCM_ERR_PARAM;
   layout(htbits, wbits, mtbits, &L);
   m->htbits = htbits; m->wbits = wbits; m->mtbits = mtbits;
-  m->ht = base + L.ht; m->buf = base + L.buf; m->o1 = base + L.o1; m->o2s = base + L.o2s; m->ind1 = (U16 *)(base + L.ind1); m->ind2 = (U16 *)(base + L.ind2);
+  m->ht = base + L.ht; m->buf = base + L.buf; m->o1 = base + L.o1; m->ind1 = (U16 *)(base + L.ind1);
   m->mt = (U32 *)(base + L.mt); m->sm = (U32 *)(base + L.sm);
   m->w1 = (I16 *)(base + L.w1); m->w2 = (I16 *)(base + L.w2);
-  m->a1 = (U16 *)(base + L.a1); m->a2 = (U16 *)(base + L.a2); m->a3 = (U16 *)(base + L.a3);
+  m->a2 = (U16 *)(base + L.a2); m->a3 = (U16 *)(base + L.a3);
   m->iob = base + L.iob;
   m->io = io; m->ioctx = ctx;
   model_init(m);
@@ -881,7 +813,7 @@ static void set_text(pcm_t *m, int text) {
   m->nh = nh;
   if (text) {
     int i;
-    for (i = NCH - 2; i < NCH; i++) m->x[XI(NCD + i)] = 0;
+    for (i = NCH - 2; i < NCH; i++) m->x[NCD + i] = 0;
   } else {
     /* at a byte boundary: look the sparse contexts up for the current byte */
     U32 c4 = m->c4;
@@ -942,7 +874,6 @@ void pcm_enc_block(void *mem, const U8 *src, U32 n) {
     enc_bit(m, 0, 32768);
     for (j = 16; j-- > 0;) enc_bit(m, (n >> j) & 1, 32768);
   }
-  if (P(14) && m->lr1 > P(0)) m->lr1--;
   if (modelled) {
     for (i = 0; i < n; i++) {
       U32 c = src[i];
@@ -986,7 +917,6 @@ int pcm_dec_block(void *mem, U8 *dst) {
     for (j = 0; j < 16; j++) n = (n << 1) | (U32)dec_bit(m, 32768);
     if (n == 0) return PCM_ERR_DATA;
   }
-  if (P(14) && m->lr1 > P(0)) m->lr1--;
   if (modelled) {
     for (i = 0; i < n; i++) {
       for (j = 0; j < 8; j++) {
