@@ -169,8 +169,8 @@ procedure Flush(const FN: string); begin SaveFile(FN, W, WLen); WLen := 0; end;
 { a sample of a music-like signal: a few partials, a slow envelope, some noise }
 function Sig(t, ch: Integer): Double;
 begin
-  Result := 0.4 * Sin(t * 0.031 + ch) + 0.2 * Sin(t * 0.0071 * (ch + 1)) + 0.1 * Sin(t * 0.17) * Sin(t * 0.0003) +
-    0.02 * (Random - 0.5);
+  Result := 0.4 * Sin(t * 0.0031 + ch) + 0.2 * Sin(t * 0.0011 * (ch + 1)) + 0.1 * Sin(t * 0.017) * Sin(t * 0.0003) +
+    0.002 * (Random - 0.5);
 end;
 
 procedure PutSample(v: Double; Bits: Integer; BE, Flt: Boolean);

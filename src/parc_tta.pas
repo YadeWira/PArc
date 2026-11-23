@@ -46,6 +46,7 @@ const
   TTA_MAX_LEVEL = 9;
   TTA_FRAME_VALUES = 1 shl 17;          // samples (all channels) per coded frame
   TTA_DETECT = 1 shl 20;                // bytes looked at to choose the format
+  TTA_RAW_CHUNK = 1 shl 20;             // raw chunks (the decoder accepts up to this)
 
   ACF_BE = MMF_BE;
   ACF_U8 = MMF_U8;
@@ -110,8 +111,11 @@ type
     FDataLeft: Int64;                     // sample bytes left in the coded region (-1 = no limit)
     FFrameBytes: SizeInt;
     FSampleBytes: Integer;
+    FRaw: TBytes;                         // raw bytes waiting for their chunk
+    FRawLen: SizeInt;
     procedure Decide;
     procedure EmitRaw(P: PByte; N: SizeInt);
+    procedure FlushRaw;
     procedure EmitVInt(V: QWord);
     procedure Process(P: PByte; N: SizeInt; Final: Boolean);
     procedure CodeFrame(P: PByte; Frames: SizeInt);
@@ -519,22 +523,34 @@ begin
   Emit(@b[0], n);
 end;
 
+{ raw bytes are gathered into chunks of 1 MB, so the stream does not depend on write sizes }
 procedure TTtaEncStage.EmitRaw(P: PByte; N: SizeInt);
 var
   k: SizeInt;
-  t: Byte;
 begin
+  if Length(FRaw) < TTA_RAW_CHUNK then SetLength(FRaw, TTA_RAW_CHUNK);
   while N > 0 do
   begin
-    k := N;
-    if k > 1 shl 20 then k := 1 shl 20;
-    t := 2;
-    Emit(@t, 1);
-    EmitVInt(k);
-    Emit(P, k);
+    k := TTA_RAW_CHUNK - FRawLen;
+    if k > N then k := N;
+    Move(P^, FRaw[FRawLen], k);
+    Inc(FRawLen, k);
     Inc(P, k);
     Dec(N, k);
+    if FRawLen = TTA_RAW_CHUNK then FlushRaw;
   end;
+end;
+
+procedure TTtaEncStage.FlushRaw;
+var
+  t: Byte;
+begin
+  if FRawLen = 0 then Exit;
+  t := 2;
+  Emit(@t, 1);
+  EmitVInt(FRawLen);
+  Emit(@FRaw[0], FRawLen);
+  FRawLen := 0;
 end;
 
 procedure TTtaEncStage.Decide;
@@ -617,6 +633,7 @@ var
 begin
   if FCodec.EncodeFrame(P, Frames, Rc, RcLen, Raw, RawLen) then
   begin
+    FlushRaw;
     t := 1;
     Emit(@t, 1);
     EmitVInt(Frames);
@@ -764,6 +781,7 @@ begin
     Process(nil, 0, True);
   if FPhase = tpCoded then
   begin
+    FlushRaw;
     t := 0;
     Emit(@t, 1);
   end;
@@ -866,7 +884,7 @@ begin
     2:
       begin
         FRawLeft := ReadVIntFrom(Source);
-        if (FRawLeft = 0) or (FRawLeft > 1 shl 20) then Corrupt('tta: invalid raw chunk');
+        if (FRawLeft = 0) or (FRawLeft > TTA_RAW_CHUNK) then Corrupt('tta: invalid raw chunk');
         Result := True;
       end;
   else

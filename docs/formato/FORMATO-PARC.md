@@ -463,3 +463,94 @@ copy may overlap itself). The table is updated at every position where a main by
 before the byte is interpreted; positions inside a match are not. The block must end exactly
 when both streams are used up, at Len bytes; anything else (or a match past Len, or NLens
 larger than NMain + 2⌊Len/255⌋ + 2) is a damaged block (`EArcCorrupt`).
+
+### 6.6 `tta` (since 2026-11)
+
+`tta` is PArc's own lossless audio codec (`src/parc_tta.pas`, hot loops in C in
+`src/tta/mmtta_core.c`), written to replace FreeArc's port of TTA (GPL); nothing is derived
+from either. **`tta` blocks written before this change do not decode** (the version byte
+rejects them). The method keeps its name and parameters: `tta[:m<level>][:s][:f][:c<n>][:w<bits>]
+[:o<offset>][:r<n>][:<chan>*<bits>[f]]`. Level 1..9 (default 3) selects the predictor
+configuration written in the stream; `m0` or `r1` store. Without `c`/`w`/`f` the encoder takes the
+format from a WAV/RIFX/AIFF/AIFC header in the first MB (unless `s`), else from sample
+statistics (1, 2, 4 or 6 channels of 8/16/24-bit samples, either byte order); if nothing fits,
+the stream is stored. The decoder needs no parameter.
+
+Stream:
+
+| Field | Value |
+|---|---|
+| `U8 version` | 1 |
+| `U8 mode` | 0 = stored: the rest of the stream is the data; 1 = coded |
+| `U8 channels, U8 bits, U8 flags, U8 level` | 1..255 channels; bits 8/16/24/32; flags bit 0 big endian, bit 1 unsigned 8-bit, bit 2 IEEE float (bits = 32); level is informative |
+| configuration | `U8 NF` (0..3), NF × (`U16 order` LE, multiple of 16 in 16..1024, `U8 shift` 1..24), `U8 A1, A2, A3, S2Shift, S2Step, MS, R1` |
+| chunks | until type 0 |
+
+Chunks: `U8 type`. Type 1, coded frame: `VInt frames` (1 ≤ frames ≤ 2^17 / channels), `VInt rcLen`
+(≥ 5), `VInt rawLen`, rcLen bytes of range coder output, rawLen bytes of raw bits. Type 2, raw:
+`VInt len` (1..2^20) bytes copied to the output (container header, trailing data, an incomplete
+sample frame, a frame that did not compress). Type 0: end; nothing may follow. `VInt` is LEB128.
+
+Samples are read as integers (8-bit unsigned minus 128; floats as their bit pattern, negative
+ones xor 0x7FFFFFFF so the order is that of the values). Per sample frame, for stereo with MS = 1
+first (L, R) → (M, S) = (R + (S >> 1), L − R) mod 2^32; then per channel in order, with all
+arithmetic mod 2^32 and arithmetic right shifts:
+
+1. d = x − ((31 · x_prev) >> 5) (x_prev of this channel, 0 at the start, 64-bit product).
+2. Short stage (unless R1 bit 1): p = (Σ w_i·u_i + w_4·o_0 + w_5·o_1 + 2^(S2Shift−1)) >> S2Shift
+   in 64 bits, u_0..3 = this channel's last four inputs d, o_0/o_1 = the previous channel's last
+   input and the one before (channel NC−1 for channel 0; zeros for mono); out = d − p; then
+   w_i += S2Step · sign(out) · sign(input_i) and the inputs shift.
+3. LMS filters j = 0..NF−1 on 16-bit history h (inputs >> max(0, bits − 16), saturated) with
+   16-bit coefficients c (all wrapping): first c_i += sign(err_prev) · a_i over the window of the
+   previous sample (a = the steps stored with the history: ±A1 if |h| > 3·avg, ±A2 if 3|h| > 4·avg,
+   ±A3 otherwise, 0 for h = 0; avg += (|h| − avg) / 16, truncating), then
+   p = ((Σ c_i·h_i mod 2^32) << sh + 2^(shift−1)) >> shift, out = in − p; err_prev = out.
+4. The residual e, zigzag-mapped to u = (e << 1) xor (e >> 31), is coded with the channel's
+   models: from mean (initially 256; mean += min(u, 2^23) − mean >> 4), t = mean + 16,
+   L = ⌊log2 t⌋, context 2L + bit L−1 of t (at most 63), k0 = min(L − 3, 32). The bit length b of u
+   as s = clamp(b − k0 + 3, 0, 7) in a 3-level binary tree (nodes 1..7 of the context); s = 7 then
+   bits "b > j" for j = k0+4.. (slots 8..18), s = 0 bits "b < j" for j = k0−3 down to 1 (slots
+   19..31), each run ending at its first 0. Then, for b ≥ 2: with R1 bit 2 all b−1 bits below the
+   leading one raw; else the first one modeled (context b), and for b ≥ 3 with R1 bit 0 the rest
+   raw, else the second one modeled (context b and the first) and the rest raw.
+   Binary decisions: a 32-bit range coder with carry (LZMA style: 5 flush bytes, the first byte
+   0), 16-bit probabilities of a 0 starting at 32768, p += (t − p) >> 7 with t = 65408 after a 0 and
+   127 after a 1. Raw bits go low bits first into the raw stream, 32 at a time.
+
+The decoder inverts the stages in reverse order. Models persist across frames; each frame's
+range coder and raw stream are separate and must be used up exactly. Decoder checks: version,
+mode, format, configuration ranges, frame and chunk sizes, b ≤ 32, both streams consumed exactly;
+anything else is a damaged block (`EArcCorrupt`). Memory: the state (about 37 KB per channel
+plus 9 KB per LMS filter), a frame of samples (2^17 values) and its coded bytes.
+
+### 6.7 `mm` (since 2026-11)
+
+`mm` is PArc's own decorrelation filter for multimedia data in front of a general compressor
+(`src/parc_mm.pas`, loops in `src/tta/mmtta_core.c`), replacing FreeArc's `mm` (GPL; nothing is
+derived from it). **`mm` blocks written before this change do not decode.** Method string as
+before: `mm[:d<n>][:s][:f][:c<n>][:w<bits>][:o<offset>][:<chan>*<bits>[f]]` (`r` other than 0
+is rejected). The output has the input's length plus the header below.
+
+| Field | Value |
+|---|---|
+| `U8 version` | 1 |
+| `U8 mode` | 0 = stored (the rest is the data); 1 = filtered |
+| `U8 channels, U8 bytes, U8 flags, U8 predictor, U8 cross` | 1..16; 1..4; bit 0 big endian, bit 1 unsigned; 0..5; 0/1 |
+| `VInt width, VInt rowBytes` | pixels per row and bytes per row (0, 0 = no rows) |
+| `VInt header, VInt dataLen + 1` | bytes copied before the data; data bytes (0 = to the end) |
+| padding | zero bytes to a multiple of 8 from the stream start (keeps the data's alignment) |
+
+Then the header bytes as they are, the data region filtered, the rest as it is. The data region
+is cut to a multiple of the unit (a row, or a sample frame of channels × bytes); an incomplete
+unit at its end passes as it is. Each sample (read with its width, byte order and signedness)
+becomes (sample − prediction) mod 2^(8·bytes). Without rows (predictor 0/1): the last sample of
+the channel, or 2·last − the one before (0 at the start, carried through the whole stream). With
+rows: of each row, the first width × channels × bytes bytes are samples, the rest passes as it
+is; a = left, b = up, c = up-left (original values); the first row predicts a (0 at its start),
+the first column b; else predictor 0 = a, 2 = b, 3 = a + b − c, 4 = the LOCO-I median (min(a, b)
+if c ≥ max(a, b), max(a, b) if c ≤ min(a, b), else a + b − c), 5 = ⌊(a + b) / 2⌋. Cross = 1: with 2
+channels the second residual minus the first, with 3 or more channels 0 and 2 minus channel 1.
+The encoder takes the layout from a container header (WAV/AIFF; BMP, TGA, binary PGM/PPM,
+uncompressed TIFF), the parameters, or sample statistics, and the predictor and cross with the
+smallest residual cost on up to 256 KB (64 KB with `d1`/`d2`).

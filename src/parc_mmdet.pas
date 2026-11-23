@@ -531,6 +531,9 @@ end;
 { ---------------------------------------------------------------------------------------- }
 { statistics }
 
+const
+  STATS_MAX = 256 * 1024;
+
 var
   BitLenTab: array[0..4095] of Byte;
 
@@ -566,7 +569,7 @@ begin
   Step := Chan * Bytes;
   Frames := Size div Step;
   Result := 0;
-  if Frames < 16 then Exit(High(Int64) div 4);
+  if Frames < 16 then Exit(Int64(1) shl 40);
   for c := 0 to Chan - 1 do
   begin
     c1 := 0; c2 := 0;
@@ -619,17 +622,24 @@ begin
   ClearLayout(L);
   Ratio := 1.0;
   if Size < 256 then Exit;
+  // 256 KB from the middle are enough (and keep this cheap)
+  if Size > STATS_MAX then
+  begin
+    Buf := Buf + (((Size - STATS_MAX) div 2) div 144) * 144;   // keeps every frame alignment
+    Size := STATS_MAX;
+  end;
   H0 := Order0Cost(Buf, Size);
   if H0 <= 0 then Exit;
   Best := High(Int64);
-  for ib := 0 to High(ByteSizes) do
+  // wider samples first: narrower ones (which also look smooth in the high bytes of wide
+  // samples) and more channels must win by 2 %
+  for ib := High(ByteSizes) downto 0 do
     for ic := 0 to High(Channels) do
       for e := 0 to Ord(BigEndian and (ByteSizes[ib] > 1)) do
       begin
         if (Channels[ic] < 1) or not (ByteSizes[ib] in [1..4]) then Continue;
         Cost := LayoutCost(Buf, Size, Channels[ic], ByteSizes[ib], e = 1);
-        // a more complex layout must win by 1 %
-        if Cost * 100 < Best * 99 then
+        if (Best = High(Int64)) or (Cost * 100 < Best * 98) then
         begin
           Best := Cost;
           L.NumChan := Channels[ic];
