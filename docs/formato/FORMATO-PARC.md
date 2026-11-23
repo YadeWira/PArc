@@ -551,6 +551,10 @@ is; a = left, b = up, c = up-left (original values); the first row predicts a (0
 the first column b; else predictor 0 = a, 2 = b, 3 = a + b − c, 4 = the LOCO-I median (min(a, b)
 if c ≥ max(a, b), max(a, b) if c ≤ min(a, b), else a + b − c), 5 = ⌊(a + b) / 2⌋. Cross = 1: with 2
 channels the second residual minus the first, with 3 or more channels 0 and 2 minus channel 1.
-The encoder takes the layout from a container header (WAV/AIFF; BMP, TGA, binary PGM/PPM,
-uncompressed TIFF), the parameters, or sample statistics, and the predictor and cross with the
-smallest residual cost on up to 256 KB (64 KB with `d1`/`d2`).
+The encoder (none of this is in the stream) takes the layout from a container header (WAV/AIFF;
+BMP or bare DIB, TGA, binary PGM/PPM, uncompressed TIFF), the parameters, or sample statistics
+(then also the frame phase and, for 8-bit pixels, a row length found as the byte distance at which
+the data repeats best), the predictor and cross with the smallest residual cost on up to 128 KB
+(64 KB with `d1`/`d2`), and stores (mode 0) when a fast LZ estimate on that sample is not smaller
+filtered than raw (synthetic and palette images often compress better as they are). Packed
+16-bit pixels (RGB555/565) and colour-mapped TGA are stored.
