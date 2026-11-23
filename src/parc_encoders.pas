@@ -776,7 +776,7 @@ begin
           if (DataSize > 0) and (DataSize < B) then B := DataSize;
           Result := 2 * B + 2 * MB_;
         end;
-      'cm': Result := 4 * DataSize + 320 * MB_;
+      'cm': Result := CmEncMemory(ParseCmLevel(Parts), DataSize);
       'srep': Result := 3 * DataSize + 64 * MB_;
       'lz4': Result := 3 * FirstMemParam(Parts, MB_) + MB_;
       'plz': Result := PlzEncMemory(ParsePlzEncParams(Parts), True) + MB_;
@@ -932,7 +932,7 @@ begin
         end;
       end;
     'storing': Result := TStoringStage.Create(Target);
-    'cm':      Result := TCmEncStage.Create(Target);
+    'cm':      Result := TCmEncStage.Create(Target, ParseCmLevel(Parts));
     'orep':    Result := TOrepEncStage.Create(Target, Parts);
     'delta':   Result := TDeltaEncStage.Create(Target, Parts);
     'dict':    Result := TDictEncStage.Create(Target, Parts);
