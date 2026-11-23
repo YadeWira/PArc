@@ -88,6 +88,7 @@ typedef struct {
   U32 c0, bpos, c4, c8, pos, nib;
   U32 wh, wh1;                /* word hashes */
   U32 selb[3];
+  U32 h2apm;                  /* order-2 hash for the second APM (bits 8-15) */
   U32 hh[NCH];                /* context hashes at byte boundary */
   U32 nh;                     /* active hashed contexts: NCH, or NCH - 2 in text blocks */
   U32 textp;                  /* probability of a text block */
@@ -473,6 +474,7 @@ static void model_init(pcm_t *m) {
   m->x2[NM] = 256;
   for (i = 0; i < NCH; i++) m->slot[i] = ht_find(m, hash3(i + 1, 0, 0));
   m->nh = NCH;
+  m->h2apm = hash3(0, 7, 0) & 0xff00;
   m->textp = 1u << 15;
   m->flagp = 1u << 15;
 }
@@ -542,7 +544,7 @@ static inline int predict(pcm_t *m) {
     U32 c2x = c0 | ((m->c4 & 255) << 8);
     I32 q2 = apm_p(m, m->a2, pm, c2x & (A2N - 1), &m->ai2, &m->aw2);
     U32 c3 = m->mlen ? (m->mbyte << 8 | c0) ^ ((m->mlen < 16 ? m->mlen : 15) << 12)
-                     : (hash3(m->c4 & 0xffff, 7, 0) & 0xff00) | c0;
+                     : m->h2apm | c0;
     I32 q3 = apm_p(m, m->a3, pm, c3 & (A3N - 1), &m->ai3, &m->aw3);
     p = ((pm + 3 * q2 + 2 * q3) * 10923 + 32768) >> 16;      /* (pm + 3 q2 + 2 q3) / 6 */
   }
@@ -659,6 +661,7 @@ static inline void update_byte(pcm_t *m) {
   /* byte-level mixer selectors */
   {
     U32 c4 = m->c4;
+    m->h2apm = hash3(c4 & 0xffff, 7, 0) & 0xff00;
     m->selb[0] = 256 + 48 + 48 + ((c4 >> 8) & 255);
     m->selb[1] = 256 + 48 + 48 + 256 + ((c4 >> 16) & 255);
     m->selb[2] = 256 + 48 + 48 + 512 + (((c4 >> 6) & 3) | (((c4 >> 14) & 3) << 2) | (((c4 >> 22) & 3) << 4));
