@@ -34,19 +34,30 @@ typedef U32 (*pcm_io_fn)(void *ctx, U8 *buf, U32 n);
 
 #define PCM_BLK 65536u        /* bytes per block (raw / modelled decision) */
 #define NCD 2                 /* direct contexts: order 0, order 1 */
-#define NCH 7                 /* hashed contexts */
+#define NCH 8                 /* hashed contexts */
 #define NC (NCD + NCH)
-#define NI 24                 /* mixer inputs (multiple of 8) */
+#ifndef PCM_NI
+#define PCM_NI 16
+#endif
+#define NI PCM_NI                 /* mixer inputs (multiple of 8) */
+#if NI == 24
+#define XI(i) (2 * (i))           /* input of context i (and XI(i)+1 the second one) */
+#define X2ON 1
+#else
+#define XI(i) (i)
+#define X2ON 0
+#endif
+#define XM XI(NC)                 /* match model inputs: XM, XM+1 */
 #define NM 6                  /* first layer mixers */
 #define NSETS (256 + 48 + 48 + 256 + 256 + 256)
 #define IOBUF 65536u
 
 /* tuning parameters (constants in the product build) */
-#define PCM_TDEF {8, 2, 1023, 5, 2, 1, 1024, 6, 0, 2, 0, 0, 1, 0, 0, 3, 0, 0, 3, 0, 2, 6}
+#define PCM_TDEF {8, 2, 1023, 5, 2, 1, 1024, 6, 0, 2, 0, 0, 1, 0, 0, 3, 0, 0, 3, 0, 2, 6, 0, 3}
 #ifdef PCM_TUNE
-int pcm_T[24] = PCM_TDEF;
+int pcm_T[32] = PCM_TDEF;
 #else
-static const int pcm_T[24] = PCM_TDEF;
+static const int pcm_T[32] = PCM_TDEF;
 #endif
 #define P(i) pcm_T[i]
 #define SMR (P(22) ? 8 : 1)
@@ -67,6 +78,7 @@ typedef struct {
   U32 smi0[256];              /* initial state-map values */
   /* arena pointers */
   U8 *ht, *buf, *o1, *o2s;
+  U16 *ind1, *ind2;
   U32 *mt;
   U32 *sm;                    /* NC*256 state maps + 64 match map */
   I16 *w1, *w2;
@@ -195,7 +207,7 @@ static void init_tables(pcm_t *m) {
 /* ------------------------------------------------------------------------ */
 /* arena layout */
 
-typedef struct { size_t ht, buf, o1, o2s, mt, sm, w1, w2, a1, a2, a3, iob, total; } layout_t;
+typedef struct { size_t ht, buf, o1, o2s, ind1, ind2, mt, sm, w1, w2, a1, a2, a3, iob, total; } layout_t;
 
 #define A2N 65536u
 #define A3N 65536u
@@ -206,6 +218,8 @@ static void layout(U32 htbits, U32 wbits, U32 mtbits, layout_t *L) {
   L->buf = o; o += (size_t)1 << wbits;
   L->o1 = o;  o += 65536;
   L->o2s = o;  o += 65536;
+  L->ind1 = o;  o += 2 * 256;
+  L->ind2 = o;  o += 2 * 65536;
   L->mt = o;  o += (size_t)4 << mtbits;
   L->sm = o;  o += 4 * (NC * 2048 + 64);
   L->w1 = o;  o += 2 * NSETS * NI;
@@ -319,18 +333,18 @@ static inline void train16(const I16 *x, I16 *w, int n, I32 e) {
 }
 
 /* the NM first-layer mixers at once: d[k] = dot(x, w + sel[k]*NI) */
-static inline void dot_all(const I16 *x, const I16 *w, const U32 *sel, I32 *d) {
+/* out[k] = clamp(dot(x, w + sel[k]*NI) >> 12, +-2047) for k < NM; out[NM..7] untouched */
+static inline void dot_all(const I16 *x, const I16 *w, const U32 *sel, I16 *out) {
 #ifdef PCM_SSE2
-  __m128i x0 = _mm_loadu_si128((const __m128i *)x);
-  __m128i x1 = _mm_loadu_si128((const __m128i *)(x + 8));
-  __m128i x2 = _mm_loadu_si128((const __m128i *)(x + 16));
+  __m128i xv[NI / 8];
   __m128i s[NM];
-  int k;
+  int k, j;
+  for (j = 0; j < NI / 8; j++) xv[j] = _mm_loadu_si128((const __m128i *)(x + 8 * j));
   for (k = 0; k < NM; k++) {
     const I16 *wk = w + sel[k] * NI;
-    __m128i a = _mm_madd_epi16(x0, _mm_loadu_si128((const __m128i *)wk));
-    a = _mm_add_epi32(a, _mm_madd_epi16(x1, _mm_loadu_si128((const __m128i *)(wk + 8))));
-    a = _mm_add_epi32(a, _mm_madd_epi16(x2, _mm_loadu_si128((const __m128i *)(wk + 16))));
+    __m128i a = _mm_madd_epi16(xv[0], _mm_loadu_si128((const __m128i *)wk));
+    for (j = 1; j < NI / 8; j++)
+      a = _mm_add_epi32(a, _mm_madd_epi16(xv[j], _mm_loadu_si128((const __m128i *)(wk + 8 * j))));
     s[k] = a;
   }
   {
@@ -339,37 +353,42 @@ static inline void dot_all(const I16 *x, const I16 *w, const U32 *sel, I32 *d) {
     __m128i t2 = _mm_unpacklo_epi32(s[2], s[3]), t3 = _mm_unpackhi_epi32(s[2], s[3]);
     __m128i u0 = _mm_add_epi32(t0, t1), u1 = _mm_add_epi32(t2, t3);
     __m128i r = _mm_add_epi32(_mm_unpacklo_epi64(u0, u1), _mm_unpackhi_epi64(u0, u1));
-    _mm_storeu_si128((__m128i *)d, r);
+    __m128i keep = _mm_loadu_si128((const __m128i *)out);
     t0 = _mm_unpacklo_epi32(s[4], s[5]); t1 = _mm_unpackhi_epi32(s[4], s[5]);
     u0 = _mm_add_epi32(t0, t1);
-    u0 = _mm_add_epi32(u0, _mm_srli_si128(u0, 8));
-    d[4] = _mm_cvtsi128_si32(u0);
-    d[5] = _mm_cvtsi128_si32(_mm_srli_si128(u0, 4));
+    u0 = _mm_add_epi32(u0, _mm_srli_si128(u0, 8));      /* lanes 0,1 = mixers 4,5 */
+    r = _mm_packs_epi32(_mm_srai_epi32(r, 12), _mm_srai_epi32(u0, 12));
+    r = _mm_min_epi16(_mm_max_epi16(r, _mm_set1_epi16(-2047)), _mm_set1_epi16(2047));
+    /* lanes 6, 7 keep their old values */
+    r = _mm_or_si128(_mm_and_si128(r, _mm_set_epi32(0, -1, -1, -1)),
+                     _mm_and_si128(keep, _mm_set_epi32(-1, 0, 0, 0)));
+    _mm_storeu_si128((__m128i *)out, r);
   }
 #else
   int k;
-  for (k = 0; k < NM; k++) d[k] = dot16(x, w + sel[k] * NI, NI);
+  for (k = 0; k < NM; k++) {
+    I32 d = dot16(x, w + sel[k] * NI, NI) >> 12;
+    if (d > 2047) d = 2047;
+    if (d < -2047) d = -2047;
+    out[k] = (I16)d;
+  }
 #endif
 }
 
 /* train the NM mixers: e[k] per mixer */
 static inline void train_all(const I16 *x, I16 *w, const U32 *sel, const I32 *e) {
 #ifdef PCM_SSE2
-  __m128i x0 = _mm_slli_epi16(_mm_loadu_si128((const __m128i *)x), 3);
-  __m128i x1 = _mm_slli_epi16(_mm_loadu_si128((const __m128i *)(x + 8)), 3);
-  __m128i x2 = _mm_slli_epi16(_mm_loadu_si128((const __m128i *)(x + 16)), 3);
+  __m128i xv[NI / 8];
   __m128i one = _mm_set1_epi16(1);
-  int k;
+  int k, j;
+  for (j = 0; j < NI / 8; j++) xv[j] = _mm_slli_epi16(_mm_loadu_si128((const __m128i *)(x + 8 * j)), 3);
   for (k = 0; k < NM; k++) {
     I16 *wk = w + sel[k] * NI;
     __m128i ev = _mm_set1_epi16((short)e[k]);
-    __m128i t;
-    t = _mm_srai_epi16(_mm_add_epi16(_mm_mulhi_epi16(x0, ev), one), 1);
-    _mm_storeu_si128((__m128i *)wk, _mm_adds_epi16(_mm_loadu_si128((const __m128i *)wk), t));
-    t = _mm_srai_epi16(_mm_add_epi16(_mm_mulhi_epi16(x1, ev), one), 1);
-    _mm_storeu_si128((__m128i *)(wk + 8), _mm_adds_epi16(_mm_loadu_si128((const __m128i *)(wk + 8)), t));
-    t = _mm_srai_epi16(_mm_add_epi16(_mm_mulhi_epi16(x2, ev), one), 1);
-    _mm_storeu_si128((__m128i *)(wk + 16), _mm_adds_epi16(_mm_loadu_si128((const __m128i *)(wk + 16)), t));
+    for (j = 0; j < NI / 8; j++) {
+      __m128i t = _mm_srai_epi16(_mm_add_epi16(_mm_mulhi_epi16(xv[j], ev), one), 1);
+      _mm_storeu_si128((__m128i *)(wk + 8 * j), _mm_adds_epi16(_mm_loadu_si128((const __m128i *)(wk + 8 * j)), t));
+    }
   }
 #else
   int k;
@@ -412,7 +431,7 @@ static void model_init(pcm_t *m) {
   for (i = 0; i < NC * 2048 + 64; i++) m->sm[i] = m->smi0[i & 255];
   for (i = NC * 2048; i < NC * 2048 + 64; i++) m->sm[i] = (1u << 31);
   for (i = 0; i < NSETS; i++)
-    for (j = 0; j < NI; j++) m->w1[i * NI + j] = (I16)(j < 2 * NC + 2 && (j & 1) == 0 ? P(6) : 0);
+    for (j = 0; j < NI; j++) m->w1[i * NI + j] = (I16)(j < XM + 2 && (!X2ON || (j & 1) == 0) ? P(6) : 0);
   for (i = 0; i < 256; i++)
     for (j = 0; j < 8; j++) m->w2[i * 8 + j] = (I16)(j < NM ? 4096 / NM : 0);
   for (i = 0; i < 256 * 33; i++) m->a1[i] = (U16)(m->sq[((i % 33) - 16) * 128 + 2048 > 4095 ? 4095 : ((i % 33) - 16) * 128 + 2048] * 16);
@@ -435,26 +454,23 @@ static inline int predict(pcm_t *m) {
   I32 pm, p;
   /* direct contexts */
   {
-    U8 *sp = P(16) ? m->o2s + (((m->c4 >> 8) & 255) << 8) + c0 : m->o0 + c0;
+    U8 *sp = P(16) == 1 ? m->o2s + (((m->c4 >> 8) & 255) << 8) + c0 : m->o0 + c0;
     U32 s = *sp, k = s + bsm;
     U32 v = m->sm[k] >> 20;
     m->sp[0] = sp; m->smx[0] = k;
-    x[0] = m->st[v]; x[1] = (I16)(P(4) ? ((I32)v - 2048) >> P(4) : 0);
+    x[XI(0)] = m->st[v]; if (X2ON) x[XI(0) + 1] = (I16)(P(4) ? ((I32)v - 2048) >> P(4) : 0);
     sp = m->o1 + ((m->c4 & 255) << 8) + c0;
     s = *sp; k = 256 * SMR + s + bsm; v = m->sm[k] >> 20;
     m->sp[1] = sp; m->smx[1] = k;
-    x[2] = m->st[v]; x[3] = (I16)(P(4) ? ((I32)v - 2048) >> P(4) : 0);
+    x[XI(1)] = m->st[v]; if (X2ON) x[XI(1) + 1] = (I16)(P(4) ? ((I32)v - 2048) >> P(4) : 0);
   }
   for (i = 0; i < NCH; i++) {
     U8 *sp = m->slot[i] + nib;
     U32 s = *sp, k = (U32)(i + NCD) * 256 * SMR + s + bsm;
     U32 v = m->sm[k] >> 20;
     m->sp[i + NCD] = sp; m->smx[i + NCD] = k;
-    if (P(8) && s == 0) { x[2 * (i + NCD)] = 0; x[2 * (i + NCD) + 1] = 0; }
-    else {
-    x[2 * (i + NCD)] = m->st[v];
-    x[2 * (i + NCD) + 1] = (I16)(P(4) ? ((I32)v - 2048) >> P(4) : 0);
-    }
+    x[XI(i + NCD)] = m->st[v];
+    if (X2ON) x[XI(i + NCD) + 1] = (I16)(P(4) ? ((I32)v - 2048) >> P(4) : 0);
     if (i < 4 && s) ord++;
     pat |= (s != 0) << i;
   }
@@ -468,15 +484,15 @@ static inline int predict(pcm_t *m) {
       m->mctx = lb * 2 + bit;
       m->msmx = NC * 2048 + m->mctx;
       v = m->sm[m->msmx] >> 20;
-      x[2 * NC] = m->st[v];
-      x[2 * NC + 1] = (I16)(bit ? (lb << 6) : -(I32)(lb << 6));
+      x[XM] = m->st[v];
+      x[XM + 1] = (I16)(bit ? (lb << 6) : -(I32)(lb << 6));
     } else {
       m->mlen = 0; m->mctx = 0;
-      x[2 * NC] = 0; x[2 * NC + 1] = 0;
+      x[XM] = 0; x[XM + 1] = 0;
     }
   } else {
     m->mctx = 0;
-    x[2 * NC] = 0; x[2 * NC + 1] = 0;
+    x[XM] = 0; x[XM + 1] = 0;
   }
   /* mixer layer 1 */
   m->sel[0] = c0;
@@ -511,17 +527,8 @@ static inline int predict(pcm_t *m) {
   }
   {
   I32 dd[NM];
-  dot_all(x, m->w1, m->sel, dd);
-  for (i = 0; i < NM; i++) {
-    I32 d;
-    if ((P(19) && i >= P(19)) || (i >= 4 && !P(16 + i))) { m->x2[i] = 0; m->p1[i] = 2048; continue; }
-    d = dd[i] >> 12;
-    if (d > 2047) d = 2047;
-    if (d < -2047) d = -2047;
-    m->st1[i] = d;
-    m->p1[i] = m->sq[d + 2048];
-    m->x2[i] = (I16)d;
-  }
+  dot_all(x, m->w1, m->sel, m->x2);
+  for (i = 0; i < NM; i++) m->p1[i] = m->sq[m->x2[i] + 2048];
   }
   m->sel2 = c0;
   {
@@ -621,6 +628,12 @@ static inline void update_byte(pcm_t *m) {
   int i;
   m->buf[m->pos & wmask] = (U8)c;
   m->pos++;
+  /* indirect: what followed the previous one/two bytes */
+  {
+    U32 p1 = m->c4 & 255, p2 = m->c4 & 0xffff;
+    m->ind1[p1] = (U16)((m->ind1[p1] << 8) | c);
+    m->ind2[p2] = (U16)((m->ind2[p2] << 8) | c);
+  }
   m->c8 = (m->c8 << 8) | (m->c4 >> 24);
   m->c4 = (m->c4 << 8) | c;
   m->c0 = 1; m->bpos = 0; m->nib = 1;
@@ -673,12 +686,25 @@ static inline void update_byte(pcm_t *m) {
       case 1: m->hh[5] = hash3(6, c4, c8 & 0xff); break;
       case 2: m->hh[5] = hash3(6, c4, c8 & 0xffffff); break;
       case 3: m->hh[5] = hash3(6, m->wh, c4 & 0xff00); break;
+      case 4: m->hh[5] = hash3(6, c4 & 0xffff, m->ind2[c4 & 0xffff]); break;
       default: m->hh[5] = hash3(6, c4 & 0xffff00, 0);
     }
     switch (P(11)) {
       case 1: m->hh[6] = hash3(7, c4, c8); break;
       case 2: m->hh[6] = hash3(7, c4, c8 & 0xff); break;
+      case 3: m->hh[6] = hash3(7, c4 & 0xff, m->ind1[c4 & 255]); break;
+      case 4: m->hh[6] = hash3(7, c4 & 0xffff, m->ind2[c4 & 0xffff]); break;
+      case 5: m->hh[6] = hash3(7, c4 & 0xff, m->ind1[c4 & 255] | (U32)m->ind2[c4 & 0xffff] << 16); break;
       default: m->hh[6] = hash3(7, m->wh, m->wh1);
+    }
+    switch (P(23)) {
+      case 3: m->hh[7] = hash3(8, c4 & 0xff, m->ind1[c4 & 255]); break;
+      case 4: m->hh[7] = hash3(8, c4 & 0xffff, m->ind2[c4 & 0xffff]); break;
+      case 5: m->hh[7] = hash3(8, c4 & 0xff, m->ind1[c4 & 255] | (U32)m->ind2[c4 & 0xffff] << 16); break;
+      case 6: m->hh[7] = hash3(8, c4, c8 & 0xff); break;
+      case 7: m->hh[7] = hash3(8, c4 & 0xff00ff00, 0); break;
+      case 8: m->hh[7] = hash3(8, c4 & 0xffff0000, 0); break;
+      default: m->hh[7] = hash3(8, 0, 0);
     }
     for (i = 0; i < NCH; i++) __builtin_prefetch(ht_bucket(m, m->hh[i]));
     for (i = 0; i < NCH; i++) m->slot[i] = ht_find(m, m->hh[i]);
@@ -776,7 +802,7 @@ int pcm_open(void *mem, U32 htbits, U32 wbits, U32 mtbits, pcm_io_fn io, void *c
   if (htbits < 10 || htbits > 24 || wbits < 16 || wbits > 27 || mtbits < 12 || mtbits > 25) return PCM_ERR_PARAM;
   layout(htbits, wbits, mtbits, &L);
   m->htbits = htbits; m->wbits = wbits; m->mtbits = mtbits;
-  m->ht = base + L.ht; m->buf = base + L.buf; m->o1 = base + L.o1; m->o2s = base + L.o2s;
+  m->ht = base + L.ht; m->buf = base + L.buf; m->o1 = base + L.o1; m->o2s = base + L.o2s; m->ind1 = (U16 *)(base + L.ind1); m->ind2 = (U16 *)(base + L.ind2);
   m->mt = (U32 *)(base + L.mt); m->sm = (U32 *)(base + L.sm);
   m->w1 = (I16 *)(base + L.w1); m->w2 = (I16 *)(base + L.w2);
   m->a1 = (U16 *)(base + L.a1); m->a2 = (U16 *)(base + L.a2); m->a3 = (U16 *)(base + L.a3);
