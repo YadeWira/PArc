@@ -152,6 +152,9 @@ procedure parc_bwt_set_alloc(a: TBwtAllocFn; f: TBwtFreeFn); cdecl; external nam
 function parc_bwt_forward(T, U: PByte; A: PLongInt; n: LongInt): LongInt; cdecl; external name 'parc_bwt_forward';
 function parc_bwt_inverse(T, U: PByte; A: PLongInt; n, primary: LongInt): LongInt; cdecl; external name 'parc_bwt_inverse';
 function parc_qlfc_model_size(coder: LongInt): LongInt; cdecl; external name 'parc_qlfc_model_size';
+procedure parc_seg_init; cdecl; external name 'parc_seg_init';
+function parc_seg_split(p: PByte; n, stride, minSeg: LongInt; penalty: Int64; divisor: LongInt; work: PLongWord): LongInt;
+  cdecl; external name 'parc_seg_split';
 function parc_repeat_share(input: PByte; len: LongInt; tab: PLongWord): LongInt; cdecl; external name 'parc_repeat_share';
 function parc_lzp_encode(input: PByte; len, minLen, hb: LongInt; hash: PLongWord; output, lens: PByte; lensCap: LongInt;
   out nMain, nLens: LongInt; out esc: Byte): LongInt; cdecl; external name 'parc_lzp_encode';
@@ -580,129 +583,33 @@ const
   SEG_MAX = 64;              // pieces per block
   SEG_PENALTY = 49152;     // bits of the whole piece (the samples see 1/SEG_STRIDE of it)
   SEG_DIV = 32;
-  SEG_DIV_A = 32;            // with a
-  SEG_TAB = 65536;
   SEG_ONE = 65536;           // fixed point: costs in 1/65536 bit
 
 type
-  TSegPair = record
-    L, R: LongInt;
-  end;
   TSegModel = class
-    T: array of TSegPair;           // [ctx * 256 + sym]: left and right counts together
-    C: array[0..255] of TSegPair;   // per context
+    Work: PLongWord;                // the C core's counts
     Divisor: Integer;               // a split must save 1/Divisor of the cost (+ the penalty)
     constructor Create(ADivisor: Integer);
+    destructor Destroy; override;
   end;
-
-var
-  SegD: array of LongInt;            // FLogF(f + 1) - FLogF(f) for f < SEG_TAB
-  SegLogLock: TRTLCriticalSection;
-
-{ floor(SEG_ONE * log2 x) for x >= 1, in integers only (the same on every platform): the
-  integer part from the top bit, 16 fraction bits by squaring the mantissa (Q31) }
-function Log2Fixed(x: QWord): Int64;
-var
-  k, i: Integer;
-  m: QWord;
-begin
-  k := BsrQWord(x);
-  if k >= 31 then m := x shr (k - 31) else m := x shl (31 - k);   // 1.xxx in Q31
-  Result := Int64(k) * SEG_ONE;
-  for i := 15 downto 0 do
-  begin
-    m := (m * m) shr 31;
-    if m >= QWord(1) shl 32 then
-    begin
-      Inc(Result, Int64(1) shl i);
-      m := m shr 1;
-    end;
-  end;
-end;
-
-{ SEG_ONE * f log2 f, fixed point }
-function FLogF(f: LongInt): Int64; inline;
-begin
-  if f <= 1 then Result := 0 else Result := Int64(f) * Log2Fixed(f);
-end;
-
-{ FLogF(f + 1) - FLogF(f) }
-function DLogF(f: LongInt): LongInt; inline;
-begin
-  if f < SEG_TAB then Result := SegD[f]
-  else Result := LongInt(FLogF(f + 1) - FLogF(f));
-end;
-
-procedure BuildSegLog;
-var
-  i: Integer;
-begin
-  EnterCriticalSection(SegLogLock);
-  try
-    if Length(SegD) = 0 then
-    begin
-      SetLength(SegD, SEG_TAB);
-      for i := 0 to SEG_TAB - 1 do SegD[i] := LongInt(FLogF(i + 1) - FLogF(i));
-    end;
-  finally
-    LeaveCriticalSection(SegLogLock);
-  end;
-end;
 
 constructor TSegModel.Create(ADivisor: Integer);
 begin
   Divisor := ADivisor;
-  SetLength(T, 65536);
-  BuildSegLog;
+  Work := GetMem((2 * 65536 + 2 * 256) * SizeOf(LongWord));
 end;
 
-{ Best cut of P[0..n) (a multiple of SEG_STRIDE, SEG_MIN <= cut <= n - SEG_MIN), or 0 }
-function SegSplit(M: TSegModel; P: PByte; n: SizeInt): SizeInt;
-var
-  i, c, k, Best, Stop: SizeInt;
-  Whole, Cur, BestCost: Int64;
-  x, y: LongInt;
-  Tp: ^TSegPair;
+destructor TSegModel.Destroy;
 begin
-  Result := 0;
-  if n < 2 * SEG_MIN then Exit;
-  FillChar(M.T[0], 65536 * SizeOf(TSegPair), 0);
-  FillChar(M.C, SizeOf(M.C), 0);
-  i := SEG_STRIDE;
-  while i < n do
-  begin
-    c := P[i - 1];
-    Inc(M.T[c shl 8 + P[i]].R);
-    Inc(M.C[c].R);
-    Inc(i, SEG_STRIDE);
-  end;
-  Whole := 0;
-  for c := 0 to 255 do Whole := Whole + FLogF(M.C[c].R);
-  for k := 0 to 65535 do Whole := Whole - FLogF(M.T[k].R);
-  Cur := Whole;
-  BestCost := Whole - Whole div M.Divisor - SEG_PENALTY * SEG_ONE div SEG_STRIDE;
-  Best := 0;
-  i := SEG_STRIDE;
-  Stop := n - SEG_MIN;
-  while i < Stop do
-  begin
-    if (Cur < BestCost) and (i >= SEG_MIN) then
-    begin
-      BestCost := Cur;
-      Best := i;
-    end;
-    c := P[i - 1];
-    // one sample from the right model to the left one
-    Tp := @M.T[c shl 8 + P[i]];
-    x := Tp^.R - 1; Tp^.R := x;
-    y := Tp^.L; Tp^.L := y + 1;
-    Inc(Cur, Int64(DLogF(x)) - DLogF(y));
-    x := M.C[c].R - 1; M.C[c].R := x;
-    y := M.C[c].L; M.C[c].L := y + 1;
-    Inc(Cur, Int64(DLogF(y)) - DLogF(x));
-    Inc(i, SEG_STRIDE);
-  end;
-  Result := Best;
+  FreeMem(Work);
+  inherited Destroy;
+end;
+
+{ Best cut of P[0..n) (a multiple of SEG_STRIDE, SEG_MIN <= cut <= n - SEG_MIN), or 0. The sweep
+  runs in the C core (parc_seg_split), with integer costs in 1/65536 bit. }
+function SegSplit(M: TSegModel; P: PByte; n: SizeInt): SizeInt;
+begin
+  Result := parc_seg_split(P, n, SEG_STRIDE, SEG_MIN, Int64(SEG_PENALTY) * SEG_ONE div SEG_STRIDE, M.Divisor, M.Work);
 end;
 
 { Cut points of P[0..n) into Cuts (ascending, ending with n) }
@@ -845,7 +752,7 @@ begin
   if FLen >= 2 * SEG_MIN then
   begin
     if FSeg = nil then
-      if FPar.Adaptive then FSeg := TSegModel.Create(SEG_DIV_A) else FSeg := TSegModel.Create(SEG_DIV);
+      FSeg := TSegModel.Create(SEG_DIV);
     Pieces := 1;
     SegSplitAll(TSegModel(FSeg), @FCur[0], FLen, Cuts, NCuts, Pieces, 0);
   end;
@@ -1085,7 +992,5 @@ end;
 
 initialization
   parc_bwt_set_alloc(@CoreAlloc, @CoreFree);
-  InitCriticalSection(SegLogLock);
-finalization
-  DoneCriticalSection(SegLogLock);
+  parc_seg_init;
 end.

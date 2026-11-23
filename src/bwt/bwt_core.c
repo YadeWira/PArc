@@ -264,6 +264,69 @@ int32_t parc_repeat_share(const uint8_t * in, int32_t len, uint32_t * tab)
     return anchors ? (int32_t)(hits * 1000 / anchors) : 0;
 }
 
+/* Segmentation (see "adaptive blocks" in src/parc_bwt.pas): the best cut of p[0..n) by the order-1
+   cost of the samples p[i - 1], p[i] for i = stride, 2 stride, ...; costs in 1/65536 bit, computed
+   with integers only (the same cuts on every platform). work: 2 * 65536 + 2 * 256 uint32.
+   Returns the cut (a multiple of stride, minSeg <= cut < n - minSeg), or 0 when no cut saves
+   1/div of the cost plus penalty (in the same units). */
+static int64_t seg_log2_fixed(uint64_t x)
+{
+    int k = 63 - __builtin_clzll(x), i;
+    uint64_t m = k >= 31 ? x >> (k - 31) : x << (31 - k);
+    int64_t r = (int64_t)k << 16;
+    for (i = 15; i >= 0; --i)
+    {
+        m = (m * m) >> 31;
+        if (m >= ((uint64_t)1 << 32)) { r += (int64_t)1 << i; m >>= 1; }
+    }
+    return r;
+}
+
+static inline int64_t seg_flogf(uint32_t f) { return f <= 1 ? 0 : (int64_t)f * seg_log2_fixed(f); }
+
+static int32_t seg_d[65536];      /* seg_flogf(f + 1) - seg_flogf(f), built by parc_seg_init */
+
+void parc_seg_init(void)
+{
+    for (uint32_t f = 0; f < 65536; ++f) seg_d[f] = (int32_t)(seg_flogf(f + 1) - seg_flogf(f));
+}
+
+static inline int64_t seg_dd(uint32_t f) { return f < 65536 ? seg_d[f] : seg_flogf(f + 1) - seg_flogf(f); }
+
+int32_t parc_seg_split(const uint8_t * p, int32_t n, int32_t stride, int32_t minSeg, int64_t penalty, int32_t div,
+    uint32_t * work)
+{
+    uint32_t * T = work;               /* [ctx * 256 + sym] * 2: right, left */
+    uint32_t * C = work + 2 * 65536;   /* [ctx] * 2 */
+    int64_t whole = 0, cur, best;
+    int32_t i, bi = 0, stop;
+    if (n < 2 * minSeg) return 0;
+    parc_bwt_memset(work, 0, (2 * 65536 + 2 * 256) * sizeof(uint32_t));
+    for (i = stride; i < n; i += stride)
+    {
+        uint32_t c = p[i - 1];
+        T[2 * ((c << 8) | p[i])]++;
+        C[2 * c]++;
+    }
+    for (i = 0; i < 256; ++i) whole += seg_flogf(C[2 * i]);
+    for (i = 0; i < 65536; ++i) whole -= seg_flogf(T[2 * i]);
+    cur = whole;
+    best = whole - whole / div - penalty;
+    stop = n - minSeg;
+    for (i = stride; i < stop; i += stride)
+    {
+        if (cur < best && i >= minSeg) { best = cur; bi = i; }
+        uint32_t c = p[i - 1];
+        uint32_t * t = &T[2 * ((c << 8) | p[i])];
+        uint32_t x = --t[0], y = t[1]++;
+        cur += seg_dd(x) - seg_dd(y);
+        uint32_t * q = &C[2 * c];
+        x = --q[0]; y = q[1]++;
+        cur += seg_dd(y) - seg_dd(x);
+    }
+    return bi;
+}
+
 /* Forward BWT of T[0..n) into U (may be T), A: n int32 of scratch. Returns the primary index (1..n), or < 0. */
 int32_t parc_bwt_forward(const uint8_t * T, uint8_t * U, int32_t * A, int32_t n)
 {
