@@ -486,16 +486,18 @@ end;
   statistics (the previous byte as context): cost = sum over contexts of N log2 N - sum over
   (context, symbol) of f log2 f, in bits. Sweeping a cut point through the block moves one
   sample at a time from the right model to the left one, so the cost of every split is known
-  in one pass; the best split is taken when it saves more than 1/32 of the cost plus about
-  1.5 KB (what the coder spends learning a new model), and both halves are split again the same
+  in one pass; the best split is taken when it saves more than a small part of the cost plus
+  about 1.5 KB (what the coder spends learning a new model), and both halves are split again the same
   way. To keep it cheap only every SEG_STRIDE-th byte is a sample, and no piece is smaller than
-  SEG_MIN. }
+  SEG_MIN. (Tuned on a solid block of 3,000 mixed text files from the corpus: the saving needed
+  is 1/SEG_DIV of the cost plus SEG_PENALTY bits.) }
 
 const
   SEG_STRIDE = 4;
-  SEG_MIN = 128 * 1024;
+  SEG_MIN = 64 * 1024;
   SEG_MAX = 64;              // pieces per block
   SEG_PENALTY = 12288.0;     // bits
+  SEG_DIV = 128;
   SEG_TAB = 65536;
 
 type
@@ -575,7 +577,7 @@ begin
   for k := 0 to 65535 do
     if M.R[k] > 1 then Whole := Whole - FLogF(M.R[k]);
   Cur := Whole;
-  BestCost := Whole - Whole / 32 - SEG_PENALTY;
+  BestCost := Whole - Whole / SEG_DIV - SEG_PENALTY;
   Best := 0;
   i := SEG_STRIDE;
   while i < n - SEG_MIN do
@@ -600,21 +602,23 @@ begin
 end;
 
 { Cut points of P[0..n) into Cuts (ascending, ending with n) }
-procedure SegSplitAll(M: TSegModel; P: PByte; n: SizeInt; var Cuts: array of SizeInt; var NCuts: Integer;
+procedure SegSplitAll(M: TSegModel; P: PByte; n: SizeInt; var Cuts: array of SizeInt; var NCuts, Pieces: Integer;
   Base: SizeInt);
 var
   c: SizeInt;
 begin
+  // Pieces: how many pieces the block has so far (each split adds one), at most SEG_MAX
   c := 0;
-  if NCuts < SEG_MAX - 1 then c := SegSplit(M, P, n);
+  if Pieces < SEG_MAX then c := SegSplit(M, P, n);
   if c = 0 then
   begin
     Cuts[NCuts] := Base + n;
     Inc(NCuts);
     Exit;
   end;
-  SegSplitAll(M, P, c, Cuts, NCuts, Base);
-  SegSplitAll(M, P + c, n - c, Cuts, NCuts, Base + c);
+  Inc(Pieces);
+  SegSplitAll(M, P, c, Cuts, NCuts, Pieces, Base);
+  SegSplitAll(M, P + c, n - c, Cuts, NCuts, Pieces, Base + c);
 end;
 
 { ---------------- encoder stage ---------------- }
@@ -725,7 +729,7 @@ end;
 procedure TBwtEncStage.FlushBlock(Final: Boolean);
 var
   Cuts: array[0..SEG_MAX - 1] of SizeInt;
-  NCuts, k: Integer;
+  NCuts, k, Pieces: Integer;
   Prev, Last: SizeInt;
   B: TBytes;
 begin
@@ -734,7 +738,8 @@ begin
   if FPar.Adaptive and (FLen >= 2 * SEG_MIN) then
   begin
     if FSeg = nil then FSeg := TSegModel.Create;
-    SegSplitAll(TSegModel(FSeg), @FCur[0], FLen, Cuts, NCuts, 0);
+    Pieces := 1;
+    SegSplitAll(TSegModel(FSeg), @FCur[0], FLen, Cuts, NCuts, Pieces, 0);
   end;
   if NCuts <= 1 then
   begin
