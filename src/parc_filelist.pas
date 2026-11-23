@@ -102,15 +102,6 @@ const
 type
   TIntArray = array of Integer;
 
-var
-  GLines: TStringArray;        // arc.groups en minúsculas (las máscaras)
-  GLineType: TStringArray;     // nombre de tipo de cada línea ($binary, $text, ...), más el $default del final
-  GDefaultGroup: Integer;      // índice de la línea "$default"
-  // Las líneas "*.ext" con ext ASCII literal se comparan sin glob ni
-  // UTF8Decode; GLitOk[i] dice si la línea i tiene ese camino rápido y GLit su extensión
-  GLitOk: array of Boolean;
-  GLit: TStringArray;
-
 { ---------------------------------------------------------------------------------------- }
 { Nombres                                                                                 }
 { ---------------------------------------------------------------------------------------- }
@@ -160,143 +151,28 @@ begin
   Result := LowerCase(Suffix(BaseName(Name)));   // filenameLower = strLower en Windows
 end;
 
-{ match de FreeArc (Utils.hs, compile_RE): '*' y '?' sobre caracteres Unicode. }
-function Glob(const Mask, S: UnicodeString): Boolean;
-var
-  m, n, StarM, StarN: Integer;
-begin
-  m := 1; n := 1; StarM := 0; StarN := 0;
-  while n <= Length(S) do
-  begin
-    if (m <= Length(Mask)) and ((Mask[m] = '?') or ((Mask[m] <> '*') and (Mask[m] = S[n]))) then
-    begin
-      Inc(m); Inc(n);
-    end
-    else if (m <= Length(Mask)) and (Mask[m] = '*') then
-    begin
-      StarM := m; StarN := n; Inc(m);
-    end
-    else if StarM > 0 then
-    begin
-      m := StarM + 1; Inc(StarN); n := StarN;
-    end
-    else
-      Exit(False);
-  end;
-  while (m <= Length(Mask)) and (Mask[m] = '*') do Inc(m);
-  Result := m > Length(Mask);
-end;
-
-function GlobU(const Mask, S: string): Boolean;
-begin
-  Result := Glob(UTF8Decode(Mask), UTF8Decode(S));
-end;
-
-{ match_FP fpBasename (FileInfo.hs): "*.ext" compara la extensión; una máscara sin
-  directorio, el nombre base; con directorio, el nombre completo. }
-function MatchLine(const Line, Name, LcExt: string): Boolean;
-var
-  Rest, NamePart: string;
-  p: Integer;
-begin
-  if Line = '*' then Exit(True);
-  p := LastDelimiter('/', Line);
-  Rest := Copy(Line, p + 1, MaxInt);
-  NamePart := Rest;
-  p := LastDelimiter('.', Rest);
-  if p > 0 then NamePart := Copy(Rest, 1, p - 1);
-  if LastDelimiter('/', Line) = 0 then
-  begin
-    if NamePart = '*' then
-    begin
-      if p > 0 then Result := GlobU(Copy(Rest, p + 1, MaxInt), LcExt)
-      else Result := LcExt = '';
-    end
-    else
-      Result := GlobU(Line, LowerCase(BaseName(Name)));
-  end
-  else
-    Result := GlobU(Line, LowerCase(Name));
-end;
-
-{ ¿Solo bytes ASCII? (con otros, UTF8Decode podría unir secuencias y el glob no es la igualdad
-  de bytes: ese caso va por el camino general) }
-function AsciiOnly(const S: string): Boolean; inline;
-var
-  i: Integer;
-begin
-  for i := 1 to Length(S) do
-    if Ord(S[i]) >= 128 then Exit(False);
-  Result := True;
-end;
-
-{ MatchLine de la línea i, con el camino rápido de las "*.ext" literales (mismo resultado:
-  un glob sin comodines sobre ASCII es la igualdad de bytes). }
-function MatchLineIdx(i: Integer; const Name, LcExt: string): Boolean; inline;
-begin
-  if GLitOk[i] and AsciiOnly(LcExt) then Result := LcExt = GLit[i]
-  else Result := MatchLine(GLines[i], Name, LcExt);
-end;
-
 function FaGroupIndex(const Name: string): Integer;
-var
-  i: Integer;
-  Ext: string;
 begin
-  Ext := FaLCExtension(Name);
-  for i := 0 to High(GLines) do
-    if MatchLineIdx(i, Name, Ext) then Exit(i);
-  Result := GDefaultGroup;
+  Result := FileGroupRank(Name);
 end;
 
-{ find_type (Cmdline.hs): el MENOR número de tipo t >= 1 tal que alguna línea de ese tipo
-  coincide; si ninguna, 0. Los tipos son índices en GM (0 = el método por defecto). }
-function FindType(const Name: string; const GM: TGroupMethods; out TypesCount: Integer): Integer;
+{ Type of a file: the group with the lowest index in GM (>= 1) among the groups whose masks
+  match it; 0 (the default chain) if none. GroupT: index in GM of each file group. }
+function FindTypeFast(const Name: string; const GroupT: TIntArray): Integer;
 var
-  i, t, MaxT: Integer;
-  Ext: string;
-  LineT: TIntArray;
-
-  function TypeNum(const T: string): Integer;
-  var
-    k: Integer;
-  begin
-    for k := 0 to High(GM) do
-      if GM[k].Group = T then Exit(k);
-    Result := 0;
-  end;
-
+  Bits: QWord;
+  g: Integer;
 begin
-  SetLength(LineT, Length(GLineType));
-  MaxT := 0;
-  for i := 0 to High(GLineType) do
+  Result := 0;
+  Bits := FileGroupMatches(Name);
+  g := 0;
+  while Bits <> 0 do
   begin
-    LineT[i] := TypeNum(GLineType[i]);
-    if LineT[i] > MaxT then MaxT := LineT[i];
+    if (Bits and 1 <> 0) and (GroupT[g] >= 1) and ((Result = 0) or (GroupT[g] < Result)) then
+      Result := GroupT[g];
+    Bits := Bits shr 1;
+    Inc(g);
   end;
-  TypesCount := MaxT + 1;
-  Ext := FaLCExtension(Name);
-  for t := 1 to MaxT do
-    for i := 0 to High(GLines) do   // (el $default agregado al final no tiene máscara)
-      if (LineT[i] = t) and MatchLineIdx(i, Name, Ext) then Exit(t);
-  Result := 0;
-end;
-
-{ FindType con los tipos de línea ya calculados (una vez por lista, no por archivo) y una sola
-  pasada: el menor tipo >= 1 entre las líneas que coinciden es lo mismo que probar t = 1, 2... }
-function FindTypeFast(const Name: string; const LineT: TIntArray): Integer;
-var
-  i: Integer;
-  Ext: string;
-begin
-  Ext := FaLCExtension(Name);
-  Result := 0;
-  for i := 0 to High(GLines) do
-    if (LineT[i] >= 1) and ((Result = 0) or (LineT[i] < Result)) and MatchLineIdx(i, Name, Ext) then
-    begin
-      Result := LineT[i];
-      if Result = 1 then Exit;
-    end;
 end;
 
 { ---------------------------------------------------------------------------------------- }
@@ -468,7 +344,7 @@ begin
   end;
   SetLength(ReNum, Length(Files));
   // g: partitionList por el índice de línea (conserva el orden)
-  SetLength(Buckets, Length(GLines) + 1);
+  SetLength(Buckets, FileGroupRankCount);
   for i := 0 to High(Files) do
   begin
     g := FaGroupIndex(Files[i].Name);
@@ -1251,6 +1127,7 @@ var
   Meth: TStringArray;
   NoSort: Boolean;
   L, LineT: TIntArray;
+  GNames: TStringArray;
   MaxT, n: Integer;
   Keys: TStringArray;      // métodos distintos (pocos), en orden de aparición
   KeyOf, KeyOrder: TIntArray;
@@ -1263,14 +1140,15 @@ begin
   SetLength(CurFiles, Length(Files));
   SetLength(CurType, Length(Files));
   TypesCount := 1;
-  // FindType: los tipos de línea dependen solo de GM, se calculan una vez
-  SetLength(LineT, Length(GLineType));
+  // Index in GM of each file group (depends only on GM: computed once)
+  GNames := FileGroupNames;
+  SetLength(LineT, Length(GNames));
   MaxT := 0;
-  for i := 0 to High(GLineType) do
+  for i := 0 to High(GNames) do
   begin
     LineT[i] := 0;
     for j := 0 to High(GM) do
-      if GM[j].Group = GLineType[i] then begin LineT[i] := j; Break; end;
+      if GM[j].Group = GNames[i] then begin LineT[i] := j; Break; end;
     if LineT[i] > MaxT then MaxT := LineT[i];
   end;
   TypesCount := MaxT + 1;
@@ -1428,43 +1306,4 @@ begin
   Result.Value := Value;
 end;
 
-procedure LoadLines;
-var
-  Raw: TStringArray;
-  i, j: Integer;
-  Cur, L: string;
-begin
-  Raw := ArcGroupLines;
-  SetLength(GLines, Length(Raw));
-  SetLength(GLineType, Length(Raw) + 1);
-  GDefaultGroup := -1;
-  Cur := '$binary';
-  for i := 0 to High(Raw) do
-  begin
-    L := LowerCase(Raw[i]);
-    GLines[i] := L;
-    if (L <> '') and (L[1] = '$') and (L <> '$default') then Cur := L;
-    GLineType[i] := Cur;
-    if (L = '$default') and (GDefaultGroup < 0) then GDefaultGroup := i;
-  end;
-  GLineType[High(GLineType)] := Cur;   // el "$default" que FreeArc agrega al final
-  if GDefaultGroup < 0 then GDefaultGroup := Length(Raw);
-  SetLength(GLitOk, Length(GLines));
-  SetLength(GLit, Length(GLines));
-  for i := 0 to High(GLines) do
-  begin
-    L := GLines[i];
-    GLitOk[i] := (Length(L) >= 2) and (L[1] = '*') and (L[2] = '.');
-    if GLitOk[i] then
-    begin
-      GLit[i] := Copy(L, 3, MaxInt);
-      for j := 1 to Length(GLit[i]) do
-        if (GLit[i][j] in ['*', '?', '/', '.']) or (Ord(GLit[i][j]) >= 128) then GLitOk[i] := False;
-    end;
-    if not GLitOk[i] then GLit[i] := '';
-  end;
-end;
-
-initialization
-  LoadLines;
 end.
