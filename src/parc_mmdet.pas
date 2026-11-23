@@ -572,7 +572,7 @@ end;
 { statistics }
 
 const
-  STATS_MAX = 256 * 1024;
+  STATS_MAX = 64 * 1024;
 
 var
   BitLenTab: array[0..4095] of Byte;

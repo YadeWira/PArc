@@ -38,7 +38,7 @@ const
   MM_STREAM_VERSION = 1;
   MM_MAX_CHAN = 16;
   MM_DETECT = 1 shl 20;
-  MM_CHUNK = 256 * 1024;
+  MM_CHUNK = 64 * 1024;
   MM_MAX_ROW = 16 shl 20;
 
 type
@@ -214,7 +214,7 @@ var
   M: TMmCore;
 begin
   FM.Pred := 0; FM.Cross := 0;
-  if FPar.Mode <= 2 then Lim := 64 * 1024 else Lim := 256 * 1024;
+  if FPar.Mode <= 2 then Lim := 64 * 1024 else Lim := 128 * 1024;
   if Lim < 4 * FUnit then Lim := 4 * FUnit;
   if Len > Lim then
   begin
@@ -273,7 +273,7 @@ begin
   F := L.NumChan * (L.Bits div 8);
   if (F <= 1) or (FLen < 4 * F + F) then Exit;
   Len := FLen - F;
-  if FPar.Mode <= 2 then Units := 64 * 1024 else Units := 256 * 1024;
+  Units := 64 * 1024;
   if Len > Units then Len := Units;
   Units := Len div F;
   Mid := @FBuf[((FLen - F - Units * F) div 2 div F) * F];
@@ -334,8 +334,8 @@ begin
       // the row length
       if Ok and (L.Bits = 8) and (L.NumChan in [1, 3, 4]) then
       begin
-        if FPar.Mode <= 2 then S := mm_find_stride(@FBuf[L.Offset], FLen - L.Offset, L.NumChan, 16, 32768, 256, 4096)
-        else S := mm_find_stride(@FBuf[L.Offset], FLen - L.Offset, L.NumChan, 16, 65536, 512, 16384);
+        if FPar.Mode <= 2 then S := mm_find_stride(@FBuf[L.Offset], FLen - L.Offset, L.NumChan, 16, 32768, 64, 4096)
+        else S := mm_find_stride(@FBuf[L.Offset], FLen - L.Offset, L.NumChan, 16, 65536, 128, 8192);
         if S > 0 then
         begin
           L.Kind := MMK_IMAGE;
@@ -548,7 +548,7 @@ var
   M: TMmCore;
   Tmp: TBytes;
 begin
-  if FPar.Mode <= 2 then Lim := 64 * 1024 else Lim := 256 * 1024;
+  if FPar.Mode <= 2 then Lim := 64 * 1024 else Lim := 128 * 1024;
   if Lim < 4 * FUnit then Lim := 4 * FUnit;
   if Len > Lim then
   begin
