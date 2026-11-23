@@ -1,283 +1,175 @@
-{ TTA — códec de audio de FreeArc (Compression/MM/C_TTA.cpp + tta.cpp +
-  entropy.cpp + filters.cpp).
+{ tta: lossless audio codec (PArc's own code, MIT; nothing from FreeArc or TTA).
 
-  Stream:
-    4 bytes de cabecera: level, raw_data*2+is_float, num_chan, word_size
-    si level = 0 -> datos guardados: el resto se copia tal cual
-    4 bytes offset (Int32 LE) + offset bytes literales (encabezado WAV)
-    después, bloques:
-      4 bytes BytesRead (Int32 LE): tamaño del bloque DESCOMPRIMIDO
-      si raw_data = 0:
-        4 bytes BitArraySize: 0 = bloque guardado (siguen BytesRead bytes crudos);
-                              >0 = siguen BitArraySize bytes del codificador Rice
-      (num_chan << is_float) canales de frame_len = BytesRead/N muestras:
-        - raw_data = 0: decode_frame (Rice) + filters_decompress
-        - raw_data != 0: muestras crudas, 4 bytes cada una
-      combine_int / combine_float, entrelazado a bytes y luego los
-      BytesRead mod N bytes que sobran del bloque.
+  The method keeps FreeArc's name `tta` and its parameters, but codec and stream are new.
+  Samples (8/16/24/32-bit integers or 32-bit floats, any byte order, 1..255 interleaved
+  channels) go through a cascade of adaptive predictors, each one predicting what the
+  previous stages left; the final residual is coded with an adaptive binary range coder.
 
-  N = num_chan*byte_size.  La aritmética es de 32 bits (el encoder lo es): las
-  muestras son Int32 y los filtros suman con wrapping de 32 bits.  Los filtros
-  procesan ceil(order/8)*8 coeficientes (el C avanza de a 8), no `order`. }
+  Per channel and sample:
+   1. Stereo: (L, R) -> (M, S) with S = L - R, M = R + (S >> 1) (lossless mid/side).
+   2. Fixed first-order prediction: d = x - (31 * x[n-1]) >> 5.
+   3. Sign-sign LMS filters on 16-bit saturated history (orders 16..1024 by level), as in
+      the published NN-filter cascades of lossless audio coders: prediction = sum(c[i] *
+      h[i]) >> shift, then each coefficient moves by +/- a step whose size depends on how
+      large that history value was against the running mean; the dot product and the
+      coefficient update of the previous sample are one pass (SSE2 on x86-64).
+   4. A short adaptive stage (int32 weights, 64-bit sums) over the last values of this
+      channel and the current/previous value of the previous channel.
+   5. The residual, zigzag-mapped to u, is coded as its bit length b (binary decisions
+      walked from the bucket the running mean of u expects, in a context of that mean),
+      the two bits below the leading one (adaptive, context b) and the rest raw.
+  The models learn continuously across frames; a frame only bounds the coded bytes.
+  Everything is integer arithmetic with fixed wrapping, so the stream is the same on every
+  platform (the assembler and the Pascal loops give identical results).
+
+  Stream (version 1, docs/formato/FORMATO-PARC.md §6.6):
+    U8 version = 1, U8 mode: 0 = stored (the rest of the stream is the data),
+                             1 = coded: U8 channels, U8 bits, U8 flags, U8 level,
+    then chunks until type 0:
+      U8 type = 1 (coded): VInt frames, VInt rcLen, VInt rawLen, rcLen bytes, rawLen bytes
+      U8 type = 2 (raw):   VInt len, len bytes (container header, trailing data, partial
+                           samples, frames that did not compress)
+      U8 type = 0: end; nothing may follow. }
 unit parc_tta;
 
 {$mode objfpc}{$H+}
 {$R-}{$Q-}
+{$pointermath on}
 
 interface
 
 uses
-  SysUtils, parc_stream;
+  SysUtils, parc_stream, parc_outstream, parc_mmdet;
+
+const
+  TTA_STREAM_VERSION = 1;
+  TTA_MAX_LEVEL = 9;
+  TTA_FRAME_VALUES = 1 shl 17;          // samples (all channels) per coded frame
+  TTA_DETECT = 1 shl 20;                // bytes looked at to choose the format
+
+  ACF_BE = MMF_BE;
+  ACF_U8 = MMF_U8;
+  ACF_FLOAT = MMF_FLOAT;
 
 type
+  ETtaEncParams = class(Exception);
+
   TTtaParams = record
     Level, SkipHeader, IsFloat, NumChan, WordSize, Offset, RawData: Integer;
+  end;
+  TTtaEncParams = TTtaParams;
+
+  { predictor configuration of a level (the layout of ttac_cfg in tta_core.c) }
+  TAcConfig = record
+    NF: LongInt;                          // sign-sign LMS filters (0..3)
+    Order, Shift: array[0..2] of LongInt;
+    S4Own, S4Cross: LongInt;              // short stage: own taps (0..4), cross taps (0..2)
+    S4Shift, S4Step: LongInt;
+    ShortFirst: LongInt;                  // 1: short stage before the LMS filters
+    MS: LongInt;                          // 1: stereo mid/side
+    ProbShift, MeanShift: LongInt;
+    A1, A2, A3, Decay: LongInt;           // LMS steps (large / medium / small value), decay of older steps
+    X1, X2, X3, X4: LongInt;              // reserved
+  end;
+
+  TAcFormat = record
+    NumChan, Bits, Flags, Level: Integer;
+  end;
+
+  { the codec state of one stream (the C core's state block) }
+  TAcCodec = class
+  private
+    FFmt: TAcFormat;
+    FCfg: TAcConfig;
+    FStateMem, FSaveMem: Pointer;
+    FState, FSave: Pointer;
+    FStateSize: SizeUInt;
+    FX: array of LongInt;                 // a frame of samples, interleaved
+    FRc, FRaw: TBytes;
+  public
+    constructor Create(const Fmt: TAcFormat);
+    destructor Destroy; override;
+    property Fmt: TAcFormat read FFmt;
+    property Cfg: TAcConfig read FCfg;
+    { bytes -> coded frame (Frames whole sample frames at Src).  Returns False (state
+      unchanged) when the coded frame would not be smaller than the input. }
+    function EncodeFrame(Src: PByte; Frames: SizeInt; out Rc: PByte; out RcLen: SizeInt;
+      out Raw: PByte; out RawLen: SizeInt): Boolean;
+    { coded frame -> bytes (Frames x NumChan x Bits/8 at Dst); False if damaged }
+    function DecodeFrame(Rc: PByte; RcLen: SizeInt; Raw: PByte; RawLen: SizeInt;
+      Frames: SizeInt; Dst: PByte): Boolean;
+  end;
+
+  TTtaEncPhase = (tpDetect, tpStored, tpCoded);
+
+  TTtaEncStage = class(TOutStage)
+  private
+    FPar: TTtaEncParams;
+    FPhase: TTtaEncPhase;
+    FBuf: TBytes;                         // detection buffer, then the pending input
+    FLen: SizeInt;
+    FCodec: TAcCodec;
+    FHdrLeft: Int64;                      // container header bytes still to pass raw
+    FDataLeft: Int64;                     // sample bytes left in the coded region (-1 = no limit)
+    FFrameBytes: SizeInt;
+    FSampleBytes: Integer;
+    procedure Decide;
+    procedure EmitRaw(P: PByte; N: SizeInt);
+    procedure EmitVInt(V: QWord);
+    procedure Process(P: PByte; N: SizeInt; Final: Boolean);
+    procedure CodeFrame(P: PByte; Frames: SizeInt);
+  protected
+    procedure DoWrite(Buf: PByte; Count: SizeInt); override;
+    procedure DoFinish; override;
+  public
+    constructor Create(ATarget: TOutStage; const Params: TStringArray);
+    constructor Create(ATarget: TOutStage; const APar: TTtaEncParams);
+    destructor Destroy; override;
   end;
 
   TTtaStage = class(TInStage)
   private
-    FLevel, FIsFloat, FRawData, FNumChan, FWordSize, FByteSize, FN: Integer;
-    FChan: array of array of LongInt;
-    FBits: array of Byte;
-    FBitsSize, FBitsPos: LongWord;
-    FOut: array of Byte;
-    FLen, FPos: SizeInt;
-    FEof, FStarted, FStored: Boolean;
+    FStarted, FStored, FEnd: Boolean;
+    FCodec: TAcCodec;
+    FOut: TBytes;
+    FOutLen, FOutPos: SizeInt;
+    FIn: TBytes;
+    FRawLeft: Int64;                      // bytes of a raw chunk still to pass
     procedure Start;
-    function  NextBlock: Boolean;
-    procedure BitInit(Size: LongWord);
-    function  GetBinary(Bits: LongWord): LongWord;
-    function  GetUnary: LongWord;
-    procedure DecodeFrame(Ch: PLongInt; Len: LongWord);
-    procedure FiltersDecompress(Data: PLongInt; Len: LongWord);
+    function NextChunk: Boolean;
   public
     constructor Create(ASource: TInStage; const APar: TTtaParams);
+    destructor Destroy; override;
     function Read(Buf: PByte; Count: SizeInt): SizeInt; override;
   end;
 
-{ Parámetros como parse_TTA. }
 function ParseTtaParams(const Params: TStringArray): TTtaParams;
+function ParseTtaEncParams(const Params: TStringArray): TTtaEncParams;
+function TtaLevelConfig(Level, Bits: Integer): TAcConfig;
+
+var
+  { experiments: when set, every level uses this configuration }
+  TtaCfgOverride: Boolean = False;
+  TtaCfgValue: TAcConfig;
 
 implementation
 
 uses
-  parc_bytes, parc_methods;
+  parc_bytes;
 
-const
-  MAX_ORDER = 32;
-  BUF_SIZE  = 256;
 
-  BIT_MASK32: array[0..39] of LongWord = (
-    $00000000, $00000001, $00000003, $00000007,
-    $0000000f, $0000001f, $0000003f, $0000007f,
-    $000000ff, $000001ff, $000003ff, $000007ff,
-    $00000fff, $00001fff, $00003fff, $00007fff,
-    $0000ffff, $0001ffff, $0003ffff, $0007ffff,
-    $000fffff, $001fffff, $003fffff, $007fffff,
-    $00ffffff, $01ffffff, $03ffffff, $07ffffff,
-    $0fffffff, $1fffffff, $3fffffff, $7fffffff,
-    $ffffffff, $ffffffff, $ffffffff, $ffffffff, $ffffffff,
-    $ffffffff, $ffffffff, $ffffffff);
 
-  { bit_shift[k] = 1<<k (saturado en 0x80000000 desde k=32).  OJO: es DISTINTA
-    de shift_16[k] = bit_shift[k+4]: los umbrales del Rice usan shift_16, pero el
-    offset que se le suma a `value` en decode_frame usa bit_shift[k0]. }
-  BIT_SHIFT: array[0..39] of LongWord = (
-    $00000001, $00000002, $00000004, $00000008,
-    $00000010, $00000020, $00000040, $00000080,
-    $00000100, $00000200, $00000400, $00000800,
-    $00001000, $00002000, $00004000, $00008000,
-    $00010000, $00020000, $00040000, $00080000,
-    $00100000, $00200000, $00400000, $00800000,
-    $01000000, $02000000, $04000000, $08000000,
-    $10000000, $20000000, $40000000, $80000000,
-    $80000000, $80000000, $80000000, $80000000,
-    $80000000, $80000000, $80000000, $80000000);
+{ ---------------------------------------------------------------------------------------- }
+{ parameters }
 
-  { shift_16[k] = bit_shift[k+4] }
-  SHIFT16: array[0..39] of LongWord = (
-    $00000010, $00000020, $00000040, $00000080,
-    $00000100, $00000200, $00000400, $00000800,
-    $00001000, $00002000, $00004000, $00008000,
-    $00010000, $00020000, $00040000, $00080000,
-    $00100000, $00200000, $00400000, $00800000,
-    $01000000, $02000000, $04000000, $08000000,
-    $10000000, $20000000, $40000000, $80000000,
-    $80000000, $80000000, $80000000, $80000000,
-    $80000000, $80000000, $80000000, $80000000,
-    $80000000, $80000000, $80000000, $80000000);
-
-  { flt_set[filtro][level-1][byte_size-1] = (order, shift, mode) }
-  FLT_SET: array[0..2, 0..2, 0..3, 0..2] of Integer = (
-   (((8,10,0),  (8,9,0),   (8,10,0),  (8,12,1)),
-    ((8,10,0),  (8,11,0),  (8,10,0),  (16,12,1)),
-    ((8,10,0),  (8,11,0),  (8,10,0),  (32,12,1))),
-   (((0,0,0),   (0,0,0),   (0,0,0),   (0,0,0)),
-    ((16,10,1), (16,9,1),  (16,10,1), (0,0,0)),
-    ((32,11,1), (32,11,1), (32,11,1), (0,0,0))),
-   (((0,0,0),   (0,0,0),   (0,0,0),   (0,0,0)),
-    ((0,0,0),   (0,0,0),   (0,0,0),   (0,0,0)),
-    ((0,0,0),   (16,9,1),  (16,10,1), (0,0,0))));
-
-type
-  PFlt = ^TFlt;
-  TFlt = record
-    order, mode, shift, round: Integer;
-    qm: array[0..MAX_ORDER - 1] of LongInt;
-    dx: array[0..BUF_SIZE - 1] of LongInt;
-    dl: array[0..BUF_SIZE - 1] of LongInt;
-    px, pl: Integer;
-  end;
-
-{ SWAP16 de ttaenc.h:57 INVIERTE el orden de los 16 bits (bit 0 <-> bit 15), no intercambia
-  bytes: con el intercambio de bytes los WAV float de 32 bits se decodificaban mal. }
-function Swap16(x: LongWord): LongWord;
-var
-  i: Integer;
-begin
-  Result := 0;
-  for i := 0 to 15 do
-    if (x and (LongWord(1) shl i)) <> 0 then Result := Result or (LongWord(1) shl (15 - i));
-end;
-
-function Predictor1(x: LongInt; k: Integer): LongInt; inline;
-begin
-  { el C hace la resta y el shift en uint64 y RECIÉN DESPUÉS castea a long:
-    castear antes cambia el resultado cuando x es negativo }
-  Result := LongInt(QWord((QWord(x) shl k) - QWord(x)) shr k);
-end;
-
-{ "c*w" o "c*wf" (canales*bits; la 'f' final marca punto flotante).  Igual que
-  los dos sscanf de parse_TTA/parse_MM. }
-function ParseChanWord(const p: string; out a, b: Integer; out isFloat: Boolean): Boolean;
-var
-  star: Integer;
-  w: string;
-begin
-  Result := False;
-  isFloat := False;
-  star := Pos('*', p);
-  if star = 0 then Exit;
-  a := StrToIntDef(Copy(p, 1, star - 1), -1);
-  if a <= 0 then Exit;
-  w := Copy(p, star + 1, MaxInt);
-  if (w <> '') and (w[Length(w)] = 'f') then
-  begin
-    isFloat := True;
-    w := Copy(w, 1, Length(w) - 1);
-  end;
-  b := StrToIntDef(w, -1);
-  Result := b > 0;
-end;
-
-{ --- filtros adaptativos ------------------------------------------------- }
-
-procedure FilterInit(fs: PFlt; order, shift, mode: Integer);
-begin
-  FillChar(fs^, SizeOf(TFlt), 0);
-  fs^.px := 0;
-  fs^.pl := 0;
-  fs^.order := order;
-  fs^.shift := shift;
-  if shift > 0 then fs^.round := 1 shl (shift - 1) else fs^.round := 0;
-  fs^.mode := mode;
-end;
-
-{ el C recorre de a 8 coeficientes, así que procesa ceil(order/8)*8 }
-function FltCount(fs: PFlt): Integer; inline;
-begin
-  Result := ((fs^.order + 7) div 8) * 8;
-end;
-
-procedure FilterDecompress(fs: PFlt; Data: PLongInt);
-var
-  i, n, pl, px: Integer;
-  sum, out_, in_: LongInt;
-begin
-  n := FltCount(fs);
-  pl := fs^.pl;
-  px := fs^.px;
-  sum := fs^.round;
-  for i := 0 to n - 1 do
-    sum := sum + fs^.dl[pl + i] * fs^.qm[i];
-  in_ := Data^;
-  out_ := in_ + SarLongint(sum, fs^.shift);
-  fs^.dl[pl + fs^.order] := out_;
-  if fs^.mode = 0 then
-  begin
-    fs^.dl[pl + fs^.order - 1] := fs^.dl[pl + fs^.order] - fs^.dl[pl + fs^.order - 1];
-    fs^.dl[pl + fs^.order - 2] := fs^.dl[pl + fs^.order - 1] - fs^.dl[pl + fs^.order - 2];
-    fs^.dl[pl + fs^.order - 3] := fs^.dl[pl + fs^.order - 2] - fs^.dl[pl + fs^.order - 3];
-  end;
-  if in_ < 0 then
-    for i := 0 to n - 1 do fs^.qm[i] := fs^.qm[i] + fs^.dx[px + i]
-  else if in_ > 0 then
-    for i := 0 to n - 1 do fs^.qm[i] := fs^.qm[i] - fs^.dx[px + i];
-  { ojo con los índices: el C escribe en px+order, px+order-1, px+order-2, px+order-3
-    (o sea *(pA-0)..*(pA-3) con pA = px+order), y los coeficientes salen de
-    pl[order], pl[order-1], pl[order-2], pl[order-3] }
-  fs^.dx[px + fs^.order] := ((fs^.dl[pl + fs^.order] shr 28) and 8) - 4;
-  fs^.dx[px + fs^.order - 1] := ((fs^.dl[pl + fs^.order - 1] shr 29) and 4) - 2;
-  fs^.dx[px + fs^.order - 2] := ((fs^.dl[pl + fs^.order - 2] shr 29) and 4) - 2;
-  fs^.dx[px + fs^.order - 3] := ((fs^.dl[pl + fs^.order - 3] shr 30) and 2) - 1;
-  if px + fs^.order = BUF_SIZE - 1 then
-  begin
-    Move(fs^.dx[px + 1], fs^.dx[0], fs^.order * SizeOf(LongInt));
-    fs^.px := 0;
-  end
-  else fs^.px := px + 1;
-  if pl + fs^.order = BUF_SIZE - 1 then
-  begin
-    Move(fs^.dl[pl + 1], fs^.dl[0], fs^.order * SizeOf(LongInt));
-    fs^.pl := 0;
-  end
-  else fs^.pl := pl + 1;
-  Data^ := out_;
-end;
-
-procedure TTtaStage.FiltersDecompress(Data: PLongInt; Len: LongWord);
-var
-  f1, f2, f3: TFlt;
-  p: PLongInt;
-  i: LongWord;
-  last: LongInt;
-begin
-  FilterInit(@f1, FLT_SET[0][FLevel - 1][FByteSize - 1][0],
-                 FLT_SET[0][FLevel - 1][FByteSize - 1][1],
-                 FLT_SET[0][FLevel - 1][FByteSize - 1][2]);
-  FilterInit(@f2, FLT_SET[1][FLevel - 1][FByteSize - 1][0],
-                 FLT_SET[1][FLevel - 1][FByteSize - 1][1],
-                 FLT_SET[1][FLevel - 1][FByteSize - 1][2]);
-  FilterInit(@f3, FLT_SET[2][FLevel - 1][FByteSize - 1][0],
-                 FLT_SET[2][FLevel - 1][FByteSize - 1][1],
-                 FLT_SET[2][FLevel - 1][FByteSize - 1][2]);
-  last := 0;
-  p := Data;
-  if Len = 0 then Exit;   // Len es LongWord: Len - 1 daría la vuelta
-  for i := 0 to Len - 1 do
-  begin
-    if f3.order <> 0 then FilterDecompress(@f3, p);
-    if f2.order <> 0 then FilterDecompress(@f2, p);
-    if f1.order <> 0 then FilterDecompress(@f1, p);
-    case FByteSize of
-      1: p^ := p^ + Predictor1(last, 4);
-      2: p^ := p^ + Predictor1(last, 5);
-      3: p^ := p^ + Predictor1(last, 5);
-      4: p^ := p^ + last;
-    end;
-    last := p^;
-    Inc(p);
-  end;
-end;
-
-{ --- parámetros --------------------------------------------------------- }
-
-function ParseTtaParams(const Params: TStringArray): TTtaParams;
+function ParseTtaEncParams(const Params: TStringArray): TTtaEncParams;
 var
   k, a, b: Integer;
   p: string;
-  isF: Boolean;
+  isF, ok: Boolean;
 begin
+  if (Length(Params) = 0) or (Params[0] <> 'tta') then
+    raise ETtaEncParams.Create('tta: not the method tta');
   Result.Level := 3;
   Result.SkipHeader := 0;
   Result.IsFloat := 0;
@@ -288,332 +180,680 @@ begin
   for k := 1 to High(Params) do
   begin
     p := Params[k];
-    if p = '' then Continue;
+    if p = '' then raise ETtaEncParams.Create('tta: empty parameter');
+    ok := True;
     case p[1] of
-      'm': Result.Level := StrToIntDef(Copy(p, 2, MaxInt), Result.Level);
-      's': Result.SkipHeader := 1;
-      'f': Result.IsFloat := 1;
-      'c': Result.NumChan := StrToIntDef(Copy(p, 2, MaxInt), Result.NumChan);
-      'w': Result.WordSize := StrToIntDef(Copy(p, 2, MaxInt), Result.WordSize);
-      'o': Result.Offset := StrToIntDef(Copy(p, 2, MaxInt), Result.Offset);
-      'r': Result.RawData := StrToIntDef(Copy(p, 2, MaxInt), Result.RawData);
+      'm': ok := FaParseInt(Copy(p, 2, MaxInt), Result.Level) and (Result.Level <= TTA_MAX_LEVEL);
+      's': ok := Length(p) = 1;
+      'f': ok := Length(p) = 1;
+      'c': ok := FaParseInt(Copy(p, 2, MaxInt), Result.NumChan);
+      'w': ok := FaParseInt(Copy(p, 2, MaxInt), Result.WordSize);
+      'o': ok := FaParseInt(Copy(p, 2, MaxInt), Result.Offset);
+      'r': ok := FaParseInt(Copy(p, 2, MaxInt), Result.RawData) and (Result.RawData <= 1);
     else
-      if ParseChanWord(p, a, b, isF) then
+      ok := FaParseChanWord(p, a, b, isF);
+      if ok then
       begin
         Result.NumChan := a;
         Result.WordSize := b;
-        if isF then Result.IsFloat := 1;
+        Result.IsFloat := Ord(isF);
+      end;
+    end;
+    if not ok then raise ETtaEncParams.CreateFmt('tta: invalid parameter "%s"', [p]);
+    if p = 's' then Result.SkipHeader := 1;
+    if p = 'f' then Result.IsFloat := 1;
+  end;
+end;
+
+function ParseTtaParams(const Params: TStringArray): TTtaParams;
+begin
+  try
+    Result := ParseTtaEncParams(Params);
+  except
+    on E: ETtaEncParams do raise EArcCorrupt.Create(E.Message);
+  end;
+end;
+
+{ ---------------------------------------------------------------------------------------- }
+{ configurations }
+
+function TtaLevelConfig(Level, Bits: Integer): TAcConfig;
+begin
+  FillChar(Result, SizeOf(Result), 0);
+  Result.S4Own := 2;
+  Result.S4Cross := 2;
+  Result.S4Shift := 12;
+  Result.S4Step := 4;
+  Result.MS := 1;
+  Result.ShortFirst := 1;
+  Result.ProbShift := 5;
+  Result.MeanShift := 4;
+  Result.A1 := 32; Result.A2 := 16; Result.A3 := 8; Result.Decay := 0;
+  case Level of
+    0, 1:
+      begin
+        Result.NF := 1;
+        Result.Order[0] := 16; Result.Shift[0] := 11;
+      end;
+    2:
+      begin
+        Result.NF := 2;
+        Result.Order[0] := 64; Result.Shift[0] := 12;
+        Result.Order[1] := 16; Result.Shift[1] := 11;
+      end;
+    3, 4, 5:
+      begin
+        Result.NF := 2;
+        Result.Order[0] := 256; Result.Shift[0] := 13;
+        Result.Order[1] := 16; Result.Shift[1] := 11;
+      end;
+  else
+    begin
+      Result.NF := 3;
+      Result.Order[0] := 1024; Result.Shift[0] := 15;
+      Result.Order[1] := 256; Result.Shift[1] := 13;
+      Result.Order[2] := 16; Result.Shift[2] := 11;
+    end;
+  end;
+  if TtaCfgOverride then Result := TtaCfgValue;
+end;
+
+{ ---------------------------------------------------------------------------------------- }
+{ the C core (src/tta/tta_core.c) }
+
+{$L tta_core.o}
+function ttac_state_size(nch: LongInt): SizeUInt; cdecl; external name 'ttac_state_size';
+procedure ttac_init(st: Pointer; nch, bits: LongInt; cfg: Pointer); cdecl; external name 'ttac_init';
+function ttac_encode(st: Pointer; x: PLongInt; frames: SizeUInt; rc: PByte; rccap: SizeUInt;
+  out rclen: SizeUInt; raw: PByte; rawcap: SizeUInt; out rawlen: SizeUInt): LongInt; cdecl;
+  external name 'ttac_encode';
+function ttac_decode(st: Pointer; x: PLongInt; frames: SizeUInt; rc: PByte; rclen: SizeUInt;
+  raw: PByte; rawlen: SizeUInt): LongInt; cdecl; external name 'ttac_decode';
+
+{ ---------------------------------------------------------------------------------------- }
+{ samples <-> integers }
+
+procedure BytesToInts(Src: PByte; Dst: PLongInt; Count: SizeInt; Bits, Flags: Integer);
+var
+  i: SizeInt;
+  v: LongWord;
+begin
+  case Bits of
+    8:
+      if Flags and ACF_U8 <> 0 then
+        for i := 0 to Count - 1 do Dst[i] := LongInt(Src[i]) - 128
+      else
+        for i := 0 to Count - 1 do Dst[i] := ShortInt(Src[i]);
+    16:
+      if Flags and ACF_BE <> 0 then
+        for i := 0 to Count - 1 do Dst[i] := SmallInt((Src[2 * i] shl 8) or Src[2 * i + 1])
+      else
+        for i := 0 to Count - 1 do Dst[i] := SmallInt(Src[2 * i] or (Src[2 * i + 1] shl 8));
+    24:
+      if Flags and ACF_BE <> 0 then
+        for i := 0 to Count - 1 do
+          Dst[i] := SarLongint(LongInt((LongWord(Src[3 * i]) shl 24) or (LongWord(Src[3 * i + 1]) shl 16) or
+            (LongWord(Src[3 * i + 2]) shl 8)), 8)
+      else
+        for i := 0 to Count - 1 do
+          Dst[i] := SarLongint(LongInt((LongWord(Src[3 * i + 2]) shl 24) or (LongWord(Src[3 * i + 1]) shl 16) or
+            (LongWord(Src[3 * i]) shl 8)), 8);
+  else
+    for i := 0 to Count - 1 do
+    begin
+      if Flags and ACF_BE <> 0 then
+        v := (LongWord(Src[4 * i]) shl 24) or (LongWord(Src[4 * i + 1]) shl 16) or
+          (LongWord(Src[4 * i + 2]) shl 8) or Src[4 * i + 3]
+      else
+        v := LongWord(Src[4 * i]) or (LongWord(Src[4 * i + 1]) shl 8) or
+          (LongWord(Src[4 * i + 2]) shl 16) or (LongWord(Src[4 * i + 3]) shl 24);
+      // floats: sign-magnitude -> two's complement order (an involution)
+      if (Flags and ACF_FLOAT <> 0) and (LongInt(v) < 0) then v := v xor $7FFFFFFF;
+      Dst[i] := LongInt(v);
+    end;
+  end;
+end;
+
+procedure IntsToBytes(Src: PLongInt; Dst: PByte; Count: SizeInt; Bits, Flags: Integer);
+var
+  i: SizeInt;
+  v: LongWord;
+begin
+  case Bits of
+    8:
+      if Flags and ACF_U8 <> 0 then
+        for i := 0 to Count - 1 do Dst[i] := Byte(Src[i] + 128)
+      else
+        for i := 0 to Count - 1 do Dst[i] := Byte(Src[i]);
+    16:
+      if Flags and ACF_BE <> 0 then
+        for i := 0 to Count - 1 do
+        begin
+          Dst[2 * i] := Byte(Src[i] shr 8);
+          Dst[2 * i + 1] := Byte(Src[i]);
+        end
+      else
+        for i := 0 to Count - 1 do
+        begin
+          Dst[2 * i] := Byte(Src[i]);
+          Dst[2 * i + 1] := Byte(Src[i] shr 8);
+        end;
+    24:
+      if Flags and ACF_BE <> 0 then
+        for i := 0 to Count - 1 do
+        begin
+          Dst[3 * i] := Byte(Src[i] shr 16);
+          Dst[3 * i + 1] := Byte(Src[i] shr 8);
+          Dst[3 * i + 2] := Byte(Src[i]);
+        end
+      else
+        for i := 0 to Count - 1 do
+        begin
+          Dst[3 * i] := Byte(Src[i]);
+          Dst[3 * i + 1] := Byte(Src[i] shr 8);
+          Dst[3 * i + 2] := Byte(Src[i] shr 16);
+        end;
+  else
+    for i := 0 to Count - 1 do
+    begin
+      v := LongWord(Src[i]);
+      if (Flags and ACF_FLOAT <> 0) and (LongInt(v) < 0) then v := v xor $7FFFFFFF;
+      if Flags and ACF_BE <> 0 then
+      begin
+        Dst[4 * i] := Byte(v shr 24);
+        Dst[4 * i + 1] := Byte(v shr 16);
+        Dst[4 * i + 2] := Byte(v shr 8);
+        Dst[4 * i + 3] := Byte(v);
       end
       else
-        raise EUnsupportedMethod.Create('tta: invalid parameter: ' + p);
+      begin
+        Dst[4 * i] := Byte(v);
+        Dst[4 * i + 1] := Byte(v shr 8);
+        Dst[4 * i + 2] := Byte(v shr 16);
+        Dst[4 * i + 3] := Byte(v shr 24);
+      end;
     end;
   end;
 end;
 
-{ --- bit array (entropy.cpp) -------------------------------------------- }
+{ ---------------------------------------------------------------------------------------- }
+{ codec }
 
-procedure TTtaStage.BitInit(Size: LongWord);
+constructor TAcCodec.Create(const Fmt: TAcFormat);
+var
+  Frames: SizeInt;
 begin
-  FBitsSize := Size;
-  { 4 bytes de relleno: el C lee palabras de 32 bits y se pasa del final }
-  SetLength(FBits, Size + 4);
-  FillChar(FBits[0], Size + 4, 0);
-  if Size > 0 then Source.ReadExact(@FBits[0], Size);
-  FBitsPos := 0;
+  inherited Create;
+  FFmt := Fmt;
+  FCfg := TtaLevelConfig(Fmt.Level, Fmt.Bits);
+  FStateSize := ttac_state_size(Fmt.NumChan);
+  FStateMem := GetMem(FStateSize + 64);
+  FState := Pointer((PtrUInt(FStateMem) + 63) and not PtrUInt(63));
+  ttac_init(FState, Fmt.NumChan, Fmt.Bits, @FCfg);
+  Frames := TTA_FRAME_VALUES div Fmt.NumChan;
+  if Frames < 1 then Frames := 1;
+  SetLength(FX, Frames * Fmt.NumChan);
 end;
 
-function TTtaStage.GetBinary(Bits: LongWord): LongWord;
-var
-  fbit, rbit, pos: LongWord;
-  w0, w1: LongWord;
+destructor TAcCodec.Destroy;
 begin
-  fbit := FBitsPos and $1F;
-  rbit := 32 - fbit;
-  pos := FBitsPos shr 5;
-  Result := 0;
-  if pos > FBitsSize then Exit;
-  w0 := LongWord(FBits[pos * 4]) or (LongWord(FBits[pos * 4 + 1]) shl 8) or
-        (LongWord(FBits[pos * 4 + 2]) shl 16) or (LongWord(FBits[pos * 4 + 3]) shl 24);
-  if Bits <= rbit then
-    Result := (w0 shr fbit) and BIT_MASK32[Bits]
+  FreeMem(FStateMem);
+  if FSaveMem <> nil then FreeMem(FSaveMem);
+  inherited Destroy;
+end;
+
+function TAcCodec.EncodeFrame(Src: PByte; Frames: SizeInt; out Rc: PByte; out RcLen: SizeInt;
+  out Raw: PByte; out RawLen: SizeInt): Boolean;
+var
+  Bytes: SizeInt;
+  rl, wl: SizeUInt;
+begin
+  Bytes := Frames * FFmt.NumChan * (FFmt.Bits div 8);
+  BytesToInts(Src, @FX[0], Frames * FFmt.NumChan, FFmt.Bits, FFmt.Flags);
+  // keep the state: a frame that does not compress is stored and must not change it
+  if FSaveMem = nil then
+  begin
+    FSaveMem := GetMem(FStateSize + 64);
+    FSave := Pointer((PtrUInt(FSaveMem) + 63) and not PtrUInt(63));
+  end;
+  Move(FState^, FSave^, FStateSize);
+  if Length(FRc) < Bytes + 64 then SetLength(FRc, Bytes + 64);
+  if Length(FRaw) < Bytes + 64 then SetLength(FRaw, Bytes + 64);
+  Result := (ttac_encode(FState, @FX[0], Frames, @FRc[0], Bytes, rl, @FRaw[0], Bytes, wl) = 0) and
+    (SizeInt(rl + wl) + 12 < Bytes);
+  if not Result then
+  begin
+    Move(FSave^, FState^, FStateSize);
+    Exit;
+  end;
+  Rc := @FRc[0];
+  RcLen := rl;
+  Raw := @FRaw[0];
+  RawLen := wl;
+end;
+
+function TAcCodec.DecodeFrame(Rc: PByte; RcLen: SizeInt; Raw: PByte; RawLen: SizeInt;
+  Frames: SizeInt; Dst: PByte): Boolean;
+begin
+  Result := ttac_decode(FState, @FX[0], Frames, Rc, RcLen, Raw, RawLen) = 0;
+  IntsToBytes(@FX[0], Dst, Frames * FFmt.NumChan, FFmt.Bits, FFmt.Flags);
+end;
+
+{ ---------------------------------------------------------------------------------------- }
+{ encoder stage }
+
+constructor TTtaEncStage.Create(ATarget: TOutStage; const Params: TStringArray);
+begin
+  Create(ATarget, ParseTtaEncParams(Params));
+end;
+
+constructor TTtaEncStage.Create(ATarget: TOutStage; const APar: TTtaEncParams);
+begin
+  inherited Create(ATarget);
+  FPar := APar;
+  FPhase := tpDetect;
+  SetLength(FBuf, TTA_DETECT);
+  FLen := 0;
+end;
+
+destructor TTtaEncStage.Destroy;
+begin
+  FCodec.Free;
+  inherited Destroy;
+end;
+
+procedure TTtaEncStage.EmitVInt(V: QWord);
+var
+  b: array[0..9] of Byte;
+  n: Integer;
+begin
+  n := 0;
+  repeat
+    b[n] := V and $7F;
+    V := V shr 7;
+    if V <> 0 then b[n] := b[n] or $80;
+    Inc(n);
+  until V = 0;
+  Emit(@b[0], n);
+end;
+
+procedure TTtaEncStage.EmitRaw(P: PByte; N: SizeInt);
+var
+  k: SizeInt;
+  t: Byte;
+begin
+  while N > 0 do
+  begin
+    k := N;
+    if k > 1 shl 20 then k := 1 shl 20;
+    t := 2;
+    Emit(@t, 1);
+    EmitVInt(k);
+    Emit(P, k);
+    Inc(P, k);
+    Dec(N, k);
+  end;
+end;
+
+procedure TTtaEncStage.Decide;
+var
+  L: TMmLayout;
+  Ok: Boolean;
+  Fmt: TAcFormat;
+  R: Double;
+  Hdr: array[0..5] of Byte;
+begin
+  Ok := False;
+  FillChar(L, SizeOf(L), 0);
+  L.DataLen := -1;
+  if (FPar.Level > 0) and (FPar.RawData = 0) then
+  begin
+    if (FPar.NumChan > 0) or (FPar.WordSize > 0) or (FPar.IsFloat <> 0) then
+    begin
+      L.NumChan := FPar.NumChan;
+      if L.NumChan = 0 then L.NumChan := 1;
+      L.Bits := FPar.WordSize;
+      if L.Bits = 0 then
+        if FPar.IsFloat <> 0 then L.Bits := 32 else L.Bits := 8;
+      L.Offset := FPar.Offset;
+      if FPar.IsFloat <> 0 then L.Flags := ACF_FLOAT
+      else if L.Bits = 8 then L.Flags := ACF_U8;
+      Ok := (L.Bits in [8, 16, 24, 32]) and ((FPar.IsFloat = 0) or (L.Bits = 32));
+    end
+    else
+    begin
+      if FPar.SkipHeader = 0 then Ok := MmParseAudioHeader(@FBuf[0], FLen, L);
+      if not Ok then
+      begin
+        Ok := MmDetectStats(@FBuf[0], FLen, [1, 2, 4, 6], [1, 2, 3], True, 0.80, L, R);
+        L.Offset := 0;
+        L.DataLen := -1;
+      end;
+    end;
+    if L.NumChan > 255 then Ok := False;
+  end;
+  Hdr[0] := TTA_STREAM_VERSION;
+  if not Ok then
+  begin
+    Hdr[1] := 0;
+    Emit(@Hdr[0], 2);
+    FPhase := tpStored;
+    Exit;
+  end;
+  Fmt.NumChan := L.NumChan;
+  Fmt.Bits := L.Bits;
+  Fmt.Flags := L.Flags and (ACF_BE or ACF_U8 or ACF_FLOAT);
+  Fmt.Level := FPar.Level;
+  if Fmt.Level < 1 then Fmt.Level := 1;
+  Hdr[1] := 1;
+  Hdr[2] := Fmt.NumChan;
+  Hdr[3] := Fmt.Bits;
+  Hdr[4] := Fmt.Flags;
+  Hdr[5] := Fmt.Level;
+  Emit(@Hdr[0], 6);
+  FCodec := TAcCodec.Create(Fmt);
+  FSampleBytes := Fmt.NumChan * (Fmt.Bits div 8);
+  FFrameBytes := (TTA_FRAME_VALUES div Fmt.NumChan) * FSampleBytes;
+  if FFrameBytes < FSampleBytes then FFrameBytes := FSampleBytes;
+  FHdrLeft := L.Offset;
+  FDataLeft := L.DataLen;
+  if FDataLeft >= 0 then FDataLeft := FDataLeft - FDataLeft mod FSampleBytes;
+  if Length(FBuf) < FFrameBytes then SetLength(FBuf, FFrameBytes);
+  FPhase := tpCoded;
+end;
+
+procedure TTtaEncStage.CodeFrame(P: PByte; Frames: SizeInt);
+var
+  Rc, Raw: PByte;
+  RcLen, RawLen: SizeInt;
+  t: Byte;
+begin
+  if FCodec.EncodeFrame(P, Frames, Rc, RcLen, Raw, RawLen) then
+  begin
+    t := 1;
+    Emit(@t, 1);
+    EmitVInt(Frames);
+    EmitVInt(RcLen);
+    EmitVInt(RawLen);
+    Emit(Rc, RcLen);
+    if RawLen > 0 then Emit(Raw, RawLen);
+  end
   else
-  begin
-    w1 := LongWord(FBits[pos * 4 + 4]) or (LongWord(FBits[pos * 4 + 5]) shl 8) or
-          (LongWord(FBits[pos * 4 + 6]) shl 16) or (LongWord(FBits[pos * 4 + 7]) shl 24);
-    Result := ((w0 shr fbit) and BIT_MASK32[rbit]) or
-              ((w1 and BIT_MASK32[Bits - rbit]) shl rbit);
-  end;
-  Inc(FBitsPos, Bits);
+    EmitRaw(P, Frames * FSampleBytes);
 end;
 
-function TTtaStage.GetUnary: LongWord;
+{ coded phase: P/N new input appended to the pending bytes }
+procedure TTtaEncStage.Process(P: PByte; N: SizeInt; Final: Boolean);
 var
-  fbit, rbit, pos: LongWord;
-  mask, w: LongWord;
+  k, Whole: SizeInt;
 begin
-  fbit := FBitsPos and $1F;
-  rbit := 32 - fbit;
-  pos := FBitsPos shr 5;
-  Result := 0;
-  if pos > FBitsSize then Exit;
-  w := LongWord(FBits[pos * 4]) or (LongWord(FBits[pos * 4 + 1]) shl 8) or
-       (LongWord(FBits[pos * 4 + 2]) shl 16) or (LongWord(FBits[pos * 4 + 3]) shl 24);
-  if (w shr fbit) = BIT_MASK32[rbit] then
+  while (N > 0) or (FLen > 0) do
   begin
-    Inc(Result, rbit);
-    fbit := 0;
-    while True do
+    // container header
+    if FHdrLeft > 0 then
     begin
-      Inc(pos);
-      w := LongWord(FBits[pos * 4]) or (LongWord(FBits[pos * 4 + 1]) shl 8) or
-           (LongWord(FBits[pos * 4 + 2]) shl 16) or (LongWord(FBits[pos * 4 + 3]) shl 24);
-      if w = BIT_MASK32[32] then Inc(Result, 32) else Break;
+      if FLen > 0 then
+      begin
+        k := FLen;
+        if k > FHdrLeft then k := FHdrLeft;
+        EmitRaw(@FBuf[0], k);
+        Move(FBuf[k], FBuf[0], FLen - k);
+        Dec(FLen, k);
+      end
+      else
+      begin
+        k := N;
+        if k > FHdrLeft then k := FHdrLeft;
+        EmitRaw(P, k);
+        Inc(P, k);
+        Dec(N, k);
+      end;
+      Dec(FHdrLeft, k);
+      Continue;
     end;
+    // after the coded region: raw
+    if FDataLeft = 0 then
+    begin
+      if FLen > 0 then
+      begin
+        EmitRaw(@FBuf[0], FLen);
+        FLen := 0;
+      end;
+      EmitRaw(P, N);
+      Exit;
+    end;
+    // fill a frame
+    k := FFrameBytes;
+    if (FDataLeft > 0) and (k > FDataLeft) then k := FDataLeft;
+    if (FLen = 0) and (N >= k) then
+    begin
+      CodeFrame(P, k div FSampleBytes);
+      Inc(P, k);
+      Dec(N, k);
+      if FDataLeft > 0 then Dec(FDataLeft, k);
+      Continue;
+    end;
+    Whole := k - FLen;
+    if Whole > N then Whole := N;
+    Move(P^, FBuf[FLen], Whole);
+    Inc(FLen, Whole);
+    Inc(P, Whole);
+    Dec(N, Whole);
+    if FLen = k then
+    begin
+      CodeFrame(@FBuf[0], k div FSampleBytes);
+      FLen := 0;
+      if FDataLeft > 0 then Dec(FDataLeft, k);
+      Continue;
+    end;
+    // N = 0 here: wait for more unless this is the end
+    if not Final then Exit;
+    Whole := FLen - FLen mod FSampleBytes;
+    if Whole > 0 then CodeFrame(@FBuf[0], Whole div FSampleBytes);
+    if FLen > Whole then EmitRaw(@FBuf[Whole], FLen - Whole);
+    FLen := 0;
+    Exit;
   end;
-  mask := LongWord(1) shl fbit;
-  while (w and mask) <> 0 do
-  begin
-    Inc(Result);
-    if mask = $80000000 then Break;
-    mask := mask shl 1;
-  end;
-  Inc(FBitsPos, Result + 1);
 end;
 
-procedure TTtaStage.DecodeFrame(Ch: PLongInt; Len: LongWord);
+procedure TTtaEncStage.DoWrite(Buf: PByte; Count: SizeInt);
 var
-  p: PLongInt;
-  k, k0, k1, sum0, sum1: LongWord;
-  unary, binary, value: LongWord;
-  depth: Integer;
-  i: LongWord;
+  k: SizeInt;
+  Tmp: TBytes;
 begin
-  k0 := 10; k1 := 10;
-  sum0 := SHIFT16[k0]; sum1 := SHIFT16[k1];
-  p := Ch;
-  if Len = 0 then Exit;   // Len es LongWord: Len - 1 daría la vuelta
-  for i := 0 to Len - 1 do
-  begin
-    unary := GetUnary;
-    if unary = 50 then unary := GetBinary(32);
-    if unary = 0 then
-    begin
-      depth := 0; k := k0;
-    end
-    else
-    begin
-      depth := 1; k := k1;
-      Dec(unary);
-    end;
-    if k <> 0 then
-    begin
-      binary := GetBinary(k);
-      value := (unary shl k) + binary;
-    end
-    else
-      value := unary;
-    if depth = 1 then
-    begin
-      sum1 := sum1 + value - (sum1 shr 4);
-      if (k1 > 0) and (sum1 < SHIFT16[k1]) then Dec(k1)
-      else if sum1 > SHIFT16[k1 + 1] then Inc(k1);
-      value := value + BIT_SHIFT[k0];
-    end;
-    sum0 := sum0 + value - (sum0 shr 4);
-    if (k0 > 0) and (sum0 < SHIFT16[k0]) then Dec(k0)
-    else if sum0 > SHIFT16[k0 + 1] then Inc(k0);
-    if (value and 1) <> 0 then p^ := LongInt((value + 1) shr 1)
-    else p^ := -LongInt(value shr 1);
-    Inc(p);
+  if Count <= 0 then Exit;
+  case FPhase of
+    tpDetect:
+      begin
+        k := TTA_DETECT - FLen;
+        if k > Count then k := Count;
+        Move(Buf^, FBuf[FLen], k);
+        Inc(FLen, k);
+        Inc(Buf, k);
+        Dec(Count, k);
+        if FLen < TTA_DETECT then Exit;
+        Decide;
+        if FPhase = tpStored then
+        begin
+          Emit(@FBuf[0], FLen);
+          FLen := 0;
+          if Count > 0 then Emit(Buf, Count);
+          Exit;
+        end;
+        // re-feed the detection buffer
+        Tmp := Copy(FBuf, 0, FLen);
+        FLen := 0;
+        Process(@Tmp[0], Length(Tmp), False);
+        if Count > 0 then Process(Buf, Count, False);
+      end;
+    tpStored:
+      Emit(Buf, Count);
+    tpCoded:
+      Process(Buf, Count, False);
   end;
 end;
 
-{ --- stage -------------------------------------------------------------- }
+procedure TTtaEncStage.DoFinish;
+var
+  t: Byte;
+  Tmp: TBytes;
+  k: SizeInt;
+begin
+  if FPhase = tpDetect then
+  begin
+    Decide;
+    if FPhase = tpStored then
+    begin
+      if FLen > 0 then Emit(@FBuf[0], FLen);
+      FLen := 0;
+      Exit;
+    end;
+    k := FLen;
+    Tmp := Copy(FBuf, 0, k);
+    FLen := 0;
+    if k > 0 then Process(@Tmp[0], k, True) else Process(nil, 0, True);
+  end
+  else if FPhase = tpCoded then
+    Process(nil, 0, True);
+  if FPhase = tpCoded then
+  begin
+    t := 0;
+    Emit(@t, 1);
+  end;
+end;
+
+{ ---------------------------------------------------------------------------------------- }
+{ decoder stage }
 
 constructor TTtaStage.Create(ASource: TInStage; const APar: TTtaParams);
 begin
-  if (APar.Level < 0) or (APar.Level > 3) then
-    raise EUnsupportedMethod.Create('tta: nivel fuera de rango');
-  if (APar.RawData < 0) or (APar.RawData > 1) then
-    raise EUnsupportedMethod.Create('tta: raw_data no soportado');
-  if (APar.NumChan < 0) or (APar.WordSize < 0) then
-    raise EUnsupportedMethod.Create('tta: invalid parameters');
   inherited Create(ASource);
+end;
+
+destructor TTtaStage.Destroy;
+begin
+  FCodec.Free;
+  inherited Destroy;
+end;
+
+function ReadVIntFrom(S: TInStage): QWord;
+var
+  b: Byte;
+  sh: Integer;
+begin
+  Result := 0;
+  sh := 0;
+  repeat
+    S.ReadExact(@b, 1);
+    if (sh = 63) and (b > 1) then Corrupt('tta: invalid number');
+    Result := Result or (QWord(b and $7F) shl sh);
+    Inc(sh, 7);
+    if (sh > 63) and (b and $80 <> 0) then Corrupt('tta: invalid number');
+  until b and $80 = 0;
 end;
 
 procedure TTtaStage.Start;
 var
-  b4: array[0..3] of Byte;
-  offset: LongInt;
+  Hdr: array[0..3] of Byte;
+  b: Byte;
+  Fmt: TAcFormat;
 begin
   FStarted := True;
-  Source.ReadExact(@b4[0], 4);
-  FLevel := b4[0];
-  FIsFloat := b4[1] mod 2;
-  FRawData := b4[1] div 2;
-  FNumChan := b4[2];
-  FWordSize := b4[3];
-  FByteSize := (FWordSize + 7) div 8;
-  // tta.cpp:430: con nivel 0 el resto de la cabecera no importa (los datos que no son audio
-  // y tta:m0 se guardan con cabecera 00 00 00 00): copiar tal cual
-  if FLevel = 0 then
+  if not Source.ReadExactOrEof(@b, 1) then Corrupt('tta: empty stream');
+  if b <> TTA_STREAM_VERSION then Corrupt('tta: unknown stream version (not a PArc 0.0.7+ tta stream)');
+  Source.ReadExact(@b, 1);
+  if b = 0 then
   begin
     FStored := True;
     Exit;
   end;
-  if (FLevel > 3) or (FRawData > 1) or (FNumChan = 0) or
-     ((FIsFloat <> 0) and (FByteSize <> 4)) or
-     ((FIsFloat = 0) and (FByteSize >= 4)) then
-    Corrupt('tta: cabecera no soportada');
-  FN := FNumChan * FByteSize;
-  if FN = 0 then Corrupt('tta: N = 0');
-  if FLevel = 0 then
-  begin
-    FStored := True;
-    Exit;
-  end;
-  Source.ReadExact(@b4[0], 4);
-  offset := LongInt(LongWord(b4[0]) or (LongWord(b4[1]) shl 8) or
-                    (LongWord(b4[2]) shl 16) or (LongWord(b4[3]) shl 24));
-  if offset < 0 then Corrupt('tta: invalid offset');
-  if offset > 0 then
-  begin
-    SetLength(FOut, offset);
-    Source.ReadExact(@FOut[0], offset);
-    FLen := offset; FPos := 0;
-  end;
+  if b <> 1 then Corrupt('tta: invalid mode');
+  Source.ReadExact(@Hdr[0], 4);
+  Fmt.NumChan := Hdr[0];
+  Fmt.Bits := Hdr[1];
+  Fmt.Flags := Hdr[2];
+  Fmt.Level := Hdr[3];
+  if (Fmt.NumChan = 0) or not (Fmt.Bits in [8, 16, 24, 32]) or (Fmt.Flags and not 7 <> 0) or
+     ((Fmt.Flags and ACF_FLOAT <> 0) and (Fmt.Bits <> 32)) or ((Fmt.Flags and ACF_U8 <> 0) and (Fmt.Bits <> 8)) or
+     (Fmt.Level < 1) or (Fmt.Level > TTA_MAX_LEVEL) then
+    Corrupt('tta: invalid format');
+  FCodec := TAcCodec.Create(Fmt);
 end;
 
-function TTtaStage.NextBlock: Boolean;
+function TTtaStage.NextChunk: Boolean;
 var
-  b4: array[0..3] of Byte;
-  bytes_read, bit_array_size, rest, frame_len: LongWord;
-  i, j, nchan: Integer;
+  t: Byte;
+  Frames, RcLen, RawLen, MaxFrames, Bytes: QWord;
+  SampleBytes: Integer;
 begin
-  if not Source.ReadExactOrEof(@b4[0], 4) then Exit(False);
-  bytes_read := LongWord(b4[0]) or (LongWord(b4[1]) shl 8) or
-                (LongWord(b4[2]) shl 16) or (LongWord(b4[3]) shl 24);
-  if bytes_read > (LongWord(1) shl 30) then Corrupt('tta: block too large');
-  frame_len := bytes_read div LongWord(FN);
-
-  if FRawData = 0 then
-  begin
-    Source.ReadExact(@b4[0], 4);
-    bit_array_size := LongWord(b4[0]) or (LongWord(b4[1]) shl 8) or
-                      (LongWord(b4[2]) shl 16) or (LongWord(b4[3]) shl 24);
-    if bit_array_size > (LongWord(1) shl 30) then
-      Corrupt('tta: compressed block too large');
-    if bit_array_size = 0 then
-    begin
-      SetLength(FOut, bytes_read);
-      if bytes_read > 0 then Source.ReadExact(@FOut[0], bytes_read);
-      FLen := bytes_read; FPos := 0;
-      Exit(True);
-    end;
-    BitInit(bit_array_size);
-  end;
-
-  if Length(FChan) <> 2 * FNumChan then SetLength(FChan, 2 * FNumChan);
-  for i := 0 to (FNumChan shl Integer(FIsFloat)) - 1 do
-  begin
-    if Length(FChan[i]) < SizeInt(frame_len) then SetLength(FChan[i], frame_len);
-    if FRawData <> 0 then
-    begin
-      { el encoder de 32 bits escribe 4 bytes por muestra }
-      if frame_len > 0 then Source.ReadExact(@FChan[i][0], frame_len * 4);
-    end
-    else
-      if frame_len > 0 then DecodeFrame(@FChan[i][0], frame_len);
-    { los filtros se aplican SIEMPRE (también con raw_data) }
-    FiltersDecompress(@FChan[i][0], frame_len);
-  end;
-
-  if FIsFloat <> 0 then
-  begin
-    for i := 0 to frame_len - 1 do
-      for j := 0 to FNumChan - 1 do
-        FChan[j][i] := LongInt(((LongWord(FChan[j][i]) + $3F80) shl 16) or
-                               Swap16(LongWord(Abs(FChan[j + FNumChan][i]) - 1) and $FFFF) or
-                               (LongWord(FChan[j + FNumChan][i]) and $80000000));
-  end
-  else if FNumChan > 1 then
-  begin
-    for i := 0 to frame_len - 1 do
-    begin
-      nchan := FNumChan - 1;
-      FChan[nchan][i] := FChan[nchan][i] + (FChan[nchan - 1][i] div 2);
-      while nchan > 0 do
+  Result := False;
+  if FEnd then Exit;
+  Source.ReadExact(@t, 1);
+  case t of
+    0:
       begin
-        FChan[nchan - 1][i] := FChan[nchan][i] - FChan[nchan - 1][i];
-        Dec(nchan);
+        if Source.Read(@t, 1) <> 0 then Corrupt('tta: data after the end');
+        FEnd := True;
       end;
-    end;
-  end;
-
-  { entrelazado a bytes }
-  SetLength(FOut, bytes_read);
-  case FByteSize of
     1:
-      for i := 0 to frame_len - 1 do
-        for j := 0 to FNumChan - 1 do
-          FOut[i * FNumChan + j] := Byte(FChan[j][i] + $80);
+      begin
+        SampleBytes := FCodec.Fmt.NumChan * (FCodec.Fmt.Bits div 8);
+        MaxFrames := TTA_FRAME_VALUES div FCodec.Fmt.NumChan;
+        if MaxFrames < 1 then MaxFrames := 1;
+        Frames := ReadVIntFrom(Source);
+        RcLen := ReadVIntFrom(Source);
+        RawLen := ReadVIntFrom(Source);
+        Bytes := Frames * SampleBytes;
+        if (Frames = 0) or (Frames > MaxFrames) or (RcLen < 5) or (RcLen > 2 * Bytes + 64) or
+           (RawLen > Bytes) then
+          Corrupt('tta: invalid frame');
+        if QWord(Length(FIn)) < RcLen + RawLen then SetLength(FIn, RcLen + RawLen);
+        Source.ReadExact(@FIn[0], RcLen + RawLen);
+        if QWord(Length(FOut)) < Bytes then SetLength(FOut, Bytes);
+        if not FCodec.DecodeFrame(@FIn[0], RcLen, @FIn[RcLen], RawLen, Frames, @FOut[0]) then
+          Corrupt('tta: damaged frame');
+        FOutLen := Bytes;
+        FOutPos := 0;
+        Result := True;
+      end;
     2:
-      for i := 0 to frame_len - 1 do
-        for j := 0 to FNumChan - 1 do
-        begin
-          FOut[(i * FNumChan + j) * 2] := Byte(LongWord(FChan[j][i]) and $FF);
-          FOut[(i * FNumChan + j) * 2 + 1] := Byte((LongWord(FChan[j][i]) shr 8) and $FF);
-        end;
-    3:
-      for i := 0 to frame_len - 1 do
-        for j := 0 to FNumChan - 1 do
-        begin
-          FOut[(i * FNumChan + j) * 3] := Byte(LongWord(FChan[j][i]) and $FF);
-          FOut[(i * FNumChan + j) * 3 + 1] := Byte((LongWord(FChan[j][i]) shr 8) and $FF);
-          FOut[(i * FNumChan + j) * 3 + 2] := Byte((LongWord(FChan[j][i]) shr 16) and $FF);
-        end;
-    4:
-      for i := 0 to frame_len - 1 do
-        for j := 0 to FNumChan - 1 do
-        begin
-          FOut[(i * FNumChan + j) * 4] := Byte(LongWord(FChan[j][i]) and $FF);
-          FOut[(i * FNumChan + j) * 4 + 1] := Byte((LongWord(FChan[j][i]) shr 8) and $FF);
-          FOut[(i * FNumChan + j) * 4 + 2] := Byte((LongWord(FChan[j][i]) shr 16) and $FF);
-          FOut[(i * FNumChan + j) * 4 + 3] := Byte((LongWord(FChan[j][i]) shr 24) and $FF);
-        end;
+      begin
+        FRawLeft := ReadVIntFrom(Source);
+        if (FRawLeft = 0) or (FRawLeft > 1 shl 20) then Corrupt('tta: invalid raw chunk');
+        Result := True;
+      end;
   else
-    Corrupt('tta: invalid byte_size');
+    Corrupt('tta: invalid chunk');
   end;
-
-  rest := bytes_read mod LongWord(FN);
-  if rest > 0 then Source.ReadExact(@FOut[bytes_read - rest], rest);
-  FLen := bytes_read;
-  FPos := 0;
-  Result := True;
 end;
 
 function TTtaStage.Read(Buf: PByte; Count: SizeInt): SizeInt;
 var
-  n: SizeInt;
+  k: SizeInt;
 begin
   Result := 0;
+  if Count <= 0 then Exit;
   if not FStarted then Start;
   if FStored then Exit(Source.Read(Buf, Count));
-  while Count > 0 do
+  while Result = 0 do
   begin
-    while FPos >= FLen do
+    if FRawLeft > 0 then
     begin
-      if FEof then Exit;
-      if not NextBlock then
-      begin
-        FEof := True;
-        Exit;
-      end;
+      k := Count;
+      if k > FRawLeft then k := FRawLeft;
+      Source.ReadExact(Buf, k);
+      Dec(FRawLeft, k);
+      Exit(k);
     end;
-    n := FLen - FPos;
-    if n > Count then n := Count;
-    Move(FOut[FPos], Buf^, n);
-    Inc(FPos, n); Inc(Buf, n); Dec(Count, n); Inc(Result, n);
+    if FOutPos < FOutLen then
+    begin
+      k := FOutLen - FOutPos;
+      if k > Count then k := Count;
+      Move(FOut[FOutPos], Buf^, k);
+      Inc(FOutPos, k);
+      Exit(k);
+    end;
+    if not NextChunk then Exit(0);
   end;
 end;
 
