@@ -46,7 +46,8 @@ open('runs', 'wb').write(b''.join(bytes([random.randrange(4)]) * random.randrang
 { head -c 300000 rnd; cat text; head -c 100000 rnd; head -c 900000 text; } > mix
 FILES="empty one s63 s64 s65 text rep3 rnd zeros allbytes twosym runs mix"
 METHODS="bwt bwt:m2 bwt:m3 bwt:m4 bwt:l bwt:m4:8m:32:h18 bwt:m1:h20 bwt:m3:8m:l bwt:m1:l2048 bwt:m4:l
- bwt:b64kb:m1 bwt:b1mb:m2:l64:h12 bwt:m1:e1 bwt:m2:e2 bwt:300000b:m1:l bwt:100b:m2"
+ bwt:b64kb:m1 bwt:b1mb:m2:l64:h12 bwt:m1:e1 bwt:m2:e2 bwt:m1:e0 bwt:300000b:m1:l bwt:100b:m2
+ bwt:m4:a bwt:b1mb:m1:a bwt:m2:l:a"
 
 rt() {   # rt <method> <file>
   local m=$1 f=$2
@@ -82,7 +83,7 @@ ck "smaller block rejected" "! \"$T\" dec bwt:1mb t1.b x.out >/dev/null 2>&1"
 
 # damaged streams
 for f in text allbytes mix runs; do
-  for m in bwt:m1 bwt:m2:l bwt:b64kb:m4:l64:h12; do
+  for m in bwt:m1 bwt:m2:l bwt:m4 bwt:b64kb:m4:l64:h12; do
     "$T" enc "$m" "$f" z.b 0
     ck "fuzz $m $f" "timeout 600 \"$T\" fuzz '$m' z.b $FUZZ 1 >/dev/null"
   done

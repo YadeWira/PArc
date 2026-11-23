@@ -1,38 +1,46 @@
 { bwt: PArc's block-sorting compressor (MIT; replaces FreeArc's GRZip, which is LGPL).
 
   Each block goes through three steps, undone in reverse order by the decoder:
-   1. LZP (parc_lzp, PArc's own): long repeats become an escape byte plus a length, so the
-      sort works on less data and the coder does not spend bits on what the LZP finds for free.
-      The lengths stream is appended to the literals: both are sorted together;
+   1. LZP (the algorithm of parc_lzp, PArc's own; the encoder runs in the C core, the decoder
+      is parc_lzp's): long repeats become an escape byte plus a length, so the sort works on
+      less data and the coder does not spend bits on what the LZP finds for free. The lengths
+      stream is appended to the literals: both are sorted together. With the adaptive coder,
+      a block where the LZP takes away more than half of the data (tables, markup, databases:
+      short repeats the BWT codes better itself) is filtered again with 4 times the minimum;
    2. the Burrows-Wheeler transform, built with libsais (Ilya Grebnov, Apache-2.0, vendored
       unchanged in src/bwt/), which also does the inverse;
    3. QLFC (quantized local frequency coding): the run heads of the BWT output are coded as
       move-to-front ranks plus run lengths, bit by bit with adaptive binary contexts.
-      Two coders from libbsc 3.4.1 (Ilya Grebnov, Apache-2.0) translated to C in
-      src/bwt/qlfc.c: "static" (three counters averaged with fixed weights) and "adaptive"
-      (the same counters mixed by a small neural mixer per context; slower, smaller).
+      Three coders from libbsc 3.4.1 (Ilya Grebnov, Apache-2.0) translated to C in
+      src/bwt/qlfc.c: "fast" (one counter per context), "static" (three counters averaged
+      with fixed weights) and "adaptive" (the three counters mixed by a small neural mixer per
+      context; slower, smaller).
   The C core (src/bwt/bwt_core.c) needs nothing from the C library: build.sh compiles it per
   target and this unit links the object. Everything is integer arithmetic on the block: the
   output does not depend on the platform or the thread count.
 
-  Blocks are compressed and decompressed in parallel (a pool of jobs, written and delivered in
-  order) within the PARC_THREADS budget (parc_parallel).
+  With `a` the encoder cuts the input where its statistics change (see "adaptive blocks"
+  below); the stream is the same, just with shorter blocks. Blocks are compressed and
+  decompressed in parallel (a pool of jobs, written and delivered in order) within the
+  PARC_THREADS budget (parc_parallel).
 
-  Method string: bwt[:<block>][:m1..m4][:l|:l<N>|:<N>][:h<N>][:e1|:e2], also b<block>; GRZip's
-  other switches (a, s, d, p, t<N>, i<N>) are accepted and ignored. Defaults: 8 MB, m1, LZP
-  with minimum match 32 and 18 hash bits. m1 = adaptive coder, m2..m4 = static coder; e1/e2
-  choose the coder explicitly. A bare integer is the LZP minimum; a bare memory size the
-  block (as with GRZip). `grzip:...` strings are read as `bwt:...` by the canonizer.
+  Method string: bwt[:<block>][:m1..m4][:l|:l<N>|:<N>][:h<N>][:e0|:e1|:e2][:a], also b<block>;
+  GRZip's other switches (s, d, p, t<N>, i<N>) are accepted and ignored. Defaults: 8 MB, m1,
+  LZP with minimum match 32 and 18 hash bits. m1 = adaptive coder, m2 and m3 = static, m4 =
+  fast; e0/e1/e2 choose fast/static/adaptive explicitly. A bare integer is the LZP minimum; a
+  bare memory size the block (as with GRZip). `grzip:...` strings are written as `bwt:...` by
+  the canonizer.
 
   Stream (version 1, docs/formato/FORMATO-PARC.md §6.6):
     U8 version (1), U8 LZP hash bits (0 = no LZP), [VInt LZP minimum if bits > 0]; both must
     be those of the method string. Then blocks until the end of the stream:
       VInt Len (1..block size), U8 mode:
         0: Len stored bytes;
-        1: U8 flags (bits 0-1: coder 1 static / 2 adaptive; bit 2: LZP applied; others 0),
-           [LZP: U8 escape, VInt minimum, VInt NMain, VInt NLens], VInt Primary, VInt CodedLen, CodedLen
-           bytes of QLFC data. The BWT input has M = NMain + NLens bytes with LZP (the main
-           stream, then the lengths), else M = Len; Primary is libsais' primary index (1..M).
+        1: U8 flags (bits 0-1: coder 1 static / 2 adaptive / 3 fast; bit 2: LZP applied;
+           others 0), [LZP: U8 escape, VInt minimum of this block (8..65535), VInt NMain,
+           VInt NLens], VInt Primary, VInt CodedLen, CodedLen bytes of QLFC data. The BWT
+           input has M = NMain + NLens bytes with LZP (the main stream, then the lengths),
+           else M = Len; Primary is libsais' primary index (1..M).
     VInt = LEB128 (7 bits per byte, low group first). }
 unit parc_bwt;
 
@@ -53,6 +61,7 @@ const
   BWT_DEF_LZP_HASH = 18;
   BWT_CODER_STATIC = 1;
   BWT_CODER_ADAPTIVE = 2;
+  BWT_CODER_FAST = 3;
   { Blocks shorter than this are stored }
   BWT_MIN_CODED = 64;
 
@@ -62,7 +71,7 @@ type
   TBwtParams = record
     BlockSize: SizeInt;
     Level: Integer;          // m1..m4
-    CoderSet: Integer;       // e1/e2 given (0 = from the level)
+    CoderSet: Integer;       // e0/e1/e2 given (-1 = from the level)
     Coder: Integer;          // BWT_CODER_*
     LzpMin: Integer;         // 0 = no LZP
     LzpHash: Integer;
@@ -200,7 +209,7 @@ var
 begin
   Result.BlockSize := BWT_DEF_BLOCK;
   Result.Level := 1;
-  Result.CoderSet := 0;
+  Result.CoderSet := -1;
   Result.Adaptive := False;
   Result.LzpMin := BWT_DEF_LZP_MIN;
   Result.LzpHash := BWT_DEF_LZP_HASH;
@@ -222,8 +231,8 @@ begin
         'e':
           begin
             Result.CoderSet := Num(r);
-            if (Result.CoderSet < 1) or (Result.CoderSet > 2) then
-              raise EBwtParams.CreateFmt('bwt: invalid coder "%s" (e1 or e2)', [p]);
+            if Result.CoderSet > 2 then
+              raise EBwtParams.CreateFmt('bwt: invalid coder "%s" (e0, e1 or e2)', [p]);
           end;
         'b':
           if ParseMemSize(r, m) then Result.BlockSize := SizeInt(Min(m, QWord(High(SizeInt))))
@@ -254,9 +263,18 @@ begin
   end;
   if Result.LzpHash < 10 then Result.LzpHash := 10;
   if Result.LzpHash > LZP_MAX_HASH_BITS then Result.LzpHash := LZP_MAX_HASH_BITS;
-  if Result.CoderSet <> 0 then Result.Coder := Result.CoderSet
-  else if Result.Level = 1 then Result.Coder := BWT_CODER_ADAPTIVE
-  else Result.Coder := BWT_CODER_STATIC;
+  case Result.CoderSet of
+    0: Result.Coder := BWT_CODER_FAST;
+    1: Result.Coder := BWT_CODER_STATIC;
+    2: Result.Coder := BWT_CODER_ADAPTIVE;
+  else
+    case Result.Level of
+      1: Result.Coder := BWT_CODER_ADAPTIVE;
+      4: Result.Coder := BWT_CODER_FAST;
+    else
+      Result.Coder := BWT_CODER_STATIC;
+    end;
+  end;
 end;
 
 function BwtMethodString(const P: TBwtParams; BlockSize: SizeInt): string;
@@ -264,7 +282,7 @@ begin
   Result := 'bwt:' + IntToStr(BlockSize) + 'b:m' + IntToStr(P.Level);
   if P.LzpMin > 0 then Result := Result + ':l' + IntToStr(P.LzpMin) + ':h' + IntToStr(P.LzpHash)
   else Result := Result + ':l';
-  if P.CoderSet <> 0 then Result := Result + ':e' + IntToStr(P.CoderSet);
+  if P.CoderSet >= 0 then Result := Result + ':e' + IntToStr(P.CoderSet);
   if P.Adaptive then Result := Result + ':a';
 end;
 
@@ -929,7 +947,7 @@ begin
       1:
         begin
           Job.Flags := RdByte;
-          if (Job.Flags and not 7 <> 0) or not ((Job.Flags and 3) in [BWT_CODER_STATIC, BWT_CODER_ADAPTIVE]) or
+          if (Job.Flags and not 7 <> 0) or ((Job.Flags and 3) = 0) or
              ((Job.Flags and 4 <> 0) and (FPar.LzpMin = 0)) then Corrupt('bwt: invalid block flags');
           if Job.Flags and 4 <> 0 then
           begin

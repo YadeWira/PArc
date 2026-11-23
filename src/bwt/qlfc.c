@@ -28,9 +28,8 @@ Changes made for PArc (2026-11, by the PArc authors):
   - translated from C++ to C (the RangeCoder class, ProbabilityCounter and
     ProbabilityMixer became plain functions on structs; templates and
     references became parameters and pointers);
-  - only the static and the adaptive coders are kept (the "fast" coder, the
-    run-time CPU dispatch and the AVX/AVX2/SSE4.1 variants are gone: x86-64
-    uses SSE2, AArch64 its NEON/64-bit paths, everything else plain C);
+  - the run-time CPU dispatch and the AVX/AVX2/SSE4.1 variants are gone: x86-64
+    uses SSE2, AArch64 its NEON/64-bit paths, everything else plain C;
   - the range coder reads and writes its 16-bit words little-endian byte by
     byte (same bytes as libbsc on little-endian machines);
   - the decoders are bounded: the input is read only up to its end (an
@@ -1913,12 +1912,447 @@ static int qlfc_static_decode(const unsigned char * input, const unsigned char *
 }
 
 /*---------------------------------------------------------------------------*/
+/* Fast coder (one counter per context, fixed-rate updates)                  */
+/*---------------------------------------------------------------------------*/
+
+typedef struct
+{
+    struct
+    {
+        short Exponent[ALPHABET_SIZE][8];
+        short Mantissa[ALPHABET_SIZE][256];   /* one row per character: the k-bit mantissa's row starts at counter 2^k */
+    } Rank;
+    struct
+    {
+        short Exponent[ALPHABET_SIZE][32];
+        short Mantissa[ALPHABET_SIZE][32][32];
+    } Run;
+} QlfcStatisticalModel3;
+
+static NOINLINE void qlfc_init_model3(QlfcStatisticalModel3 * model)
+{
+    qlfc_fill(&model->Rank, sizeof(model->Rank), 4096);
+    qlfc_fill(&model->Run, sizeof(model->Run), 1024);
+}
+
+/* p = p - ((p - threshold) >> R) */
+#define PC_UPD(p, R, th) ((p) = (short)((p) - (((p) - (th)) >> (R))))
+
+INLINE void rcp_encode_bit0(uint64_t * low, uint32_t * range, RangeCoder * c, int P, int probability)
+{
+    if (*range < 0x10000) { c->low = *low; c->range = *range; *range = rc_shift_low(c); *low = c->low; }
+    *range = (*range >> P) * (uint32_t)probability;
+}
+
+INLINE void rcp_encode_bit1(uint64_t * low, uint32_t * range, RangeCoder * c, int P, int probability)
+{
+    if (*range < 0x10000) { c->low = *low; c->range = *range; *range = rc_shift_low(c); *low = c->low; }
+    uint32_t r = (*range >> P) * (uint32_t)probability;
+    *low += r; *range -= r;
+}
+
+INLINE void rcp_encode_bit(uint64_t * low, uint32_t * range, RangeCoder * c, int P, uint32_t bit, int probability)
+{
+    if (*range < 0x10000) { c->low = *low; c->range = *range; *range = rc_shift_low(c); *low = c->low; }
+    uint32_t r = (*range >> P) * (uint32_t)probability;
+    *low   = *low + ((~bit + 1u) & r);
+    *range = r    + ((~bit + 1u) & (*range - r - r));
+}
+
+INLINE int rcp_peak_bit(RangeCoder * c, int P, int probability)
+{
+    if (c->range < 0x10000) { c->range <<= 16; c->code = (c->code << 16) | rc_input_short(c); }
+    return c->code >= (c->range >> P) * (uint32_t)probability;
+}
+
+INLINE void rcp_decode_bit0(RangeCoder * c, int P, int probability)
+{
+    c->range = (c->range >> P) * (uint32_t)probability;
+}
+
+INLINE void rcp_decode_bit1(RangeCoder * c, int P, int probability)
+{
+    uint32_t r = (c->range >> P) * (uint32_t)probability;
+    c->code -= r; c->range -= r;
+}
+
+INLINE uint32_t rcp_decode_bit_mask(RangeCoder * c, int P, int probability)
+{
+    if (c->range < 0x10000) { c->range <<= 16; c->code = (c->code << 16) | rc_input_short(c); }
+    uint32_t r    = (c->range >> P) * (uint32_t)probability;
+    uint32_t mask = 0 - (uint32_t)(c->code >= r);
+    c->code  = c->code - (r & mask);
+    c->range = r + ((c->range - r - r) & mask);
+    return mask;
+}
+
+/* the alphabet with probability 1/2 per bit (P = 1, probability 1): the same bits as qlfc_encode_alphabet */
+static void qlfc_fast_encode_alphabet(RangeCoder * coder, const unsigned char * MTFTable)
+{
+    unsigned char usedChar[ALPHABET_SIZE];
+    for (int i = 0; i < ALPHABET_SIZE; ++i) usedChar[i] = 0;
+
+    int prevChar = -1;
+    for (int rank = 0; rank < ALPHABET_SIZE; ++rank)
+    {
+        int currentChar = MTFTable[rank];
+
+        for (int bit = 7; bit >= 0; --bit)
+        {
+            int bit0 = 0, bit1 = 0;
+            for (int c = (currentChar >> (bit + 1)) << (bit + 1); c < ((currentChar >> (bit + 1)) + 1) << (bit + 1); ++c)
+            {
+                if (c == prevChar || usedChar[c] == 0)
+                {
+                    if (c & (1 << bit)) bit1 = 1; else bit0 = 1;
+                    if (bit0 && bit1) break;
+                }
+            }
+            if (bit0 && bit1)
+            {
+                uint64_t low = coder->low; uint32_t range = coder->range;
+                rcp_encode_bit(&low, &range, coder, 1, (uint32_t)((currentChar >> bit) & 1), 1);
+                coder->low = low; coder->range = range;
+            }
+        }
+
+        if (currentChar == prevChar) break;
+        prevChar = currentChar; usedChar[currentChar] = 1;
+    }
+}
+
+static void qlfc_fast_decode_alphabet(RangeCoder * coder, unsigned char * MTFTable)
+{
+    unsigned char usedChar[ALPHABET_SIZE];
+    for (int i = 0; i < ALPHABET_SIZE; ++i) usedChar[i] = 0;
+
+    int prevChar = -1;
+    for (int rank = 0; rank < ALPHABET_SIZE; ++rank)
+    {
+        int currentChar = 0;
+
+        for (int bit = 7; bit >= 0; --bit)
+        {
+            int bit0 = 0, bit1 = 0;
+            for (int c = currentChar << (bit + 1); c < (currentChar + 1) << (bit + 1); ++c)
+            {
+                if (c == prevChar || usedChar[c] == 0)
+                {
+                    if (c & (1 << bit)) bit1 = 1; else bit0 = 1;
+                    if (bit0 && bit1) break;
+                }
+            }
+            if (bit0 && bit1)
+            {
+                /* DecodeBit<1>(1) */
+                if (coder->range < 0x10000) { coder->range <<= 16; coder->code = (coder->code << 16) | rc_input_short(coder); }
+                uint32_t r = (coder->range >> 1);
+                int b = coder->code >= r;
+                coder->range = b ? coder->range - r : r;
+                coder->code  = b ? coder->code  - r : coder->code;
+                currentChar += currentChar + b;
+            }
+            else
+            {
+                if (bit0) currentChar += currentChar + 0;
+                if (bit1) currentChar += currentChar + 1;
+            }
+        }
+
+        MTFTable[rank] = (unsigned char)currentChar;
+
+        if (currentChar == prevChar) break;
+        prevChar = currentChar; usedChar[currentChar] = 1;
+    }
+}
+
+static int qlfc_fast_encode(const unsigned char * RESTRICT input, unsigned char * RESTRICT output, unsigned char * RESTRICT buffer, int inputSize, int outputSize, QlfcStatisticalModel3 * model)
+{
+    unsigned char MTFTable[ALPHABET_SIZE];
+
+    qlfc_init_model3(model);
+
+    const unsigned char * RESTRICT ranks = qlfc_transform(input, buffer, inputSize, MTFTable);
+
+    RangeCoder coder;
+    rc_init_encoder(&coder, output, outputSize);
+    rc_encode_word(&coder, (uint32_t)inputSize);
+
+    qlfc_fast_encode_alphabet(&coder, MTFTable);
+
+    const unsigned char * inputEnd  = input  + inputSize;
+    const unsigned char * ranksEnd  = buffer + inputSize;
+    const unsigned char * inputTail = inputEnd;
+    const unsigned char * ranksTail = ranksEnd - 1;
+
+    for (const unsigned char * p = inputEnd - 1; (p > input) && (inputEnd - p < 16); --p)
+    {
+        if (p[0] != p[-1]) { inputTail = p; ranksTail--; }
+    }
+
+    uint64_t low = coder.low; uint32_t range = coder.range;
+
+    for (; ranks < ranksEnd; )
+    {
+        coder.low = low; coder.range = range;
+        if (rc_check_eob(&coder)) return QLFC_NOT_COMPRESSIBLE;
+
+        unsigned int currentRank = *ranks++;
+        int currentChar = *input;
+        unsigned int currentRun;
+
+        {
+            const unsigned char * runStart = input++;
+
+            if (ranks <= ranksTail)
+            {
+                QLFC_SCAN_FAST();
+            }
+            else
+            {
+                if (input < inputTail) { input = inputTail; }
+                while ((input < inputEnd) && (*input == currentChar)) { input++; }
+            }
+
+            currentRun = (unsigned int)(input - runStart);
+        }
+
+        {
+            short * RESTRICT predictor = &model->Rank.Exponent[currentChar][0];
+
+            if (currentRank == 1)
+            {
+                int p = predictor[0]; PC_UPD(predictor[0], 4, 8016); rcp_encode_bit0(&low, &range, &coder, 13, p);
+            }
+            else
+            {
+                {
+                    int p = predictor[0]; PC_UPD(predictor[0], 4, 83); rcp_encode_bit1(&low, &range, &coder, 13, p);
+                }
+
+                int bitRankSize = bsc_bit_scan_reverse(currentRank);
+
+                for (int bit = 1; bit < bitRankSize; ++bit)
+                {
+                    int p = predictor[bit]; PC_UPD(predictor[bit], 4, 122); rcp_encode_bit1(&low, &range, &coder, 13, p);
+                }
+
+                if (bitRankSize < 7)
+                {
+                    int p = predictor[bitRankSize]; PC_UPD(predictor[bitRankSize], 4, 8114); rcp_encode_bit0(&low, &range, &coder, 13, p);
+                }
+
+                predictor = &model->Rank.Mantissa[currentChar][MANTISSA_ROW_START(bitRankSize)];
+
+                for (int context = 1, bit = bitRankSize - 1; bit >= 0; --bit)
+                {
+                    unsigned int b = (currentRank >> bit) & 1;
+                    int p = predictor[context]; PC_UPD(predictor[context], 7, b ? 235 : 7999); rcp_encode_bit(&low, &range, &coder, 13, b, p);
+                    context += context + (int)b;
+                }
+            }
+        }
+
+        {
+            short * RESTRICT predictor = &model->Run.Exponent[currentChar][0];
+
+            if (currentRun == 1)
+            {
+                int p = predictor[0]; PC_UPD(predictor[0], 5, 2025); rcp_encode_bit0(&low, &range, &coder, 11, p);
+            }
+            else
+            {
+                {
+                    int p = predictor[0]; PC_UPD(predictor[0], 5, 42); rcp_encode_bit1(&low, &range, &coder, 11, p);
+                }
+
+                int bitRunSize = bsc_bit_scan_reverse(currentRun);
+
+                for (int bit = 1; bit < bitRunSize; ++bit)
+                {
+                    int p = predictor[bit]; PC_UPD(predictor[bit], 4, 142); rcp_encode_bit1(&low, &range, &coder, 11, p);
+                }
+
+                {
+                    int p = predictor[bitRunSize]; PC_UPD(predictor[bitRunSize], 4, 1962); rcp_encode_bit0(&low, &range, &coder, 11, p);
+                }
+
+                predictor = &model->Run.Mantissa[currentChar][bitRunSize][0];
+
+                if (bitRunSize <= 5)
+                {
+                    for (int context = 1, bit = bitRunSize - 1; bit >= 0; --bit)
+                    {
+                        unsigned int b = (currentRun >> bit) & 1;
+                        int p = predictor[context]; PC_UPD(predictor[context], 6, b ? 147 : 1951); rcp_encode_bit(&low, &range, &coder, 11, b, p);
+                        context += context + (int)b;
+                    }
+                }
+                else
+                {
+                    for (int context = 1, bit = bitRunSize - 1; bit >= 0; --bit)
+                    {
+                        unsigned int b = (currentRun >> bit) & 1;
+                        int p = predictor[context]; PC_UPD(predictor[context], 5, b ? 46 : 1987); rcp_encode_bit(&low, &range, &coder, 11, b, p);
+                        context += 1;
+                    }
+                }
+            }
+        }
+    }
+
+    coder.low = low; coder.range = range;
+    return rc_finish_encoder(&coder);
+}
+
+static int qlfc_fast_decode(const unsigned char * input, const unsigned char * inputEnd, unsigned char * output, int n, QlfcStatisticalModel3 * model)
+{
+    unsigned char ALIGNED(64) MTFTable[ALPHABET_SIZE];
+    for (int i = 0; i < ALPHABET_SIZE; ++i) MTFTable[i] = 0;
+
+    qlfc_init_model3(model);
+
+    RangeCoder coder;
+    rc_init_decoder(&coder, input, inputEnd);
+    if ((int)rc_decode_word(&coder) != n) return QLFC_DATA_CORRUPT;
+
+    qlfc_fast_decode_alphabet(&coder, MTFTable);
+
+    int i = 0;
+    while (i < n)
+    {
+        int currentChar = MTFTable[0];
+
+        {
+            short * RESTRICT predictor = &model->Rank.Exponent[currentChar][0];
+
+            int p = predictor[0];
+            if (rcp_peak_bit(&coder, 13, p))
+            {
+                PC_UPD(predictor[0], 4, 83);
+                rcp_decode_bit1(&coder, 13, p);
+
+                int bitRankSize = 1;
+                while (bitRankSize < 7)
+                {
+                    p = predictor[bitRankSize];
+                    if (rcp_peak_bit(&coder, 13, p))
+                    {
+                        PC_UPD(predictor[bitRankSize], 4, 122);
+                        bitRankSize++;
+                        rcp_decode_bit1(&coder, 13, p);
+                    }
+                    else
+                    {
+                        PC_UPD(predictor[bitRankSize], 4, 8114);
+                        rcp_decode_bit0(&coder, 13, p);
+                        break;
+                    }
+                }
+
+                predictor = &model->Rank.Mantissa[currentChar][MANTISSA_ROW_START(bitRankSize)];
+
+                unsigned int rank = 1; int probability = predictor[1];
+                while (--bitRankSize > 0)
+                {
+                    int probability0 = predictor[2 * rank + 0], probability1 = predictor[2 * rank + 1];
+                    uint32_t m = rcp_decode_bit_mask(&coder, 13, probability);
+                    predictor[rank] = (short)(probability - ((probability - (7999 + ((235 - 7999) & (int)m))) >> 7));
+                    probability = probability0 + ((probability1 - probability0) & (int)m); rank += rank - m;
+                }
+                {
+                    uint32_t m = rcp_decode_bit_mask(&coder, 13, probability);
+                    predictor[rank] = (short)(probability - ((probability - (7999 + ((235 - 7999) & (int)m))) >> 7));
+                    rank += rank - m;
+                }
+
+                if (rank > 255) return QLFC_DATA_CORRUPT;
+                qlfc_mtf_update(MTFTable, (int)rank, currentChar);
+            }
+            else
+            {
+                MTFTable[0] = MTFTable[1]; MTFTable[1] = (unsigned char)currentChar; PC_UPD(predictor[0], 4, 8016); rcp_decode_bit0(&coder, 13, p);
+            }
+        }
+
+        {
+            short * RESTRICT predictor = &model->Run.Exponent[currentChar][0];
+
+            int p = predictor[0];
+            if (rcp_peak_bit(&coder, 11, p))
+            {
+                PC_UPD(predictor[0], 5, 42);
+                rcp_decode_bit1(&coder, 11, p);
+
+                int bitRunSize = 1;
+                while (1)
+                {
+                    p = predictor[bitRunSize];
+                    if (rcp_peak_bit(&coder, 11, p))
+                    {
+                        PC_UPD(predictor[bitRunSize], 4, 142);
+                        bitRunSize++;
+                        if (bitRunSize > 30) return QLFC_DATA_CORRUPT;
+                        rcp_decode_bit1(&coder, 11, p);
+                    }
+                    else
+                    {
+                        PC_UPD(predictor[bitRunSize], 4, 1962);
+                        rcp_decode_bit0(&coder, 11, p);
+                        break;
+                    }
+                }
+
+                predictor = &model->Run.Mantissa[currentChar][bitRunSize][0];
+
+                unsigned int runSize = 1;
+                if (bitRunSize <= 5)
+                {
+                    int probability = predictor[1];
+                    while (--bitRunSize > 0)
+                    {
+                        int probability0 = predictor[2 * runSize + 0], probability1 = predictor[2 * runSize + 1];
+                        uint32_t m = rcp_decode_bit_mask(&coder, 11, probability);
+                        predictor[runSize] = (short)(probability - ((probability - (1951 + ((147 - 1951) & (int)m))) >> 6));
+                        probability = probability0 + ((probability1 - probability0) & (int)m); runSize += runSize - m;
+                    }
+                    {
+                        uint32_t m = rcp_decode_bit_mask(&coder, 11, probability);
+                        predictor[runSize] = (short)(probability - ((probability - (1951 + ((147 - 1951) & (int)m))) >> 6));
+                        runSize += runSize - m;
+                    }
+                }
+                else
+                {
+                    for (int context = 1; context <= bitRunSize; ++context)
+                    {
+                        int probability = predictor[context]; uint32_t m = rcp_decode_bit_mask(&coder, 11, probability);
+                        predictor[context] = (short)(probability - ((probability - (1987 + ((46 - 1987) & (int)m))) >> 5));
+                        runSize += runSize - m;
+                    }
+                }
+
+                if (runSize > (unsigned int)(n - i)) return QLFC_DATA_CORRUPT;
+                qlfc_put_run(output, i, n, currentChar, (int)runSize); i += (int)runSize;
+            }
+            else
+            {
+                output[i++] = (unsigned char)currentChar; PC_UPD(predictor[0], 5, 2025); rcp_decode_bit0(&coder, 11, p);
+            }
+        }
+    }
+
+    return coder.overrun ? QLFC_DATA_CORRUPT : n;
+}
+
+/*---------------------------------------------------------------------------*/
 /* Entry points for PArc (cdecl, no allocation)                              */
 /*---------------------------------------------------------------------------*/
 
-/* Coder 1 = static, 2 = adaptive. */
+/* Coder 1 = static, 2 = adaptive, 3 = fast. */
 int32_t parc_qlfc_model_size(int32_t coder)
 {
+    if (coder == 3) return (int32_t)sizeof(QlfcStatisticalModel3);
     return coder == 2 ? (int32_t)sizeof(QlfcStatisticalModel2) : (int32_t)sizeof(QlfcStatisticalModel1);
 }
 
@@ -1929,6 +2363,7 @@ int32_t parc_qlfc_encode(const uint8_t * input, uint8_t * output, uint8_t * buff
 {
     if (n < 1 || outputSize < 64) return QLFC_NOT_COMPRESSIBLE;
     if (coder == 2) return qlfc_adaptive_encode(input, output, buffer, n, outputSize, (QlfcStatisticalModel2 *)model);
+    if (coder == 3) return qlfc_fast_encode(input, output, buffer, n, outputSize, (QlfcStatisticalModel3 *)model);
     return qlfc_static_encode(input, output, buffer, n, outputSize, (QlfcStatisticalModel1 *)model);
 }
 
@@ -1937,5 +2372,6 @@ int32_t parc_qlfc_decode(const uint8_t * input, int32_t inputSize, uint8_t * out
 {
     if (n < 1 || inputSize < 0) return QLFC_DATA_CORRUPT;
     if (coder == 2) return qlfc_adaptive_decode(input, input + inputSize, output, n, (QlfcStatisticalModel2 *)model);
+    if (coder == 3) return qlfc_fast_decode(input, input + inputSize, output, n, (QlfcStatisticalModel3 *)model);
     return qlfc_static_decode(input, input + inputSize, output, n, (QlfcStatisticalModel1 *)model);
 }
