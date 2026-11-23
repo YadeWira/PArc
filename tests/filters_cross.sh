@@ -1,5 +1,5 @@
 #!/bin/bash
-# tests/filters_cross.sh — delta and lzp give the same bytes on every platform: test_filters
+# tests/filters_cross.sh — delta, lzp and dispack give the same bytes on every platform: test_filters
 # built for linux32 (native), linuxarm64 (qemu-aarch64 with QEMU_LD_PREFIX) and win64/win32 (Wine)
 # encodes like the linux64 one and reads its streams.
 # Uso: tests/filters_cross.sh   (FPC_CROSS as in build.sh; WINEPREFIX: if not given, a private copy
@@ -51,7 +51,9 @@ cat "$ROOT"/src/*.pas > text
 head -c 300000 /dev/urandom > rnd
 cat syn/tables text syn/audio16le > tab
 { head -c 50000 rnd; cat text; head -c 30000 rnd; cat text; } > mix
-CASES="delta:tab delta:mix delta:x:tab lzp:64m:32:h20:92%:text lzp:80m:105:d1m:s32:h22:92%:mix"
+cp "$ROOT/build/linux64/parc" exe 2>/dev/null || cp "$B/linux64/test_filters" exe
+{ head -c 4096 exe; head -c 200000 rnd; tail -c +4097 exe; } > exemix
+CASES="delta:tab delta:mix delta:x:tab lzp:64m:32:h20:92%:text lzp:80m:105:d1m:s32:h22:92%:mix dispack:exe dispack:b64kb:exemix"
 for c in $CASES; do
   f=${c##*:}; m=${c%:*}
   R=ref_${f}_${m//[:%]/_}

@@ -124,10 +124,6 @@ type
   Default 8 MB. }
 function DispackBlockSize(const Params: TStringArray): Integer;
 
-{ The encoder's choice of code regions in Data[0..Len) (Base = stream position of Data[0]),
-  exposed for tests: headers and the heuristic. }
-function XfFindRegions(Data: PByte; Len: SizeInt): TXfRegionArray;
-
 { Whole-buffer helpers (tests): encode Src into a dispack stream and back. }
 function XfEncodeBuf(Src: PByte; Len: SizeInt; BlockSize: SizeInt): TBytes;
 
@@ -519,22 +515,6 @@ begin
   Flush(w);
 end;
 
-function XfFindRegions(Data: PByte; Len: SizeInt): TXfRegionArray;
-var
-  NRegs, i: Integer;
-  Span: Int64;
-begin
-  Result := nil;
-  NRegs := 0;
-  for i := 0 to Len - 4 do
-    if ((Data[i] = Ord('M')) and (Data[i + 1] = Ord('Z')) and
-        ParsePE(Data + i, Len - i, i, Result, NRegs, Span)) or
-       ((Data[i] = $7F) and (Data[i + 1] = Ord('E')) and (Data[i + 2] = Ord('L')) and (Data[i + 3] = Ord('F')) and
-        ParseELF(Data + i, Len - i, i, Result, NRegs, Span)) then ;
-  if NRegs = 0 then HeuristicRegions(Data, Len, 0, Result, NRegs);
-  SetLength(Result, NRegs);
-end;
-
 { ---------------------------------------------------------------- encoder }
 
 procedure PutVInt(var B: TBytes; var N: SizeInt; V: QWord);
@@ -686,6 +666,7 @@ begin
       R.Start := FBase;
     end;
     if R.Start + R.Len > BE then R.Len := BE - R.Start;
+    if R.Len < 16 then Continue;              // the decoder allows at most one region per 16 bytes
     R.Start := R.Start - FBase;
     j := NR;
     while (j > 0) and (Rs[j - 1].Start > R.Start) do
