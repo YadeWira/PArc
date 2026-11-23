@@ -6,8 +6,8 @@
     LzmaEncodeMem y parámetros inválidos.
   - Match finder multihilo (bt4): con 2 y 3 hilos (NumThreads y la concesión LzmaEncThreadGrant)
     la salida tiene que ser idéntica a la de un hilo, también normalizando las posiciones.
-    ht4 (:normal) multihilo: idéntica a la lista del multihilo con un hilo (LzmaHtListOneThread),
-    también normalizando las filas (LzmaHtPosBits).
+    ht4 (:normal, buscador por filas propio) multihilo: también idéntica a un hilo, también
+    normalizando las filas.
   - Con -dump DIR escribe DIR/NNNN.lz y DIR/manifest.txt ("NNNN.lz <orig> dict lc lp pb") para
     validar los streams con liblzma (Python lzma, FORMAT_RAW + FILTER_LZMA1).
   Sale con 0 si todo coincide. }
@@ -238,8 +238,7 @@ end;
 
 { Multihilo: misma salida que con un hilo, con NumThreads = 2/3 y con la concesión del hilo
   (NumThreads = 0); los hilos tienen que arrancar de verdad (LzmaMtStarts). }
-procedure CheckMt(const Name: string; const Data: TBytes; const Method: string; NormLimit: LongWord;
-  HtPosBits: Integer = 0);
+procedure CheckMt(const Name: string; const Data: TBytes; const Method: string; NormLimit: LongWord);
 var
   P: TLzmaEncParams;
   ref, comp, back: TBytes;
@@ -248,14 +247,7 @@ var
 begin
   P := ParseLzmaEncParams(SplitMethod(Method));
   P.NumThreads := 1;
-  LzmaHtPosBits := HtPosBits;
-  // ht4: la referencia de un hilo es la lista del multihilo (la de FreeArc -mt1 es otra)
-  LzmaHtListOneThread := True;
-  try
-    ref := EncodeStage(Data, P);
-  finally
-    LzmaHtListOneThread := False;
-  end;
+  ref := EncodeStage(Data, P);
   LzmaMtNormLimit := NormLimit;
   try
     for k := 0 to 2 do
@@ -294,7 +286,6 @@ begin
     end;
   finally
     LzmaMtNormLimit := $FFFFFFFF;
-    LzmaHtPosBits := 0;
   end;
 end;
 
@@ -352,7 +343,7 @@ begin
 end;
 
 const
-  AllMethods: array[0..18] of string = (
+  AllMethods: array[0..20] of string = (
     'lzma:64kb:normal:bt4',
     'lzma:64kb:fast:hc4',
     'lzma:64kb:bt2:a1:fb16',
@@ -368,11 +359,13 @@ const
     'lzma:64mb:normal:bt4',
     'lzma:64mb:max',
     'lzma:64mb:fast',
-    // ht4 (tabla hash de FreeArc): filas de 1 entrada, mc grande (tope de fila) y a1
+    // ht4 (filas propias): 1 candidato, mc grande (tope de la fila), a1 y h (memoria)
     'lzma:64kb:fast:ht4:mc1',
     'lzma:64kb:ht4:mc100000:fb273',
     'lzma:1mb:normal:ht4:mc64:lc0:lp4:pb4',
-    'lzma:4mb:a1:ht4:fb5:mc3'
+    'lzma:4mb:a1:ht4:fb5:mc3',
+    'lzma:4mb:normal:ht4:mc12:h64kb',
+    'lzma:4mb:fast:ht4:mc9:h1mb'
   );
   QuickMethods: array[0..5] of string = (
     'lzma:64kb:normal:bt4', 'lzma:64kb:fast:hc4', 'lzma:1mb:max', 'lzma:1mb:bt3:lc0:lp2:pb0', 'lzma:64mb:fastest',
@@ -433,6 +426,14 @@ begin
   ExpectError('lzma:fb-3');
   ExpectError('lzma:lc');
   ExpectError('lzip');
+  ExpectError('lzma:hxyz');
+  ExpectError('lzma:mc');
+  ExpectError('lzma:a');
+  ExpectError('lzma:12q');
+  ExpectParse('lzma:96M:FAST:mc6:LC4', 96 shl 20, mfHT4, 32, 6, 0);
+  ExpectParse('lzma:32:fast', 64 shl 20, mfHT4, 32, 0, 0);
+  ExpectParse('lzma:fast:16', 64 shl 20, mfHT4, 16, 0, 0);
+  ExpectParse('lzma: 96m:normal:16:mc8:lc4', 96 shl 20, mfHT4, 16, 8, 1);
 
   WriteLn('== datos generados');
   SetLength(d, 0);
@@ -484,7 +485,8 @@ begin
   CheckMt('repite a 1MB-1', d, 'lzma:1mb:normal', $FFFFFFFF);
   CheckMt('repite a 1MB-1', d, 'lzma:2mb:normal:mc4', $FFFFFFFF);
   d := GenFarRepeat(12 shl 20, 100003);
-  CheckMt('repite 12MB norm', d, 'lzma:256kb:normal', $FFFFFFFF, 23);
+  CheckMt('repite 12MB norm', d, 'lzma:256kb:normal', (1 shl 18) + (1 shl 19) + 7);
+  CheckMt('repite 12MB norm', d, 'lzma:256kb:normal:mc12', (1 shl 18) + (1 shl 19) + 7);
   SetLength(d, 5 shl 20); FillChar(d[0], Length(d), 0);
   CheckMt('ceros 5MB', d, 'lzma:4mb:normal', $FFFFFFFF);
   SetLength(d, 100); FillChar(d[0], Length(d), 7);

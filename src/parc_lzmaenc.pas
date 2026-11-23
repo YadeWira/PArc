@@ -93,8 +93,8 @@ type
   end;
 
 function DefaultLzmaEncParams: TLzmaEncParams;
-{ Como parse_LZMA (C_LZMA.cpp): Params[0] = 'lzma'. Lanza ELzmaEncParams si un parámetro no
-  opcional es inválido. }
+{ Params[0] = 'lzma' y los parámetros del método (ver la implementación). Lanza
+  ELzmaEncParams si alguno es inválido. }
 function ParseLzmaEncParams(const Params: TStringArray): TLzmaEncParams;
 { Lanza ELzmaEncParams si P no se puede usar para comprimir. }
 procedure ValidateLzmaEncParams(const P: TLzmaEncParams);
@@ -4511,7 +4511,7 @@ begin
 end;
 
 { ====================================================================== }
-{ Parámetros (parse_LZMA de C_LZMA.cpp)                                    }
+{ Hilos, memoria y parámetros                                              }
 { ====================================================================== }
 
 function LzmaEncMaxThreads(const P: TLzmaEncParams): Integer;
@@ -4653,197 +4653,180 @@ end;
 
 function DefaultLzmaEncParams: TLzmaEncParams;
 begin
-  // LZMA_METHOD::LZMA_METHOD
-  Result.DictSize := 64 shl 20;
-  Result.HashSize := 0;
-  Result.Algorithm := 1;
-  Result.NumFastBytes := 32;
-  Result.MatchFinder := mfHT4;
-  Result.MatchFinderCycles := 0;
-  Result.pb := 2;
+  FillChar(Result, SizeOf(Result), 0);
+  Result.DictSize := QWord(64) shl 20;
   Result.lc := 3;
   Result.lp := 0;
+  Result.pb := 2;
+  Result.Algorithm := 1;
+  Result.NumFastBytes := 32;
+  Result.MatchFinderCycles := 0;
+  Result.MatchFinder := mfHT4;
   Result.NumThreads := 0;
 end;
 
-{ parseInt de Common.cpp: '=' opcional, solo dígitos }
-function FaParseInt(const S: string; out V: Integer): Boolean;
+{ Entero decimal sin signo (al menos un dígito, nada más). }
+function LzNat(const S: string; out V: Integer): Boolean;
 var
   i: Integer;
-  n: QWord;
+  n: Int64;
 begin
   Result := False;
-  V := 0;
-  i := 1;
-  if (i <= Length(S)) and (S[i] = '=') then Inc(i);
-  if i > Length(S) then Exit;
+  if S = '' then Exit;
   n := 0;
-  while (i <= Length(S)) and (S[i] in ['0'..'9']) do
+  for i := 1 to Length(S) do
   begin
-    n := n * 10 + QWord(Ord(S[i]) - Ord('0'));
-    if n > QWord(High(Integer)) then Exit;
-    Inc(i);
+    if not (S[i] in ['0'..'9']) then Exit;
+    n := n * 10 + (Ord(S[i]) - Ord('0'));
+    if n > High(Integer) then Exit;
   end;
-  if i <= Length(S) then Exit;
   V := Integer(n);
   Result := True;
 end;
 
-{ parseMem64 de Common.cpp: sufijo b/k/m/g; sin sufijo (o '^') = potencia de 2 }
-function FaParseMem(const S: string; out V: QWord): Boolean;
+{ Tamaño: dígitos y un sufijo b, k/kb, m/mb, g/gb; sin sufijo, 2^N (como el resto de los
+  métodos: "24" = 16 MB). }
+function LzMem(const S: string; out V: QWord): Boolean;
 var
   i: Integer;
   n: QWord;
-  c: Char;
+  u: string;
 begin
   Result := False;
-  V := 0;
   i := 1;
-  if (i <= Length(S)) and (S[i] = '=') then Inc(i);
-  if (i > Length(S)) or not (S[i] in ['0'..'9']) then Exit;
   n := 0;
   while (i <= Length(S)) and (S[i] in ['0'..'9']) do
   begin
+    if n > (High(QWord) div 10) then Exit;
     n := n * 10 + QWord(Ord(S[i]) - Ord('0'));
-    if n > (QWord(1) shl 40) then Exit;
     Inc(i);
   end;
-  if i <= Length(S) then c := S[i] else c := '^';
-  case c of
-    'b': V := n;
-    'k': V := n shl 10;
-    'm': V := n shl 20;
-    'g': V := n shl 30;
-    '^': begin if n > 62 then Exit; V := QWord(1) shl n; end;
-  else
-    Exit;
-  end;
+  if i = 1 then Exit;
+  u := Copy(S, i, MaxInt);
+  if u = '' then
+  begin
+    if n > 63 then Exit;
+    V := QWord(1) shl n;
+  end
+  else if u = 'b' then V := n
+  else if (u = 'k') or (u = 'kb') then V := n shl 10
+  else if (u = 'm') or (u = 'mb') then V := n shl 20
+  else if (u = 'g') or (u = 'gb') then V := n shl 30
+  else Exit;
   Result := True;
 end;
 
-{ FindMatchFinder (strcasecmp) }
-function FindMatchFinder(const S: string; out mf: TLzmaMatchFinder): Boolean;
-var
-  u: string;
+function LzFinder(const S: string; out mf: TLzmaMatchFinder): Boolean;
 begin
-  u := LowerCase(S);
   Result := True;
-  if u = 'bt2' then mf := mfBT2
-  else if u = 'bt3' then mf := mfBT3
-  else if u = 'bt4' then mf := mfBT4
-  else if u = 'hc4' then mf := mfHC4
-  else if u = 'ht4' then mf := mfHT4
+  if S = 'bt2' then mf := mfBT2
+  else if S = 'bt3' then mf := mfBT3
+  else if S = 'bt4' then mf := mfBT4
+  else if S = 'hc4' then mf := mfHC4
+  else if S = 'ht4' then mf := mfHT4
   else Result := False;
 end;
 
+{ Cadena del método: lzma[:parámetro...], cada parámetro (sin distinguir mayúsculas):
+    <n>            fast bytes (solo dígitos)          <tamaño>  diccionario (96m, 1gb...)
+    d<tamaño>      diccionario                        h<tamaño> memoria de las filas de ht4
+    fb<n> mc<n> lc<n> lp<n> pb<n> a<n>                mf=<buscador> o bt2/bt3/bt4/hc4/ht4
+    fastest/fast/normal/max/ultra: algoritmo, fast bytes y ciclos (y el buscador si todavía
+    no se dio uno); *... se ignora. Se aplican en orden. }
 function ParseLzmaEncParams(const Params: TStringArray): TLzmaEncParams;
 var
-  k, n: Integer;
-  p: string;
-  optional, ok, mfSet: Boolean;
-  m: QWord;
-  f: TLzmaMatchFinder;
   R: TLzmaEncParams;
+  mfGiven: Boolean;
 
-  procedure Profile(algo: Integer; defMf: TLzmaMatchFinder; fb, mc: Integer);
+  procedure Bad(const S: string);
+  begin
+    raise ELzmaEncParams.CreateFmt('lzma: invalid parameter "%s"', [S]);
+  end;
+
+  procedure Level(algo, fb, mc: Integer; mf: TLzmaMatchFinder);
   begin
     R.Algorithm := algo;
-    if not mfSet then begin R.MatchFinder := defMf; mfSet := True; end;
     R.NumFastBytes := fb;
     R.MatchFinderCycles := mc;
+    if not mfGiven then R.MatchFinder := mf;
+    mfGiven := True;
   end;
 
-  function Unnamed: Boolean;
+  function Num(const S, Whole: string): Integer;
   begin
-    // nombre de match finder, entero = numFastBytes, memoria = diccionario
-    Result := True;
-    if FindMatchFinder(p, f) then begin R.MatchFinder := f; mfSet := True; end
-    else if FaParseInt(p, n) then R.NumFastBytes := n
-    else if FaParseMem(p, m) then R.DictSize := m
-    else Result := False;
+    if not LzNat(S, Result) then Bad(Whole);
   end;
 
+var
+  i: Integer;
+  p, orig: string;
+  q: QWord;
+  mf: TLzmaMatchFinder;
 begin
-  if (Length(Params) = 0) or (Params[0] <> 'lzma') then
-    raise ELzmaEncParams.Create('not an lzma method');
+  if (Length(Params) = 0) or (LowerCase(Trim(Params[0])) <> 'lzma') then
+    raise ELzmaEncParams.Create('lzma: not an lzma method');
   R := DefaultLzmaEncParams;
-  mfSet := False;
-  for k := 1 to High(Params) do
+  mfGiven := False;
+  for i := 1 to High(Params) do
   begin
-    p := Params[k];
-    optional := (p <> '') and (p[1] = '*');
-    if optional then Delete(p, 1, 1);
-    ok := True;
-    if p = '' then ok := False
+    orig := Trim(Params[i]);
+    p := LowerCase(orig);
+    if p = '' then Continue;
+    if p[1] = '*' then Continue;
+    if p[1] in ['0'..'9'] then
+    begin
+      if LzNat(p, R.NumFastBytes) then Continue;
+      if not LzMem(p, q) then Bad(orig);
+      R.DictSize := q;
+    end
+    else if LzFinder(p, mf) then begin R.MatchFinder := mf; mfGiven := True; end
+    else if Copy(p, 1, 3) = 'mf=' then
+    begin
+      if not LzFinder(Copy(p, 4, MaxInt), mf) then Bad(orig);
+      R.MatchFinder := mf;
+      mfGiven := True;
+    end
+    else if p = 'fastest' then Level(0, 5, 1, mfHT4)
+    else if p = 'fast' then Level(0, 32, 0, mfHT4)
+    else if p = 'normal' then Level(1, 32, 0, mfHT4)
+    else if p = 'max' then Level(1, 128, 0, mfBT4)
+    else if p = 'ultra' then Level(1, 128, 128, mfBT4)
+    else if Copy(p, 1, 2) = 'fb' then R.NumFastBytes := Num(Copy(p, 3, MaxInt), orig)
+    else if Copy(p, 1, 2) = 'mc' then R.MatchFinderCycles := Num(Copy(p, 3, MaxInt), orig)
+    else if Copy(p, 1, 2) = 'lc' then R.lc := Num(Copy(p, 3, MaxInt), orig)
+    else if Copy(p, 1, 2) = 'lp' then R.lp := Num(Copy(p, 3, MaxInt), orig)
+    else if Copy(p, 1, 2) = 'pb' then R.pb := Num(Copy(p, 3, MaxInt), orig)
+    else if p[1] = 'a' then R.Algorithm := Num(Copy(p, 2, MaxInt), orig)
     else if p[1] = 'd' then
     begin
-      ok := FaParseMem(Copy(p, 2, MaxInt), m);
-      if ok then R.DictSize := m;
+      if not LzMem(Copy(p, 2, MaxInt), q) then Bad(orig);
+      R.DictSize := q;
     end
     else if p[1] = 'h' then
     begin
-      if FaParseMem(Copy(p, 2, MaxInt), m) then R.HashSize := m
-      else ok := Unnamed;          // "hc4", "ht4"
+      if not LzMem(Copy(p, 2, MaxInt), q) then Bad(orig);
+      R.HashSize := q;
     end
-    else if p[1] = 'a' then
-    begin
-      ok := FaParseInt(Copy(p, 2, MaxInt), n);
-      if ok then R.Algorithm := n;
-    end
-    else if Copy(p, 1, 2) = 'fb' then
-    begin
-      ok := FaParseInt(Copy(p, 3, MaxInt), n);
-      if ok then R.NumFastBytes := n;
-    end
-    else if Copy(p, 1, 2) = 'mc' then
-    begin
-      ok := FaParseInt(Copy(p, 3, MaxInt), n);
-      if ok then R.MatchFinderCycles := n;
-    end
-    else if Copy(p, 1, 2) = 'lc' then
-    begin
-      ok := FaParseInt(Copy(p, 3, MaxInt), n);
-      if ok then R.lc := n;
-    end
-    else if Copy(p, 1, 2) = 'lp' then
-    begin
-      ok := FaParseInt(Copy(p, 3, MaxInt), n);
-      if ok then R.lp := n;
-    end
-    else if Copy(p, 1, 2) = 'pb' then
-    begin
-      ok := FaParseInt(Copy(p, 3, MaxInt), n);
-      if ok then R.pb := n;
-    end
-    else if Copy(p, 1, 2) = 'mf' then
-    begin
-      if (Length(p) >= 3) and (p[3] = '=') then ok := FindMatchFinder(Copy(p, 4, MaxInt), f)
-      else ok := FindMatchFinder(Copy(p, 3, MaxInt), f);
-      if ok then begin R.MatchFinder := f; mfSet := True; end;
-    end
-    else if p = 'fastest' then Profile(0, mfHT4, 5, 1)
-    else if p = 'fast' then Profile(0, mfHT4, 32, 0)
-    else if p = 'normal' then Profile(1, mfHT4, 32, 0)
-    else if p = 'max' then Profile(1, mfBT4, 128, 0)
-    else if p = 'ultra' then Profile(1, mfBT4, 128, 128)
-    else ok := Unnamed;
-    if not ok and not optional then
-      raise ELzmaEncParams.CreateFmt('invalid lzma parameter: "%s"', [Params[k]]);
+    else
+      Bad(orig);
   end;
-  if not mfSet then R.MatchFinder := mfHT4;   // match finder por defecto
+  ValidateLzmaEncParams(R);
   Result := R;
 end;
 
 procedure ValidateLzmaEncParams(const P: TLzmaEncParams);
 begin
-  if (P.lc < 0) or (P.lc > 8) or (P.lp < 0) or (P.lp > 4) or (P.pb < 0) or (P.pb > 4) then
-    raise ELzmaEncParams.Create('lzma: lc/lp/pb fuera de rango (lc 0..8, lp 0..4, pb 0..4)');
-  if P.DictSize = 0 then
-    raise ELzmaEncParams.Create('lzma: diccionario nulo');
-  if (P.Algorithm < 0) or (P.MatchFinderCycles < 0) or (P.NumThreads < 0) then
-    raise ELzmaEncParams.Create('lzma: negative parameters');
+  if (P.DictSize = 0) or (P.DictSize > (QWord(1) shl 40)) then
+    raise ELzmaEncParams.Create('lzma: invalid dictionary size');
+  if (P.lc < 0) or (P.lc > 8) then raise ELzmaEncParams.Create('lzma: lc must be 0..8');
+  if (P.lp < 0) or (P.lp > 4) then raise ELzmaEncParams.Create('lzma: lp must be 0..4');
+  if (P.pb < 0) or (P.pb > 4) then raise ELzmaEncParams.Create('lzma: pb must be 0..4');
+  if P.Algorithm < 0 then raise ELzmaEncParams.Create('lzma: invalid algorithm');
+  if P.NumFastBytes < 0 then raise ELzmaEncParams.Create('lzma: invalid fast bytes');
+  if P.MatchFinderCycles < 0 then raise ELzmaEncParams.Create('lzma: invalid cycles');
+  if P.NumThreads < 0 then raise ELzmaEncParams.Create('lzma: invalid thread count');
   if (Ord(P.MatchFinder) < Ord(Low(TLzmaMatchFinder))) or (Ord(P.MatchFinder) > Ord(High(TLzmaMatchFinder))) then
-    raise ELzmaEncParams.Create('lzma: match finder desconocido');
+    raise ELzmaEncParams.Create('lzma: unknown match finder');
 end;
 
 { ====================================================================== }
