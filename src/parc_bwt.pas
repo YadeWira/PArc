@@ -398,8 +398,9 @@ end;
 
 const
   { A block whose BWT output has fewer runs than 1/FEW_RUNS of its bytes is coded with the
-    adaptive coder at every level }
+    adaptive coder instead of the fast one; instead of the static one, below STATIC_RUNS per mille }
   FEW_RUNS = 8;
+  STATIC_RUNS = 300;
   { LZP only when at least this share (per mille) of the block looks like long repeats (of 128
     bytes or more) }
   LZP_MIN_SHARE = 30;
@@ -565,8 +566,11 @@ begin
     // The coders spend their time per run of the BWT output: when the runs are few (very
     // redundant data) the adaptive coder costs little more than the others and is much better
     // there (the fixed weights of the static and fast coders adapt badly to long runs)
+    // (not with e0 or e2: the coder was given)
     Coder := P.Coder;
-    if (Coder <> BWT_CODER_ADAPTIVE) and (P.CoderSet < 0) and (CountRuns(T, M) * FEW_RUNS < M) then
+    if (Coder = BWT_CODER_FAST) and (P.CoderSet < 0) and (CountRuns(T, M) * FEW_RUNS < M) then
+      Coder := BWT_CODER_ADAPTIVE
+    else if (Coder = BWT_CODER_STATIC) and (Int64(CountRuns(T, M)) * 1000 < Int64(M) * STATIC_RUNS) then
       Coder := BWT_CODER_ADAPTIVE;
     Model := GetMem(parc_qlfc_model_size(Coder));
     C := parc_qlfc_encode(T, OutP, Scratch, M, OutCap, Coder, Model);
@@ -737,7 +741,9 @@ begin
   Threads := PoolWorkers(BWT_MAXTHREADS);
   if Threads > 0 then SetLength(FQueue, Threads + 1) else SetLength(FQueue, 1);
   FPool := TJobPool.Create(Threads, Length(FQueue));
-  FMemCap := Int64(Length(FQueue)) * FBufSize;
+  // half a queue more of input than the first queue holds: the jobs behind a slow one keep the
+  // threads busy (ex2t on Silesia at T4: 1.76 s -> 1.34 s, +12 MB)
+  FMemCap := Int64(Length(FQueue)) * FBufSize * 3 div 2;
 end;
 
 destructor TBwtEncStage.Destroy;
@@ -791,8 +797,8 @@ begin
     Emit(@H[0], hb);
   end;
   // The queue grows (one more job and thread when every thread is busy and a token is free)
-  // only while the input held by the jobs in flight stays within what the first queue would hold
-  // with full blocks: small pieces of mixed data can use the threads that other solid blocks
+  // only while the input held by the jobs in flight stays within 3/2 of what the first queue
+  // would hold with full blocks: small pieces of mixed data can use the threads that other solid blocks
   // free, big blocks do not add up to more memory than GRZip's
   if FCount = Length(FQueue) then
   begin
