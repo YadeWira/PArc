@@ -499,8 +499,6 @@ end;
 
 const
   kRfHashMul = QWord($9E3779B97F4A7C15);
-var
-  TunPF: LongWord = 2; TunSKA: LongWord = $FFFFFFF; TunSKB: LongWord = 0;
 const
   kRfMaxCap = 14;               // fila de 64 bytes
 
@@ -515,7 +513,6 @@ end;
 { Bytes por fila para mc: 32 (7 entradas) o 64 (14). }
 function RfRowBytesFor(mc: LongWord): LongWord;
 begin
-  if GetEnvironmentVariable('RFR') <> '' then Exit(StrToInt(GetEnvironmentVariable('RFR')));
   if mc <= 7 then Result := 32 else Result := 64;
 end;
 
@@ -1420,115 +1417,21 @@ begin
   Result := p^.rows + PtrUInt((QWord(h) * p^.numRows) shr 32) * p^.rowBytes;
 end;
 
-{ Las etiquetas de la fila (4 u 8 bytes; el último nibble es la cabeza). }
-function RfTagWord(row: PByte; tagArea: LongWord): QWord; inline;
-begin
-  if tagArea = 8 then Result := PQWord(row)^ else Result := PLongWord(row)^;
-end;
-
-function RfHead(row: PByte; tagArea: LongWord): LongWord; inline;
-begin
-  Result := row[tagArea - 1] shr 4;
-end;
-
-{ Escribe la entrada i (etiqueta t, posición pos) y la deja como cabeza. }
-procedure RfPut(row: PByte; tagArea, i, t, pos: LongWord); inline;
-var
-  b: PByte;
-begin
-  PLongWord(row + tagArea)[i] := pos;
-  b := row + (i shr 1);
-  if (i and 1) = 0 then b^ := (b^ and $F0) or (t and $F)
-  else b^ := (b^ and $0F) or ((t and $F) shl 4);
-  b := row + tagArea - 1;
-  b^ := (b^ and $0F) or (i shl 4);
-end;
-
-{ Busca en la fila del hash h los matches de cur (pos) más largos que maxLen, en orden de
-  largo creciente, en d (pares largo, distancia - 1), e inserta pos en la fila. mmm: la
-  distancia máxima + 1 (min(pos, ventana)). Devuelve el final de d. }
-function RfFindInsert(p: PMatchFinder; cur: PByte; pos, h, mmm, lenLimit, maxLen: LongWord;
-  d: PLongWord): PLongWord;
 const
-  k7 = QWord($7777777777777777);
-  k8 = QWord($8888888888888888);
-var
-  row, c: PByte;
-  e: PLongWord;
-  x, m, full: QWord;
-  cap, ta, head, i, n, delta, len: LongWord;
-begin
-  row := RfRow(p, h);
-  cap := p^.rowCap;
-  ta := p^.rowTagArea;
-  e := PLongWord(row + ta);
-  x := RfTagWord(row, ta);
-  head := LongWord(x shr (8 * ta - 4)) and $F;
-  // nibbles iguales a la etiqueta: bit 4i en m (exacto, sin falsos positivos)
-  x := x xor (QWord(h and $F) * QWord($1111111111111111));
-  m := ((not (((x and k7) + k7) or x)) and k8) shr 3;
-  full := (QWord(1) shl (4 * cap)) - 1;
-  m := m and full;
-  if m <> 0 then
-  begin
-    // la entrada más nueva (head) al nibble 0, después head + 1, ...
-    if head <> 0 then m := ((m shr (4 * head)) or (m shl (4 * (cap - head)))) and full;
-    n := p^.cutValue;
-    repeat
-      i := head + (LongWord(BsfQWord(m)) shr 2);
-      if i >= cap then Dec(i, cap);
-      delta := LongWord(pos - e[i]);
-      if delta >= mmm then Break;
-      c := cur - delta;
-      // etiqueta igual pero otros 4 bytes (1 de 16): no cuenta como candidato
-      if PLongWord(c)^ = PLongWord(cur)^ then
-      begin
-        if c[maxLen] = cur[maxLen] then
-        begin
-          len := MatchLen(c, cur, 4, lenLimit);
-          if len > maxLen then
-          begin
-            maxLen := len;
-            d[0] := len;
-            d[1] := delta - 1;
-            Inc(d, 2);
-            if len >= lenLimit then Break;
-          end;
-        end;
-        Dec(n);
-      end;
-      m := m and (m - 1);
-    until (m = 0) or (n = 0);
-  end;
-  if head = 0 then head := cap - 1 else Dec(head);
-  RfPut(row, ta, head, h, pos);
-  Result := d;
-end;
+  kRf7 = QWord($7777777777777777);
+  kRf8 = QWord($8888888888888888);
+  kRfPf = 2;   // la fila se trae a la caché kRfPf posiciones antes
 
-procedure RfInsert(p: PMatchFinder; pos, h: LongWord); inline;
-var
-  row: PByte;
-  head: LongWord;
-begin
-  row := RfRow(p, h);
-  head := RfHead(row, p^.rowTagArea);
-  if head = 0 then head := p^.rowCap - 1 else Dec(head);
-  RfPut(row, p^.rowTagArea, head, h, pos);
-end;
-
-{ Fila del hash de la posición pos + 2 (cur + 2) a la caché, y su hash guardado para cuando
-  llegue (necesita lenLimit >= 6). }
+{ Fila de la posición pos + kRfPf a la caché, y su hash guardado para cuando llegue (necesita
+  lenLimit >= 4 + kRfPf). }
 procedure RfPrefetch(p: PMatchFinder; cur: PByte; pos: LongWord); inline;
 var
-  row: PByte;
   h: LongWord;
 begin
-  if TunPF = 0 then Exit;
-  h := RfHash(cur + TunPF);
-  p^.rfHashPos[(pos + TunPF) and 7] := LongWord(pos + TunPF);
-  p^.rfHashVal[(pos + TunPF) and 7] := h;
-  row := RfRow(p, h);
-  prefetch(row^);
+  h := RfHash(cur + kRfPf);
+  p^.rfHashPos[(pos + kRfPf) and 7] := LongWord(pos + kRfPf);
+  p^.rfHashVal[(pos + kRfPf) and 7] := h;
+  prefetch(RfRow(p, h)^);
 end;
 
 { RfHash(cur) de la posición pos, el guardado por RfPrefetch si está. }
@@ -1540,125 +1443,23 @@ begin
     Result := RfHash(cur);
 end;
 
-{ ht4: el mismo "mixing" hash2/hash3 de Hc4GetMatches (SDK) y después la fila. }
-function RfGetMatches(p: PMatchFinder; distances: PLongWord): PLongWord;
-var
-  h2, h3, d2, d3, pos, mmm, maxLen, lenLimit, temp: LongWord;
-  cur: PByte;
-  hash: PLongWord;
-begin
-  lenLimit := p^.lenLimit;
-  if lenLimit < 4 then begin MfMovePos(p); Exit(distances); end;
-  cur := p^.buffer;
-  pos := p^.pos;
-  if lenLimit >= 4 + TunPF then RfPrefetch(p, cur, pos);
-  temp := p^.crc[cur[0]] xor cur[1];
-  h2 := temp and (kHash2Size - 1);
-  temp := temp xor (LongWord(cur[2]) shl 8);
-  h3 := temp and (kHash3Size - 1);
-  hash := p^.hash;
-  pos := p^.pos;
-  d2 := LongWord(pos - hash[h2]);
-  d3 := LongWord(pos - hash[kFix3HashSize + h3]);
-  hash[h2] := pos;
-  hash[kFix3HashSize + h3] := pos;
-  mmm := p^.cyclicBufferSize;
-  if pos < mmm then mmm := pos;
-  maxLen := 3;
-  repeat
-    if (d2 < mmm) and ((cur - d2)^ = cur^) then
-    begin
-      distances[0] := 2;
-      distances[1] := d2 - 1;
-      Inc(distances, 2);
-      if (cur - d2)[2] = cur[2] then
-      else if (d3 < mmm) and ((cur - d3)^ = cur^) then
-      begin
-        d2 := d3;
-        distances[1] := d3 - 1;
-        Inc(distances, 2);
-      end
-      else
-        Break;
-    end
-    else if (d3 < mmm) and ((cur - d3)^ = cur^) then
-    begin
-      d2 := d3;
-      distances[1] := d3 - 1;
-      Inc(distances, 2);
-    end
-    else
-      Break;
-    maxLen := UpdateMaxLen(cur, d2, maxLen, lenLimit);
-    distances[-2] := maxLen;
-    if maxLen = lenLimit then
-    begin
-      RfInsert(p, pos, RfCurHash(p, cur, pos));
-      MfMovePos(p);
-      Exit(distances);
-    end;
-    Break;
-  until True;
-  distances := RfFindInsert(p, cur, pos, RfCurHash(p, cur, pos), mmm, lenLimit, maxLen, distances);
-  MfMovePos(p);
-  Result := distances;
-end;
+{$DEFINE RF_CAP:=7}{$DEFINE RF_TA:=4}
+{$DEFINE RF_LOADTAGS:=RfLoadTags32}{$DEFINE RF_PUSH:=RfPush32}{$DEFINE RF_CORE:=RfCore32}
+{$DEFINE RF_GETMATCHES:=RfGetMatches32}{$DEFINE RF_SKIP:=RfSkip32}
+{$I parc_lzmarf.inc}
+{$DEFINE RF_CAP:=14}{$DEFINE RF_TA:=8}
+{$DEFINE RF_LOADTAGS:=RfLoadTags64}{$DEFINE RF_PUSH:=RfPush64}{$DEFINE RF_CORE:=RfCore64}
+{$DEFINE RF_GETMATCHES:=RfGetMatches64}{$DEFINE RF_SKIP:=RfSkip64}
+{$I parc_lzmarf.inc}
 
-procedure RfSkip(p: PMatchFinder; num: LongWord);
-var
-  cur: PByte;
-  hash: PLongWord;
-  pos, num2, rem, h2, h3, temp, k, tot: LongWord;
+{ Para el hilo BT del multihilo (fila de 32 o 64 bytes). }
+function RfFindInsert(p: PMatchFinder; cur: PByte; pos, h, mmm, lenLimit, maxLen: LongWord;
+  d: PLongWord): PLongWord;
 begin
-  k := 0;
-  tot := num;
-  repeat
-    if p^.lenLimit < 4 + TunPF then
-    begin
-      // cola del stream (sin prefetch, que lee hasta cur[5])
-      if p^.lenLimit >= 4 then
-      begin
-        cur := p^.buffer;
-        temp := p^.crc[cur[0]] xor cur[1];
-        p^.hash[temp and (kHash2Size - 1)] := p^.pos;
-        temp := temp xor (LongWord(cur[2]) shl 8);
-        p^.hash[kFix3HashSize + (temp and (kHash3Size - 1))] := p^.pos;
-        if (k < TunSKA) or (tot - k <= TunSKB) then RfInsert(p, p^.pos, RfCurHash(p, cur, p^.pos));
-      end;
-      MfMovePos(p);
-      Dec(num);
-      Inc(k);
-      Continue;
-    end;
-    pos := p^.pos;
-    num2 := num;
-    rem := LongWord(p^.posLimit - pos);
-    if num2 >= rem then num2 := rem;
-    Dec(num, num2);
-    p^.cyclicBufferPos := p^.cyclicBufferPos + num2;
-    cur := p^.buffer;
-    hash := p^.hash;
-    repeat
-      temp := p^.crc[cur[0]] xor cur[1];
-      h2 := temp and (kHash2Size - 1);
-      temp := temp xor (LongWord(cur[2]) shl 8);
-      h3 := temp and (kHash3Size - 1);
-      hash[h2] := pos;
-      hash[kFix3HashSize + h3] := pos;
-      if (k < TunSKA) or (tot - k <= TunSKB) then
-      begin
-        RfPrefetch(p, cur, pos);
-        RfInsert(p, pos, RfCurHash(p, cur, pos));
-      end;
-      Inc(k);
-      Inc(cur);
-      pos := LongWord(pos + 1);
-      Dec(num2);
-    until num2 = 0;
-    p^.buffer := cur;
-    p^.pos := pos;
-    if pos = p^.posLimit then MfCheckLimits(p);
-  until num = 0;
+  if p^.rowTagArea = 8 then
+    Result := RfCore64(p, RfRow(p, h), cur, pos, h, mmm, lenLimit, maxLen, d)
+  else
+    Result := RfCore32(p, RfRow(p, h), cur, pos, h, mmm, lenLimit, maxLen, d);
 end;
 
 { Bt2_MatchFinder_Skip }
@@ -3819,7 +3620,7 @@ procedure LoadTun;
   end;
 begin
   G('TCP', TunCP); G('TT2', TunT2); G('TT3', TunT3); G('TT4', TunT4); G('TT5', TunT5);
-  G('TPF', TunPF); G('TSKA', TunSKA); G('TSKB', TunSKB); G('TR2', TunR2); G('TR3', TunR3); G('TR4', TunR4);
+  G('TR2', TunR2); G('TR3', TunR3); G('TR4', TunR4);
 end;
 
 { ChangePair del SDK: bigDist es mucho más lejana que smallDist (más de 128 veces). }
@@ -4204,8 +4005,17 @@ begin
   end
   else if mf.htMode then
   begin
-    GetMatchesF := @RfGetMatches;
-    SkipF := @RfSkip;
+    // la forma de la fila sale de mc (RfRowBytesFor)
+    if RfRowBytesFor(mc) = 64 then
+    begin
+      GetMatchesF := @RfGetMatches64;
+      SkipF := @RfSkip64;
+    end
+    else
+    begin
+      GetMatchesF := @RfGetMatches32;
+      SkipF := @RfSkip32;
+    end;
   end
   else
   begin
