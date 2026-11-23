@@ -23,15 +23,15 @@
 
   The encoder cuts the input where its statistics change (see "adaptive blocks" below; GRZip
   did it only with `a`): the stream is the same, just with shorter blocks. With `a` the blocks
-  are also at most 3/4 of the block size (half at m4), and at most 1/4 where the data were found
+  are also at most half the block size (3/4 at m1), and at most 1/4 where the data were found
   to be mixed: less memory and faster sorting (GRZip's adaptive blocks were small too).
   Blocks are compressed and decompressed in parallel (a pool of jobs, written and delivered in
   order) within the PARC_THREADS budget (parc_parallel).
 
   Method string: bwt[:<block>][:m1..m4][:l|:l<N>|:<N>][:h<N>][:e0|:e1|:e2][:a], also b<block>;
   GRZip's other switches (s, d, p, t<N>, i<N>) are accepted and ignored. Defaults: 8 MB, m1,
-  LZP with minimum match 32 and 18 hash bits. m1 = adaptive coder, m2 and m3 = static, m4 =
-  fast; e0/e1/e2 choose fast/static/adaptive explicitly. A bare integer is the LZP minimum; a
+  LZP with minimum match 32 and 18 hash bits. m1 = adaptive coder, m2..m4 = static (m4 with
+  the sort transform); e0/e1/e2 choose fast/static/adaptive explicitly. A bare integer is the LZP minimum; a
   bare memory size the block (as with GRZip). `grzip:...` strings are written as `bwt:...` by
   the canonizer.
 
@@ -287,7 +287,6 @@ begin
   else
     case Result.Level of
       1: Result.Coder := BWT_CODER_ADAPTIVE;
-      4: Result.Coder := BWT_CODER_FAST;
     else
       Result.Coder := BWT_CODER_STATIC;
     end;
@@ -702,14 +701,14 @@ var
 begin
   FPar := ParseBwtParams(Params);
   inherited Create(ATarget);
-  // GRZip's adaptive block (a): blocks of at most half the block size at m4 and 3/4 at m1..m3,
+  // GRZip's adaptive block (a): blocks of at most half the block size at m2..m4 and 3/4 at m1,
   // and pieces of at most 1/4 where the data were found to be mixed; this keeps the memory of
   // the threads and the time of the sort down
   FBufSize := FPar.BlockSize;
   FMixedCap := FPar.BlockSize;
   if FPar.Adaptive and (FBufSize >= 4 * SEG_MIN) then
   begin
-    if FPar.Level = 4 then FBufSize := FBufSize div 2 else FBufSize := FBufSize div 4 * 3;
+    if FPar.Level >= 2 then FBufSize := FBufSize div 2 else FBufSize := FBufSize div 4 * 3;
     FMixedCap := FPar.BlockSize div 4;
   end;
   Threads := PoolWorkers(BWT_MAXTHREADS);

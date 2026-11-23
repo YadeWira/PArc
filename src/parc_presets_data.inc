@@ -144,7 +144,7 @@ const
     '',
     'ex1t = ex1b',
     'ex2t = bwt:m4:h20:a',  // PARC: hash 2^20, bloque adaptativo
-    'ex3t = bwt:m2:h20:a',
+    'ex3t = bwt:m2:h20:a:e2',  // PARC: codificador adaptativo con bloques de medio tamaño (más chico y menos memoria que grzip:m2)
     'ex4t = bwt:m1:h20:a',
     'ex5t = dict:p: 64m:80% + lzp: 64m: 65:d1m:s32:h22:90% + xppmd:12:192m',  // PARC: 8:96->12:192
     'ex6t = dict:p: 64m:80% + lzp: 80m:105:d1m:s32:h22:92% + xppmd:12:192m',

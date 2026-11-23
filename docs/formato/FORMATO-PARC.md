@@ -599,8 +599,7 @@ as `bwt:...`.
 Method string: `bwt[:<block>][:m1..m4][:l|:l<N>|:<N>][:h<N>][:e0|:e1|:e2]`, also `b<block>`;
 GRZip's `a`, `s`, `d`, `p`, `t<N>`, `i<N>` are accepted and ignored. Defaults: block 8 MB
 (at most 1 GB), `m1`, LZP minimum 32 (8..65535; `l` alone = no LZP) and 18 hash bits (10..26).
-The coder: `m1` adaptive, `m2`/`m3` static, `m4` fast, or `e0` fast, `e1` static, `e2`
-adaptive. The decoder takes the block size and the LZP hash bits from the method string.
+The coder: `m1` adaptive, `m2`..`m4` static, or `e0` fast, `e1` static, `e2` adaptive. The decoder takes the block size and the LZP hash bits from the method string.
 
 Stream header: `U8 version` (1), `U8 LZP hash bits` (0 = no LZP), and `VInt LZP minimum` when
 the bits are not 0; both must equal the method string's. Then blocks until the end of the
@@ -644,7 +643,7 @@ The exact model (states, rates, thresholds and tables) is the one in `src/bwt/ql
 The encoder's choices (not needed to decode): `m4` uses the sort transform, the other levels
 the BWT; blocks are cut where order-1 statistics change
 (a solid block of many files becomes pieces of similar data, at least 64 KB); with `a` the
-blocks are at most 3/4 of the block size at `m1`..`m3` and half at `m4`, and the pieces of data
+blocks are at most half the block size at `m2`..`m4` and 3/4 at `m1`, and the pieces of data
 found to be mixed at most 1/4; the LZP is skipped on blocks with few long repeats (estimated
 from content-defined samples); a block whose BWT output has fewer runs than 1/8 of its bytes is
 coded with the adaptive coder at any level; a block shorter than 64 bytes, or whose coded form
