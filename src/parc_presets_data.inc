@@ -22,7 +22,7 @@ const
     ';Text files compression with slow decompression',
     '1t  = 1b',
     '2t  = bwt:m4:8m:32:h18:a                                           | ex2t',  // PARC: bloque adaptativo, hash 2^18
-    '3t  = dict:p: 64m:85% + lzp: 64m: 32:h20        :92% + bwt:m3:8m:l:a | ex3t',  // PARC: LZP 32, bloque adaptativo
+    '3t  = dict:p: 64m:85% + bwt:m1:8m:32:h20:a                         | ex3t',  // PARC: bwt con su LZP y el codificador adaptativo (antes lzp:64m + grzip:m3: más chico, más rápido y menos memoria)
     '4t  = dict:p: 64m:80% + lzp: 64m: 65:d1m:s16:h20:90% + ppmd:8:192m   | ex4t',  // PARC: 192 MB
     '5t  = dict:p: 64m:80% + lzp: 80m:105:d1m:s32:h22:92% + ppmd:13:192m  | ex5t',  // PARC: orden 13
     '#t  = dict:p:128m:75%:l8192:m800:s250 + lzp:160m:145:d1m:s32:h23:90% + ppmd:18:512m',  // PARC: más fuerte que FreeArc

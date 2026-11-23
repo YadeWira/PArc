@@ -667,14 +667,14 @@ var
 begin
   FPar := ParseBwtParams(Params);
   inherited Create(ATarget);
-  // GRZip's adaptive block (a): blocks of at most half the block size at m2..m4 and 3/4 at m1,
+  // GRZip's adaptive block (a): blocks of at most half the block size at m4 and 3/4 at m1..m3,
   // and pieces of at most 1/4 where the data were found to be mixed; this keeps the memory of
   // the threads and the time of the sort down
   FBufSize := FPar.BlockSize;
   FMixedCap := FPar.BlockSize;
   if FPar.Adaptive and (FBufSize >= 4 * SEG_MIN) then
   begin
-    if FPar.Level >= 2 then FBufSize := FBufSize div 2 else FBufSize := FBufSize div 4 * 3;
+    if FPar.Level = 4 then FBufSize := FBufSize div 2 else FBufSize := FBufSize div 4 * 3;
     FMixedCap := FPar.BlockSize div 4;
   end;
   Threads := PoolWorkers(BWT_MAXTHREADS);
