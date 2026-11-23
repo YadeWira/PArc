@@ -1,0 +1,27 @@
+The C core of PArc's `bwt` codec (src/parc_bwt.pas). Third-party code, Apache-2.0:
+
+libsais 2.12.2 — Copyright (c) 2021-2026 Ilya Grebnov, Apache-2.0 WITH LLVM-exception
+  Source: https://github.com/IlyaGrebnov/libsais (master, 2026-11-23; VERSION 2.12.2)
+  libsais.c  sha256 812ce5891348817bf0b1c45480fb7efeacdf9c2bc7a0d7c2f37abd240f20728f  (unchanged)
+  libsais.h  sha256 45ca126e92a323e56bd63893a8a3826e93107883c4b9fefc14eef97928a17f01  (unchanged)
+  LICENSE-libsais  its LICENSE
+  Only libsais_bwt and libsais_unbwt are called (single-threaded, no OpenMP).
+
+libbsc 3.4.1 — Copyright (c) 2009-2026 Ilya Grebnov, Apache-2.0
+  Source: https://github.com/IlyaGrebnov/libbsc, tag v3.4.1
+  qlfc.c         translated from libbsc/coder/qlfc/qlfc.cpp, qlfc_model.h/.cpp,
+                 coder/common/rangecoder.h and predictor.h; the changes are listed at its top
+  qlfc_tables.h  libbsc/coder/common/tables.h with its platform.h include line replaced
+  bwt_core.c     parc_st5_forward / parc_st5_inverse: the serial order-5 sort transform and its
+                 inverse from libbsc/st/st.cpp, translated to C (no allocation; the inverse
+                 checks every link against the block and reports damaged data)
+  LICENSE-libbsc its LICENSE
+
+PArc's own code (MIT): bwt_core.c — the runtime without the C library (memory functions, the
+allocator hook, ___chkstk_ms for mingw), the LZP encoder (the algorithm of src/parc_lzp.pas,
+same bytes), the repeat-share estimate and the segmentation sweep, and the entry points.
+
+build.sh compiles bwt_core.c (which includes libsais.c and qlfc.c) for every target with
+-O3 -fno-builtin -ffreestanding -fno-stack-protector (and -fno-tree-loop-distribute-patterns
+with gcc); the object needs nothing from the C library or libgcc. To update libsais, replace
+libsais.c/libsais.h and check that `nm -u` of the object is still empty on every target.

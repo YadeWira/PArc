@@ -1,7 +1,7 @@
 { mm: multimedia decorrelation filter (PArc's own code, MIT; nothing from FreeArc).
 
   The method keeps FreeArc's name `mm` and its parameters, but the filter and its stream
-  are new.  It goes in front of a general compressor (`mm+grzip`, `mm+plz`, `mm+lzma`) and
+  are new.  It goes in front of a general compressor (`mm+bwt`, `mm+plz`, `mm+lzma`) and
   replaces every sample by (sample - prediction) mod 2^bits, keeping its width, byte order
   and position, so the output has the length of the input plus a small header.
 
@@ -14,7 +14,7 @@
   minus that of G (two channels: the second minus the first).  The encoder picks the one
   with the smallest residual cost on up to 256 KB of the first MB.
 
-  Stream (version 1, docs/formato/FORMATO-PARC.md §6.9):
+  Stream (version 1, docs/formato/FORMATO-PARC.md §6.10):
     U8 version = 1, U8 mode: 0 = stored (the rest is the data), 1 = filtered:
       U8 channels (1..16), U8 bytes per sample (1..4), U8 flags (bit 0 big endian,
       bit 1 unsigned), U8 predictor (0..5), U8 cross (0/1), VInt width (pixels per row,

@@ -4,7 +4,7 @@
     splitFileTypes     tipo de cada tanda de archivos: por arc.groups y, si el método tiene
                        grupos $text/$compressed, por contenido (detect_datatype, detect_mm);
     splitToSolidBlocks un grupo por método (ordenados por el texto del método) y cortes por
-                       -s, por el tamaño de bloque de dict/grzip/lzp y "nosolid" de tta/mm.
+                       -s, por el tamaño de bloque de dict/bwt/lzp y "nosolid" de tta/mm.
   Solo para archivos NUEVOS (del disco); los que vienen de un archivo existente los maneja
   CmdModify aparte. Los directorios no pasan por acá (van en su propio bloque, primero). }
 unit parc_filelist;
@@ -593,7 +593,7 @@ begin
   for i := 0 to High(Names) do Names[i] := Names[i].Split([':'])[0];
   if Has('tta') then Result := '$wav'
   else if Has('mm') then Result := '$bmp'
-  else if Has('grzip') or Has('ppmd') or Has('pmm') or Has('dict') then Result := '$text'
+  else if Has('bwt') or Has('grzip') or Has('ppmd') or Has('pmm') or Has('dict') then Result := '$text'
   else if Only(['storing']) or Only(['orep', 'plz']) then Result := '$compressed'   // FreeArc: rep+tor
   else if Has('ecm') then Result := '$iso'
   else if Has('precomp') then Result := '$precomp'
@@ -932,8 +932,8 @@ begin
   V := q;
 end;
 
-{ GetBlockSize de dict, grzip y lzp (C_Dict/C_GRZip/C_LZP.cpp: el parámetro de memoria
-  suelto o b<mem>); los demás, 0. }
+{ GetBlockSize de dict, bwt (y grzip, su nombre viejo) y lzp (C_Dict/C_LZP.cpp: el parámetro
+  de memoria suelto o b<mem>); los demás, 0. }
 function BlockSizeOf(const Stage: string): Int64;
 var
   P: TStringArray;
@@ -944,7 +944,7 @@ begin
   P := Stage.Split([':']);
   Name := P[0];
   if Name = 'dict' then Result := 64 * MB
-  else if (Name = 'grzip') or (Name = 'lzp') then Result := 8 * MB
+  else if (Name = 'bwt') or (Name = 'grzip') or (Name = 'lzp') then Result := 8 * MB
   else Exit(0);
   for i := 1 to High(P) do
   begin
@@ -953,9 +953,9 @@ begin
     if (Name <> 'lzp') and (Length(S) = 1) then Continue;   // opciones de una letra
     if (S[1] = 'b') and MemParam(Copy(S, 2, MaxInt), v) then begin Result := v; Continue; end;
     if (Name = 'dict') and (S[1] in ['c', 'l', 'm', 's', 'r']) then Continue;
-    if (Name = 'grzip') and (S[1] in ['m', 'l', 'h', 't', 'i']) then Continue;
+    if ((Name = 'bwt') or (Name = 'grzip')) and (S[1] in ['m', 'l', 'h', 't', 'i', 'e']) then Continue;
     if (Name = 'lzp') and (S[1] in ['l', 'h', 'd', 's']) then Continue;
-    if (S[Length(S)] = '%') and (Name <> 'grzip') and IsIntParam(Copy(S, 1, Length(S) - 1)) then Continue;
+    if (S[Length(S)] = '%') and (Name <> 'grzip') and (Name <> 'bwt') and IsIntParam(Copy(S, 1, Length(S) - 1)) then Continue;
     if IsIntParam(S) then Continue;
     if MemParam(S, v) then Result := v;
   end;

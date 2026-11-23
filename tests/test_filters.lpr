@@ -1,5 +1,5 @@
 { test_filters: helper of tests/delta.sh, tests/lzp.sh and tests/filters_cross.sh
-  for PArc's own filters (src/parc_delta.pas, parc_lzp.pas, parc_dispack.pas).
+  for PArc's own filters and codecs (src/parc_delta.pas, parc_lzp.pas, parc_dispack.pas, parc_bwt.pas).
     test_filters enc <method> <in> <out> <chunk>   encode, writing in pieces of <chunk> bytes
                                                    (0 = random sizes, fixed seed)
     test_filters dec <method> <in> <out>           decode, reading in random-sized pieces
@@ -8,13 +8,15 @@
                                                    a clean EArcCorrupt, never another exception
     test_filters synth <dir>                       synthetic tables (every delta layout) in <dir>
     test_filters segs <method> <in>                the segments the delta encoder chooses
+    test_filters lzpsame <in> <min> <bits>         bwt's LZP (C) gives the bytes of parc_lzp's
   Exit code 0 = ok. }
 program test_filters;
 
 {$mode objfpc}{$H+}
 
 uses
-  SysUtils, Classes, parc_bytes, parc_stream, parc_outstream, parc_delta, parc_lzp, parc_dispack;
+  {$IFDEF UNIX}cthreads,{$ENDIF} SysUtils, Classes, parc_bytes, parc_stream, parc_outstream, parc_delta, parc_lzp,
+  parc_dispack, parc_bwt;
 
 function MinCompr(const Parts: TStringArray): Integer;
 var
@@ -34,6 +36,7 @@ begin
   case Parts[0] of
     'delta': Result := TDeltaEncStage.Create(Sink, Parts);
     'lzp': Result := TLzpEncStage.Create(Sink, ParseLzpParams(Parts), MinCompr(Parts));
+    'bwt': Result := TBwtEncStage.Create(Sink, Parts);
     'dispack', 'dispack070': Result := TDisPackEncStage.Create(Sink, DispackBlockSize(Parts));
   else
     raise Exception.Create('unknown method ' + Method);
@@ -48,6 +51,7 @@ begin
   case Parts[0] of
     'delta': Result := TDeltaStage.Create(Src);
     'lzp': Result := TLzpStage.Create(Src, ParseLzpParams(Parts));
+    'bwt': Result := TBwtStage.Create(Src, Parts);
     'dispack', 'dispack070': Result := TDisPackStage.Create(Src, DispackBlockSize(Parts));
   else
     raise Exception.Create('unknown method ' + Method);
@@ -308,6 +312,23 @@ begin
     end
     else if (ParamCount >= 5) and (ParamStr(1) = 'fuzz') then
       DoFuzz(ParamStr(2), ParamStr(3), StrToInt(ParamStr(4)), StrToInt(ParamStr(5)))
+    else if (ParamCount >= 4) and (ParamStr(1) = 'lzpsame') then
+    begin
+      // the bwt encoder's LZP (C core) against parc_lzp's, block by block
+      Data := LoadFile(ParamStr(2));
+      Len := 0;
+      while Len < Length(Data) do
+      begin
+        i := Length(Data) - Len;
+        if i > 1 shl 20 then i := 1 shl 20;
+        if not BwtLzpSameAsPascal(@Data[Len], i, StrToInt(ParamStr(3)), StrToInt(ParamStr(4))) then
+        begin
+          WriteLn('LZP differs at ', Len);
+          Halt(1);
+        end;
+        Inc(Len, i);
+      end;
+    end
     else if (ParamCount >= 2) and (ParamStr(1) = 'synth') then
       Synth(ParamStr(2))
     else if (ParamCount >= 3) and (ParamStr(1) = 'segs') then

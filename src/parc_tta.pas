@@ -22,7 +22,7 @@
   Everything is integer arithmetic with fixed wrapping, so the stream is the same on every
   platform (the assembler and the Pascal loops give identical results).
 
-  Stream (version 1, docs/formato/FORMATO-PARC.md §6.8):
+  Stream (version 1, docs/formato/FORMATO-PARC.md §6.9):
     U8 version = 1, U8 mode: 0 = stored (the rest of the stream is the data),
                              1 = coded: U8 channels, U8 bits, U8 flags, U8 level,
     then chunks until type 0:

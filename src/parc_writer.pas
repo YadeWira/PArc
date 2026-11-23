@@ -1142,8 +1142,8 @@ begin
         n := Length(AllGroups);
         SetLength(Jobs, n);
         Pool := TJobPool.Create(Workers, n);
-        // Cada bloque planea sus pools internos (4x4, grzip, REP) con su parte del presupuesto;
-        // si después sobran fichas (los últimos bloques), 4x4/grzip crecen solos
+        // Cada bloque planea sus pools internos (4x4, bwt, OREP) con su parte del presupuesto;
+        // si después sobran fichas (los últimos bloques), 4x4/bwt crecen solos
         Pool.Share := BudgetThreads div Workers;
         if Pool.Share < 1 then Pool.Share := 1;
         // Este hilo casi solo espera: sin ficha mientras tanto (las N son de los que comprimen),

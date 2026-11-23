@@ -192,7 +192,7 @@ work. There is no unlock (as in FreeArc).
 ### Solid blocks: `-s`
 
 Without `-s`, archives are solid like FreeArc's: a block is only cut where a method needs it
-(the dictionary of `dict`/`grzip`/`lzp`, `tta`/`mm` data) or where the file group changes. The
+(the dictionary of `dict`/`bwt`/`lzp`, `tta`/`mm` data) or where the file group changes. The
 threads are used inside each block (4x4, multithreaded LZMA). Use `-s-`, `-s...` or an explicit
 `-s<N>m` to cut blocks, for example to extract single files faster.
 
@@ -387,7 +387,7 @@ parc x site.parc '*.css' -ep -dpcss                     # all .css files, flat
 
 The compression limit applies to the encoders running at the same time. PArc estimates what
 each method chain needs (all stages of a chain run together: lzma by its exact encoder size,
-match finder included; orep window ring and anchor table (`OrepEncMemory`); PPMd model; plz window and tables; lzp/dict/grzip
+match finder included; orep window ring and anchor table (`OrepEncMemory`); PPMd model; plz window and tables; lzp/dict/bwt
 blocks; `4x4` counts one inner encoder per thread plus its blocks; `cm` its model (`cm:<level>`,
 level 6 ≈ 170 MB, less for blocks under 1 MB) plus up to 64 MB of input; `srep` keeps the whole
 block in memory) and, if a block's chain does not fit, shrinks the largest consumer first
@@ -480,7 +480,7 @@ extracting, the half-written file is deleted. A second Ctrl-C stops immediately.
 
 | variable | effect |
 |---|---|
-| `PARC_THREADS` | maximum number of threads working at the same time in the whole process (default: CPU cores, at most 64): block compression, 4x4/grzip, `orep`, the multi-threaded LZMA match finder, `t` verification and parallel extraction all share it. It also picks the preset alternatives, like FreeArc's `-mtN` (e.g. `PARC_THREADS=1 -m1` uses the single-thread `plz:2`). The `-mt<N>` option overrides it |
+| `PARC_THREADS` | maximum number of threads working at the same time in the whole process (default: CPU cores, at most 64): block compression, 4x4/bwt, `orep`, the multi-threaded LZMA match finder, `t` verification and parallel extraction all share it. It also picks the preset alternatives, like FreeArc's `-mtN` (e.g. `PARC_THREADS=1 -m1` uses the single-thread `plz:2`). The `-mt<N>` option overrides it |
 | `PARC_OREP_THREADS` | threads of the `orep` encoder: by default the block's share of `PARC_THREADS` (up to 4) when it is at least 2, else 1 (on the writing thread). OREP's threads only work with a free `PARC_THREADS` token (they never wait for one; the writing thread searches the block itself when none is free), so the budget is never exceeded; the output is the same with any number. `1` = always on the writing thread |
 | `PARC_BUFMEM` | MB of memory for compressed blocks waiting their turn when compressing in parallel (default min(1024, RAM/4), 256 on 32-bit); the rest goes to temporary files |
 | `PARC_CRC` | `table` disables the PCLMULQDQ CRC-32 (for measurements) |
