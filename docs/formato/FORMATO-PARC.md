@@ -516,7 +516,7 @@ The exact model (states, rates, thresholds and tables) is the one in `src/bwt/ql
 
 The encoder's choices (not needed to decode): blocks are cut where order-1 statistics change
 (a solid block of many files becomes pieces of similar data, at least 64 KB); with `a` the
-blocks are at most half the block size at `m2`..`m4` and 3/4 at `m1`, and the pieces of data
+blocks are at most 3/4 of the block size at `m1`..`m3` and half at `m4`, and the pieces of data
 found to be mixed at most 1/4; the LZP is skipped on blocks with few long repeats (estimated
 from content-defined samples); a block whose BWT output has fewer runs than 1/8 of its bytes is
 coded with the adaptive coder at any level; a block shorter than 64 bytes, or whose coded form

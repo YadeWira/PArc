@@ -20,9 +20,9 @@
   output does not depend on the platform or the thread count.
 
   The encoder cuts the input where its statistics change (see "adaptive blocks" below; GRZip
-  did it only with `a`): the stream is the same, just with shorter blocks. With `a` the levels
-  m2..m4 also cut at half the block size (less memory and faster sorting; GRZip's adaptive
-  blocks were small too). Blocks are compressed and
+  did it only with `a`): the stream is the same, just with shorter blocks. With `a` the blocks
+  are also at most 3/4 of the block size (half at m4), and at most 1/4 where the data were found
+  to be mixed: less memory and faster sorting (GRZip's adaptive blocks were small too). Blocks are compressed and
   decompressed in parallel (a pool of jobs, written and delivered in order) within the
   PARC_THREADS budget (parc_parallel).
 
@@ -77,8 +77,8 @@ type
     Coder: Integer;          // BWT_CODER_*
     LzpMin: Integer;         // 0 = no LZP
     LzpHash: Integer;
-    Adaptive: Boolean;       // a (GRZip's adaptive block): at m2..m4 blocks of at most half
-                             // the block size (they are always cut where the data change)
+    Adaptive: Boolean;       // a (GRZip's adaptive block): smaller blocks (see FBufSize);
+                             // they are always cut where the data change
   end;
 
   { Encoder: blocks of BlockSize bytes compressed in parallel and written in order. }
