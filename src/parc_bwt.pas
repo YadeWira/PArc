@@ -710,8 +710,6 @@ end;
 procedure TBwtEncStage.SubmitJob(var Data: TBytes; Len: SizeInt);
 var
   Job: TBwtEncJob;
-  Q: TJobArray;
-  i, w: Integer;
   H: TBytes;
   hb: SizeInt;
 begin
@@ -731,21 +729,11 @@ begin
       H[1] := 0;
     Emit(@H[0], hb);
   end;
+  // The queue does not grow past its first length (threads + 1): every job holds about 5 times
+  // its block, and when solid blocks are compressed side by side (the presets' groups) a growing
+  // queue in each of them added up to more memory than GRZip's; idle tokens still add threads
   if FCount = Length(FQueue) then
-  begin
-    // queue full: one more thread and job instead of waiting, if every thread is busy
-    w := FPool.MaxWorkers;
-    if FPool.CanGrow(BWT_MAXTHREADS) then
-    begin
-      SetLength(Q, Length(FQueue) + 1);
-      for i := 0 to FCount - 1 do Q[i] := FQueue[(FHead + i) mod Length(FQueue)];
-      FQueue := Q;
-      FHead := 0;
-      FPool.SetMaxWorkers(w + 1);
-    end
-    else
-      WriteOldest;
-  end
+    WriteOldest
   else if (FCount >= FPool.MaxWorkers) and (BudgetIdle > 0) and FPool.CanGrow(BWT_MAXTHREADS) then
     FPool.SetMaxWorkers(FPool.MaxWorkers + 1);
   Job := TBwtEncJob.Create;
