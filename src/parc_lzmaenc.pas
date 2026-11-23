@@ -1,24 +1,24 @@
-{ Codificador LZMA1 "raw" (sin cabecera .lzma): port a Pascal de LzmaEnc.c + LzFind.c del
-  LZMA SDK 26.03 (Igor Pavlov, dominio público), un solo hilo (sin LzFindMt).
-  Uso en FreeArc (C_LZMA.cpp, lzma_compress2): las propiedades no se escriben (salen del string
-  del método) y el stream lleva marca de fin (writeEndMark = 1), que lzma_decompress2 exige
-  (LZMA_STATUS_FINISHED_WITH_MARK) al descomprimir en streaming.
+{ Codificador LZMA1 "raw" (sin cabecera .lzma): port a Pascal de LzmaEnc.c + LzFind.c +
+  LzFindMt.c del LZMA SDK 26.03 (Igor Pavlov, dominio público), más un buscador propio.
+  Las propiedades no se escriben (salen del string del método) y el stream lleva marca de fin,
+  que el decodificador de bloques de datos exige.
   - TLzmaEncStage: etapa "push" (TOutStage) para bloques de datos.
   - LzmaEncodeMem: memoria-a-memoria (LzmaEnc_MemEncode), para bloques de control y 4x4.
-  Match finders: bt2, bt3, bt4, hc4 (SDK 26.03) y ht4, que no existe en el SDK: es el de LzFind.c
-  de FreeArc 0.67 (tabla hash con filas de mc posiciones y etiqueta en los bits altos, sin
-  "son"), portado aparte (Ht4GetMatches/Ht4Skip). PArc 0.0.2 lo mapeaba a hc4; los streams de
-  los dos son LZMA estándar (el decodificador no cambia), solo cambian razón y velocidad.
-  El parser óptimo (GetOptimum) se aparta del SDK 26.03 en dos atajos de velocidad del SDK 18+
-  que costaban razón (siempre cotiza el literal; short rep como el SDK 9.x) y actualiza los
-  precios cada 32 matches en vez de 64: 0.1-0.4 % más chico, ~1 % más lento, y queda igual o
-  más chico que FreeArc en :normal y :max. GetOptimumFast (:fast) sigue idéntico al SDK.
-  Los streams son LZMA estándar. Diferencias con FreeArc 0.67 (SDK 9.x modificado):
-  - mc = 0 usa la fórmula de FreeArc (bt: 16+fb/2, hc4: 16+fb/4, ht4: fb/2). En ht4 mc es el
-    largo de la fila de la tabla hash y se limita a kHtMaxCutValue (memoria acotada).
-  - "h" (tamaño del hash) se acepta y se ignora: el SDK 26.03 lo deriva del diccionario.
-  - No se aplica el redondeo de LZMA_METHOD::SetDictionary (mínimo 32kb, rounddown_mem): el
-    llamador debe escribir en el método exactamente el DictSize con que comprime. }
+  Match finders: bt2, bt3, bt4, hc4 (SDK 26.03) y ht4, que es propio de PArc (ver "ht4:
+  buscador por filas propio" abajo): no viene del SDK ni de otro programa. Los streams son
+  LZMA estándar (el decodificador no cambia); solo cambian razón y velocidad.
+  Diferencias con el SDK 26.03:
+  - El parser óptimo (GetOptimum) no usa dos atajos de velocidad del SDK 18+ que costaban
+    razón (siempre cotiza el literal; short rep como el SDK 9.x) y actualiza los precios cada
+    32 matches en vez de 64.
+  - GetOptimumFast (:fast) es el del SDK con umbrales propios (medidos): un match de 3 a
+    distancia >= 2 KB o de 4 a >= 64 KB se toma como literal, ChangePair compara con >> 5 en
+    vez de >> 7 y un rep de largo L gana a un match de L + 4 a distancia >= 16 KB.
+  - mc = 0: bt2/bt3/bt4 16 + fb/2 y hc4 la mitad, como LzmaEncProps_Normalize; ht4 4 + fb/8.
+  - "h" es la memoria de las filas de ht4 (0 = 3/4 del diccionario o de la entrada).
+  - La ventana deja 1/4 de margen en vez de 1/2 (se mueve el doble de veces, ocupa menos).
+  - No se aplica ningún redondeo del diccionario: el llamador debe escribir en el método
+    exactamente el DictSize con que comprime. }
 unit parc_lzmaenc;
 
 {$mode objfpc}{$H+}
@@ -42,22 +42,20 @@ type
 
   TLzmaEncParams = record
     DictSize: QWord;
-    HashSize: QWord;            // "h" de FreeArc: se acepta pero el SDK 26.03 deriva el hash del diccionario
+    HashSize: QWord;            // "h": bytes para las filas de ht4 (0 = automático); bt/hc no lo usan
     lc, lp, pb: Integer;
     Algorithm: Integer;         // 0 = fast (GetOptimumFast), >= 1 = normal (óptimo)
     NumFastBytes: Integer;      // se recorta a 5..273 como LzmaEnc_SetProps
-    MatchFinderCycles: Integer; // 0 = automático (fórmula de LzmaEncProps_Normalize de FreeArc)
+    MatchFinderCycles: Integer; // 0 = automático (LzmaDefaultCycles); en ht4, candidatos verificados
     MatchFinder: TLzmaMatchFinder;
     { Hilos ocupados que puede usar el stream (no va en el string del método): 0 = automático
       (LzmaEncThreadsFor: la concesión LzmaEncThreadGrant si el llamador fijó una; si no, la
       parte del presupuesto global de hilos de este bloque, salvo dentro de 4x4 o con
       presupuesto de un hilo); 1 = un hilo; 2 = match finder multihilo con un hilo BT además
       del que comprime (el BT calcula también el hash); >= 3 = además un hilo hash aparte, como
-      LzFindMt del SDK y FreeArc (el hash es liviano: ~10 % de un núcleo). Solo :normal/:max
-      usa más de uno (LzmaEncMaxThreads): bt4 hasta 3, con la misma salida que con uno; ht4
-      hasta 2, con la lista de matches del multihilo de FreeArc (más chica que la de un hilo,
-      que es la de FreeArc -mt1): con ht4 la salida depende de si hay 1 o más hilos, como en
-      FreeArc. Los hilos del match finder toman fichas del presupuesto global mientras
+      LzFindMt del SDK (el hash es liviano: ~10 % de un núcleo). Solo :normal/:max usa más de
+      uno (LzmaEncMaxThreads): bt4 hasta 3 y ht4 hasta 2, los dos con la misma salida que con
+      un hilo. Los hilos del match finder toman fichas del presupuesto global mientras
       trabajan, así que nunca se pasa de PARC_THREADS. }
     NumThreads: Integer;
   end;
@@ -130,8 +128,8 @@ function LzmaEncMemory(const P: TLzmaEncParams): QWord;
   reserva el codificador (ventana, hash, árbol) más Headroom bytes se pueden reservar de
   verdad ahora (se prueban y se liberan: en 32 bits lo que falla es el bloque contiguo más
   grande). En
-  32 bits el método se ajusta con esto antes de comprimir (parc_canon), como FreeArc achica el
-  diccionario a la memoria disponible; así el decodificador también lo puede reservar. }
+  32 bits el método se ajusta con esto antes de comprimir (parc_canon): el diccionario se
+  achica a la memoria disponible; así el decodificador también lo puede reservar. }
 function LzmaFitDictionary(const P: TLzmaEncParams; MaxMem, Headroom: QWord): QWord;
 
 threadvar
@@ -485,20 +483,24 @@ end;
 
 { ---------------------------------------------------------------------- }
 { ht4: buscador por filas propio de PArc (no viene del SDK ni de FreeArc).  }
-{ Cada hash de 4 bytes elige una fila de 32 o 64 bytes (media línea o una  }
-{ línea de caché entera). La fila es un anillo con las cap (7 o 14)        }
-{ posiciones más recientes que cayeron en ella, cada una con una etiqueta  }
-{ de 4 bits (otros bits del mismo hash):                                   }
-{   [cap etiquetas de 4 bits][cabeza: último nibble] [cap posiciones]      }
-{ (32 bytes: 4 bytes de etiquetas y 7 posiciones; 64: 8 bytes y 14.) La   }
-{ cabeza es el índice de la entrada más nueva.                             }
+{ Un hash multiplicativo de los 4 bytes elige una fila de 32 o 64 bytes    }
+{ (media línea o una línea de caché, alineadas). La fila es un anillo con  }
+{ las cap posiciones más recientes que cayeron en ella, cada una con una   }
+{ etiqueta (otros bits del mismo hash):                                    }
+{   [cap etiquetas][cabeza: último campo] [cap posiciones de 32 bits]      }
+{ Formas: 32 bytes con 7 etiquetas de 4 bits (4 bytes), 64 con 14 de 4     }
+{ (8 bytes) y 32 con 6 de 8 bits (8 bytes); la cabeza es el índice de la   }
+{ entrada más nueva.                                                       }
 { Buscar: las etiquetas iguales a la del hash salen todas juntas como una  }
-{ máscara (comparación de nibbles en un QWord, sin SSE), se rota para que  }
-{ la primera sea la más nueva y se verifican en ese orden, como mucho      }
-{ cutValue (mc) candidatos; los de etiqueta distinta no leen la ventana.   }
-{ Se corta en el primero fuera de la ventana (o vacío, 0): los que siguen  }
-{ son más viejos. Insertar es bajar la cabeza y escribir encima de la más  }
-{ vieja: no se mueve nada.                                                 }
+{ máscara de bits (comparación de campos en un QWord, sin SSE), se rota    }
+{ para que la primera sea la más nueva y se verifican en ese orden, como   }
+{ mucho cutValue (mc) candidatos con los 4 bytes iguales; las etiquetas    }
+{ distintas no leen la ventana. Se corta en el primero fuera de la ventana }
+{ (o vacío, 0): los que siguen son más viejos. Insertar es bajar la cabeza }
+{ y escribir encima de la más vieja: no se mueve nada.                     }
+{ Los pares salen en orden de largo creciente igual que en bt4, así que el }
+{ multihilo (el hilo BT busca en las filas con maxLen = 3 y el LZ se queda  }
+{ con los más largos que su hash2/hash3) da la misma salida que un hilo.   }
 { ---------------------------------------------------------------------- }
 
 const
@@ -513,6 +515,8 @@ begin
   case shape of
     1: begin bytes := 64; cap := 14; tagArea := 8; tagBits := 4; end;
     2: begin bytes := 32; cap := 6; tagArea := 8; tagBits := 8; end;
+    3: begin bytes := 16; cap := 4; tagArea := 4; tagBits := 6; end;   // posiciones de 24 bits
+    4: begin bytes := 32; cap := 8; tagArea := 7; tagBits := 6; end;   // posiciones de 24 bits
   else
     begin bytes := 32; cap := 7; tagArea := 4; tagBits := 4; end;
   end;
@@ -526,11 +530,17 @@ begin
 end;
 
 { Forma de fila para un stream: con el parser rápido (:fast) las etiquetas de 8 bits (menos
-  candidatos falsos, más rápido); con el óptimo, la más densa. }
-function RfShapeForAlgo(mc: LongWord; algo: Integer): LongWord;
+  candidatos falsos, más rápido); con el óptimo, la más densa; con pocos candidatos y un
+  diccionario de hasta 16 MB (small: los bloques de 4x4), la de 16 bytes con posiciones de
+  24 bits (la posición módulo 2^24: una entrada más vieja que 2^24 posiciones parece más
+  nueva, pero todo candidato se verifica contra la ventana y la distancia se limita al
+  diccionario, así que la salida es válida igual). }
+function RfShapeForAlgo(mc: LongWord; algo: Integer; small: Boolean): LongWord;
 begin
   if GetEnvironmentVariable('RFS') <> '' then Exit(StrToInt(GetEnvironmentVariable('RFS')));
-  if (algo = 0) and (mc <= 6) then Result := 2 else Result := RfShapeFor(mc);
+  if (algo = 0) and (mc <= 6) then Result := 2
+  else if small and (mc <= 4) then Result := 3
+  else Result := RfShapeFor(mc);
 end;
 
 { Forma de la tabla: filas de la forma shape, tantas como entren en el presupuesto
@@ -545,7 +555,8 @@ begin
   b := budget;
   if b = 0 then
   begin
-    b := QWord(dataSize) * 3 div 4;
+    // 3/4 de la entrada; las formas de 4 bytes por entrada, toda
+    if shape in [3, 4] then b := dataSize else b := QWord(dataSize) * 3 div 4;
     if GetEnvironmentVariable('RFB') <> '' then b := QWord(dataSize) * StrToInt(GetEnvironmentVariable('RFB')) div 16;
   end;
   r := b div bytes;
@@ -577,7 +588,7 @@ end;
   etiquetas y la cabeza no cambian. }
 procedure RfNormalize(p: PMatchFinder; subValue: LongWord);
 var
-  row: PByte;
+  row, q: PByte;
   e: PLongWord;
   n, i, v: LongWord;
 begin
@@ -585,19 +596,30 @@ begin
   n := p^.numRows;
   while n <> 0 do
   begin
-    e := PLongWord(row + p^.rowTagArea);
-    for i := 0 to p^.rowCap - 1 do
+    if p^.rowShape in [3, 4] then
+      // posiciones de 24 bits: módulo 2^24, como se comparan
+      for i := 0 to p^.rowCap - 1 do
+      begin
+        q := row + p^.rowTagArea + 3 * i;
+        v := LongWord(q[0] or (LongWord(q[1]) shl 8) or (LongWord(q[2]) shl 16) - subValue);
+        q[0] := Byte(v); q[1] := Byte(v shr 8); q[2] := Byte(v shr 16);
+      end
+    else
     begin
-      v := e[i];
-      if v < subValue then v := subValue;
-      e[i] := v - subValue;
+      e := PLongWord(row + p^.rowTagArea);
+      for i := 0 to p^.rowCap - 1 do
+      begin
+        v := e[i];
+        if v < subValue then v := subValue;
+        e[i] := v - subValue;
+      end;
     end;
     Inc(row, p^.rowBytes);
     Dec(n);
   end;
 end;
 
-{ MatchFinder_Create (sin numHashOutBits, que FreeArc no usa). Lanza EOutOfMemory. }
+{ MatchFinder_Create (sin numHashOutBits). Lanza EOutOfMemory. }
 procedure MfCreate(p: PMatchFinder; historySize, keepAddBufferBefore, matchMaxLen,
   keepAddBufferAfter: LongWord);
 var
@@ -1435,10 +1457,6 @@ begin
 end;
 
 const
-  kRf7 = QWord($7777777777777777);
-  kRf8 = QWord($8888888888888888);
-  kRf7F = QWord($7F7F7F7F7F7F7F7F);
-  kRf80 = QWord($8080808080808080);
   kRfPf = 2;   // la fila se trae a la caché kRfPf posiciones antes
 
 { Fila de la posición pos + kRfPf a la caché, y su hash guardado para cuando llegue (necesita
@@ -1462,18 +1480,35 @@ begin
     Result := RfHash(cur);
 end;
 
-{$DEFINE RF_CAP:=7}{$DEFINE RF_TA:=4}{$DEFINE RF_TB:=4}{$DEFINE RF_LG:=2}
+{$DEFINE RF_CAP:=7}{$DEFINE RF_TA:=4}{$DEFINE RF_TW:=4}{$DEFINE RF_HS:=28}{$DEFINE RF_HB:=4}{$DEFINE RF_TB:=4}{$DEFINE RF_LG:=2}{$DEFINE RF_PB:=4}
+{$DEFINE RF_KONE:=QWord($1111111111111111)}{$DEFINE RF_KLO:=QWord($7777777777777777)}{$DEFINE RF_KHI:=QWord($8888888888888888)}
 {$DEFINE RF_LOADTAGS:=RfLoadTags32}{$DEFINE RF_PUSH:=RfPush32}{$DEFINE RF_CORE:=RfCore32}
 {$DEFINE RF_GETMATCHES:=RfGetMatches32}{$DEFINE RF_SKIP:=RfSkip32}
 {$I parc_lzmarf.inc}
-{$DEFINE RF_CAP:=14}{$DEFINE RF_TA:=8}{$DEFINE RF_TB:=4}{$DEFINE RF_LG:=2}
+{$DEFINE RF_CAP:=14}{$DEFINE RF_TA:=8}{$DEFINE RF_TW:=8}{$DEFINE RF_HS:=60}{$DEFINE RF_HB:=4}{$DEFINE RF_TB:=4}{$DEFINE RF_LG:=2}{$DEFINE RF_PB:=4}
+{$DEFINE RF_KONE:=QWord($1111111111111111)}{$DEFINE RF_KLO:=QWord($7777777777777777)}{$DEFINE RF_KHI:=QWord($8888888888888888)}
 {$DEFINE RF_LOADTAGS:=RfLoadTags64}{$DEFINE RF_PUSH:=RfPush64}{$DEFINE RF_CORE:=RfCore64}
 {$DEFINE RF_GETMATCHES:=RfGetMatches64}{$DEFINE RF_SKIP:=RfSkip64}
 {$I parc_lzmarf.inc}
 { 32 bytes con etiquetas de 8 bits: 6 entradas (bytes 0..5), cabeza en el byte 7 }
-{$DEFINE RF_CAP:=6}{$DEFINE RF_TA:=8}{$DEFINE RF_TB:=8}{$DEFINE RF_LG:=3}
+{$DEFINE RF_CAP:=6}{$DEFINE RF_TA:=8}{$DEFINE RF_TW:=8}{$DEFINE RF_HS:=56}{$DEFINE RF_HB:=8}{$DEFINE RF_TB:=8}{$DEFINE RF_LG:=3}{$DEFINE RF_PB:=4}
+{$DEFINE RF_KONE:=QWord($0101010101010101)}{$DEFINE RF_KLO:=QWord($7F7F7F7F7F7F7F7F)}{$DEFINE RF_KHI:=QWord($8080808080808080)}
 {$DEFINE RF_LOADTAGS:=RfLoadTags32b}{$DEFINE RF_PUSH:=RfPush32b}{$DEFINE RF_CORE:=RfCore32b}
 {$DEFINE RF_GETMATCHES:=RfGetMatches32b}{$DEFINE RF_SKIP:=RfSkip32b}
+{$I parc_lzmarf.inc}
+{ 16 bytes, 4 entradas con etiquetas de 6 bits (bits 0..23), la cabeza en los bits 24..25 y
+  posiciones de 24 bits desde el byte 4 (diccionarios de hasta 16 MB: los bloques de 4x4) }
+{$DEFINE RF_CAP:=4}{$DEFINE RF_TA:=4}{$DEFINE RF_TW:=4}{$DEFINE RF_HS:=24}{$DEFINE RF_HB:=2}{$DEFINE RF_TB:=6}{$DEFINE RF_LG:=0}{$DEFINE RF_PB:=3}
+{$DEFINE RF_KONE:=QWord($0041041041041041)}{$DEFINE RF_KLO:=QWord($07DF7DF7DF7DF7DF)}{$DEFINE RF_KHI:=QWord($0820820820820820)}
+{$DEFINE RF_LOADTAGS:=RfLoadTags16}{$DEFINE RF_PUSH:=RfPush16}{$DEFINE RF_CORE:=RfCore16}
+{$DEFINE RF_GETMATCHES:=RfGetMatches16}{$DEFINE RF_SKIP:=RfSkip16}
+{$I parc_lzmarf.inc}
+{ 32 bytes, 8 entradas con etiquetas de 6 bits (bits 0..47), la cabeza en los bits 48..50 y
+  posiciones de 24 bits desde el byte 7 }
+{$DEFINE RF_CAP:=8}{$DEFINE RF_TA:=7}{$DEFINE RF_TW:=8}{$DEFINE RF_HS:=48}{$DEFINE RF_HB:=3}{$DEFINE RF_TB:=6}{$DEFINE RF_LG:=0}{$DEFINE RF_PB:=3}
+{$DEFINE RF_KONE:=QWord($0041041041041041)}{$DEFINE RF_KLO:=QWord($07DF7DF7DF7DF7DF)}{$DEFINE RF_KHI:=QWord($0820820820820820)}
+{$DEFINE RF_LOADTAGS:=RfLoadTags32c}{$DEFINE RF_PUSH:=RfPush32c}{$DEFINE RF_CORE:=RfCore32c}
+{$DEFINE RF_GETMATCHES:=RfGetMatches32c}{$DEFINE RF_SKIP:=RfSkip32c}
 {$I parc_lzmarf.inc}
 
 { Para el hilo BT del multihilo (fila de 32 o 64 bytes). }
@@ -1483,6 +1518,8 @@ begin
   case p^.rowShape of
     1: Result := RfCore64(p, RfRow(p, h), cur, pos, h, mmm, lenLimit, maxLen, d);
     2: Result := RfCore32b(p, RfRow(p, h), cur, pos, h, mmm, lenLimit, maxLen, d);
+    3: Result := RfCore16(p, RfRow(p, h), cur, pos, h, mmm, lenLimit, maxLen, d);
+    4: Result := RfCore32c(p, RfRow(p, h), cur, pos, h, mmm, lenLimit, maxLen, d);
   else
     Result := RfCore32(p, RfRow(p, h), cur, pos, h, mmm, lenLimit, maxLen, d);
   end;
@@ -1623,8 +1660,8 @@ end;
 {   - HASH: lee la entrada, mueve el bloque de la ventana cuando hace      }
 {     falta y, por bloques de hasta 128K posiciones, calcula con la tabla  }
 {     hash de 4 bytes (la alta) la distancia a la posición anterior con el }
-{     mismo hash ("heads"). Misma fórmula que Bt4GetMatches (la de PArc/   }
-{     FreeArc, no la GetHeads4b del SDK 26.03).                            }
+{     mismo hash ("heads"). Misma fórmula que Bt4GetMatches (la del SDK,   }
+{     sin la GetHeads4b vectorizada del SDK 26.03).                        }
 {   - BT: con esas distancias recorre e inserta en el árbol binario        }
 {     (BtGetMatchesSpec con maxLen = 3) posición por posición y escribe    }
 {     los pares en bloques de 64K u32: [n, avail, (n-1) u32 por posición]. }
@@ -3393,7 +3430,7 @@ begin
     nextIsLit := False;
 
     // El SDK 18+ no cotiza el literal si ya hay un precio y matchByte = curByte, o si el
-    // match solo ya cuesta más: acá se cotiza siempre (como el SDK 9.x de FreeArc): 0.1-0.4 %
+    // match solo ya cuesta más: acá se cotiza siempre (como el SDK 9.x): 0.1-0.4 %
     // más chico por ~1 % de tiempo.
     begin
       probs := LitProbsPtr(position, (data - 1)^);
@@ -4019,7 +4056,7 @@ begin
   begin
     if mc > kRfMaxCap then mc := kRfMaxCap;
     mf.rowsBudget := P.HashSize;
-    mf.rowShape := RfShapeForAlgo(mc, P.Algorithm);
+    mf.rowShape := RfShapeForAlgo(mc, P.Algorithm, d <= (1 shl 24));
   end;
   mf.cutValue := mc;
 
@@ -4036,6 +4073,8 @@ begin
     case mf.rowShape of
       1: begin GetMatchesF := @RfGetMatches64; SkipF := @RfSkip64; end;
       2: begin GetMatchesF := @RfGetMatches32b; SkipF := @RfSkip32b; end;
+      3: begin GetMatchesF := @RfGetMatches16; SkipF := @RfSkip16; end;
+      4: begin GetMatchesF := @RfGetMatches32c; SkipF := @RfSkip32c; end;
     else
       begin GetMatchesF := @RfGetMatches32; SkipF := @RfSkip32; end;
     end;
@@ -4060,7 +4099,7 @@ begin
   litProbs := GetMem((SizeInt($300) * SizeOf(TProb)) shl lclp);
   d := dictSize;
   if (d = (QWord(2) shl 30)) or (d = (QWord(3) shl 30)) then Dec(d);
-  // Multihilo como FreeArc (mtMode = numThreads > 1 y no fast), solo para bt4. En memoria,
+  // Multihilo (numThreads > 1 y no fast), bt4 y ht4. En memoria,
   // solo si el bloque lo justifica (crear los hilos y 5 MB de buffers cuesta ~ms). La salida
   // es la misma con o sin hilos. Hilos: los de P, o (0) los que el llamador concedió a este
   // hilo (LzmaEncThreadGrant; sin concesión, uno).
@@ -4402,7 +4441,7 @@ begin
     mc := P.MatchFinderCycles;
     if mc = 0 then mc := LzmaDefaultCycles(P.MatchFinder, P.NumFastBytes);
     if mc > kRfMaxCap then mc := kRfMaxCap;
-    RfLayout(LongWord(d), P.HashSize, RfShapeForAlgo(LongWord(mc), P.Algorithm), cap, rb, nr);
+    RfLayout(LongWord(d), P.HashSize, RfShapeForAlgo(LongWord(mc), P.Algorithm, False), cap, rb, nr);
     Hash := 4 * kFix4HashSize + QWord(nr) * rb + 64;
   end
   else

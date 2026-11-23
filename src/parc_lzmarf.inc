@@ -1,11 +1,14 @@
 { ht4 (parc_lzmaenc): las rutinas de una forma de fila. Se incluye una vez por forma con las
-  macros RF_CAP (entradas), RF_TA (bytes de etiquetas, 4 u 8: un LongWord o un QWord), RF_TB
-  (bits por etiqueta, 4 u 8; la cabeza ocupa el último campo), RF_LG (log2 de RF_TB) y los
-  nombres RF_* definidos. }
+  macros RF_CAP (entradas), RF_TA (dónde empiezan las posiciones), RF_TW (bytes de la palabra
+  de etiquetas: 4 u 8, un LongWord o un QWord desde el byte 0), RF_TB (bits por etiqueta, 4 u
+  8), RF_HS/RF_HB (bit y ancho de la cabeza en esa palabra), RF_LG (log2 de RF_TB),
+  RF_KONE/RF_KLO/RF_KHI (un 1 / los bits bajos / el alto de cada campo de RF_TB bits) y los
+  nombres RF_*. RF_PB: bytes por posición (4, o 3 para entradas de hasta 16 MB:
+  la posición módulo 2^24, solo si ninguna distancia llega a 2^24). }
 
 function RF_LOADTAGS(row: PByte): QWord; inline;
 begin
-  {$IF RF_TA = 8}Result := PQWord(row)^;{$ELSE}Result := PLongWord(row)^;{$ENDIF}
+  {$IF RF_TW = 8}Result := PQWord(row)^;{$ELSE}Result := PLongWord(row)^;{$ENDIF}
 end;
 
 { Escribe pos como entrada nueva de la fila: la cabeza baja uno (sobre la más vieja), con la
@@ -14,12 +17,19 @@ procedure RF_PUSH(row: PByte; x: QWord; h, pos: LongWord); inline;
 var
   head: LongWord;
 begin
-  head := LongWord(x shr (8 * RF_TA - RF_TB)) and ((1 shl RF_TB) - 1);
+  head := LongWord(x shr RF_HS) and ((1 shl RF_HB) - 1);
   if head = 0 then head := RF_CAP - 1 else Dec(head);
+  x := (x and not ((QWord((1 shl RF_TB) - 1) shl (RF_TB * head)) or (QWord((1 shl RF_HB) - 1) shl RF_HS)))
+    or (QWord(h and ((1 shl RF_TB) - 1)) shl (RF_TB * head)) or (QWord(head) shl RF_HS);
+  // las etiquetas primero: la palabra puede incluir bytes de la primera posición (sin cambios
+  // hasta acá), que se escribe después
+  {$IF RF_TW = 8}PQWord(row)^ := x;{$ELSE}PLongWord(row)^ := LongWord(x);{$ENDIF}
+  {$IF RF_PB = 3}
+  PWord(row + RF_TA + 3 * head)^ := Word(pos);
+  row[RF_TA + 3 * head + 2] := Byte(pos shr 16);
+  {$ELSE}
   PLongWord(row + RF_TA)[head] := pos;
-  x := (x and not ((QWord((1 shl RF_TB) - 1) shl (RF_TB * head)) or (QWord((1 shl RF_TB) - 1) shl (8 * RF_TA - RF_TB))))
-    or (QWord(h and ((1 shl RF_TB) - 1)) shl (RF_TB * head)) or (QWord(head) shl (8 * RF_TA - RF_TB));
-  {$IF RF_TA = 8}PQWord(row)^ := x;{$ELSE}PLongWord(row)^ := LongWord(x);{$ENDIF}
+  {$ENDIF}
 end;
 
 { Busca en la fila row (del hash h) los matches de cur (pos) más largos que maxLen, en orden
@@ -35,15 +45,12 @@ var
 begin
   e := PLongWord(row + RF_TA);
   x0 := RF_LOADTAGS(row);
-  head := LongWord(x0 shr (8 * RF_TA - RF_TB)) and ((1 shl RF_TB) - 1);
-  // campos iguales a la etiqueta: bit RF_TB*i en m (exacto, sin falsos positivos)
-  {$IF RF_TB = 8}
-  x := x0 xor (QWord(h and $FF) * QWord($0101010101010101));
-  m := (((not (((x and kRf7F) + kRf7F) or x)) and kRf80) shr 7) and ((QWord(1) shl (8 * RF_CAP)) - 1);
-  {$ELSE}
-  x := x0 xor (QWord(h and $F) * QWord($1111111111111111));
-  m := (((not (((x and kRf7) + kRf7) or x)) and kRf8) shr 3) and ((QWord(1) shl (4 * RF_CAP)) - 1);
-  {$ENDIF}
+  head := LongWord(x0 shr RF_HS) and ((1 shl RF_HB) - 1);
+  // campos iguales a la etiqueta: bit RF_TB*i + RF_TB-1 en m (exacto, sin falsos positivos;
+  // RF_KLO/RF_KHI: los bits bajos / el alto de cada campo)
+  x := x0 xor (QWord(h and ((1 shl RF_TB) - 1)) * RF_KONE);
+  m := ((not (((x and RF_KLO) + RF_KLO) or x)) and RF_KHI) and ((QWord(1) shl (RF_TB * RF_CAP)) - 1);
+  m := m shr (RF_TB - 1);
   if m <> 0 then
   begin
     // la entrada más nueva (head) al nibble 0, después head + 1, ...
@@ -51,10 +58,19 @@ begin
       m := ((m shr (RF_TB * head)) or (m shl (RF_TB * (RF_CAP - head)))) and ((QWord(1) shl (RF_TB * RF_CAP)) - 1);
     n := p^.cutValue;
     repeat
+      {$IF RF_TB = 6}
+      i := head + ((LongWord(BsfQWord(m)) * 11) shr 6);   // bsf div 6 (bsf < 64)
+      {$ELSE}
       i := head + (LongWord(BsfQWord(m)) shr RF_LG);
+      {$ENDIF}
       if i >= RF_CAP then Dec(i, RF_CAP);
+      {$IF RF_PB = 3}
+      delta := LongWord(pos - PLongWord(row + RF_TA + 3 * i)^) and $FFFFFF;
+      if LongWord(delta - 1) >= LongWord(mmm - 1) then Break;
+      {$ELSE}
       delta := LongWord(pos - e[i]);
       if delta >= mmm then Break;
+      {$ENDIF}
       c := cur - delta;
       // etiqueta igual pero otros 4 bytes: no cuenta como candidato
       if PLongWord(c)^ = PLongWord(cur)^ then
