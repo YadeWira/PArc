@@ -136,7 +136,7 @@ implementation
 
 uses
   Math, parc_filters, parc_ppmd, parc_methods, parc_lzp, parc_parallel, parc_lzmaenc,
-  parc_orep, parc_delta, parc_dictenc, parc_ttaenc, parc_mmenc, parc_grzipenc,
+  parc_orep, parc_delta, parc_dictenc, parc_tta, parc_mm, parc_grzipenc,
   parc_crypt, parc_canon, parc_lz4enc, parc_dispack, parc_srep, parc_cm, parc_bcj2, parc_plzenc;
 
 function StageName(const Stage: string): string; forward;

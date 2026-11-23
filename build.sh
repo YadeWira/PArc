@@ -22,6 +22,18 @@ corep() {
   $cc $COREPFLAGS $extra "$@" -c src/orep/orep_core.c -o "$out/units/orep_core.o"
 }
 
+# cmm <dir> <cc> [opciones]: el núcleo en C de tta/mm (src/tta/mmtta_core.c, MIT, propio)
+# -> <dir>/units/mmtta_core.o, que parc_tta/parc_mm enlazan con {$L}. -fwrapv: el código ya
+# envuelve con unsigned, es por las dudas.
+MMFLAGS="-O3 -fwrapv -fno-builtin -ffreestanding -fno-stack-protector -w"
+cmm() {
+  out=$1; cc=$2; shift 2
+  mkdir -p "$out/units"
+  extra=""
+  case "$cc" in *clang*) ;; *) extra="-fno-tree-loop-distribute-patterns" ;; esac
+  $cc $MMFLAGS $extra "$@" -c src/tta/mmtta_core.c -o "$out/units/mmtta_core.o"
+}
+
 build() {
   target=$1; compiler=$2; shift 2
   out="build/$target"
@@ -32,26 +44,33 @@ build() {
 
 case "${1:-linux64}" in
   linux64) corep build/linux64 gcc -fno-pie
+           cmm build/linux64 gcc -fno-pie
            build linux64 fpc -Tlinux -Px86_64 ;;
   win64)   corep build/win64 x86_64-w64-mingw32-gcc
+           cmm build/win64 x86_64-w64-mingw32-gcc
            if [ -x "$FPC_CROSS/bin/fpc-win64" ]; then build win64 "$FPC_CROSS/bin/fpc-win64"
            else build win64 fpc -Twin64 -Px86_64; fi ;;
   linux32) corep build/linux32 gcc -m32 -fno-pie -mstackrealign
+           cmm build/linux32 gcc -m32 -fno-pie -mstackrealign
            build linux32 "$FPC_CROSS/bin/fpc-linux32" ;;
   # Linux aarch64: nativo (p. ej. el runner ARM de CI) con el fpc del sistema, si no el cross
   linuxarm64)
            if [ "$(uname -m)" = aarch64 ]; then
              corep build/linuxarm64 gcc -fno-pie
+             cmm build/linuxarm64 gcc -fno-pie
              build linuxarm64 fpc -Tlinux -Paarch64
            else
              corep build/linuxarm64 aarch64-linux-gnu-gcc -fno-pie
+             cmm build/linuxarm64 aarch64-linux-gnu-gcc -fno-pie
              build linuxarm64 "$FPC_CROSS/bin/fpc-linuxarm64"
            fi ;;
   # macOS arm64 (solo en un Mac: el fpc de Homebrew y clang de Xcode), contra el SDK de xcrun
   macos)   corep build/macos clang
+           cmm build/macos clang
            build macos fpc -Tdarwin -Paarch64 -XR"$(xcrun --show-sdk-path)" ;;
   # i686: la pila realineada (FPC la deja a 4)
   win32)   corep build/win32 i686-w64-mingw32-gcc -mstackrealign
+           cmm build/win32 i686-w64-mingw32-gcc -mstackrealign
            build win32 "$FPC_CROSS/bin/fpc-win32" ;;
   all)     for t in linux64 linux32 linuxarm64 win64 win32; do "$0" $t; done ;;
   *)       echo "target desconocido: $1" >&2; exit 1 ;;

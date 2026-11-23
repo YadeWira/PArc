@@ -1,94 +1,134 @@
-{ MM — preprocesador multimedia de FreeArc (Compression/MM/mm.cpp).
-  Filtro "diff" por canal, sin compresor propio: se usa como etapa previa de otro
-  método (p.ej. `mm+grzip`), y el grupo $bmp de arc.groups lo invoca así.
+{ mm: multimedia decorrelation filter (PArc's own code, MIT; nothing from FreeArc).
 
-  Stream:
-    1 byte de flags:
-      0        = datos guardados sin procesar (el resto del stream va tal cual)
-      bit0     = 1 (diff); bits 1..7 deben ser 0 (reorder no soportado todavía)
-    2 bytes  = num_chan, word_size(bits)
-    4 bytes  = offset (Int32 LE): bytes del encabezado original que se copian intactos
-    offset bytes (copia literal al destino)
-    roundUp(3+4+offset, N) - (3+4+offset) bytes: relleno de alineación, que son los
-      VALORES INICIALES del acumulador `base` de cada canal (el encoder los emite
-      desde un base en cero, y el decoder los lee dentro de base y no los emite)
-    después, chunks de a roundDown(BUFFER_SIZE, N) bytes con los datos "diffeados"
+  The method keeps FreeArc's name `mm` and its parameters, but the filter and its stream
+  are new.  It goes in front of a general compressor (`mm+grzip`, `mm+plz`, `mm+lzma`) and
+  replaces every sample by (sample - prediction) mod 2^bits, keeping its width, byte order
+  and position, so the output has the length of the input plus a small header.
 
-  N = num_chan * byte_size.  El decoder deshace el diff de a grupos de N bytes; el
-  acumulador base persiste entre chunks (por eso el tamaño de chunk debe ser el
-  mismo que usó el encoder).
-  Aritmética: los elementos son de 8/16/24/32 bits y el diff se hace en 32 bits
-  con wrapping (el encoder es de 32 bits). }
+  Layout (parc_mmdet): the container header when there is one (WAV/AIFF audio; BMP, TGA,
+  PGM/PPM and uncompressed TIFF images, which also give the row length), the method's
+  c/w/o parameters, or the statistics of the first MB.  Prediction (the hot loops are C,
+  src/tta/mmtta_core.c): audio and images without rows per channel from the last one or
+  two samples; images from their neighbours (up, gradient a+b-c, the LOCO-I median edge
+  detector, the average of left and up, or left), optionally with the residuals of R and B
+  minus that of G (two channels: the second minus the first).  The encoder picks the one
+  with the smallest residual cost on up to 256 KB of the first MB.
+
+  Stream (version 1, docs/formato/FORMATO-PARC.md §6.7):
+    U8 version = 1, U8 mode: 0 = stored (the rest is the data), 1 = filtered:
+      U8 channels (1..16), U8 bytes per sample (1..4), U8 flags (bit 0 big endian,
+      bit 1 unsigned), U8 predictor (0..5), U8 cross (0/1), VInt width (pixels per row,
+      0 = no rows), VInt row bytes, VInt header bytes, VInt data bytes + 1 (0 = to the end),
+      zero bytes up to a multiple of 8 from the stream start,
+      the header bytes as they are, the data filtered, the rest as it is.
+  Rows: the first width x channels x bytes bytes of each row are samples, the rest (row
+  padding) passes as it is; a final incomplete row or sample frame passes as it is. }
 unit parc_mm;
 
 {$mode objfpc}{$H+}
 {$R-}{$Q-}
+{$pointermath on}
 
 interface
 
 uses
-  SysUtils, parc_stream;
+  SysUtils, parc_stream, parc_outstream, parc_mmdet;
+
+const
+  MM_STREAM_VERSION = 1;
+  MM_MAX_CHAN = 16;
+  MM_DETECT = 1 shl 20;
+  MM_CHUNK = 256 * 1024;
+  MM_MAX_ROW = 16 shl 20;
 
 type
+  EMmEncParams = class(Exception);
+
   TMmParams = record
     Mode, SkipHeader, IsFloat, NumChan, WordSize, Offset, Reorder: Integer;
+  end;
+  TMmEncParams = TMmParams;
+
+  { the C filter state (mm_t in mmtta_core.c) }
+  TMmCore = record
+    NumChan, Bytes, BE, Uns, Pred, Cross: LongInt;
+    Width, RowBytes: LongInt;
+    Last1, Last2: array[0..MM_MAX_CHAN - 1] of LongInt;
+    Cost: QWord;
+  end;
+  PMmCore = ^TMmCore;
+
+  TMmEncPhase = (mpDetect, mpStored, mpFiltered);
+
+  TMmEncStage = class(TOutStage)
+  private
+    FPar: TMmEncParams;
+    FPhase: TMmEncPhase;
+    FBuf: TBytes;                 // detection buffer
+    FLen: SizeInt;
+    FM: TMmCore;
+    FHdrLeft, FDataLeft: Int64;   // header bytes to pass, data bytes to filter (-1: to the end)
+    FUnit: SizeInt;               // a row or a sample frame
+    FPend: TBytes;                // incomplete unit
+    FPendLen: SizeInt;
+    FPrev: TBytes;                // last original row (2D)
+    FHavePrev: Boolean;
+    FOut: TBytes;
+    procedure Decide;
+    procedure ChoosePred(Data: PByte; Len: SizeInt);
+    procedure Feed(P: PByte; N: SizeInt);
+    procedure FilterUnits(P: PByte; Units: SizeInt);
+  protected
+    procedure DoWrite(Buf: PByte; Count: SizeInt); override;
+    procedure DoFinish; override;
+  public
+    constructor Create(ATarget: TOutStage; const Params: TStringArray);
+    constructor Create(ATarget: TOutStage; const APar: TMmEncParams);
   end;
 
   TMmStage = class(TInStage)
   private
-    FPar: TMmParams;
-    FBuf: array of Byte;
-    FBase: array of Byte;
+    FStarted, FStored: Boolean;
+    FM: TMmCore;
+    FHdrLeft, FDataLeft: Int64;
+    FUnit: SizeInt;
+    FBuf: TBytes;
     FLen, FPos: SizeInt;
-    FEof, FStarted, FStored: Boolean;
-    FNumChan, FWordSize, FByteSize, FN, FChunk: Integer;
+    FPrev: TBytes;
+    FHavePrev: Boolean;
+    FEof: Boolean;
     procedure Start;
-    function NextChunk: Boolean;
+    function Fill: Boolean;
   public
     constructor Create(ASource: TInStage; const APar: TMmParams);
     function Read(Buf: PByte; Count: SizeInt): SizeInt; override;
   end;
 
-{ Parámetros como parse_MM. }
 function ParseMmParams(const Params: TStringArray): TMmParams;
+function ParseMmEncParams(const Params: TStringArray): TMmEncParams;
 
 implementation
 
 uses
-  parc_bytes, parc_methods;
+  parc_bytes, parc_tta;   // parc_tta links mmtta_core.o (once)
 
-const
-  BUFFER_SIZE = 256 * 1024;
+procedure mm_enc_rows(m: PMmCore; src, prev, dst: PByte; nrows: SizeUInt; cost: LongInt); cdecl; external name 'mm_enc_rows';
+procedure mm_dec_rows(m: PMmCore; buf, prev: PByte; nrows: SizeUInt); cdecl; external name 'mm_dec_rows';
+procedure mm_enc_1d(m: PMmCore; src, dst: PByte; frames: SizeUInt; cost: LongInt); cdecl; external name 'mm_enc_1d';
+procedure mm_dec_1d(m: PMmCore; buf: PByte; frames: SizeUInt); cdecl; external name 'mm_dec_1d';
+function mm_state_size: SizeUInt; cdecl; external name 'mm_state_size';
 
-{ "c*w" o "c*wf" (canales*bits, la 'f' final marca punto flotante).
-  Equivale a los dos sscanf de parse_MM. }
-function ParseChanWord(const p: string; out a, b: Integer; out isFloat: Boolean): Boolean;
-var
-  star: Integer;
-  w: string;
-begin
-  Result := False;
-  isFloat := False;
-  star := Pos('*', p);
-  if star = 0 then Exit;
-  a := StrToIntDef(Copy(p, 1, star - 1), -1);
-  if a <= 0 then Exit;
-  w := Copy(p, star + 1, MaxInt);
-  if (w <> '') and (w[Length(w)] = 'f') then
-  begin
-    isFloat := True;
-    w := Copy(w, 1, Length(w) - 1);
-  end;
-  b := StrToIntDef(w, -1);
-  Result := b > 0;
-end;
+{ ---------------------------------------------------------------------------------------- }
+{ parameters }
 
-function ParseMmParams(const Params: TStringArray): TMmParams;
+function ParseMmEncParams(const Params: TStringArray): TMmEncParams;
 var
   k, a, b: Integer;
   p: string;
-  isF: Boolean;
+  isF, ok: Boolean;
 begin
+  if (Length(Params) = 0) or (Params[0] <> 'mm') then
+    raise EMmEncParams.Create('mm: not the method mm');
   Result.Mode := 9;
   Result.SkipHeader := 0;
   Result.IsFloat := 0;
@@ -99,270 +139,495 @@ begin
   for k := 1 to High(Params) do
   begin
     p := Params[k];
-    if p = '' then Continue;
+    if p = '' then raise EMmEncParams.Create('mm: empty parameter');
     case p[1] of
-      's': Result.SkipHeader := 1;
-      'f': Result.IsFloat := 1;
-      'd': Result.Mode := StrToIntDef(Copy(p, 2, MaxInt), Result.Mode);
-      'c': Result.NumChan := StrToIntDef(Copy(p, 2, MaxInt), Result.NumChan);
-      'w': Result.WordSize := StrToIntDef(Copy(p, 2, MaxInt), Result.WordSize);
-      'o': Result.Offset := StrToIntDef(Copy(p, 2, MaxInt), Result.Offset);
-      'r': Result.Reorder := StrToIntDef(Copy(p, 2, MaxInt), Result.Reorder);
+      's': ok := Length(p) = 1;
+      'f': ok := Length(p) = 1;
+      'd': ok := FaParseInt(Copy(p, 2, MaxInt), Result.Mode);
+      'c': ok := FaParseInt(Copy(p, 2, MaxInt), Result.NumChan);
+      'w': ok := FaParseInt(Copy(p, 2, MaxInt), Result.WordSize);
+      'o': ok := FaParseInt(Copy(p, 2, MaxInt), Result.Offset);
+      'r': ok := FaParseInt(Copy(p, 2, MaxInt), Result.Reorder) and (Result.Reorder = 0);
     else
-      { "c*w" o "c*wf" }
-      if ParseChanWord(p, a, b, isF) then
+      ok := FaParseChanWord(p, a, b, isF);
+      if ok then
       begin
         Result.NumChan := a;
         Result.WordSize := b;
-        if isF then Result.IsFloat := 1;
-      end
+        Result.IsFloat := Ord(isF);
+      end;
+    end;
+    if not ok then raise EMmEncParams.CreateFmt('mm: invalid parameter "%s"', [p]);
+    if p = 's' then Result.SkipHeader := 1;
+    if p = 'f' then Result.IsFloat := 1;
+  end;
+end;
+
+function ParseMmParams(const Params: TStringArray): TMmParams;
+begin
+  try
+    Result := ParseMmEncParams(Params);
+  except
+    on E: EMmEncParams do raise EArcCorrupt.Create(E.Message);
+  end;
+end;
+
+{ LEB128 (7 bits per byte, low group first, bit 7 = more) }
+procedure PutLeb(var W: TByteWriter; V: QWord);
+begin
+  repeat
+    if V > $7F then W.U8((V and $7F) or $80) else W.U8(V);
+    V := V shr 7;
+  until V = 0;
+end;
+
+{ ---------------------------------------------------------------------------------------- }
+{ encoder }
+
+constructor TMmEncStage.Create(ATarget: TOutStage; const Params: TStringArray);
+begin
+  Create(ATarget, ParseMmEncParams(Params));
+end;
+
+constructor TMmEncStage.Create(ATarget: TOutStage; const APar: TMmEncParams);
+begin
+  inherited Create(ATarget);
+  if mm_state_size <> SizeOf(TMmCore) then raise EMmEncParams.Create('mm: core mismatch');
+  FPar := APar;
+  FPhase := mpDetect;
+  SetLength(FBuf, MM_DETECT);
+end;
+
+{ the predictor with the smallest residual cost on (up to) 256 KB of data }
+procedure TMmEncStage.ChoosePred(Data: PByte; Len: SizeInt);
+var
+  Lim, Units: SizeInt;
+  p, c, BestP, BestC, LoP, HiP: Integer;
+  Best: QWord;
+  M: TMmCore;
+begin
+  FM.Pred := 0; FM.Cross := 0;
+  if FPar.Mode <= 2 then Lim := 64 * 1024 else Lim := 256 * 1024;
+  if Len > Lim then Len := Lim;
+  Units := Len div FUnit;
+  if Units < 2 then Exit;
+  if FM.Width > 0 then begin LoP := 0; HiP := 5; end else begin LoP := 0; HiP := 1; end;
+  Best := High(QWord);
+  BestP := LoP; BestC := 0;
+  for p := LoP to HiP do
+    for c := 0 to Ord(FM.NumChan >= 2) do
+    begin
+      if (FM.Width > 0) and (p = 1) then Continue;
+      M := FM;
+      M.Pred := p;
+      M.Cross := c;
+      M.Cost := 0;
+      FillChar(M.Last1, SizeOf(M.Last1), 0);
+      FillChar(M.Last2, SizeOf(M.Last2), 0);
+      if M.Width > 0 then mm_enc_rows(@M, Data, nil, nil, Units, 1)
+      else mm_enc_1d(@M, Data, nil, Units, 1);
+      if M.Cost < Best then
+      begin
+        Best := M.Cost;
+        BestP := p;
+        BestC := c;
+      end;
+    end;
+  FM.Pred := BestP;
+  FM.Cross := BestC;
+end;
+
+procedure TMmEncStage.Decide;
+var
+  L: TMmLayout;
+  Ok: Boolean;
+  R: Double;
+  W: TByteWriter;
+  Avail: SizeInt;
+begin
+  Ok := False;
+  FillChar(L, SizeOf(L), 0);
+  L.DataLen := -1;
+  if (FPar.NumChan > 0) or (FPar.WordSize > 0) or (FPar.IsFloat <> 0) then
+  begin
+    L.NumChan := FPar.NumChan;
+    if L.NumChan = 0 then L.NumChan := 1;
+    L.Bits := FPar.WordSize;
+    if L.Bits = 0 then
+      if FPar.IsFloat <> 0 then L.Bits := 32 else L.Bits := 8;
+    L.Offset := FPar.Offset;
+    if L.Bits = 8 then L.Flags := MMF_U8;
+    Ok := L.Bits in [8, 16, 24, 32];
+  end
+  else
+  begin
+    if FPar.SkipHeader = 0 then Ok := MmParseHeader(@FBuf[0], FLen, L);
+    if not Ok then
+    begin
+      if FPar.Mode <= 2 then
+        Ok := MmDetectStats(@FBuf[0], FLen, [1, 2, 3, 4], [1, 2], False, 0.80, L, R)
       else
-        raise EUnsupportedMethod.Create('mm: invalid parameter: ' + p);
+        Ok := MmDetectStats(@FBuf[0], FLen, [1, 2, 3, 4], [1, 2, 3, 4], True, 0.80, L, R);
+      L.Offset := 0;
+      L.DataLen := -1;
     end;
   end;
-end;
-
-{ --- undiff de a N bytes, con acumulador por canal ---------------------- }
-
-procedure Undiff1(Buf: PByte; BufSize, N: Integer; Base: PByte);
-var
-  p, e: PByte;
-  i: Integer;
-begin
-  p := Buf;
-  e := Buf + BufSize;
-  while p + N <= e do
+  if Ok and ((L.NumChan < 1) or (L.NumChan > MM_MAX_CHAN)) then Ok := False;
+  FillChar(FM, SizeOf(FM), 0);
+  if Ok then
   begin
-    for i := 0 to N - 1 do
+    FM.NumChan := L.NumChan;
+    FM.Bytes := L.Bits div 8;
+    FM.BE := Ord(L.Flags and MMF_BE <> 0);
+    FM.Uns := Ord((L.Kind = MMK_IMAGE) or (L.Flags and MMF_U8 <> 0));
+    if (L.Kind = MMK_IMAGE) and (L.Width > 0) and (L.RowBytes >= Int64(L.Width) * L.NumChan * (L.Bits div 8)) and
+       (L.RowBytes <= MM_MAX_ROW) then
     begin
-      Base[i] := Base[i] + p[i];
-      p[i] := Base[i];
-    end;
-    Inc(p, N);
+      FM.Width := L.Width;
+      FM.RowBytes := L.RowBytes;
+      FUnit := L.RowBytes;
+    end
+    else
+      FUnit := FM.NumChan * FM.Bytes;
   end;
-end;
-
-procedure Undiff2(Buf: PByte; BufSize, N: Integer; Base: PByte);
-var
-  p, e: PByte;
-  i: Integer;
-  v: LongWord;
-begin
-  p := Buf;
-  e := Buf + BufSize;
-  { N elementos de 2 bytes por grupo }
-  while p + N * 2 <= e do
+  W.Clear;
+  W.U8(MM_STREAM_VERSION);
+  if not Ok then
   begin
-    for i := 0 to N - 1 do
-    begin
-      v := (LongWord(p[2 * i]) or (LongWord(p[2 * i + 1]) shl 8)) +
-           (LongWord(Base[2 * i]) or (LongWord(Base[2 * i + 1]) shl 8));
-      Base[2 * i] := v and $FF;
-      Base[2 * i + 1] := (v shr 8) and $FF;
-      p[2 * i] := Base[2 * i];
-      p[2 * i + 1] := Base[2 * i + 1];
-    end;
-    Inc(p, N * 2);
+    W.U8(0);
+    Emit(@W.Data[0], W.Len);
+    FPhase := mpStored;
+    Exit;
   end;
+  // the predictor, on the data in the detection buffer
+  Avail := FLen - L.Offset;
+  if (L.DataLen >= 0) and (Avail > L.DataLen) then Avail := L.DataLen;
+  if Avail > 0 then ChoosePred(@FBuf[L.Offset], Avail);
+  W.U8(1);
+  W.U8(FM.NumChan);
+  W.U8(FM.Bytes);
+  W.U8(FM.BE or (FM.Uns shl 1));
+  W.U8(FM.Pred);
+  W.U8(FM.Cross);
+  PutLeb(W, FM.Width);
+  PutLeb(W, FM.RowBytes);
+  PutLeb(W, L.Offset);
+  PutLeb(W, L.DataLen + 1);
+  while W.Len mod 8 <> 0 do W.U8(0);
+  Emit(@W.Data[0], W.Len);
+  FHdrLeft := L.Offset;
+  FDataLeft := L.DataLen;
+  if FDataLeft > 0 then FDataLeft := FDataLeft - FDataLeft mod FUnit;   // the rest passes raw
+  SetLength(FPend, FUnit);
+  SetLength(FPrev, FUnit);
+  SetLength(FOut, MM_CHUNK + FUnit);
+  FPhase := mpFiltered;
 end;
 
-procedure Undiff3(Buf: PByte; BufSize, N: Integer; Base: PByte);
+{ Units whole rows / sample frames at P (all inside the data region) }
+procedure TMmEncStage.FilterUnits(P: PByte; Units: SizeInt);
 var
-  p, e: PByte;
-  i: Integer;
-  v: LongWord;
+  k, PrevP: SizeInt;
+  Pp: PByte;
 begin
-  p := Buf;
-  e := Buf + BufSize;
-  while p + N * 3 <= e do
+  while Units > 0 do
   begin
-    for i := 0 to N - 1 do
+    k := MM_CHUNK div FUnit;
+    if k < 1 then k := 1;
+    if k > Units then k := Units;
+    if FM.Width > 0 then
     begin
-      v := LongWord(p[i * 3]) or (LongWord(p[i * 3 + 1]) shl 8) or (LongWord(p[i * 3 + 2]) shl 16);
-      v := v + (LongWord(Base[i * 4]) or (LongWord(Base[i * 4 + 1]) shl 8) or
-                (LongWord(Base[i * 4 + 2]) shl 16) or (LongWord(Base[i * 4 + 3]) shl 24));
-      Base[i * 4] := v and $FF;
-      Base[i * 4 + 1] := (v shr 8) and $FF;
-      Base[i * 4 + 2] := (v shr 16) and $FF;
-      Base[i * 4 + 3] := (v shr 24) and $FF;
-      p[i * 3] := Base[i * 4];                     { setvalue24: mantiene el 4º byte }
-      p[i * 3 + 1] := Base[i * 4 + 1];
-      p[i * 3 + 2] := Base[i * 4 + 2];
-    end;
-    Inc(p, N * 3);
+      if FHavePrev then Pp := @FPrev[0] else Pp := nil;
+      mm_enc_rows(@FM, P, Pp, @FOut[0], k, 0);
+      Move(P[(k - 1) * FUnit], FPrev[0], FUnit);
+      FHavePrev := True;
+    end
+    else
+      mm_enc_1d(@FM, P, @FOut[0], k, 0);
+    PrevP := k * FUnit;
+    Emit(@FOut[0], PrevP);
+    Inc(P, PrevP);
+    Dec(Units, k);
   end;
 end;
 
-procedure Undiff4(Buf: PByte; BufSize, N: Integer; Base: PByte);
+procedure TMmEncStage.Feed(P: PByte; N: SizeInt);
 var
-  p, e: PByte;
-  i: Integer;
-  v: LongWord;
+  k, Units: SizeInt;
 begin
-  p := Buf;
-  e := Buf + BufSize;
-  { N elementos de 4 bytes por grupo }
-  while p + N * 4 <= e do
+  while N > 0 do
   begin
-    for i := 0 to N - 1 do
+    if FHdrLeft > 0 then
     begin
-      v := (LongWord(p[4 * i]) or (LongWord(p[4 * i + 1]) shl 8) or
-            (LongWord(p[4 * i + 2]) shl 16) or (LongWord(p[4 * i + 3]) shl 24)) +
-           (LongWord(Base[4 * i]) or (LongWord(Base[4 * i + 1]) shl 8) or
-            (LongWord(Base[4 * i + 2]) shl 16) or (LongWord(Base[4 * i + 3]) shl 24));
-      Base[4 * i] := v and $FF;
-      Base[4 * i + 1] := (v shr 8) and $FF;
-      Base[4 * i + 2] := (v shr 16) and $FF;
-      Base[4 * i + 3] := (v shr 24) and $FF;
-      p[4 * i] := Base[4 * i];
-      p[4 * i + 1] := Base[4 * i + 1];
-      p[4 * i + 2] := Base[4 * i + 2];
-      p[4 * i + 3] := Base[4 * i + 3];
+      k := N;
+      if k > FHdrLeft then k := FHdrLeft;
+      Emit(P, k);
+      Inc(P, k); Dec(N, k); Dec(FHdrLeft, k);
+      Continue;
     end;
-    Inc(p, N * 4);
+    if FDataLeft = 0 then
+    begin
+      Emit(P, N);
+      Exit;
+    end;
+    // complete the pending unit
+    if FPendLen > 0 then
+    begin
+      k := FUnit - FPendLen;
+      if k > N then k := N;
+      Move(P^, FPend[FPendLen], k);
+      Inc(FPendLen, k); Inc(P, k); Dec(N, k);
+      if FPendLen = FUnit then
+      begin
+        FilterUnits(@FPend[0], 1);
+        FPendLen := 0;
+        if FDataLeft > 0 then Dec(FDataLeft, FUnit);
+      end;
+      Continue;
+    end;
+    Units := N div FUnit;
+    if (FDataLeft > 0) and (Units > FDataLeft div FUnit) then Units := FDataLeft div FUnit;
+    if Units > 0 then
+    begin
+      FilterUnits(P, Units);
+      k := Units * FUnit;
+      Inc(P, k); Dec(N, k);
+      if FDataLeft > 0 then Dec(FDataLeft, k);
+      Continue;
+    end;
+    Move(P^, FPend[0], N);
+    FPendLen := N;
+    N := 0;
   end;
 end;
 
-{ --- TMmStage ----------------------------------------------------------- }
+procedure TMmEncStage.DoWrite(Buf: PByte; Count: SizeInt);
+var
+  k: SizeInt;
+  Tmp: TBytes;
+begin
+  if Count <= 0 then Exit;
+  case FPhase of
+    mpDetect:
+      begin
+        k := MM_DETECT - FLen;
+        if k > Count then k := Count;
+        Move(Buf^, FBuf[FLen], k);
+        Inc(FLen, k); Inc(Buf, k); Dec(Count, k);
+        if FLen < MM_DETECT then Exit;
+        Decide;
+        Tmp := FBuf;
+        FBuf := nil;
+        if FPhase = mpStored then Emit(@Tmp[0], FLen) else Feed(@Tmp[0], FLen);
+        FLen := 0;
+        if Count > 0 then DoWrite(Buf, Count);
+      end;
+    mpStored: Emit(Buf, Count);
+    mpFiltered: Feed(Buf, Count);
+  end;
+end;
+
+procedure TMmEncStage.DoFinish;
+var
+  Tmp: TBytes;
+begin
+  if FPhase = mpDetect then
+  begin
+    Decide;
+    Tmp := FBuf;
+    FBuf := nil;
+    if FLen > 0 then
+      if FPhase = mpStored then Emit(@Tmp[0], FLen) else Feed(@Tmp[0], FLen);
+    FLen := 0;
+  end;
+  // an incomplete unit at the end passes as it is
+  if (FPhase = mpFiltered) and (FPendLen > 0) then
+  begin
+    Emit(@FPend[0], FPendLen);
+    FPendLen := 0;
+  end;
+end;
+
+{ ---------------------------------------------------------------------------------------- }
+{ decoder }
 
 constructor TMmStage.Create(ASource: TInStage; const APar: TMmParams);
 begin
-  if (APar.Reorder <> 0) then
-    raise EUnsupportedMethod.Create('mm: reorder not supported yet');
-  if (APar.NumChan < 0) or (APar.WordSize < 0) then
-    raise EUnsupportedMethod.Create('mm: invalid parameters');
   inherited Create(ASource);
-  FPar := APar;
 end;
 
-function RoundDown(a, b: SizeInt): SizeInt; inline;
+function ReadVIntFrom(S: TInStage): QWord;
+var
+  b: Byte;
+  sh: Integer;
 begin
-  if b <= 0 then Exit(0);
-  Result := (a div b) * b;
-end;
-
-function RoundUp(a, b: SizeInt): SizeInt; inline;
-begin
-  if b <= 0 then Exit(a);
-  Result := ((a + b - 1) div b) * b;
+  Result := 0;
+  sh := 0;
+  repeat
+    S.ReadExact(@b, 1);
+    if (sh = 63) and (b > 1) then Corrupt('mm: invalid number');
+    Result := Result or (QWord(b and $7F) shl sh);
+    Inc(sh, 7);
+    if (sh > 63) and (b and $80 <> 0) then Corrupt('mm: invalid number');
+  until b and $80 = 0;
 end;
 
 procedure TMmStage.Start;
 var
-  hdr: array[0..2] of Byte;
-  b4: array[0..3] of Byte;
-  offset: LongInt;
-  align: SizeInt;
+  b: array[0..5] of Byte;
+  Pos: Int64;
+  Wd, Rb, Off, DL: QWord;
+  Pad: array[0..7] of Byte;
+  k: Integer;
+
+  function VI: QWord;
+  var
+    x: Byte;
+    sh: Integer;
+  begin
+    Result := 0;
+    sh := 0;
+    repeat
+      Source.ReadExact(@x, 1);
+      Inc(Pos);
+      if sh > 56 then Corrupt('mm: invalid number');
+      Result := Result or (QWord(x and $7F) shl sh);
+      Inc(sh, 7);
+    until x and $80 = 0;
+  end;
+
 begin
   FStarted := True;
-  if not Source.ReadExactOrEof(@hdr[0], 1) then
-  begin
-    FEof := True; FStored := True; FLen := 0;
-    Exit;
-  end;
-  if hdr[0] = 0 then
+  if not Source.ReadExactOrEof(@b[0], 1) then Corrupt('mm: empty stream');
+  if b[0] <> MM_STREAM_VERSION then Corrupt('mm: unknown stream version (not a PArc 0.0.7+ mm stream)');
+  Source.ReadExact(@b[0], 1);
+  if b[0] = 0 then
   begin
     FStored := True;
     Exit;
   end;
-  if (hdr[0] and not 1) <> 0 then
-    Corrupt('mm: flags no soportados (reorder)');
-  Source.ReadExact(@hdr[1], 2);
-  FNumChan := hdr[1];
-  FWordSize := hdr[2];
-  if (FNumChan = 0) then Corrupt('mm: num_chan = 0');
-  FByteSize := (FWordSize + 7) div 8;
-  // byte_size > 4: el switch de mm.cpp no tiene rama y los datos pasan tal cual
-  if FByteSize < 1 then Corrupt('mm: invalid word_size');
-  FN := FNumChan * FByteSize;
-  Source.ReadExact(@b4[0], 4);
-  offset := LongInt(LongWord(b4[0]) or (LongWord(b4[1]) shl 8) or
-                    (LongWord(b4[2]) shl 16) or (LongWord(b4[3]) shl 24));
-  if offset < 0 then Corrupt('mm: invalid offset');
-  { el encabezado original se copia tal cual }
-  if offset > 0 then
+  if b[0] <> 1 then Corrupt('mm: invalid mode');
+  Source.ReadExact(@b[0], 5);
+  Pos := 7;
+  FillChar(FM, SizeOf(FM), 0);
+  FM.NumChan := b[0];
+  FM.Bytes := b[1];
+  FM.BE := b[2] and 1;
+  FM.Uns := (b[2] shr 1) and 1;
+  FM.Pred := b[3];
+  FM.Cross := b[4];
+  Wd := VI;
+  Rb := VI;
+  Off := VI;
+  DL := VI;
+  if (FM.NumChan < 1) or (FM.NumChan > MM_MAX_CHAN) or (FM.Bytes < 1) or (FM.Bytes > 4) or
+     (b[2] > 3) or (FM.Pred > 5) or (FM.Cross > 1) or (Off > QWord(High(Int64))) or (DL > QWord(High(Int64))) then
+    Corrupt('mm: invalid header');
+  if Wd > 0 then
   begin
-    SetLength(FBuf, offset);
-    Source.ReadExact(@FBuf[0], offset);
-    FLen := offset;
-    FPos := 0;
-  end;
-  { acumulador de cada canal: el encoder usa 4 bytes por canal para 24 bits }
-  if FByteSize = 3 then SetLength(FBase, FNumChan * 4)
-  else SetLength(FBase, FNumChan * FByteSize);
-  FillChar(FBase[0], Length(FBase), 0);
-  { relleno de alineación = valores iniciales de base (no se emiten) }
-  align := RoundUp(3 + 4 + offset, FN) - (3 + 4 + offset);
-  if align > 0 then
+    if (FM.Pred < 2) and (FM.Pred <> 0) or (Rb > MM_MAX_ROW) or (Wd * FM.NumChan * FM.Bytes > Rb) then
+      Corrupt('mm: invalid header');
+    FM.Width := Wd;
+    FM.RowBytes := Rb;
+    FUnit := Rb;
+  end
+  else
   begin
-    if align > Length(FBase) then Corrupt('mm: invalid alignment');
-    Source.ReadExact(@FBase[0], align);
+    if (FM.Pred > 1) or (Rb <> 0) then Corrupt('mm: invalid header');
+    FUnit := FM.NumChan * FM.Bytes;
   end;
-  FChunk := RoundDown(BUFFER_SIZE, FN);
-  { OJO: no limpiar FBuf acá — todavía contiene los `offset` bytes del encabezado
-    original que hay que entregar (FLen quedó en offset). }
+  k := (8 - Pos mod 8) mod 8;
+  if k > 0 then
+  begin
+    Source.ReadExact(@Pad[0], k);
+    while k > 0 do
+    begin
+      Dec(k);
+      if Pad[k] <> 0 then Corrupt('mm: invalid padding');
+    end;
+  end;
+  FHdrLeft := Off;
+  FDataLeft := Int64(DL) - 1;
+  if FDataLeft > 0 then FDataLeft := FDataLeft - FDataLeft mod FUnit;
+  k := MM_CHUNK div FUnit;
+  if k < 1 then k := 1;
+  SetLength(FBuf, k * FUnit);
+  SetLength(FPrev, FUnit);
 end;
 
-function TMmStage.NextChunk: Boolean;
+{ next piece of output into FBuf: data units decoded, or raw bytes }
+function TMmStage.Fill: Boolean;
 var
-  n, k: SizeInt;
+  Want, Got, Units, k: SizeInt;
+  Pp: PByte;
 begin
-  if FStored then
-  begin
-    SetLength(FBuf, BUFFER_SIZE);
-    n := Source.Read(@FBuf[0], BUFFER_SIZE);
-    FLen := n;
-    FPos := 0;
-    Exit(n > 0);
-  end;
-  if FChunk <= 0 then Exit(False);
-  if Length(FBuf) < FChunk then SetLength(FBuf, FChunk);
-  // Llenar el trozo entero: Read puede devolver menos (p. ej. plz entrega de a bloques) y un
-  // trozo que no termina en un límite de muestra rompía el undiff de los siguientes
-  n := 0;
-  repeat
-    k := Source.Read(@FBuf[n], FChunk - n);
-    Inc(n, k);
-  until (k = 0) or (n = FChunk);
-  FLen := n;
   FPos := 0;
-  if n <= 0 then Exit(False);
-  case FByteSize of
-    1: Undiff1(@FBuf[0], n, FNumChan, @FBase[0]);
-    2: Undiff2(@FBuf[0], n, FNumChan, @FBase[0]);
-    3: Undiff3(@FBuf[0], n, FNumChan, @FBase[0]);
-    4: Undiff4(@FBuf[0], n, FNumChan, @FBase[0]);
-  else
-    ;   // byte_size > 4: sin undiff, como el switch sin rama de mm.cpp
+  FLen := 0;
+  if FEof then Exit(False);
+  if (FHdrLeft > 0) or (FDataLeft = 0) then
+  begin
+    Want := Length(FBuf);
+    if (FHdrLeft > 0) and (Want > FHdrLeft) then Want := FHdrLeft;
+    Got := Source.Read(@FBuf[0], Want);
+    if Got = 0 then
+    begin
+      if FHdrLeft > 0 then Corrupt('mm: truncated stream');
+      FEof := True;
+      Exit(False);
+    end;
+    if FHdrLeft > 0 then Dec(FHdrLeft, Got);
+    FLen := Got;
+    Exit(True);
   end;
+  Want := Length(FBuf);
+  if (FDataLeft > 0) and (Want > FDataLeft) then Want := FDataLeft;
+  // as many bytes as there are (a short stream ends in an incomplete unit that is raw)
+  Got := 0;
+  while Got < Want do
+  begin
+    k := Source.Read(@FBuf[Got], Want - Got);
+    if k = 0 then Break;
+    Inc(Got, k);
+  end;
+  if Got = 0 then
+  begin
+    if FDataLeft > 0 then Corrupt('mm: truncated stream');
+    FEof := True;
+    Exit(False);
+  end;
+  Units := Got div FUnit;
+  if Units > 0 then
+    if FM.Width > 0 then
+    begin
+      if FHavePrev then Pp := @FPrev[0] else Pp := nil;
+      mm_dec_rows(@FM, @FBuf[0], Pp, Units);
+      Move(FBuf[(Units - 1) * FUnit], FPrev[0], FUnit);
+      FHavePrev := True;
+    end
+    else
+      mm_dec_1d(@FM, @FBuf[0], Units);
+  if FDataLeft > 0 then Dec(FDataLeft, Got);
+  // a short read is the end of the stream (an incomplete unit there is raw)
+  if Got < Want then FEof := True;
+  FLen := Got;
   Result := True;
 end;
 
 function TMmStage.Read(Buf: PByte; Count: SizeInt): SizeInt;
 var
-  n: SizeInt;
+  k: SizeInt;
 begin
   Result := 0;
+  if Count <= 0 then Exit;
   if not FStarted then Start;
-  while Count > 0 do
-  begin
-    while FPos >= FLen do
-    begin
-      if FEof then Exit;
-      if not NextChunk then
-      begin
-        FEof := True;
-        Exit;
-      end;
-    end;
-    n := FLen - FPos;
-    if n > Count then n := Count;
-    if (n < 0) or (FPos + n > Length(FBuf)) then
-      raise Exception.CreateFmt('mm: inconsistencia FPos=%d FLen=%d len(FBuf)=%d n=%d chunk=%d',
-        [FPos, FLen, Length(FBuf), n, FChunk]);
-    Move(FBuf[FPos], Buf^, n);
-    Inc(FPos, n); Inc(Buf, n); Dec(Count, n); Inc(Result, n);
-  end;
+  if FStored then Exit(Source.Read(Buf, Count));
+  if FPos >= FLen then
+    if not Fill then Exit(0);
+  k := FLen - FPos;
+  if k > Count then k := Count;
+  Move(FBuf[FPos], Buf^, k);
+  Inc(FPos, k);
+  Result := k;
 end;
 
 end.

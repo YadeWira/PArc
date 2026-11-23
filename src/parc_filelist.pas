@@ -541,28 +541,25 @@ begin
   if Result < 0 then Result := 0;
 end;
 
-{ detectMM: solo para $wav/$bmp: cabecera en el primer KB, o entropía en la mitad. }
+{ detectMM: only for $wav/$bmp: a container header in the first KB (parc_mmdet), or sample
+  statistics in the middle of the file. }
 function DetectMM(Fs: TFileStream; FileSize: Int64; const DefaultType: string): Boolean;
 var
   Buf: TBytes;
   Len, Bytes: Integer;
-  IsFloat, NumChan, WordSize, Offset: Integer;
+  L: TMmLayout;
 begin
   Result := False;
   if (DefaultType <> '$wav') and (DefaultType <> '$bmp') then Exit;
-  if FileSize > High(LongInt) then FileSize := High(LongInt);   // clipToMaxInt
+  if FileSize > High(LongInt) then FileSize := High(LongInt);
   Len := ReadChunk(Fs, 0, Min(1024, FileSize), Buf);
-  if (Len > 0) and MmDetectWavHeader(@Buf[0], Len, IsFloat, NumChan, WordSize, Offset) then Exit(True);
-  // detect_mm_bytes
+  if (Len > 0) and MmParseHeader(@Buf[0], Len, L) then Exit(True);
   if CurLevel <= 2 then Bytes := 64 * KB
   else Bytes := Max(64 * KB, Min(FileSize, MB) div 2);
   if Bytes > FileSize then Bytes := FileSize;
   Len := ReadChunk(Fs, (FileSize - Bytes) div 2, Bytes, Buf);
   if Len <= 0 then Exit;
-  if CurLevel <= 2 then
-    Result := MmDetectByEntropy(@Buf[0], Len, [1, 3], [8, 16], 0.80, IsFloat, NumChan, WordSize, Offset)
-  else
-    Result := MmDetectByEntropy(@Buf[0], Len, [1, 2, 3, 4], [8, 16, 24, 32], 0.80, IsFloat, NumChan, WordSize, Offset);
+  Result := MmLooksMultimedia(@Buf[0], Len, CurLevel > 2);
 end;
 
 { typeByCompressor (Compression.hs): el tipo que sugiere el compresor de un bloque viejo, por

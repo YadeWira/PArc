@@ -301,9 +301,9 @@ begin
 end;
 
 { ---------------------------------------------------------------------------------------- }
-{ the C core (src/tta/tta_core.c) }
+{ the C core (src/tta/mmtta_core.c) }
 
-{$L tta_core.o}
+{$L mmtta_core.o}
 function ttac_state_size(nch: LongInt): SizeUInt; cdecl; external name 'ttac_state_size';
 procedure ttac_init(st: Pointer; nch, bits: LongInt; cfg: Pointer); cdecl; external name 'ttac_init';
 function ttac_encode(st: Pointer; x: PLongInt; frames: SizeUInt; rc: PByte; rccap: SizeUInt;
