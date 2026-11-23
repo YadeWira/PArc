@@ -19,13 +19,13 @@
   target and this unit links the object. Everything is integer arithmetic on the block: the
   output does not depend on the platform or the thread count.
 
-  With `a` the encoder cuts the input where its statistics change (see "adaptive blocks"
-  below); the stream is the same, just with shorter blocks. Blocks are compressed and
+  The encoder cuts the input where its statistics change (see "adaptive blocks" below; GRZip
+  did it only with `a`, which is accepted): the stream is the same, just with shorter blocks. Blocks are compressed and
   decompressed in parallel (a pool of jobs, written and delivered in order) within the
   PARC_THREADS budget (parc_parallel).
 
-  Method string: bwt[:<block>][:m1..m4][:l|:l<N>|:<N>][:h<N>][:e0|:e1|:e2][:a], also b<block>;
-  GRZip's other switches (s, d, p, t<N>, i<N>) are accepted and ignored. Defaults: 8 MB, m1,
+  Method string: bwt[:<block>][:m1..m4][:l|:l<N>|:<N>][:h<N>][:e0|:e1|:e2], also b<block>;
+  GRZip's other switches (a, s, d, p, t<N>, i<N>) are accepted and ignored. Defaults: 8 MB, m1,
   LZP with minimum match 32 and 18 hash bits. m1 = adaptive coder, m2 and m3 = static, m4 =
   fast; e0/e1/e2 choose fast/static/adaptive explicitly. A bare integer is the LZP minimum; a
   bare memory size the block (as with GRZip). `grzip:...` strings are written as `bwt:...` by
@@ -75,7 +75,8 @@ type
     Coder: Integer;          // BWT_CODER_*
     LzpMin: Integer;         // 0 = no LZP
     LzpHash: Integer;
-    Adaptive: Boolean;       // a: blocks cut where the statistics change
+    Adaptive: Boolean;       // a (GRZip's adaptive block): accepted; the blocks are always cut
+                             // where the statistics change
   end;
 
   { Encoder: blocks of BlockSize bytes compressed in parallel and written in order. }
@@ -283,7 +284,6 @@ begin
   if P.LzpMin > 0 then Result := Result + ':l' + IntToStr(P.LzpMin) + ':h' + IntToStr(P.LzpHash)
   else Result := Result + ':l';
   if P.CoderSet >= 0 then Result := Result + ':e' + IntToStr(P.CoderSet);
-  if P.Adaptive then Result := Result + ':a';
 end;
 
 function LzpParamsOf(const P: TBwtParams; BlockSize: SizeInt; MinLen: Integer): TLzpParams;
@@ -507,40 +507,43 @@ end;
   in one pass; the best split is taken when it saves more than a small part of the cost plus
   about 1.5 KB (what the coder spends learning a new model), and both halves are split again the same
   way. To keep it cheap only every SEG_STRIDE-th byte is a sample, and no piece is smaller than
-  SEG_MIN. (Tuned on a solid block of 3,000 mixed text files from the corpus: the saving needed
-  is 1/SEG_DIV of the cost plus SEG_PENALTY bits.) }
+  SEG_MIN. (Tuned on a solid block of 3,000 mixed text files from the corpus, on prose and on
+  Silesia's text files: the saving needed is 1/SEG_DIV of the cost plus SEG_PENALTY bits; a
+  looser rule cuts collections of texts apart and loses the repeats between them.) }
 
 const
-  SEG_STRIDE = 4;
+  SEG_STRIDE = 8;
   SEG_MIN = 64 * 1024;
   SEG_MAX = 64;              // pieces per block
-  SEG_PENALTY = 12288.0;     // bits
-  SEG_DIV = 128;
+  SEG_PENALTY = 49152.0;     // bits of the whole piece (the samples see 1/SEG_STRIDE of it)
+  SEG_DIV = 32;
   SEG_TAB = 65536;
+  SEG_ONE = 65536;           // fixed point: costs in 1/65536 bit
 
 type
+  TSegPair = record
+    L, R: LongInt;
+  end;
   TSegModel = class
-    L, R: array of LongInt;         // [ctx * 256 + sym]
-    LC, RC: array[0..255] of LongInt;
+    T: array of TSegPair;           // [ctx * 256 + sym]: left and right counts together
+    C: array[0..255] of TSegPair;   // per context
     constructor Create;
   end;
 
 var
-  SegLog: array of Single;           // f log2 f for f < SEG_TAB (read only once built)
-  SegD: array of Single;             // (f + 1) log2 (f + 1) - f log2 f for f < SEG_TAB
+  SegD: array of LongInt;            // SEG_ONE * ((f + 1) log2 (f + 1) - f log2 f) for f < SEG_TAB
   SegLogLock: TRTLCriticalSection;
 
 function FLogF(f: LongInt): Double; inline;
 begin
-  if f < SEG_TAB then Result := SegLog[f]
-  else Result := f * Log2(f);
+  if f <= 1 then Result := 0 else Result := f * Log2(f);
 end;
 
-{ FLogF(f + 1) - FLogF(f) }
-function DLogF(f: LongInt): Single; inline;
+{ SEG_ONE * (FLogF(f + 1) - FLogF(f)) }
+function DLogF(f: LongInt): LongInt; inline;
 begin
   if f < SEG_TAB then Result := SegD[f]
-  else Result := (f + 1) * Log2(f + 1) - f * Log2(f);
+  else Result := Round(SEG_ONE * (FLogF(f + 1) - FLogF(f)));
 end;
 
 procedure BuildSegLog;
@@ -549,13 +552,10 @@ var
 begin
   EnterCriticalSection(SegLogLock);
   try
-    if Length(SegLog) = 0 then
+    if Length(SegD) = 0 then
     begin
       SetLength(SegD, SEG_TAB);
-      SetLength(SegLog, SEG_TAB);
-      SegLog[0] := 0;
-      for i := 1 to SEG_TAB - 1 do SegLog[i] := i * Log2(i);
-      for i := 0 to SEG_TAB - 1 do SegD[i] := (i + 1) * Log2(i + 1) - SegLog[i];
+      for i := 0 to SEG_TAB - 1 do SegD[i] := Round(SEG_ONE * (FLogF(i + 1) - FLogF(i)));
     end;
   finally
     LeaveCriticalSection(SegLogLock);
@@ -564,56 +564,55 @@ end;
 
 constructor TSegModel.Create;
 begin
-  SetLength(L, 65536);
-  SetLength(R, 65536);
+  SetLength(T, 65536);
   BuildSegLog;
 end;
 
 { Best cut of P[0..n) (a multiple of SEG_STRIDE, SEG_MIN <= cut <= n - SEG_MIN), or 0 }
 function SegSplit(M: TSegModel; P: PByte; n: SizeInt): SizeInt;
 var
-  i, c, k, Best: SizeInt;
-  Whole, Cur, BestCost: Double;
+  i, c, k, Best, Stop: SizeInt;
+  Whole: Double;
+  Cur, BestCost: Int64;
   x, y: LongInt;
+  Tp: ^TSegPair;
 begin
   Result := 0;
   if n < 2 * SEG_MIN then Exit;
-  FillChar(M.L[0], 65536 * SizeOf(LongInt), 0);
-  FillChar(M.R[0], 65536 * SizeOf(LongInt), 0);
-  FillChar(M.LC, SizeOf(M.LC), 0);
-  FillChar(M.RC, SizeOf(M.RC), 0);
+  FillChar(M.T[0], 65536 * SizeOf(TSegPair), 0);
+  FillChar(M.C, SizeOf(M.C), 0);
   i := SEG_STRIDE;
   while i < n do
   begin
     c := P[i - 1];
-    Inc(M.R[c shl 8 + P[i]]);
-    Inc(M.RC[c]);
+    Inc(M.T[c shl 8 + P[i]].R);
+    Inc(M.C[c].R);
     Inc(i, SEG_STRIDE);
   end;
   Whole := 0;
-  for c := 0 to 255 do Whole := Whole + FLogF(M.RC[c]);
-  for k := 0 to 65535 do
-    if M.R[k] > 1 then Whole := Whole - FLogF(M.R[k]);
-  Cur := Whole;
-  BestCost := Whole - Whole / SEG_DIV - SEG_PENALTY;
+  for c := 0 to 255 do Whole := Whole + FLogF(M.C[c].R);
+  for k := 0 to 65535 do Whole := Whole - FLogF(M.T[k].R);
+  Cur := Round(Whole * SEG_ONE);
+  BestCost := Round((Whole - Whole / SEG_DIV - SEG_PENALTY / SEG_STRIDE) * SEG_ONE);
   Best := 0;
   i := SEG_STRIDE;
-  while i < n - SEG_MIN do
+  Stop := n - SEG_MIN;
+  while i < Stop do
   begin
-    if (i >= SEG_MIN) and (Cur < BestCost) then
+    if (Cur < BestCost) and (i >= SEG_MIN) then
     begin
       BestCost := Cur;
       Best := i;
     end;
     c := P[i - 1];
-    k := c shl 8 + P[i];
     // one sample from the right model to the left one
-    x := M.R[k] - 1; M.R[k] := x;
-    y := M.L[k]; M.L[k] := y + 1;
-    Cur := Cur + DLogF(x) - DLogF(y);
-    x := M.RC[c] - 1; M.RC[c] := x;
-    y := M.LC[c]; M.LC[c] := y + 1;
-    Cur := Cur - DLogF(x) + DLogF(y);
+    Tp := @M.T[c shl 8 + P[i]];
+    x := Tp^.R - 1; Tp^.R := x;
+    y := Tp^.L; Tp^.L := y + 1;
+    Inc(Cur, Int64(DLogF(x)) - DLogF(y));
+    x := M.C[c].R - 1; M.C[c].R := x;
+    y := M.C[c].L; M.C[c].L := y + 1;
+    Inc(Cur, Int64(DLogF(y)) - DLogF(x));
     Inc(i, SEG_STRIDE);
   end;
   Result := Best;
@@ -753,7 +752,7 @@ var
 begin
   if FLen = 0 then Exit;
   NCuts := 0;
-  if FPar.Adaptive and (FLen >= 2 * SEG_MIN) then
+  if FLen >= 2 * SEG_MIN then
   begin
     if FSeg = nil then FSeg := TSegModel.Create;
     Pieces := 1;
