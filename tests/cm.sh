@@ -32,7 +32,7 @@ mkdir -p st && cd st || exit 2
 : > empty
 printf 'a' > one
 head -c 300 /dev/urandom > small
-cat "$ROOT"/src/*.pas | head -c 1000000 > text
+cat "$ROOT"/src/*.pas 2>/dev/null | head -c 1000000 > text
 head -c 400000 /dev/urandom > rnd
 head -c 1000000 /dev/zero > zeros
 { head -c 100000 rnd; head -c 500000 text; head -c 200000 zeros; head -c 150000 "$PARC"; head -c 70000 rnd; } > mix

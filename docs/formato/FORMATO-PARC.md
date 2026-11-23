@@ -499,17 +499,23 @@ sequence of blocks of at most 64 KiB:
 |---|---|
 | end | 1 bit, p = 1/2: 1 = end of stream (nothing follows) |
 | modelled | 1 bit, adaptive (p starts at 1/2, moves 1/16 towards each coded value) |
+| text | only if modelled: 1 bit, adaptive like the previous one (its own probability) |
 | full | 1 bit, p = 1/2: 1 = 65536 bytes; 0 = 16 bits of length follow (p = 1/2, MSB first, 1..65535) |
 | data | the block's bytes, 8 bits each MSB first: predicted by the model if modelled, else p = 1/2 |
 
+In a text block the model leaves out its two sparse contexts (bytes 2–3 and 3–4 back); they
+help binary data much more than text, and text blocks code about 5–8% faster without them. The
+encoder marks a block as text when at least half of its bytes are printable ASCII (0x20–0x7E,
+tab, LF, CR) and fewer than 1/32 are zero (a heuristic; the decoder only reads the bit).
 The encoder stores a block raw ("not modelled") when it has at least 4096 bytes and its order-0
 entropy exceeds 7.92 bits per byte (already compressed data): it costs 8 bits per byte and keeps
 such data at full speed in both directions. Raw bytes still enter the history, the contexts and
 the match model; the mixers, state maps and secondary estimators only learn from modelled bits.
 
 The model (identical in encoder and decoder; integer arithmetic only, so every platform gives
-the same bytes; the SSE2 mixer code and the portable C code are bit-exact) is defined by
-`pcm_core.c`. In short: for each bit, eleven contexts give a bit-history state (one byte, a
+the same bytes; the SSE2 (x86, also 32-bit: `build.sh` compiles the core with `-msse2` there)
+and NEON (aarch64) mixer code and the portable C code are bit-exact) is defined by
+`pcm_core.c`. In short: for each bit, up to eleven contexts give a bit-history state (one byte, a
 bounded (n0, n1, last bit) counter): order 0 and order 1 from direct tables, and orders 2, 3, 4
 and 6, the current word, the previous and current word, bytes 2–3 back, the two bytes that last
 followed the previous byte (indirect), and bytes 3–4 back from a hash table of 64-byte buckets

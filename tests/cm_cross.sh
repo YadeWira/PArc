@@ -2,7 +2,7 @@
 # tests/cm_cross.sh — cm gives the same bytes on every platform: test_cm built for linux32
 # (native), linuxarm64 (qemu-aarch64 with QEMU_LD_PREFIX) and win64/win32 (Wine) encodes like the
 # linux64 one and reads its streams. The C core is built with each target's compiler as in
-# build.sh (x86-64 uses the SSE2 mixer, the others the portable C one: same results).
+# build.sh (x86 uses the SSE2 mixer, aarch64 NEON, linux64_c the portable C one: same results).
 # Uso: tests/cm_cross.sh   (FPC_CROSS as in build.sh; WINEPREFIX: if not given, a private copy
 #      of FILTERS_WINE_TEMPLATE, or Wine's default)
 set -u
@@ -28,7 +28,7 @@ build() {   # build <name> <cc and its options> -- <fpc> [options]
 build linux64 gcc -fno-pie -- fpc || exit 2
 build linux64_c gcc -fno-pie -DPCM_NO_SIMD -- fpc || exit 2
 TARGETS="linux64_c"
-if [ -x "$FPC_CROSS/bin/fpc-linux32" ] && build linux32 gcc -m32 -fno-pie -mstackrealign -- "$FPC_CROSS/bin/fpc-linux32" -Fl/usr/lib32; then TARGETS="$TARGETS linux32"; fi
+if [ -x "$FPC_CROSS/bin/fpc-linux32" ] && build linux32 gcc -m32 -msse2 -fno-pie -mstackrealign -- "$FPC_CROSS/bin/fpc-linux32" -Fl/usr/lib32; then TARGETS="$TARGETS linux32"; fi
 if [ -x "$FPC_CROSS/bin/fpc-linuxarm64" ] && command -v qemu-aarch64 >/dev/null &&
    build linuxarm64 aarch64-linux-gnu-gcc -fno-pie -- "$FPC_CROSS/bin/fpc-linuxarm64" -Fl"$(dirname "$(aarch64-linux-gnu-gcc -print-libgcc-file-name)")"; then
   TARGETS="$TARGETS linuxarm64"; fi
@@ -37,7 +37,7 @@ if command -v wine >/dev/null; then
     cp -r "$FILTERS_WINE_TEMPLATE" "$W/wp"; export WINEPREFIX=$W/wp; fi
   export WINEDEBUG=-all
   [ -x "$FPC_CROSS/bin/fpc-win64" ] && build win64 x86_64-w64-mingw32-gcc -- "$FPC_CROSS/bin/fpc-win64" && TARGETS="$TARGETS win64"
-  [ -x "$FPC_CROSS/bin/fpc-win32" ] && build win32 i686-w64-mingw32-gcc -mstackrealign -- "$FPC_CROSS/bin/fpc-win32" && TARGETS="$TARGETS win32"
+  [ -x "$FPC_CROSS/bin/fpc-win32" ] && build win32 i686-w64-mingw32-gcc -msse2 -mstackrealign -- "$FPC_CROSS/bin/fpc-win32" && TARGETS="$TARGETS win32"
 fi
 echo "plataformas: linux64 (referencia) $TARGETS"
 
@@ -51,7 +51,7 @@ runt() {   # runt <platform> args...
 }
 
 cd "$W" || exit 2
-cat "$ROOT"/src/*.pas | head -c 400000 > text
+cat "$ROOT"/src/*.pas 2>/dev/null | head -c 400000 > text
 head -c 200000 /dev/urandom > rnd
 { head -c 70000 rnd; cat text; head -c 150000 "$ROOT/build/linux64/parc" 2>/dev/null; head -c 30000 rnd; cat text; } > mix
 CASES="6:text 6:mix 1:mix"

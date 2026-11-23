@@ -18,6 +18,9 @@
 #if defined(__SSE2__) && !defined(PCM_NO_SIMD)
 #include <emmintrin.h>
 #define PCM_SSE2 1
+#elif defined(__aarch64__) && !defined(PCM_NO_SIMD)
+#include <arm_neon.h>
+#define PCM_NEON 1
 #endif
 
 typedef uint8_t U8;
@@ -205,7 +208,7 @@ static void init_tables(pcm_t *m) {
   build_states(m, sa, sb, sl, &ns);
   for (i = 0; i < 256; i++) {
     U32 p;
-    if (i < ns) p = (U32)(((U64)(2 * sb[i] + 1) << 22) / (U32)(2 * (sa[i] + sb[i]) + 2));
+    if (i < ns) p = ((U32)(2 * sb[i] + 1) << 22) / (U32)(2 * (sa[i] + sb[i]) + 2);   /* < 2^29 */
     else p = 1u << 21;
     if (p > (1u << 22) - 1) p = (1u << 22) - 1;
     m->smi0[i] = p << 10;
@@ -372,6 +375,24 @@ static inline void dot_all(const I16 *x, const I16 *w, const U32 *sel, I16 *out)
                      _mm_and_si128(keep, _mm_set_epi32(-1, 0, 0, 0)));
     _mm_storeu_si128((__m128i *)out, r);
   }
+#elif defined(PCM_NEON)
+  int16x8_t xv[NI / 8];
+  int k, j;
+  for (j = 0; j < NI / 8; j++) xv[j] = vld1q_s16(x + 8 * j);
+  for (k = 0; k < NM; k++) {
+    const I16 *wk = w + sel[k] * NI;
+    int32x4_t a = vdupq_n_s32(0);
+    I32 d;
+    for (j = 0; j < NI / 8; j++) {
+      int16x8_t wv = vld1q_s16(wk + 8 * j);
+      a = vmlal_s16(a, vget_low_s16(xv[j]), vget_low_s16(wv));
+      a = vmlal_high_s16(a, xv[j], wv);
+    }
+    d = vaddvq_s32(a) >> 12;
+    if (d > 2047) d = 2047;
+    if (d < -2047) d = -2047;
+    out[k] = (I16)d;
+  }
 #else
   int k;
   for (k = 0; k < NM; k++) {
@@ -396,6 +417,22 @@ static inline void train_all(const I16 *x, I16 *w, const U32 *sel, const I32 *e)
     for (j = 0; j < NI / 8; j++) {
       __m128i t = _mm_srai_epi16(_mm_add_epi16(_mm_mulhi_epi16(xv[j], ev), one), 1);
       _mm_storeu_si128((__m128i *)(wk + 8 * j), _mm_adds_epi16(_mm_loadu_si128((const __m128i *)(wk + 8 * j)), t));
+    }
+  }
+#elif defined(PCM_NEON)
+  int16x8_t xv[NI / 8];
+  int16x8_t one = vdupq_n_s16(1);
+  int k, j;
+  for (j = 0; j < NI / 8; j++) xv[j] = vshlq_n_s16(vld1q_s16(x + 8 * j), 3);
+  for (k = 0; k < NM; k++) {
+    I16 *wk = w + sel[k] * NI;
+    int16x8_t ev = vdupq_n_s16((short)e[k]);
+    for (j = 0; j < NI / 8; j++) {
+      /* (x*8*e) >> 16 as SSE2's pmulhw, then (t + 1) >> 1 */
+      int16x8_t t = vcombine_s16(vshrn_n_s32(vmull_s16(vget_low_s16(xv[j]), vget_low_s16(ev)), 16),
+                                 vshrn_n_s32(vmull_high_s16(xv[j], ev), 16));
+      t = vshrq_n_s16(vaddq_s16(t, one), 1);
+      vst1q_s16(wk + 8 * j, vqaddq_s16(vld1q_s16(wk + 8 * j), t));
     }
   }
 #else
@@ -780,11 +817,11 @@ static U32 flog2(U32 x) {        /* log2(x) * 256 with 8 fractional bits, x >= 1
 
 static U32 entropy0(const U8 *p, U32 n) {
   U32 cnt[256], i;
-  U64 s = 0;
+  U32 s = 0;                       /* <= 65536 * 16 * 256 */
   for (i = 0; i < 256; i++) cnt[i] = 0;
   for (i = 0; i < n; i++) cnt[p[i]]++;
   for (i = 0; i < 256; i++)
-    if (cnt[i]) s += (U64)cnt[i] * (flog2(n) - flog2(cnt[i]));
+    if (cnt[i]) s += cnt[i] * (flog2(n) - flog2(cnt[i]));
   (void)ilog2_8;
   return n ? (U32)(s / n) : 0;
 }
