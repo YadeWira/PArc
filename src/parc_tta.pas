@@ -250,10 +250,11 @@ begin
       end;
   else
     begin
-      // as 3, two modeled mantissa bits
+      // as 3, two modeled mantissa bits; 9: also the final short stage
       Result.NF := 2;
       Result.Order[0] := 256; Result.Shift[0] := 15;
       Result.Order[1] := 16; Result.Shift[1] := 12;
+      if Level >= 9 then Result.R2 := 1;
     end;
   end;
   if TtaCfgOverride then Result := TtaCfgValue;
