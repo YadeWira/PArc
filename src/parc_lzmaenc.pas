@@ -233,7 +233,7 @@ type
     normLimit: LongWord;
     rows: PByte;
     rowsBase: Pointer;
-    numRows, rowBytes, rowCap, rowTagArea: LongWord;
+    numRows, rowBytes, rowCap, rowTagArea, rowShape: LongWord;
     rowsBudget: QWord;          // bytes para las filas ("h" del método; 0 = automático)
     rfHashPos, rfHashVal: array[0..7] of LongWord;  // RfHash ya calculados (prefetch)
     pfPos, pfHv1, pfHv2: LongWord;  // bt4: hash de pos+1 y pos+2 calculados en pfPos - 1
@@ -448,7 +448,11 @@ begin
   blockSize := LongWord(p^.keepSizeBefore + p^.keepSizeAfter);
   if (p^.keepSizeBefore < historySize) or (blockSize < p^.keepSizeBefore) then Exit(0);
   rem := LongWord(kBlockSizeMax - blockSize);
-  if blockSize < (LongWord(1) shl 30) then reserve := blockSize shr 1 else reserve := blockSize shr 2;
+  // margen para no mover la ventana a cada rato: 1/4 (el SDK usa 1/2 por debajo de 1 GB). Con
+  // 1/4 se mueve el doble de veces (un Move de ~diccionario cada 1/4 de diccionario de entrada,
+  // ~1 ms por MB contra ~100 ms por MB de compresión) y la ventana ocupa 1,25 diccionarios
+  // en vez de 1,5
+  reserve := blockSize shr 2;
   reserve := reserve + (1 shl 12) + kBlockMoveAlign + kBlockSizeAlign;
   if (blockSize >= kBlockSizeMax) or (rem < kBlockSizeReserveMin) then Exit(0);
   if reserve >= rem then
@@ -502,34 +506,46 @@ const
 const
   kRfMaxCap = 14;               // fila de 64 bytes
 
-{ Entradas de una fila de rowBytes (32 o 64) bytes y dónde empiezan las posiciones (los
-  bytes de etiquetas). }
-procedure RfRowShape(rowBytes: LongWord; out cap, tagArea: LongWord);
+{ Formas de fila: 0 = 32 bytes, 7 entradas con etiquetas de 4 bits; 1 = 64 bytes, 14 entradas
+  con etiquetas de 4 bits; 2 = 32 bytes, 6 entradas con etiquetas de 8 bits. }
+procedure RfShapeInfo(shape: LongWord; out bytes, cap, tagArea, tagBits: LongWord);
 begin
-  tagArea := rowBytes div 8;
-  cap := (rowBytes - tagArea) div 4;
+  case shape of
+    1: begin bytes := 64; cap := 14; tagArea := 8; tagBits := 4; end;
+    2: begin bytes := 32; cap := 6; tagArea := 8; tagBits := 8; end;
+  else
+    begin bytes := 32; cap := 7; tagArea := 4; tagBits := 4; end;
+  end;
 end;
 
-{ Bytes por fila para mc: 32 (7 entradas) o 64 (14). }
-function RfRowBytesFor(mc: LongWord): LongWord;
+{ Forma de fila para mc candidatos. }
+function RfShapeFor(mc: LongWord): LongWord;
 begin
-  if mc <= 7 then Result := 32 else Result := 64;
+  if GetEnvironmentVariable('RFS') <> '' then Exit(StrToInt(GetEnvironmentVariable('RFS')));
+  if mc <= 7 then Result := 0 else Result := 1;
 end;
 
-{ Forma de la tabla: filas de RfRowBytesFor(mc) bytes, tantas como entren en el presupuesto
+{ Forma de fila para un stream: con el parser rápido (:fast) las etiquetas de 8 bits (menos
+  candidatos falsos, más rápido); con el óptimo, la más densa. }
+function RfShapeForAlgo(mc: LongWord; algo: Integer): LongWord;
+begin
+  if GetEnvironmentVariable('RFS') <> '' then Exit(StrToInt(GetEnvironmentVariable('RFS')));
+  if (algo = 0) and (mc <= 6) then Result := 2 else Result := RfShapeFor(mc);
+end;
+
+{ Forma de la tabla: filas de la forma shape, tantas como entren en el presupuesto
   (budget bytes; 0 = automático: dataSize, el diccionario o el tamaño esperado de la
   entrada), al menos kRfMinRows. }
-procedure RfLayout(dataSize: LongWord; budget: QWord; mc: LongWord; out cap, bytes, rows: LongWord);
+procedure RfLayout(dataSize: LongWord; budget: QWord; shape: LongWord; out cap, bytes, rows: LongWord);
 var
   b, r: QWord;
-  ta: LongWord;
+  ta, tb: LongWord;
 begin
-  bytes := RfRowBytesFor(mc);
-  RfRowShape(bytes, cap, ta);
+  RfShapeInfo(shape, bytes, cap, ta, tb);
   b := budget;
   if b = 0 then
   begin
-    b := dataSize;
+    b := QWord(dataSize) * 3 div 4;
     if GetEnvironmentVariable('RFB') <> '' then b := QWord(dataSize) * StrToInt(GetEnvironmentVariable('RFB')) div 16;
   end;
   r := b div bytes;
@@ -608,8 +624,9 @@ begin
     // ht4: solo las tablas fijas hash2/hash3 van en hash; las filas, aparte (RfLayout)
     hs := historySize;
     if p^.expectedDataSize < hs then hs := LongWord(p^.expectedDataSize);
-    RfLayout(hs, p^.rowsBudget, p^.cutValue, p^.rowCap, p^.rowBytes, p^.numRows);
-    RfRowShape(p^.rowBytes, p^.rowCap, p^.rowTagArea);
+    // (rowShape lo fija el llamador antes, RfShapeForAlgo)
+    RfLayout(hs, p^.rowsBudget, p^.rowShape, p^.rowCap, p^.rowBytes, p^.numRows);
+    RfShapeInfo(p^.rowShape, p^.rowBytes, p^.rowCap, p^.rowTagArea, hs);
     hashSizeSum := 0;
   end
   else
@@ -1420,6 +1437,8 @@ end;
 const
   kRf7 = QWord($7777777777777777);
   kRf8 = QWord($8888888888888888);
+  kRf7F = QWord($7F7F7F7F7F7F7F7F);
+  kRf80 = QWord($8080808080808080);
   kRfPf = 2;   // la fila se trae a la caché kRfPf posiciones antes
 
 { Fila de la posición pos + kRfPf a la caché, y su hash guardado para cuando llegue (necesita
@@ -1443,23 +1462,30 @@ begin
     Result := RfHash(cur);
 end;
 
-{$DEFINE RF_CAP:=7}{$DEFINE RF_TA:=4}
+{$DEFINE RF_CAP:=7}{$DEFINE RF_TA:=4}{$DEFINE RF_TB:=4}{$DEFINE RF_LG:=2}
 {$DEFINE RF_LOADTAGS:=RfLoadTags32}{$DEFINE RF_PUSH:=RfPush32}{$DEFINE RF_CORE:=RfCore32}
 {$DEFINE RF_GETMATCHES:=RfGetMatches32}{$DEFINE RF_SKIP:=RfSkip32}
 {$I parc_lzmarf.inc}
-{$DEFINE RF_CAP:=14}{$DEFINE RF_TA:=8}
+{$DEFINE RF_CAP:=14}{$DEFINE RF_TA:=8}{$DEFINE RF_TB:=4}{$DEFINE RF_LG:=2}
 {$DEFINE RF_LOADTAGS:=RfLoadTags64}{$DEFINE RF_PUSH:=RfPush64}{$DEFINE RF_CORE:=RfCore64}
 {$DEFINE RF_GETMATCHES:=RfGetMatches64}{$DEFINE RF_SKIP:=RfSkip64}
+{$I parc_lzmarf.inc}
+{ 32 bytes con etiquetas de 8 bits: 6 entradas (bytes 0..5), cabeza en el byte 7 }
+{$DEFINE RF_CAP:=6}{$DEFINE RF_TA:=8}{$DEFINE RF_TB:=8}{$DEFINE RF_LG:=3}
+{$DEFINE RF_LOADTAGS:=RfLoadTags32b}{$DEFINE RF_PUSH:=RfPush32b}{$DEFINE RF_CORE:=RfCore32b}
+{$DEFINE RF_GETMATCHES:=RfGetMatches32b}{$DEFINE RF_SKIP:=RfSkip32b}
 {$I parc_lzmarf.inc}
 
 { Para el hilo BT del multihilo (fila de 32 o 64 bytes). }
 function RfFindInsert(p: PMatchFinder; cur: PByte; pos, h, mmm, lenLimit, maxLen: LongWord;
   d: PLongWord): PLongWord;
 begin
-  if p^.rowTagArea = 8 then
-    Result := RfCore64(p, RfRow(p, h), cur, pos, h, mmm, lenLimit, maxLen, d)
+  case p^.rowShape of
+    1: Result := RfCore64(p, RfRow(p, h), cur, pos, h, mmm, lenLimit, maxLen, d);
+    2: Result := RfCore32b(p, RfRow(p, h), cur, pos, h, mmm, lenLimit, maxLen, d);
   else
     Result := RfCore32(p, RfRow(p, h), cur, pos, h, mmm, lenLimit, maxLen, d);
+  end;
 end;
 
 { Bt2_MatchFinder_Skip }
@@ -3993,6 +4019,7 @@ begin
   begin
     if mc > kRfMaxCap then mc := kRfMaxCap;
     mf.rowsBudget := P.HashSize;
+    mf.rowShape := RfShapeForAlgo(mc, P.Algorithm);
   end;
   mf.cutValue := mc;
 
@@ -4005,16 +4032,12 @@ begin
   end
   else if mf.htMode then
   begin
-    // la forma de la fila sale de mc (RfRowBytesFor)
-    if RfRowBytesFor(mc) = 64 then
-    begin
-      GetMatchesF := @RfGetMatches64;
-      SkipF := @RfSkip64;
-    end
+    // la forma de la fila sale de mc (RfShapeFor)
+    case mf.rowShape of
+      1: begin GetMatchesF := @RfGetMatches64; SkipF := @RfSkip64; end;
+      2: begin GetMatchesF := @RfGetMatches32b; SkipF := @RfSkip32b; end;
     else
-    begin
-      GetMatchesF := @RfGetMatches32;
-      SkipF := @RfSkip32;
+      begin GetMatchesF := @RfGetMatches32; SkipF := @RfSkip32; end;
     end;
   end
   else
@@ -4379,7 +4402,7 @@ begin
     mc := P.MatchFinderCycles;
     if mc = 0 then mc := LzmaDefaultCycles(P.MatchFinder, P.NumFastBytes);
     if mc > kRfMaxCap then mc := kRfMaxCap;
-    RfLayout(LongWord(d), P.HashSize, LongWord(mc), cap, rb, nr);
+    RfLayout(LongWord(d), P.HashSize, RfShapeForAlgo(LongWord(mc), P.Algorithm), cap, rb, nr);
     Hash := 4 * kFix4HashSize + QWord(nr) * rb + 64;
   end
   else

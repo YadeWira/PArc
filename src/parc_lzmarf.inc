@@ -1,5 +1,7 @@
 { ht4 (parc_lzmaenc): las rutinas de una forma de fila. Se incluye una vez por forma con las
-  macros RF_CAP (entradas), RF_TA (bytes de etiquetas) y los nombres RF_* definidos. }
+  macros RF_CAP (entradas), RF_TA (bytes de etiquetas, 4 u 8: un LongWord o un QWord), RF_TB
+  (bits por etiqueta, 4 u 8; la cabeza ocupa el último campo), RF_LG (log2 de RF_TB) y los
+  nombres RF_* definidos. }
 
 function RF_LOADTAGS(row: PByte): QWord; inline;
 begin
@@ -12,11 +14,11 @@ procedure RF_PUSH(row: PByte; x: QWord; h, pos: LongWord); inline;
 var
   head: LongWord;
 begin
-  head := LongWord(x shr (8 * RF_TA - 4)) and $F;
+  head := LongWord(x shr (8 * RF_TA - RF_TB)) and ((1 shl RF_TB) - 1);
   if head = 0 then head := RF_CAP - 1 else Dec(head);
   PLongWord(row + RF_TA)[head] := pos;
-  x := (x and not ((QWord($F) shl (4 * head)) or (QWord($F) shl (8 * RF_TA - 4))))
-    or (QWord(h and $F) shl (4 * head)) or (QWord(head) shl (8 * RF_TA - 4));
+  x := (x and not ((QWord((1 shl RF_TB) - 1) shl (RF_TB * head)) or (QWord((1 shl RF_TB) - 1) shl (8 * RF_TA - RF_TB))))
+    or (QWord(h and ((1 shl RF_TB) - 1)) shl (RF_TB * head)) or (QWord(head) shl (8 * RF_TA - RF_TB));
   {$IF RF_TA = 8}PQWord(row)^ := x;{$ELSE}PLongWord(row)^ := LongWord(x);{$ENDIF}
 end;
 
@@ -33,23 +35,28 @@ var
 begin
   e := PLongWord(row + RF_TA);
   x0 := RF_LOADTAGS(row);
-  head := LongWord(x0 shr (8 * RF_TA - 4)) and $F;
-  // nibbles iguales a la etiqueta: bit 4i en m (exacto, sin falsos positivos)
+  head := LongWord(x0 shr (8 * RF_TA - RF_TB)) and ((1 shl RF_TB) - 1);
+  // campos iguales a la etiqueta: bit RF_TB*i en m (exacto, sin falsos positivos)
+  {$IF RF_TB = 8}
+  x := x0 xor (QWord(h and $FF) * QWord($0101010101010101));
+  m := (((not (((x and kRf7F) + kRf7F) or x)) and kRf80) shr 7) and ((QWord(1) shl (8 * RF_CAP)) - 1);
+  {$ELSE}
   x := x0 xor (QWord(h and $F) * QWord($1111111111111111));
   m := (((not (((x and kRf7) + kRf7) or x)) and kRf8) shr 3) and ((QWord(1) shl (4 * RF_CAP)) - 1);
+  {$ENDIF}
   if m <> 0 then
   begin
     // la entrada más nueva (head) al nibble 0, después head + 1, ...
     if head <> 0 then
-      m := ((m shr (4 * head)) or (m shl (4 * (RF_CAP - head)))) and ((QWord(1) shl (4 * RF_CAP)) - 1);
+      m := ((m shr (RF_TB * head)) or (m shl (RF_TB * (RF_CAP - head)))) and ((QWord(1) shl (RF_TB * RF_CAP)) - 1);
     n := p^.cutValue;
     repeat
-      i := head + (LongWord(BsfQWord(m)) shr 2);
+      i := head + (LongWord(BsfQWord(m)) shr RF_LG);
       if i >= RF_CAP then Dec(i, RF_CAP);
       delta := LongWord(pos - e[i]);
       if delta >= mmm then Break;
       c := cur - delta;
-      // etiqueta igual pero otros 4 bytes (1 de 16): no cuenta como candidato
+      // etiqueta igual pero otros 4 bytes: no cuenta como candidato
       if PLongWord(c)^ = PLongWord(cur)^ then
       begin
         if c[maxLen] = cur[maxLen] then
