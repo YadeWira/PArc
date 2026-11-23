@@ -30,8 +30,8 @@
 
   Method string: bwt[:<block>][:m1..m4][:l|:l<N>|:<N>][:h<N>][:e0|:e1|:e2][:a], also b<block>;
   GRZip's other switches (s, d, p, t<N>, i<N>) are accepted and ignored. Defaults: 8 MB, m1,
-  LZP with minimum match 32 and 18 hash bits. m1 = adaptive coder, m2..m4 = static (m4 with
-  the sort transform); e0/e1/e2 choose fast/static/adaptive explicitly. A bare integer is the LZP minimum; a
+  LZP with minimum match 32 and 18 hash bits. m1 = adaptive coder, m2 and m3 = static, m4 =
+  fast (and the sort transform); e0/e1/e2 choose fast/static/adaptive explicitly. A bare integer is the LZP minimum; a
   bare memory size the block (as with GRZip). `grzip:...` strings are written as `bwt:...` by
   the canonizer.
 
@@ -97,6 +97,7 @@ type
     FSeg: TObject;               // segmentation model, created on first use
     FBufSize: SizeInt;           // input gathered before cutting it into blocks
     FMixedCap: SizeInt;          // with a: largest piece of a buffer that was cut
+    FInFlight, FMemCap: Int64;   // input held by the queued jobs, and its cap
     procedure SubmitJob(const Data: TBytes; Off, Len: SizeInt);
     procedure FlushBlock(Final: Boolean);
     procedure WriteOldest;
@@ -201,6 +202,7 @@ const
   { buckets of the sort transform: 16 * 256 * 256 to sort, 256 * 256 to invert }
   ST_BUCKETS = 16 * 65536;
   ST_IBUCKETS = 65536;
+  ST_MIN_BLOCK = 1 shl 20;
   OUT_SLACK = 8192;
   LZP_MAX_MIN = 65535;
   LZP_REDO_PCT = 50;
@@ -288,6 +290,7 @@ begin
   else
     case Result.Level of
       1: Result.Coder := BWT_CODER_ADAPTIVE;
+      4: Result.Coder := BWT_CODER_FAST;
     else
       Result.Coder := BWT_CODER_STATIC;
     end;
@@ -487,9 +490,9 @@ begin
       UseLzp := LzpEncode(@Buf[Off], Len, Lp, HashP, Main, Lens, NMain, NLens, Esc);
       // When the LZP takes away more than LZP_REDO_PCT % of the block with the method's
       // minimum, the data are made of short repeats that the BWT codes better itself (tables,
-      // markup, databases): the block is filtered again with 4 times the minimum (adaptive
-      // coder only: the second pass costs time that the fast levels do not have)
-      if UseLzp and (P.Level = 1) and (P.Coder = BWT_CODER_ADAPTIVE) and ((Len - NMain) * 100 > Len * LZP_REDO_PCT) and
+      // markup, databases): the block is filtered again with 4 times the minimum (m1..m3; at m4
+      // the second pass costs time that the fastest level does not have)
+      if UseLzp and (P.Level <= 3) and ((Len - NMain) * 100 > Len * LZP_REDO_PCT) and
          (4 * MinLen <= LZP_MAX_MIN) then
       begin
         MinLen := 4 * MinLen;
@@ -516,7 +519,9 @@ begin
     Main := nil;
     T := @Buf[Off];
   end;
-  UseSt := (P.Level = 4) and (M >= 2);
+  // m4: the sort transform on blocks of 1 MB or more (on smaller ones the suffix sort is cheap
+  // and its fixed costs, 4 MB of buckets, are not)
+  UseSt := (P.Level = 4) and (M >= ST_MIN_BLOCK);
   if UseSt and not UseLzp then
   begin
     // the sort transform writes 28 bytes after the data: on a private copy (the slice may be
@@ -732,6 +737,7 @@ begin
   Threads := PoolWorkers(BWT_MAXTHREADS);
   if Threads > 0 then SetLength(FQueue, Threads + 1) else SetLength(FQueue, 1);
   FPool := TJobPool.Create(Threads, Length(FQueue));
+  FMemCap := Int64(Length(FQueue)) * FBufSize;
 end;
 
 destructor TBwtEncStage.Destroy;
@@ -751,6 +757,7 @@ begin
   Job := FQueue[FHead];
   FHead := (FHead + 1) mod Length(FQueue);
   Dec(FCount);
+  Dec(FInFlight, TBwtEncJob(Job).InLen);
   try
     FPool.WaitJob(Job);
     if Job.OutSize > 0 then Emit(@Job.OutBuf[0], Job.OutSize);
@@ -764,6 +771,8 @@ var
   Job: TBwtEncJob;
   H: TBytes;
   hb: SizeInt;
+  Q: TJobArray;
+  i: Integer;
 begin
   if Len = 0 then Exit;
   if not FHeaderDone then
@@ -781,11 +790,23 @@ begin
       H[1] := 0;
     Emit(@H[0], hb);
   end;
-  // The queue does not grow past its first length (threads + 1): every job holds about 5 times
-  // its block, and when solid blocks are compressed side by side (the presets' groups) a growing
-  // queue in each of them added up to more memory than GRZip's; idle tokens still add threads
+  // The queue grows (one more job and thread when every thread is busy and a token is free)
+  // only while the input held by the jobs in flight stays within what the first queue would hold
+  // with full blocks: small pieces of mixed data can use the threads that other solid blocks
+  // free, big blocks do not add up to more memory than GRZip's
   if FCount = Length(FQueue) then
-    WriteOldest
+  begin
+    if (FInFlight + Len <= FMemCap) and FPool.CanGrow(BWT_MAXTHREADS) then
+    begin
+      SetLength(Q, Length(FQueue) + 1);
+      for i := 0 to FCount - 1 do Q[i] := FQueue[(FHead + i) mod Length(FQueue)];
+      FQueue := Q;
+      FHead := 0;
+      FPool.SetMaxWorkers(FPool.MaxWorkers + 1);
+    end
+    else
+      WriteOldest;
+  end
   else if (FCount >= FPool.MaxWorkers) and (BudgetIdle > 0) and FPool.CanGrow(BWT_MAXTHREADS) then
     FPool.SetMaxWorkers(FPool.MaxWorkers + 1);
   Job := TBwtEncJob.Create;
@@ -793,6 +814,7 @@ begin
   Job.InBuf := Data;       // the buffer goes to the job (a reference, no copy)
   Job.InOff := Off;
   Job.InLen := Len;
+  Inc(FInFlight, Len);
   FQueue[(FHead + FCount) mod Length(FQueue)] := Job;
   Inc(FCount);
   FPool.Submit(Job);

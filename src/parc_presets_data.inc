@@ -21,7 +21,7 @@ const
     '',
     ';Text files compression with slow decompression',
     '1t  = 1b',
-    '2t  = bwt:m4:8m:32:h18:a                                           | ex2t',  // PARC: bloque adaptativo, hash 2^18
+    '2t  = bwt:m4:8m:32:h18:a:e1                                        | ex2t',  // PARC: transformada de orden 5 y codificador estático
     '3t  = dict:p: 64m:85% + bwt:m1:8m:32:h20:a                         | ex3t',  // PARC: bwt con su LZP y el codificador adaptativo (antes lzp:64m + grzip:m3: más chico, más rápido y menos memoria)
     '4t  = dict:p: 64m:80% + lzp: 64m: 65:d1m:s16:h20:90% + ppmd:8:192m   | ex4t',  // PARC: 192 MB
     '5t  = dict:p: 64m:80% + lzp: 80m:105:d1m:s32:h22:92% + ppmd:13:192m  | ex5t',  // PARC: orden 13
@@ -143,8 +143,8 @@ const
     'ex9binary = 4x4:i0:lzma:64mb:max',
     '',
     'ex1t = ex1b',
-    'ex2t = bwt:m4:h20:a',  // PARC: hash 2^20, bloque adaptativo
-    'ex3t = bwt:m2:h20:a:e2',  // PARC: codificador adaptativo con bloques de medio tamaño (más chico y menos memoria que grzip:m2)
+    'ex2t = bwt:m4:h20:a:e1',  // PARC: transformada de orden 5 y codificador estático
+    'ex3t = bwt:m2:h20:a',
     'ex4t = bwt:m1:h20:a',
     'ex5t = dict:p: 64m:80% + lzp: 64m: 65:d1m:s32:h22:90% + xppmd:12:192m',  // PARC: 8:96->12:192
     'ex6t = dict:p: 64m:80% + lzp: 80m:105:d1m:s32:h22:92% + xppmd:12:192m',
