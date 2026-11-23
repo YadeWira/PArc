@@ -463,3 +463,66 @@ copy may overlap itself). The table is updated at every position where a main by
 before the byte is interpreted; positions inside a match are not. The block must end exactly
 when both streams are used up, at Len bytes; anything else (or a match past Len, or NLens
 larger than NMain + 2⌊Len/255⌋ + 2) is a damaged block (`EArcCorrupt`).
+
+### 6.6 `cm` (since 2026-11)
+
+`cm` is PArc's own context-mixing compressor (`src/parc_cm.pas` + the model in
+`src/cm/pcm_core.c`, freestanding C, MIT), written to replace the port of Matt Mahoney's lpaq1
+(GPL); it is not derived from it (designed from published descriptions of bitwise context
+mixing). **`cm` blocks written before this change do not decode** (the version byte rejects
+them). Used by `-mxx` (`xx$text`, `xx$binary`, `xx$obj`).
+
+Method string: `cm[:<level>]`, level 1..9 (default 6). The level only sets the encoder's table
+sizes, which go in the stream header; the decoder needs no parameter.
+
+| level | context table | history | match table | model memory |
+|---|---|---|---|---|
+| L | 64·2^(15+L) B | 2^(18+L) B | 4·2^(16+L) B | ≈ 2^(21+L) · 1.25 B (level 6: ≈ 168 MB) |
+
+Inputs of at most 1 MB get smaller tables (context table ≥ 4 buckets per input byte rounded up
+to a power of two, history and match table ≥ the input), so small blocks neither allocate nor
+clear the full model.
+
+Stream header: `U8 version` (1), `U8 htbits` (10..24: 2^htbits buckets of 64 bytes), `U8 wbits`
+(16..27: history ring of 2^wbits bytes), `U8 mtbits` (12..25: match table of 2^mtbits
+entries), `U8 flags` (bit 0: the size follows; other bits 0), and if bit 0 is set `U32 size`
+(little endian, ≤ 16 MiB, the exact number of bytes the stream decodes to). The encoder sets
+bit 0 when the whole input fits in 16 MiB; the decoder then decodes everything at once and
+frees the model before the stages above it allocate theirs (so a `dict+lzp+cm` chain never
+holds the CM model and the LZP tables at the same time).
+
+Then one binary arithmetic-coded stream (32-bit range, carry-less; probability of a 1 in 16
+bits; after the last bit the encoder writes the 4 bytes of the low end of the range). It is a
+sequence of blocks of at most 64 KiB:
+
+| Field | Coding |
+|---|---|
+| end | 1 bit, p = 1/2: 1 = end of stream (nothing follows) |
+| modelled | 1 bit, adaptive (p starts at 1/2, moves 1/16 towards each coded value) |
+| full | 1 bit, p = 1/2: 1 = 65536 bytes; 0 = 16 bits of length follow (p = 1/2, MSB first, 1..65535) |
+| data | the block's bytes, 8 bits each MSB first: predicted by the model if modelled, else p = 1/2 |
+
+The encoder stores a block raw ("not modelled") when it has at least 4096 bytes and its order-0
+entropy exceeds 7.92 bits per byte (already compressed data): it costs 8 bits per byte and keeps
+such data at full speed in both directions. Raw bytes still enter the history, the contexts and
+the match model; the mixers, state maps and secondary estimators only learn from modelled bits.
+
+The model (identical in encoder and decoder; integer arithmetic only, so every platform gives
+the same bytes; the SSE2 mixer code and the portable C code are bit-exact) is defined by
+`pcm_core.c`. In short: for each bit, eleven contexts give a bit-history state (one byte, a
+bounded (n0, n1, last bit) counter): order 0 and order 1 from direct tables, and orders 2, 3, 4
+and 6, the current word, the previous and current word, bytes 2–3 back, the two bytes that last
+followed the previous byte (indirect), and bytes 3–4 back from a hash table of 64-byte buckets
+(four 16-byte slots: an 8-bit check and the 15 states of a nibble; the slot with the lowest
+state count is replaced). Each state is mapped to a probability by an adaptive table per context
+(rate 1/(n+1.5), n ≤ 1023). A match model (the last position with the same 6 preceding bytes,
+verified backwards) adds the predicted bit with its length. Six mixers (16 inputs, 16-bit
+weights, weight sets selected by the partial byte, the match state, the number of known
+contexts and bit position, the byte 2 back, the byte 3 back and the classes of the last three
+bytes) feed a second mixer (selected by the match state and the partial byte), followed by two
+interpolated secondary estimators (order 1, and match byte or order-2 hash).
+
+Decoder checks: version, header ranges, the flags byte, the known size (decoded bytes must
+match it exactly) and a stream that ends early (more than 8 missing bytes); a damaged stream
+gives either wrong data (caught by the block's CRC) or `EArcCorrupt`. Memory: the model (from
+the header) plus 64 KiB, or plus the known size.

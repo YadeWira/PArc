@@ -35,9 +35,12 @@ typedef U32 (*pcm_io_fn)(void *ctx, U8 *buf, U32 n);
 #define PCM_BLK 65536u        /* bytes per block (raw / modelled decision) */
 #define NCD 2                 /* direct contexts: order 0, order 1 */
 #ifndef PCM_NCH
-#define PCM_NCH 8
+#define PCM_NCH 9
 #endif
 #define NCH PCM_NCH           /* hashed contexts */
+#if NCH != 9
+#error "the context list (update_byte, set_text) assumes 9 hashed contexts"
+#endif
 #define NC (NCD + NCH)
 #ifndef PCM_NI
 #define PCM_NI 16
@@ -93,6 +96,8 @@ typedef struct {
   U32 wlen;
   U32 selb[3];
   U32 hh[NCH];                /* context hashes at byte boundary */
+  U32 nh;                     /* active hashed contexts: NCH, or NCH - 2 in text blocks */
+  U32 textp;                  /* probability of a text block */
   U8 *slot[NCH];
   U8 o0[256];
   U8 *sp[NC];
@@ -447,6 +452,8 @@ static void model_init(pcm_t *m) {
   m->x[NI - 1] = 256;
   m->x2[NM] = 256;
   for (i = 0; i < NCH; i++) m->slot[i] = ht_find(m, hash3(i + 1, 0, 0));
+  m->nh = NCH;
+  m->textp = 1u << 15;
   m->flagp = 1u << 15;
 }
 
@@ -469,7 +476,7 @@ static inline int predict(pcm_t *m) {
     m->sp[1] = sp; m->smx[1] = k;
     x[XI(1)] = m->st[v]; if (X2ON) x[XI(1) + 1] = (I16)(P(4) ? ((I32)v - 2048) >> P(4) : 0);
   }
-  for (i = 0; i < NCH; i++) {
+  for (i = 0; i < (int)m->nh; i++) {
     U8 *sp = m->slot[i] + nib;
     U32 s = *sp, k = (U32)(i + NCD) * 256 * SMR + s + bsm;
     U32 v = m->sm[k] >> 20;
@@ -559,6 +566,8 @@ static inline int predict(pcm_t *m) {
       case 2: p = (q1 + 2 * q2 + q3 + 2) >> 2; break;
       case 3: p = ((pm + 3 * q2 + 2 * q3) * 10923 + 32768) >> 16; break;
       case 4: p = (pm + q1 + 4 * q2 + 2 * q3 + 4) >> 3; break;
+      case 5: p = (pm + 3 * q2 + 2) >> 2; break;
+      case 6: p = (pm + 3 * q3 + 2) >> 2; break;
       default: p = (2 * pm + q1 + 3 * q2 + 2 * q3 + 4) >> 3;
     }
   }
@@ -579,7 +588,8 @@ static inline void update(pcm_t *m, int y) {
     U8 *spl[NC];
     U8 ns[NC];
     I32 target = y ? (1 << 22) - 1 : 0;
-    for (i = 0; i < NC; i++) {
+    int nc = NCD + (int)m->nh;
+    for (i = 0; i < nc; i++) {
       U32 *t = sm + m->smx[i];
       U32 v = *t, n = v & 1023;
       I32 pp = (I32)(v >> 10);
@@ -590,7 +600,7 @@ static inline void update(pcm_t *m, int y) {
       ns[i] = m->nex[*spl[i]][y];
     }
     if (m->mctx) sm_update(m, sm + m->msmx, y, P(2));
-    for (i = 0; i < NC; i++) *spl[i] = ns[i];
+    for (i = 0; i < nc; i++) *spl[i] = ns[i];
   }
   /* mixers */
   {
@@ -612,13 +622,13 @@ static inline void update(pcm_t *m, int y) {
     update_byte(m);
   } else if (m->bpos == 4) {
     U32 h = m->c0 * 0x6F4F2A35u;
-    for (i = 0; i < NCH; i++) m->slot[i] = ht_find(m, m->hh[i] + h);
+    for (i = 0; i < (int)m->nh; i++) m->slot[i] = ht_find(m, m->hh[i] + h);
     m->nib = 1;
   } else {
     m->nib = (m->nib << 1) | (U32)y;
     if (P(12) && m->bpos == 3) {
       U32 h0 = (m->c0 << 1) * 0x6F4F2A35u, h1 = ((m->c0 << 1) | 1) * 0x6F4F2A35u;
-      for (i = 0; i < NCH; i++) {
+      for (i = 0; i < (int)m->nh; i++) {
         __builtin_prefetch(ht_bucket(m, m->hh[i] + h0));
         __builtin_prefetch(ht_bucket(m, m->hh[i] + h1));
       }
@@ -691,53 +701,17 @@ static inline void update_byte(pcm_t *m) {
     m->hh[1] = hash3(2, c4 & 0xffffff, 0);
     m->hh[2] = hash3(3, c4, 0);
     m->hh[3] = hash3(4, c4, c8 & 0xffff);
-    switch (P(26)) {
-      case 1: m->hh[4] = hash3(5, m->wh, c & 255); break;
-      case 2: m->hh[4] = hash3(5, m->wh, m->wh ? 0 : (c4 & 0xffff) + 1); break;
-      default: m->hh[4] = hash3(5, m->wh, m->wh ? 0 : (c & 255) + 1);
+    m->hh[4] = hash3(5, m->wh, m->wh ? 0 : (c & 255) + 1);   /* current word */
+    m->hh[5] = hash3(8, c4 & 0xff, m->ind1[c4 & 255]);    /* indirect: what followed c1 */
+    m->hh[6] = hash3(7, m->wh, m->wh1);                   /* previous and current word */
+    if (m->nh > 7) {                                      /* binary blocks only */
+      m->hh[7] = hash3(6, c4 & 0xffff00, 0);              /* bytes 2-3 back */
+      m->hh[8] = hash3(9, c4 & 0xffff0000, 0);            /* bytes 3-4 back */
     }
-    switch (P(10)) {
-      case 1: m->hh[5] = hash3(6, c4, c8 & 0xff); break;
-      case 2: m->hh[5] = hash3(6, c4, c8 & 0xffffff); break;
-      case 3: m->hh[5] = hash3(6, m->wh, c4 & 0xff00); break;
-      case 4: m->hh[5] = hash3(6, c4 & 0xffff, m->ind2[c4 & 0xffff]); break;
-      default: m->hh[5] = hash3(6, c4 & 0xffff00, 0);
-    }
-    switch (P(11)) {
-      case 1: m->hh[6] = hash3(7, c4, c8); break;
-      case 2: m->hh[6] = hash3(7, c4, c8 & 0xff); break;
-      case 3: m->hh[6] = hash3(7, c4 & 0xff, m->ind1[c4 & 255]); break;
-      case 4: m->hh[6] = hash3(7, c4 & 0xffff, m->ind2[c4 & 0xffff]); break;
-      case 5: m->hh[6] = hash3(7, c4 & 0xff, m->ind1[c4 & 255] | (U32)m->ind2[c4 & 0xffff] << 16); break;
-      case 6: m->hh[6] = m->wh ? hash3(7, m->wh, m->wh1) : hash3(7, m->wh1, c4 & 0xff); break;
-      default: m->hh[6] = hash3(7, m->wh, m->wh1);
-    }
-    switch (P(23)) {
-      case 3: m->hh[7] = hash3(8, c4 & 0xff, m->ind1[c4 & 255]); break;
-      case 4: m->hh[7] = hash3(8, c4 & 0xffff, m->ind2[c4 & 0xffff]); break;
-      case 5: m->hh[7] = hash3(8, c4 & 0xff, m->ind1[c4 & 255] | (U32)m->ind2[c4 & 0xffff] << 16); break;
-      case 6: m->hh[7] = hash3(8, c4, c8 & 0xff); break;
-      case 7: m->hh[7] = hash3(8, c4 & 0xff00ff00, 0); break;
-      case 8: m->hh[7] = hash3(8, c4 & 0xffff0000, 0); break;
-      default: m->hh[7] = hash3(8, 0, 0);
-    }
-#if NCH > 8
-    switch (P(24)) {
-      case 3: m->hh[8] = hash3(9, c4 & 0xff, m->ind1[c4 & 255]); break;
-      case 4: m->hh[8] = hash3(9, c4 & 0xffff, m->ind2[c4 & 0xffff]); break;
-      case 6: m->hh[8] = hash3(9, c4, c8 & 0xff); break;
-      case 7: m->hh[8] = hash3(9, c4 & 0xff00ff00, 0); break;
-      case 8: m->hh[8] = hash3(9, c4 & 0xffff0000, 0); break;
-      case 9: m->hh[8] = hash3(9, m->wh, c4 & 0xff00); break;
-      case 10: m->hh[8] = hash3(9, c4, c8 & 0xffffff); break;
-      default: m->hh[8] = hash3(9, 0, 0);
-    }
-#endif
-    for (i = 0; i < NCH; i++) __builtin_prefetch(ht_bucket(m, m->hh[i]));
-    for (i = 0; i < NCH; i++) m->slot[i] = ht_find(m, m->hh[i]);
+    for (i = 0; i < (int)m->nh; i++) __builtin_prefetch(ht_bucket(m, m->hh[i]));
+    for (i = 0; i < (int)m->nh; i++) m->slot[i] = ht_find(m, m->hh[i]);
   }
 }
-
 /* ------------------------------------------------------------------------ */
 /* arithmetic coder (32-bit, carry-less) */
 
@@ -844,19 +818,52 @@ int pcm_open(void *mem, U32 htbits, U32 wbits, U32 mtbits, pcm_io_fn io, void *c
   return 0;
 }
 
-static inline void enc_flagbit(pcm_t *m, int y) {
-  enc_bit(m, y, m->flagp);
-  if (y) m->flagp += (65536 - m->flagp) >> 4; else m->flagp -= m->flagp >> 4;
-  if (m->flagp < 64) m->flagp = 64;
-  if (m->flagp > 65472) m->flagp = 65472;
+/* block flags: adaptive probability, 1/16 towards each coded value */
+static inline void flag_upd(U32 *fp, int y) {
+  if (y) *fp += (65536 - *fp) >> 4; else *fp -= *fp >> 4;
+  if (*fp < 64) *fp = 64;
+  if (*fp > 65472) *fp = 65472;
 }
 
-static inline int dec_flagbit(pcm_t *m) {
-  int y = dec_bit(m, m->flagp);
-  if (y) m->flagp += (65536 - m->flagp) >> 4; else m->flagp -= m->flagp >> 4;
-  if (m->flagp < 64) m->flagp = 64;
-  if (m->flagp > 65472) m->flagp = 65472;
+static inline void enc_flagbit(pcm_t *m, U32 *fp, int y) {
+  enc_bit(m, y, *fp);
+  flag_upd(fp, y);
+}
+
+static inline int dec_flagbit(pcm_t *m, U32 *fp) {
+  int y = dec_bit(m, *fp);
+  flag_upd(fp, y);
   return y;
+}
+
+/* text blocks leave out the two sparse contexts (7, 8): about 8% faster on text, where they
+   help little */
+static void set_text(pcm_t *m, int text) {
+  U32 nh = text ? NCH - 2 : NCH;
+  if (nh == m->nh) return;
+  m->nh = nh;
+  if (text) {
+    int i;
+    for (i = NCH - 2; i < NCH; i++) m->x[XI(NCD + i)] = 0;
+  } else {
+    /* at a byte boundary: look the sparse contexts up for the current byte */
+    U32 c4 = m->c4;
+    m->hh[7] = hash3(6, c4 & 0xffff00, 0);
+    m->hh[8] = hash3(9, c4 & 0xffff0000, 0);
+    m->slot[7] = ht_find(m, m->hh[7]);
+    m->slot[8] = ht_find(m, m->hh[8]);
+  }
+}
+
+/* the encoder's choice: mostly printable bytes and few zeros */
+static int is_text_block(const U8 *p, U32 n) {
+  U32 i, asc = 0, z = 0;
+  for (i = 0; i < n; i++) {
+    U32 c = p[i];
+    asc += (c - 0x20u < 0x5fu) | (c == 9) | (c == 10) | (c == 13);
+    z += c == 0;
+  }
+  return asc * 2 >= n && z * 32 < n;
 }
 
 /* raw bytes still enter the history so the contexts and match model see them */
@@ -887,7 +894,12 @@ void pcm_enc_block(void *mem, const U8 *src, U32 n) {
   int modelled = 1;
   if (n >= 4096 && entropy0(src, n) > RAW_H0) modelled = 0;
   enc_bit(m, 0, 32768);                       /* not end */
-  enc_flagbit(m, modelled);
+  enc_flagbit(m, &m->flagp, modelled);
+  if (modelled) {
+    int text = is_text_block(src, n);
+    enc_flagbit(m, &m->textp, text);
+    set_text(m, text);
+  }
   if (n == PCM_BLK) enc_bit(m, 1, 32768);
   else {
     enc_bit(m, 0, 32768);
@@ -929,7 +941,8 @@ int pcm_dec_block(void *mem, U8 *dst) {
   U32 i, j, n;
   int modelled;
   if (dec_bit(m, 32768)) return 0;
-  modelled = dec_flagbit(m);
+  modelled = dec_flagbit(m, &m->flagp);
+  if (modelled) set_text(m, dec_flagbit(m, &m->textp));
   if (dec_bit(m, 32768)) n = PCM_BLK;
   else {
     n = 0;

@@ -3,24 +3,26 @@
   The model and the arithmetic coder are in src/cm/pcm_core.c (freestanding C, linked as
   pcm_core.o); this unit wraps them as pipeline stages. Bitwise prediction from:
    - bit-history states (one byte per context and bit position) for order 0 and 1 (direct
-     tables) and orders 2, 3, 4, 6, word, word bigram and a sparse context (a hash table of
-     64-byte buckets holding four 16-byte nibble slots with an 8-bit check);
-   - adaptive state maps (state -> probability, rate 1/n), two inputs per context;
+     tables) and orders 2, 3, 4, 6, word, word bigram, two sparse contexts and an indirect one
+     (a hash table of 64-byte buckets holding four 16-byte nibble slots with an 8-bit check);
+   - adaptive state maps (state -> probability, rate 1/n);
    - a match model over a history ring (longest recent match, predicted bit and length);
-   - four mixers with weight sets selected by the partial byte, match state, context order and
-     the previous byte, a second-layer mixer, and three interpolated secondary estimators.
+   - six mixers (SSE2 on x86-64, bit-exact portable C elsewhere) with weight sets selected by
+     the partial byte, match state, context order, earlier bytes and byte classes; a second-layer
+     mixer and two interpolated secondary estimators.
   Blocks of 64 KB whose order-0 entropy is close to 8 bits (already compressed data) are coded
   as raw bits without the model, which keeps such data at full speed in both directions.
   Everything is integer arithmetic, so the output is the same on every platform.
 
   Method: cm[:<level>]  level 1..9 (default 6: 128 MB contexts + 16 MB history + 16 MB match
-  table, ~170 MB per stream). Inputs smaller than 1 MB get proportionally smaller tables.
+  table, ~170 MB per stream). Inputs up to 1 MB get proportionally smaller tables.
 
-  Stream (version 1, docs/formato/FORMATO-PARC.md):
-    U8 version (= 1), U8 htbits, U8 wbits, U8 mtbits, then one arithmetic-coded stream:
-    per block: bit "end" (p = 1/2); bit "modelled" (adaptive); bit "full" (p = 1/2), and if
-    not full 16 bits of length (1..65535); then the bytes, MSB first, either predicted by the
-    model or with p = 1/2. After the end bit the coder writes 4 bytes. }
+  Stream (version 1, docs/formato/FORMATO-PARC.md §6.6):
+    U8 version (= 1), U8 htbits, U8 wbits, U8 mtbits, U8 flags (bit 0: U32 size follows, for
+    inputs up to 16 MB; the decoder then decodes it all at once and frees the model), then one
+    arithmetic-coded stream: per block: bit "end" (p = 1/2); bit "modelled" (adaptive); bit
+    "full" (p = 1/2), and if not full 16 bits of length (1..65535); then the bytes, MSB first,
+    either predicted by the model or with p = 1/2. After the end bit the coder writes 4 bytes. }
 unit parc_cm;
 
 {$mode objfpc}{$H+}
