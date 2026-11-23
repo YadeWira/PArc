@@ -261,14 +261,16 @@ int32_t parc_repeat_share(const uint8_t * in, int32_t len, uint32_t * tab)
         uint32_t slot = (uint32_t)(k >> 48), chk = (uint32_t)k | 1;
         if (tab[slot] == chk) hits++; else tab[slot] = chk;
     }
-    return anchors ? (int32_t)(hits * 1000 / anchors) : 0;
+    /* (32-bit arithmetic: no 64-bit division on 32-bit targets, which would need libgcc) */
+    while (anchors >= ((int64_t)1 << 22)) { anchors >>= 1; hits >>= 1; }
+    return anchors ? (int32_t)((uint32_t)hits * 1000u / (uint32_t)anchors) : 0;
 }
 
 /* Segmentation (see "adaptive blocks" in src/parc_bwt.pas): the best cut of p[0..n) by the order-1
    cost of the samples p[i - 1], p[i] for i = stride, 2 stride, ...; costs in 1/65536 bit, computed
    with integers only (the same cuts on every platform). work: 2 * 65536 + 2 * 256 uint32.
    Returns the cut (a multiple of stride, minSeg <= cut < n - minSeg), or 0 when no cut saves
-   1/div of the cost plus penalty (in the same units). */
+   1/2^divShift of the cost plus penalty (in the same units). */
 static int64_t seg_log2_fixed(uint64_t x)
 {
     int k = 63 - __builtin_clzll(x), i;
@@ -293,7 +295,7 @@ void parc_seg_init(void)
 
 static inline int64_t seg_dd(uint32_t f) { return f < 65536 ? seg_d[f] : seg_flogf(f + 1) - seg_flogf(f); }
 
-int32_t parc_seg_split(const uint8_t * p, int32_t n, int32_t stride, int32_t minSeg, int64_t penalty, int32_t div,
+int32_t parc_seg_split(const uint8_t * p, int32_t n, int32_t stride, int32_t minSeg, int64_t penalty, int32_t divShift,
     uint32_t * work)
 {
     uint32_t * T = work;               /* [ctx * 256 + sym] * 2: right, left */
@@ -311,7 +313,7 @@ int32_t parc_seg_split(const uint8_t * p, int32_t n, int32_t stride, int32_t min
     for (i = 0; i < 256; ++i) whole += seg_flogf(C[2 * i]);
     for (i = 0; i < 65536; ++i) whole -= seg_flogf(T[2 * i]);
     cur = whole;
-    best = whole - whole / div - penalty;
+    best = whole - (whole >> divShift) - penalty;
     stop = n - minSeg;
     for (i = stride; i < stop; i += stride)
     {

@@ -154,7 +154,7 @@ function parc_bwt_forward(T, U: PByte; A: PLongInt; n: LongInt): LongInt; cdecl;
 function parc_bwt_inverse(T, U: PByte; A: PLongInt; n, primary: LongInt): LongInt; cdecl; external name 'parc_bwt_inverse';
 function parc_qlfc_model_size(coder: LongInt): LongInt; cdecl; external name 'parc_qlfc_model_size';
 procedure parc_seg_init; cdecl; external name 'parc_seg_init';
-function parc_seg_split(p: PByte; n, stride, minSeg: LongInt; penalty: Int64; divisor: LongInt; work: PLongWord): LongInt;
+function parc_seg_split(p: PByte; n, stride, minSeg: LongInt; penalty: Int64; divShift: LongInt; work: PLongWord): LongInt;
   cdecl; external name 'parc_seg_split';
 function parc_repeat_share(input: PByte; len: LongInt; tab: PLongWord): LongInt; cdecl; external name 'parc_repeat_share';
 function parc_lzp_encode(input: PByte; len, minLen, hb: LongInt; hash: PLongWord; output, lens: PByte; lensCap: LongInt;
@@ -586,7 +586,7 @@ end;
   about 1.5 KB (what the coder spends learning a new model), and both halves are split again the same
   way. To keep it cheap only every SEG_STRIDE-th byte is a sample, and no piece is smaller than
   SEG_MIN. (Tuned on a solid block of 3,000 mixed text files from the corpus, on prose and on
-  Silesia's text files: the saving needed is 1/SEG_DIV of the cost plus SEG_PENALTY bits; a
+  Silesia's text files: the saving needed is 1/32 of the cost plus SEG_PENALTY bits; a
   looser rule cuts collections of texts apart and loses the repeats between them.) }
 
 const
@@ -594,20 +594,20 @@ const
   SEG_MIN = 64 * 1024;
   SEG_MAX = 64;              // pieces per block
   SEG_PENALTY = 49152;     // bits of the whole piece (the samples see 1/SEG_STRIDE of it)
-  SEG_DIV = 32;
+  SEG_DIV_SHIFT = 5;         // a split must save 1/32 of the cost (+ the penalty)
   SEG_ONE = 65536;           // fixed point: costs in 1/65536 bit
 
 type
   TSegModel = class
     Work: PLongWord;                // the C core's counts
-    Divisor: Integer;               // a split must save 1/Divisor of the cost (+ the penalty)
-    constructor Create(ADivisor: Integer);
+    DivShift: Integer;              // a split must save 1/2^DivShift of the cost (+ the penalty)
+    constructor Create(ADivShift: Integer);
     destructor Destroy; override;
   end;
 
-constructor TSegModel.Create(ADivisor: Integer);
+constructor TSegModel.Create(ADivShift: Integer);
 begin
-  Divisor := ADivisor;
+  DivShift := ADivShift;
   Work := GetMem((2 * 65536 + 2 * 256) * SizeOf(LongWord));
 end;
 
@@ -621,7 +621,7 @@ end;
   runs in the C core (parc_seg_split), with integer costs in 1/65536 bit. }
 function SegSplit(M: TSegModel; P: PByte; n: SizeInt): SizeInt;
 begin
-  Result := parc_seg_split(P, n, SEG_STRIDE, SEG_MIN, Int64(SEG_PENALTY) * SEG_ONE div SEG_STRIDE, M.Divisor, M.Work);
+  Result := parc_seg_split(P, n, SEG_STRIDE, SEG_MIN, Int64(SEG_PENALTY) * SEG_ONE div SEG_STRIDE, M.DivShift, M.Work);
 end;
 
 { Cut points of P[0..n) into Cuts (ascending, ending with n) }
@@ -758,7 +758,7 @@ begin
   if FLen >= 2 * SEG_MIN then
   begin
     if FSeg = nil then
-      FSeg := TSegModel.Create(SEG_DIV);
+      FSeg := TSegModel.Create(SEG_DIV_SHIFT);
     Pieces := 1;
     SegSplitAll(TSegModel(FSeg), @FCur[0], FLen, Cuts, NCuts, Pieces, 0);
   end;
