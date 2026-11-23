@@ -76,6 +76,8 @@ type
     FOut: TBytes;
     procedure Decide;
     procedure ChoosePred(Data: PByte; Len: SizeInt);
+    function Pays(Data: PByte; Len: SizeInt): Boolean;
+    function FramePhase(const L: TMmLayout): Integer;
     procedure Feed(P: PByte; N: SizeInt);
     procedure FilterUnits(P: PByte; Units: SizeInt);
   protected
@@ -110,7 +112,8 @@ function ParseMmEncParams(const Params: TStringArray): TMmEncParams;
 implementation
 
 uses
-  parc_bytes, parc_tta;   // parc_tta links mmtta_core.o (once)
+  parc_bytes, parc_plzenc,
+  parc_tta;   // parc_tta links mmtta_core.o (once)
 
 procedure mm_enc_rows(m: PMmCore; src, prev, dst: PByte; nrows: SizeUInt; cost: LongInt); cdecl; external name 'mm_enc_rows';
 procedure mm_dec_rows(m: PMmCore; buf, prev: PByte; nrows: SizeUInt); cdecl; external name 'mm_dec_rows';
@@ -118,6 +121,7 @@ procedure mm_enc_1d(m: PMmCore; src, dst: PByte; frames: SizeUInt; cost: LongInt
 procedure mm_dec_1d(m: PMmCore; buf: PByte; frames: SizeUInt); cdecl; external name 'mm_dec_1d';
 function mm_state_size: SizeUInt; cdecl; external name 'mm_state_size';
 procedure mm_costs_2d(m: PMmCore; src: PByte; nrows: SizeUInt; cost: PQWord); cdecl; external name 'mm_costs_2d';
+function mm_find_stride(p: PByte; len: SizeUInt; n, smin, smax, k1, k2: LongWord): LongWord; cdecl; external name 'mm_find_stride';
 
 { ---------------------------------------------------------------------------------------- }
 { parameters }
@@ -211,7 +215,11 @@ begin
   FM.Pred := 0; FM.Cross := 0;
   if FPar.Mode <= 2 then Lim := 64 * 1024 else Lim := 256 * 1024;
   if Lim < 4 * FUnit then Lim := 4 * FUnit;
-  if Len > Lim then Len := Lim;
+  if Len > Lim then
+  begin
+    Data := Data + ((Len - Lim) div 2 div FUnit) * FUnit;   // from the middle
+    Len := Lim;
+  end;
   Units := Len div FUnit;
   if Units < 2 then Exit;
   Best := High(QWord);
@@ -251,6 +259,40 @@ begin
   FM.Cross := BestC;
 end;
 
+{ the offset (0 .. frame size - 1) at which sample frames line up best: the smallest
+  order-1 residual cost on the middle of the detection buffer }
+function TMmEncStage.FramePhase(const L: TMmLayout): Integer;
+var
+  F, ph, Len, Units: SizeInt;
+  M: TMmCore;
+  Best: QWord;
+  Mid: PByte;
+begin
+  Result := 0;
+  F := L.NumChan * (L.Bits div 8);
+  if (F <= 1) or (FLen < 4 * F + F) then Exit;
+  Len := FLen - F;
+  if FPar.Mode <= 2 then Units := 64 * 1024 else Units := 256 * 1024;
+  if Len > Units then Len := Units;
+  Units := Len div F;
+  Mid := @FBuf[((FLen - F - Units * F) div 2 div F) * F];
+  Best := High(QWord);
+  for ph := 0 to F - 1 do
+  begin
+    FillChar(M, SizeOf(M), 0);
+    M.NumChan := L.NumChan;
+    M.Bytes := L.Bits div 8;
+    M.BE := Ord(L.Flags and MMF_BE <> 0);
+    M.Uns := Ord(L.Flags and MMF_U8 <> 0);
+    mm_enc_1d(@M, Mid + ph, nil, Units, 1);
+    if M.Cost < Best then
+    begin
+      Best := M.Cost;
+      Result := ph;
+    end;
+  end;
+end;
+
 procedure TMmEncStage.Decide;
 var
   L: TMmLayout;
@@ -258,6 +300,7 @@ var
   R: Double;
   W: TByteWriter;
   Avail: SizeInt;
+  S: LongWord;
 begin
   Ok := False;
   FillChar(L, SizeOf(L), 0);
@@ -284,8 +327,24 @@ begin
         Ok := MmDetectStats(@FBuf[0], FLen, [1, 2, 3, 4], [1, 2, 3, 4], True, 0.80, L, R);
       L.Offset := 0;
       L.DataLen := -1;
+      // where the first whole sample frame starts (an unknown header before the samples)
+      if Ok then L.Offset := FramePhase(L);
+      // 8-bit pixels without a header (e.g. a TIFF whose directory is at the end): look for
+      // the row length
+      if Ok and (L.Bits = 8) and (L.NumChan in [1, 3, 4]) then
+      begin
+        if FPar.Mode <= 2 then S := mm_find_stride(@FBuf[L.Offset], FLen - L.Offset, L.NumChan, 16, 32768, 256, 4096)
+        else S := mm_find_stride(@FBuf[L.Offset], FLen - L.Offset, L.NumChan, 16, 65536, 512, 16384);
+        if S > 0 then
+        begin
+          L.Kind := MMK_IMAGE;
+          L.Width := S div LongWord(L.NumChan);
+          L.RowBytes := S;
+        end;
+      end;
     end;
   end;
+  // (a header with no channels: a packed format such as 16-bit RGB555, left alone)
   if Ok and ((L.NumChan < 1) or (L.NumChan > MM_MAX_CHAN)) then Ok := False;
   FillChar(FM, SizeOf(FM), 0);
   if Ok then
@@ -316,7 +375,17 @@ begin
   // the predictor, on the data in the detection buffer
   Avail := FLen - L.Offset;
   if (L.DataLen >= 0) and (Avail > L.DataLen) then Avail := L.DataLen;
-  if Avail > 0 then ChoosePred(@FBuf[L.Offset], Avail);
+  if Avail > 0 then
+  begin
+    ChoosePred(@FBuf[L.Offset], Avail);
+    if not Pays(@FBuf[L.Offset], Avail) then
+    begin
+      W.U8(0);
+      Emit(@W.Data[0], W.Len);
+      FPhase := mpStored;
+      Exit;
+    end;
+  end;
   W.U8(1);
   W.U8(FM.NumChan);
   W.U8(FM.Bytes);
@@ -460,6 +529,41 @@ begin
     Emit(@FPend[0], FPendLen);
     FPendLen := 0;
   end;
+end;
+
+{ Does the filter pay?  The residuals of smooth data compress much better, but synthetic and
+  palette images (flat areas, repeated patterns) often compress better as they are.  A fast LZ
+  (plz:1) on the same sample, raw and filtered, decides. }
+function LzSize(P: PByte; N: SizeInt): SizeInt;
+var
+  D: TBytes;
+begin
+  if PlzEncodeMem(['plz', '1'], P, N, D) then Result := Length(D) else Result := N;
+end;
+
+function TMmEncStage.Pays(Data: PByte; Len: SizeInt): Boolean;
+var
+  Lim, Units: SizeInt;
+  M: TMmCore;
+  Tmp: TBytes;
+begin
+  if FPar.Mode <= 2 then Lim := 64 * 1024 else Lim := 256 * 1024;
+  if Lim < 4 * FUnit then Lim := 4 * FUnit;
+  if Len > Lim then
+  begin
+    Data := Data + ((Len - Lim) div 2 div FUnit) * FUnit;
+    Len := Lim;
+  end;
+  Units := Len div FUnit;
+  if Units < 2 then Exit(True);
+  Len := Units * FUnit;
+  M := FM;
+  FillChar(M.Last1, SizeOf(M.Last1), 0);
+  FillChar(M.Last2, SizeOf(M.Last2), 0);
+  SetLength(Tmp, Len);
+  if M.Width > 0 then mm_enc_rows(@M, Data, nil, @Tmp[0], Units, 0)
+  else mm_enc_1d(@M, Data, @Tmp[0], Units, 0);
+  Result := LzSize(@Tmp[0], Len) < LzSize(Data, Len);
 end;
 
 { ---------------------------------------------------------------------------------------- }

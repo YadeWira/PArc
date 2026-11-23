@@ -927,3 +927,51 @@ void mm_costs_2d(const mm_t *m, const u8 *src, usize nrows, u64 *cost)
   else if (m->bytes == 1 && m->uns && m->nch == 1) mm2_costs_body(m, src, nrows, cost, 1, 1, 0, 1);
   else mm2_costs_body(m, src, nrows, cost, m->nch, m->bytes, m->be, m->uns);
 }
+
+/* ================================================================ row length
+
+   For images without a header the mm encoder looks for the row length S (bytes): the byte
+   distance where the data repeats best.  Coarse pass: every S in [smin, smax] on k1 sample
+   positions; the 16 best go to a fine pass on k2 positions.  Returns S, or 0 when no S beats
+   the distance n (the left neighbour) by 15 %. */
+
+static u64 mm_dist_cost(const u8 *p, usize len, u32 S, u32 from, u32 k)
+{
+  u64 c = 0;
+  usize i, step = (len - from) / k;
+  u32 j;
+  if (step == 0) step = 1;
+  for (j = 0, i = from; j < k && i < len; j++, i += step) {
+    i32 d = (i32)p[i] - (i32)p[i - S];
+    c += (u32)(d < 0 ? -d : d);
+  }
+  return c;
+}
+
+u32 mm_find_stride(const u8 *p, usize len, u32 n, u32 smin, u32 smax, u32 k1, u32 k2)
+{
+  u32 best[16], S, j, m;
+  u64 bc[16], c, ref;
+  if (smax > len / 3) smax = (u32)(len / 3);
+  if (smin < 2 * n) smin = 2 * n;
+  if (smin > smax || len < 4096) return 0;
+  for (j = 0; j < 16; j++) { best[j] = 0; bc[j] = ~(u64)0; }
+  for (S = smin; S <= smax; S++) {
+    c = mm_dist_cost(p, len, S, smax, k1);
+    if (c < bc[15]) {
+      for (j = 15; j > 0 && bc[j - 1] > c; j--) { bc[j] = bc[j - 1]; best[j] = best[j - 1]; }
+      bc[j] = c; best[j] = S;
+    }
+  }
+  m = 0;
+  c = ~(u64)0;
+  for (j = 0; j < 16; j++) {
+    u64 f;
+    if (!best[j]) continue;
+    f = mm_dist_cost(p, len, best[j], smax, k2);
+    if (f < c || (f == c && best[j] < m)) { c = f; m = best[j]; }
+  }
+  ref = mm_dist_cost(p, len, n, smax, k2);
+  if (!m || c * 100 > ref * 85) return 0;
+  return m;
+}

@@ -317,7 +317,46 @@ begin
   Row := ((Int64(W) * Bpp + 31) div 32) * 4;
   case Bpp of
     8:  ImageLayout(L, 1, 8, W, Row, Off);
-    16: ImageLayout(L, 1, 16, W, Row, Off);
+    16: ImageLayout(L, 0, 16, W, Row, Off);    // RGB555/565: no channels to predict
+    24: ImageLayout(L, 3, 8, W, Row, Off);
+    32: ImageLayout(L, 4, 8, W, Row, Off);
+  else
+    Exit;
+  end;
+  Result := True;
+end;
+
+{ a bare DIB (BMP without its 14-byte file header) }
+function ParseDib(Buf: PByte; Size: SizeInt; out L: TMmLayout): Boolean;
+var
+  Hs, Comp, Colors: LongWord;
+  W, H: LongInt;
+  Bpp: Integer;
+  Off, Row: Int64;
+begin
+  Result := False;
+  ClearLayout(L);
+  if Size < 40 then Exit;
+  Hs := LE32(Buf);
+  if not ((Hs = 40) or (Hs = 52) or (Hs = 56) or (Hs = 108) or (Hs = 124)) then Exit;
+  W := LongInt(LE32(Buf + 4));
+  H := LongInt(LE32(Buf + 8));
+  if (LE16(Buf + 12) <> 1) or (W <= 0) or (W > 1 shl 20) or (H = 0) then Exit;
+  Bpp := LE16(Buf + 14);
+  Comp := LE32(Buf + 16);
+  Colors := LE32(Buf + 32);
+  if (Comp <> 0) and (Comp <> 3) then Exit;
+  Off := Hs;
+  if (Comp = 3) and (Hs = 40) then Inc(Off, 12);
+  if Bpp <= 8 then
+  begin
+    if Colors = 0 then Colors := 1 shl Bpp;
+    if Colors > 256 then Exit;
+    Inc(Off, 4 * Int64(Colors));
+  end;
+  Row := ((Int64(W) * Bpp + 31) div 32) * 4;
+  case Bpp of
+    8:  ImageLayout(L, 1, 8, W, Row, Off);
     24: ImageLayout(L, 3, 8, W, Row, Off);
     32: ImageLayout(L, 4, 8, W, Row, Off);
   else
@@ -351,13 +390,14 @@ begin
   if CmType = 1 then Inc(Off, Int64(CmLen) * ((CmBits + 7) div 8));
   case Bpp of
     8:  ImageLayout(L, 1, 8, W, W, Off);
-    16: ImageLayout(L, 1, 16, W, 2 * W, Off);
+    16: ImageLayout(L, 0, 16, W, 2 * W, Off);  // RGB555: no channels to predict
     24: ImageLayout(L, 3, 8, W, 3 * W, Off);
     32: ImageLayout(L, 4, 8, W, 4 * W, Off);
   else
     Exit;
   end;
   if (Bpp = 16) and (ImType = 3) then Exit;
+  if (Bpp = 8) and (ImType = 1) then L.NumChan := 0;   // palette indices: nothing to predict
   L.DataLen := Int64(L.RowBytes) * H;
   Result := True;
 end;
@@ -525,7 +565,7 @@ end;
 function MmParseHeader(Buf: PByte; Size: SizeInt; out L: TMmLayout): Boolean;
 begin
   Result := MmParseAudioHeader(Buf, Size, L) or ParseBmp(Buf, Size, L) or ParsePnm(Buf, Size, L) or
-    ParseTiff(Buf, Size, L) or ParseTga(Buf, Size, L);
+    ParseTiff(Buf, Size, L) or ParseDib(Buf, Size, L) or ParseTga(Buf, Size, L);
 end;
 
 { ---------------------------------------------------------------------------------------- }

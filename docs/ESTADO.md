@@ -1293,6 +1293,8 @@ bash tests/plz_cross.sh           # plz: mismos bytes en linux64/linux32/linuxar
 bash tests/delta.sh               # delta: tablas sintéticas de cada formato, trozos al azar, asm == Pascal, dañados
 bash tests/lzp.sh                 # lzp: parámetros de los presets y extremos, trozos al azar, dañados
 bash tests/filters_cross.sh       # delta/lzp: mismos bytes en linux64/linux32/linuxarm64/win64/win32
+bash tests/mmtta.sh               # tta/mm: detección, ida y vuelta en todos los niveles, trozos al azar, C con y sin SIMD, dañados, presets
+bash tests/mmtta_cross.sh         # tta/mm: mismos bytes en linux64/linux32/linuxarm64 (QEMU)/win64/win32 (Wine)
 # plz_bench: cualquier método en memoria por las cadenas (tamaño, CPU y pared)
 fpc -O3 -Fusrc -Fobuild/linux64/units -Flbuild/linux64/units -FUbuild/tests/units -FEbuild/tests tests/plz_bench.lpr
 # liberar/reusar un trabajo del pool apenas termina (ventana ampliada con -dPARC_RACE_TEST)
