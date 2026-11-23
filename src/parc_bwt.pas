@@ -295,12 +295,21 @@ begin
   if P.Adaptive then Result := Result + ':a';
 end;
 
+{ LZP parameters for a block of BlockSize bytes. The table has at most one bucket (two
+  positions) per 8 bytes of the block: ceil(log2 BlockSize) - 3 bits (at least 10), or the
+  method's bits if fewer; a bigger table only costs memory and time on small blocks. }
 function LzpParamsOf(const P: TBwtParams; BlockSize: SizeInt; MinLen: Integer): TLzpParams;
+var
+  b: Integer;
 begin
+  b := 1;
+  while (b < 40) and ((SizeInt(1) shl b) < BlockSize) do Inc(b);
+  Dec(b, 3);
+  if b > P.LzpHash then b := P.LzpHash;
   Result.BlockSize := BlockSize;
   Result.MinMatchLen := MinLen;
   Result.SmallestLen := MinLen;
-  Result.HashSizeLog := P.LzpHash;
+  Result.HashSizeLog := b;
   Result.Barrier := LZP_MAX_BLOCK;
   LzpNormalize(Result);
 end;
