@@ -599,7 +599,7 @@ as `bwt:...`.
 Method string: `bwt[:<block>][:m1..m4][:l|:l<N>|:<N>][:h<N>][:e0|:e1|:e2]`, also `b<block>`;
 GRZip's `a`, `s`, `d`, `p`, `t<N>`, `i<N>` are accepted and ignored. Defaults: block 8 MB
 (at most 1 GB), `m1`, LZP minimum 32 (8..65535; `l` alone = no LZP) and 18 hash bits (10..26).
-The coder: `m1` adaptive, `m2`..`m4` static, or `e0` fast, `e1` static, `e2` adaptive. The decoder takes the block size and the LZP hash bits from the method string.
+The coder: `m1` adaptive, `m2` and `m3` static, `m4` fast, or `e0` fast, `e1` static, `e2` adaptive. The decoder takes the block size and the LZP hash bits from the method string.
 
 Stream header: `U8 version` (1), `U8 LZP hash bits` (0 = no LZP), and `VInt LZP minimum` when
 the bits are not 0; both must equal the method string's. Then blocks until the end of the
@@ -640,15 +640,15 @@ ranks, 11-bit for lengths), static (three counters averaged with fixed weights) 
 The exact model (states, rates, thresholds and tables) is the one in `src/bwt/qlfc.c` and
 `qlfc_tables.h`, which define the format, as libbsc's sources define its own.
 
-The encoder's choices (not needed to decode): `m4` uses the sort transform, the other levels
-the BWT; blocks are cut where order-1 statistics change
+The encoder's choices (not needed to decode): `m4` uses the sort transform on blocks of 1 MB or more
+(after the LZP), the BWT otherwise and at the other levels; blocks are cut where order-1 statistics change
 (a solid block of many files becomes pieces of similar data, at least 64 KB); with `a` the
 blocks are at most half the block size at `m2`..`m4` and 3/4 at `m1`, and the pieces of data
 found to be mixed at most 1/4; the LZP is skipped on blocks with few long repeats (estimated
 from content-defined samples); a block whose BWT output has fewer runs than 1/8 of its bytes is
-coded with the adaptive coder at any level; a block shorter than 64 bytes, or whose coded form
-is not smaller, is stored; with the adaptive coder, a block where the LZP removes more than
-half of the data is filtered again with 4 times the minimum.
+coded with the adaptive coder unless `e` is given; a block shorter than 64 bytes, or whose coded form
+is not smaller, is stored; at `m1`..`m3`, a block where the LZP removes more than half of
+the data is filtered again with 4 times the minimum (recorded in the block).
 
 Decoder checks: version, header parameters, every field range above, the QLFC data (a read
 past CodedLen, a length or rank that does not fit, a decoded size other than M), the primary
