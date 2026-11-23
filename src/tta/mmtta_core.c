@@ -682,60 +682,80 @@ ALWAYS i32 mm_pred2d(const i32 kind, i32 a, i32 b, i32 c)
 ALWAYS i32 mm_ref(const i32 nch) { return nch >= 3 ? 1 : 0; }
 ALWAYS i32 mm_crossed(const i32 nch, i32 ch) { return nch == 2 ? ch == 1 : nch >= 3 && (ch == 0 || ch == 2); }
 
-/* 1D: frames whole sample frames; cost: only add up the cost */
+/* a value as mm_get reads it back from its bytes */
+ALWAYS i32 mm_norm(u32 v, const i32 bytes, const i32 uns)
+{
+  if (bytes == 4) return (i32)v;
+  if (uns) return (i32)(v & ((1u << (8 * bytes)) - 1));
+  return (i32)(v << (32 - 8 * bytes)) >> (32 - 8 * bytes);
+}
+
+/* 1D: frames whole sample frames; cost: only add up the cost.  The last values live in
+   locals (registers when nch is a constant) and go back to m at the end. */
 ALWAYS void mm1_enc(mm_t *m, const u8 *src, u8 *dst, usize frames, const i32 nch, const i32 bytes,
                     const i32 be, const i32 uns, const i32 order, const i32 cross, const i32 cost)
 {
   usize i;
-  i32 ch;
+  i32 ch, l1[MMCH], l2[MMCH];
+  u64 cs = 0;
   const i32 N = nch * bytes, ref = mm_ref(nch);
+  for (ch = 0; ch < nch; ch++) { l1[ch] = m->last1[ch]; l2[ch] = m->last2[ch]; }
   for (i = 0; i < frames; i++) {
     u32 r[MMCH];
     for (ch = 0; ch < nch; ch++) {
       i32 v = mm_get(src + i * N + ch * bytes, bytes, be, uns);
-      i32 p = order == 2 ? SUB32(2 * (u32)m->last1[ch], m->last2[ch]) : m->last1[ch];
-      m->last2[ch] = m->last1[ch];
-      m->last1[ch] = v;
+      i32 p = order == 2 ? SUB32(2 * (u32)l1[ch], l2[ch]) : l1[ch];
+      l2[ch] = l1[ch];
+      l1[ch] = v;
       r[ch] = (u32)SUB32(v, p);
     }
     for (ch = 0; ch < nch; ch++) {
       u32 o = cross && mm_crossed(nch, ch) ? r[ch] - r[ref] : r[ch];
-      if (cost) m->cost += mm_rcost(o, bytes);
+      if (cost) cs += mm_rcost(o, bytes);
       else mm_put(dst + i * N + ch * bytes, bytes, be, o);
     }
   }
+  for (ch = 0; ch < nch; ch++) { m->last1[ch] = l1[ch]; m->last2[ch] = l2[ch]; }
+  m->cost += cs;
 }
 
 ALWAYS void mm1_dec(mm_t *m, u8 *buf, usize frames, const i32 nch, const i32 bytes,
                     const i32 be, const i32 uns, const i32 order, const i32 cross)
 {
   usize i;
-  i32 ch;
+  i32 ch, l1[MMCH], l2[MMCH];
   const i32 N = nch * bytes, ref = mm_ref(nch);
+  for (ch = 0; ch < nch; ch++) { l1[ch] = m->last1[ch]; l2[ch] = m->last2[ch]; }
   for (i = 0; i < frames; i++) {
-    u32 rr = (u32)mm_get(buf + i * N + ref * bytes, bytes, be, 1);
+    u8 *q = buf + i * N;
+    u32 rr = (u32)mm_get(q + ref * bytes, bytes, be, 1);
     for (ch = 0; ch < nch; ch++) {
-      u8 *q = buf + i * N + ch * bytes;
-      u32 o = (u32)mm_get(q, bytes, be, 1);
-      i32 p = order == 2 ? SUB32(2 * (u32)m->last1[ch], m->last2[ch]) : m->last1[ch];
+      u32 o = (u32)mm_get(q + ch * bytes, bytes, be, 1);
+      i32 p = order == 2 ? SUB32(2 * (u32)l1[ch], l2[ch]) : l1[ch], v;
       if (cross && mm_crossed(nch, ch)) o += rr;
-      mm_put(q, bytes, be, o + (u32)p);
-      m->last2[ch] = m->last1[ch];
-      m->last1[ch] = mm_get(q, bytes, be, uns);
+      v = mm_norm(o + (u32)p, bytes, uns);
+      mm_put(q + ch * bytes, bytes, be, (u32)v);
+      l2[ch] = l1[ch];
+      l1[ch] = v;
     }
   }
+  for (ch = 0; ch < nch; ch++) { m->last1[ch] = l1[ch]; m->last2[ch] = l2[ch]; }
 }
 
-/* 2D: nrows rows of rowbytes at src; prev = the original row before them (NULL at the top) */
+/* 2D: nrows rows of rowbytes at src; prev = the original row before them (NULL at the top).
+   The left and up-left values of each channel are carried in locals along the row. */
 ALWAYS void mm2_enc(mm_t *m, const u8 *src, const u8 *prev, u8 *dst, usize nrows, const i32 nch,
                     const i32 bytes, const i32 be, const i32 uns, const i32 kind, const i32 cross, const i32 cost)
 {
   usize y;
   i32 x, ch;
+  u64 cs = 0;
   const i32 N = nch * bytes, ref = mm_ref(nch), w = m->width, rb = m->rowbytes;
   for (y = 0; y < nrows; y++) {
     const u8 *cur = src + y * rb, *up = y ? cur - rb : prev;
     u8 *out = cost ? 0 : dst + y * rb;
+    i32 a[MMCH], c[MMCH];
+    for (ch = 0; ch < nch; ch++) { a[ch] = 0; c[ch] = 0; }
     for (x = 0; x < w; x++) {
       u32 r[MMCH];
       for (ch = 0; ch < nch; ch++) {
@@ -743,20 +763,23 @@ ALWAYS void mm2_enc(mm_t *m, const u8 *src, const u8 *prev, u8 *dst, usize nrows
         i32 v = mm_get(cur + off, bytes, be, uns), p;
         if (up) {
           i32 b = mm_get(up + off, bytes, be, uns);
-          p = x ? mm_pred2d(kind, mm_get(cur + off - N, bytes, be, uns), b, mm_get(up + off - N, bytes, be, uns)) : b;
+          p = x ? mm_pred2d(kind, a[ch], b, c[ch]) : b;
+          c[ch] = b;
         } else
-          p = x ? mm_get(cur + off - N, bytes, be, uns) : 0;
+          p = a[ch];
+        a[ch] = v;
         r[ch] = (u32)SUB32(v, p);
       }
       for (ch = 0; ch < nch; ch++) {
         u32 o = cross && mm_crossed(nch, ch) ? r[ch] - r[ref] : r[ch];
-        if (cost) m->cost += mm_rcost(o, bytes);
+        if (cost) cs += mm_rcost(o, bytes);
         else mm_put(out + x * N + ch * bytes, bytes, be, o);
       }
     }
     if (!cost)
       for (x = w * N; x < rb; x++) out[x] = cur[x];   /* row padding as it is */
   }
+  m->cost += cs;
 }
 
 ALWAYS void mm2_dec(mm_t *m, u8 *buf, const u8 *prev, usize nrows, const i32 nch,
@@ -768,19 +791,33 @@ ALWAYS void mm2_dec(mm_t *m, u8 *buf, const u8 *prev, usize nrows, const i32 nch
   for (y = 0; y < nrows; y++) {
     u8 *cur = buf + y * rb;
     const u8 *up = y ? cur - rb : prev;
+    i32 a[MMCH], c[MMCH];
+    for (ch = 0; ch < nch; ch++) { a[ch] = 0; c[ch] = 0; }
+    if (!up) {
+      for (x = 0; x < w; x++) {
+        u8 *q = cur + x * N;
+        u32 rr = (u32)mm_get(q + ref * bytes, bytes, be, 1);
+        for (ch = 0; ch < nch; ch++) {
+          u32 o = (u32)mm_get(q + ch * bytes, bytes, be, 1);
+          if (cross && mm_crossed(nch, ch)) o += rr;
+          a[ch] = mm_norm(o + (u32)a[ch], bytes, uns);
+          mm_put(q + ch * bytes, bytes, be, (u32)a[ch]);
+        }
+      }
+      continue;
+    }
     for (x = 0; x < w; x++) {
-      u32 rr = (u32)mm_get(cur + x * N + ref * bytes, bytes, be, 1);
+      u8 *q = cur + x * N;
+      const u8 *uq = up + x * N;
+      u32 rr = (u32)mm_get(q + ref * bytes, bytes, be, 1);
       for (ch = 0; ch < nch; ch++) {
-        const i32 off = x * N + ch * bytes;
-        u32 o = (u32)mm_get(cur + off, bytes, be, 1);
-        i32 p;
-        if (up) {
-          i32 b = mm_get(up + off, bytes, be, uns);
-          p = x ? mm_pred2d(kind, mm_get(cur + off - N, bytes, be, uns), b, mm_get(up + off - N, bytes, be, uns)) : b;
-        } else
-          p = x ? mm_get(cur + off - N, bytes, be, uns) : 0;
+        u32 o = (u32)mm_get(q + ch * bytes, bytes, be, 1);
+        i32 b = mm_get(uq + ch * bytes, bytes, be, uns);
+        i32 p = x ? mm_pred2d(kind, a[ch], b, c[ch]) : b;
         if (cross && mm_crossed(nch, ch)) o += rr;
-        mm_put(cur + off, bytes, be, o + (u32)p);
+        a[ch] = mm_norm(o + (u32)p, bytes, uns);
+        c[ch] = b;
+        mm_put(q + ch * bytes, bytes, be, (u32)a[ch]);
       }
     }
   }
@@ -856,4 +893,46 @@ void mm_dec_1d(mm_t *m, u8 *buf, usize frames)
 {
   MM_SPECS1(D1)
   mm1_dec(m, buf, frames, m->nch, m->bytes, m->be, m->uns, m->pred + 1, m->cross);
+}
+
+/* costs of all 2D predictors in one pass: cost[2 * k + cross] for k = 0 (left), 2..5 */
+ALWAYS void mm2_costs_body(const mm_t *m, const u8 *src, usize nrows, u64 *cost, const i32 nch,
+                           const i32 bytes, const i32 be, const i32 uns)
+{
+  usize y;
+  i32 x, ch, k;
+  const i32 N = nch * bytes, ref = mm_ref(nch), w = m->width, rb = m->rowbytes;
+  for (y = 1; y < nrows; y++) {
+    const u8 *cur = src + y * rb, *up = cur - rb;
+    for (x = 1; x < w; x++) {
+      u32 r[6][MMCH];
+      for (ch = 0; ch < nch; ch++) {
+        const i32 off = x * N + ch * bytes;
+        i32 v = mm_get(cur + off, bytes, be, uns), a = mm_get(cur + off - N, bytes, be, uns);
+        i32 b = mm_get(up + off, bytes, be, uns), c = mm_get(up + off - N, bytes, be, uns);
+        r[0][ch] = (u32)SUB32(v, a);
+        r[2][ch] = (u32)SUB32(v, mm_pred2d(2, a, b, c));
+        r[3][ch] = (u32)SUB32(v, mm_pred2d(3, a, b, c));
+        r[4][ch] = (u32)SUB32(v, mm_pred2d(4, a, b, c));
+        r[5][ch] = (u32)SUB32(v, mm_pred2d(5, a, b, c));
+      }
+      for (k = 0; k < 6; k++) {
+        if (k == 1) continue;
+        for (ch = 0; ch < nch; ch++) {
+          cost[2 * k] += mm_rcost(r[k][ch], bytes);
+          if (nch >= 2) cost[2 * k + 1] += mm_rcost(mm_crossed(nch, ch) ? r[k][ch] - r[k][ref] : r[k][ch], bytes);
+        }
+      }
+    }
+  }
+}
+
+void mm_costs_2d(const mm_t *m, const u8 *src, usize nrows, u64 *cost)
+{
+  i32 k;
+  for (k = 0; k < 12; k++) cost[k] = 0;
+  if (m->bytes == 1 && m->uns && m->nch == 3) mm2_costs_body(m, src, nrows, cost, 3, 1, 0, 1);
+  else if (m->bytes == 1 && m->uns && m->nch == 4) mm2_costs_body(m, src, nrows, cost, 4, 1, 0, 1);
+  else if (m->bytes == 1 && m->uns && m->nch == 1) mm2_costs_body(m, src, nrows, cost, 1, 1, 0, 1);
+  else mm2_costs_body(m, src, nrows, cost, m->nch, m->bytes, m->be, m->uns);
 }

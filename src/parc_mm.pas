@@ -117,6 +117,7 @@ procedure mm_dec_rows(m: PMmCore; buf, prev: PByte; nrows: SizeUInt); cdecl; ext
 procedure mm_enc_1d(m: PMmCore; src, dst: PByte; frames: SizeUInt; cost: LongInt); cdecl; external name 'mm_enc_1d';
 procedure mm_dec_1d(m: PMmCore; buf: PByte; frames: SizeUInt); cdecl; external name 'mm_dec_1d';
 function mm_state_size: SizeUInt; cdecl; external name 'mm_state_size';
+procedure mm_costs_2d(m: PMmCore; src: PByte; nrows: SizeUInt; cost: PQWord); cdecl; external name 'mm_costs_2d';
 
 { ---------------------------------------------------------------------------------------- }
 { parameters }
@@ -202,37 +203,50 @@ end;
 procedure TMmEncStage.ChoosePred(Data: PByte; Len: SizeInt);
 var
   Lim, Units: SizeInt;
-  p, c, BestP, BestC, LoP, HiP: Integer;
+  p, c, BestP, BestC: Integer;
+  Costs: array[0..11] of QWord;
   Best: QWord;
   M: TMmCore;
 begin
   FM.Pred := 0; FM.Cross := 0;
   if FPar.Mode <= 2 then Lim := 64 * 1024 else Lim := 256 * 1024;
+  if Lim < 4 * FUnit then Lim := 4 * FUnit;
   if Len > Lim then Len := Lim;
   Units := Len div FUnit;
   if Units < 2 then Exit;
-  if FM.Width > 0 then begin LoP := 0; HiP := 5; end else begin LoP := 0; HiP := 1; end;
   Best := High(QWord);
-  BestP := LoP; BestC := 0;
-  for p := LoP to HiP do
-    for c := 0 to Ord(FM.NumChan >= 2) do
-    begin
-      if (FM.Width > 0) and (p = 1) then Continue;
-      M := FM;
-      M.Pred := p;
-      M.Cross := c;
-      M.Cost := 0;
-      FillChar(M.Last1, SizeOf(M.Last1), 0);
-      FillChar(M.Last2, SizeOf(M.Last2), 0);
-      if M.Width > 0 then mm_enc_rows(@M, Data, nil, nil, Units, 1)
-      else mm_enc_1d(@M, Data, nil, Units, 1);
-      if M.Cost < Best then
+  BestP := 0; BestC := 0;
+  if FM.Width > 0 then
+  begin
+    // all 2D predictors in one pass
+    mm_costs_2d(@FM, Data, Units, @Costs[0]);
+    for p := 0 to 5 do
+      for c := 0 to Ord(FM.NumChan >= 2) do
+        if (p <> 1) and (Costs[2 * p + c] < Best) then
+        begin
+          Best := Costs[2 * p + c];
+          BestP := p;
+          BestC := c;
+        end;
+  end
+  else
+    for p := 0 to 1 do
+      for c := 0 to Ord(FM.NumChan >= 2) do
       begin
-        Best := M.Cost;
-        BestP := p;
-        BestC := c;
+        M := FM;
+        M.Pred := p;
+        M.Cross := c;
+        M.Cost := 0;
+        FillChar(M.Last1, SizeOf(M.Last1), 0);
+        FillChar(M.Last2, SizeOf(M.Last2), 0);
+        mm_enc_1d(@M, Data, nil, Units, 1);
+        if M.Cost < Best then
+        begin
+          Best := M.Cost;
+          BestP := p;
+          BestC := c;
+        end;
       end;
-    end;
   FM.Pred := BestP;
   FM.Cross := BestC;
 end;
