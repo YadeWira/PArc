@@ -22,7 +22,7 @@ The rest of the FreeArc 0.67 tree is in git history (commit `82ea8d9`) and in Fr
 | phase | status |
 |---|---|
 | FreeArc/PArc bugs | ✅ closed (the `.arc` parity fixes remain as history; see tag `entrega-arc`) |
-| Ported codecs | ✅ closed (LZMA, LZ4, PPMd, 4x4, Dict, LZP, Delta, MM, TTA, GRZip, BCJ, DisPack, SREP; Tornado was ported too and removed after 0.0.5, replaced by the own `plz`; REP replaced by OREP, MIT, 2026-11) |
+| Ported codecs | ✅ closed (LZMA, LZ4, PPMd, 4x4, Dict, LZP, Delta, MM, TTA, BCJ, DisPack, SREP; Tornado was ported too and removed after 0.0.5, replaced by the own `plz`; REP replaced by OREP, MIT, 2026-11; GRZip replaced by the own `bwt`, 2026-11-23) |
 | `.arc` compatibility | ❌ dropped: rejected with a message pointing to FreeArc-ex |
 | GUI | ❌ dropped |
 | `.zip/.7z/.rar` containers | ➡ moved to FreeArc-ex (tag `entrega-arc`) |
@@ -39,7 +39,7 @@ The rest of the FreeArc 0.67 tree is in git history (commit `82ea8d9`) and in Fr
 - Commands: `l`, `lb`, `t`, `x`, `e`, `a`, `u`, `f`, `d`, `r`, and FreeArc's `v`, `lt`, `create`,
   `m`, `mf`, `ch`, `rr<spec>`, `c`, `cw`, `j`, `k` (tests/cli_commands.sh). Not implemented: `s`
   (SFX) and `modify`.
-- Methods: `storing`, `lzma`, `ppmd`, `grzip`, `dict`, `orep`, `delta`, `plz`, `lzp`, `mm`,
+- Methods: `storing`, `lzma`, `ppmd`, `bwt`, `dict`, `orep`, `delta`, `plz`, `lzp`, `mm`,
   `tta`, `4x4`, `exe` (BCJ), `lz4`, `dispack070`, `srep` and `cm` (context mixing), alone or
   chained.
 - `plz` (2026-11) is PArc's own LZ77 codec (no FreeArc code). Since 2026-11-20 it is the LZ of
@@ -1274,7 +1274,7 @@ SREP with the 32-bit binary was verified under Wine and with an archive cross-ch
 ./build.sh linux64
 bash tests/cli.sh tests/cli_options.sh tests/cli_commands.sh
 bash tests/stdio.sh tests/volumes.sh
-bash tests/rs_recovery.sh tests/parc_crypt.sh tests/cm.sh tests/grzip.sh tests/bcj2.sh
+bash tests/rs_recovery.sh tests/parc_crypt.sh tests/cm.sh tests/bwt.sh tests/bcj2.sh
 bash tests/dispack.sh tests/srep.sh tests/bcj.sh
 bash tests/run_tornado_tests.sh tests/crypto_vectors.sh tests/crc.sh tests/extract_parallel.sh
 bash tests/run_lzma_tests.py build/tests/test_lzma

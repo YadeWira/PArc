@@ -463,3 +463,64 @@ copy may overlap itself). The table is updated at every position where a main by
 before the byte is interpreted; positions inside a match are not. The block must end exactly
 when both streams are used up, at Len bytes; anything else (or a match past Len, or NLens
 larger than NMain + 2⌊Len/255⌋ + 2) is a damaged block (`EArcCorrupt`).
+
+### 6.6 `bwt` (since 2026-11): replaces `grzip`
+
+`bwt` is PArc's block-sorting compressor (`src/parc_bwt.pas` and the C core in `src/bwt/`),
+written to replace FreeArc's GRZip (I. Grebnov, LGPL); it is not derived from it. It is LZP
+(the model of §6.5), the Burrows–Wheeler transform (libsais, Apache-2.0) and QLFC coding (the
+coders of libbsc 3.4.1, Apache-2.0, translated to C). **`grzip` blocks of older archives no
+longer decode** (exit code 3); a `grzip:...` method string given to the compressor is written
+as `bwt:...`.
+
+Method string: `bwt[:<block>][:m1..m4][:l|:l<N>|:<N>][:h<N>][:e0|:e1|:e2]`, also `b<block>`;
+GRZip's `a`, `s`, `d`, `p`, `t<N>`, `i<N>` are accepted and ignored. Defaults: block 8 MB
+(at most 1 GB), `m1`, LZP minimum 32 (8..65535; `l` alone = no LZP) and 18 hash bits (10..26).
+The coder: `m1` adaptive, `m2`/`m3` static, `m4` fast, or `e0` fast, `e1` static, `e2`
+adaptive. The decoder takes the block size and the LZP hash bits from the method string.
+
+Stream header: `U8 version` (1), `U8 LZP hash bits` (0 = no LZP), and `VInt LZP minimum` when
+the bits are not 0; both must equal the method string's. Then blocks until the end of the
+stream (`VInt` is LEB128):
+
+| Field | Value |
+|---|---|
+| `VInt Len` | bytes the block decodes to, 1 ≤ Len ≤ block size |
+| `U8 mode` | 0 = stored: Len bytes follow; 1 = coded |
+| `U8 flags` | (coded) bits 0–1: coder (1 static, 2 adaptive, 3 fast; 0 invalid), bit 2: LZP applied (only if the header has LZP), bits 3–7 zero |
+| LZP fields | (bit 2) `U8 escape`, `VInt minimum` (8..65535), `VInt NMain` (≤ Len), `VInt NLens` (≤ NMain + 2⌊Len/255⌋ + 2) |
+| `VInt Primary` | primary index of the BWT, 1 ≤ Primary ≤ M |
+| `VInt CodedLen` | bytes of QLFC data, ≤ Len |
+| data | CodedLen bytes |
+
+M = NMain + NLens with LZP (1 ≤ M ≤ Len), else M = Len. Decoding a coded block: the QLFC data
+give M bytes (their first 32 bits, coded, must say M), the inverse BWT of those with Primary
+(libsais' convention: the index of the row of the original string, counted from 1; the
+string is not terminated) gives the BWT input, and with LZP that input is the main stream
+(NMain bytes) followed by the lengths stream (NLens bytes), decoded as in §6.5 with this
+block's minimum as both minimum and smallest length, no barrier, and the hash bits of the
+header (limited to the block as in §6.5) into Len bytes; without LZP it is the block.
+
+QLFC (Grebnov's quantized local frequency coding, as coded by libbsc's `qlfc.cpp`): the BWT
+output is cut into runs of equal bytes; for each run, the move-to-front rank of its byte
+(the ranks are those of a list that starts with the alphabet in the order coded first) and
+its length are coded with a binary range coder (32-bit range, 16-bit output words stored
+little-endian) bit by bit — exponent then mantissa — under contexts of the byte, of the
+recent ranks and lengths, and of a static model. The three coders differ only in how they
+predict each bit: fast (one counter per context, fixed rates; 13-bit probabilities for
+ranks, 11-bit for lengths), static (three counters averaged with fixed weights) and adaptive
+(the three counters mixed by a 3-input mixer with an interpolated output map per context).
+The exact model (states, rates, thresholds and tables) is the one in `src/bwt/qlfc.c` and
+`qlfc_tables.h`, which define the format, as libbsc's sources define its own.
+
+The encoder's choices (not needed to decode): blocks are cut where order-1 statistics change
+(a solid block of many files becomes pieces of similar data, at least 64 KB); a block shorter
+than 64 bytes, or whose coded form is not smaller, is stored; with the adaptive coder, a
+block where the LZP removes more than half of the data is filtered again with 4 times the
+minimum.
+
+Decoder checks: version, header parameters, every field range above, the QLFC data (a read
+past CodedLen, a length or rank that does not fit, a decoded size other than M), the primary
+index and the LZP decoding; anything else is a damaged block (`EArcCorrupt`). Memory per block
+being decoded: the coded data, M bytes, 4(M + 1) bytes for the inverse BWT, then Len bytes
+and the LZP table; blocks are decoded in parallel within `PARC_THREADS`.
