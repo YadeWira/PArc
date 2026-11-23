@@ -785,7 +785,7 @@ begin
       'dict': Result := 3 * FirstMemParam(Parts, 64 * MB_) + MB_;
       'grzip': Result := 6 * FirstMemParam(Parts, 8 * MB_) + MB_;
       'dispack', 'dispack070': Result := 3 * FirstMemParam(Parts, 8 * MB_) + MB_;
-      'cm': Result := 4 * DataSize + 320 * MB_;
+      'cm': Result := CmEncMemory(ParseCmLevel(Parts), DataSize);
       'srep': Result := 3 * DataSize + 64 * MB_;
       'lz4': Result := 3 * FirstMemParam(Parts, MB_) + MB_;
       'plz': Result := PlzEncMemory(ParsePlzEncParams(Parts), True) + MB_;
@@ -941,7 +941,7 @@ begin
         end;
       end;
     'storing': Result := TStoringStage.Create(Target);
-    'cm':      Result := TCmEncStage.Create(Target);
+    'cm':      Result := TCmEncStage.Create(Target, ParseCmLevel(Parts));
     'orep':    Result := TOrepEncStage.Create(Target, Parts);
     'delta':   Result := TDeltaEncStage.Create(Target, Parts);
     'dict':    Result := TDictEncStage.Create(Target, Parts);
