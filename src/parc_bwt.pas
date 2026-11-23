@@ -93,6 +93,7 @@ type
     FHeaderDone: Boolean;
     FSeg: TObject;               // segmentation model, created on first use
     FBufSize: SizeInt;           // input gathered before cutting it into blocks
+    FMixedCap: SizeInt;          // with a: largest piece of a buffer that was cut
     procedure SubmitJob(var Data: TBytes; Len: SizeInt);
     procedure FlushBlock(Final: Boolean);
     procedure WriteOldest;
@@ -655,10 +656,16 @@ var
 begin
   FPar := ParseBwtParams(Params);
   inherited Create(ATarget);
-  // GRZip's adaptive block (a) at the faster levels: also at most half the block, which keeps
-  // the memory of the threads and the time of the sort down; m1 keeps the whole block
+  // GRZip's adaptive block (a): blocks of at most half the block size at m2..m4 and 3/4 at m1,
+  // and pieces of at most 1/4 where the data were found to be mixed; this keeps the memory of
+  // the threads and the time of the sort down
   FBufSize := FPar.BlockSize;
-  if FPar.Adaptive and (FPar.Level >= 2) and (FBufSize >= 2 * SEG_MIN) then FBufSize := FBufSize div 2;
+  FMixedCap := FPar.BlockSize;
+  if FPar.Adaptive and (FBufSize >= 4 * SEG_MIN) then
+  begin
+    if FPar.Level >= 2 then FBufSize := FBufSize div 2 else FBufSize := FBufSize div 4 * 3;
+    FMixedCap := FPar.BlockSize div 4;
+  end;
   Threads := PoolWorkers(BWT_MAXTHREADS);
   if Threads > 0 then SetLength(FQueue, Threads + 1) else SetLength(FQueue, 1);
   FPool := TJobPool.Create(Threads, Length(FQueue));
@@ -743,8 +750,8 @@ end;
 procedure TBwtEncStage.FlushBlock(Final: Boolean);
 var
   Cuts: array[0..SEG_MAX - 1] of SizeInt;
-  NCuts, k, Pieces: Integer;
-  Prev, Last: SizeInt;
+  NCuts, k, Pieces, j, Parts: Integer;
+  Prev, Last, e, b0: SizeInt;
   B: TBytes;
 begin
   if FLen = 0 then Exit;
@@ -769,9 +776,17 @@ begin
   if Final then Last := NCuts;
   for k := 0 to Last - 1 do
   begin
-    SetLength(B, Cuts[k] - Prev + IN_SLACK);   // (room for the coder's look-ahead)
-    Move(FCur[Prev], B[0], Cuts[k] - Prev);
-    SubmitJob(B, Cuts[k] - Prev);
+    // with a, the pieces of mixed data are also kept small (GRZip's adaptive blocks were)
+    Parts := 1;
+    if FPar.Adaptive then Parts := (Cuts[k] - Prev + FMixedCap - 1) div FMixedCap;
+    for j := 0 to Parts - 1 do
+    begin
+      e := Prev + (Cuts[k] - Prev) * (j + 1) div Parts - Prev - (Cuts[k] - Prev) * j div Parts;
+      b0 := Prev + (Cuts[k] - Prev) * j div Parts;
+      SetLength(B, e + IN_SLACK);   // (room for the coder's look-ahead)
+      Move(FCur[b0], B[0], e);
+      SubmitJob(B, e);
+    end;
     Prev := Cuts[k];
   end;
   if Final then
