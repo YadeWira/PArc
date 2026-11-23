@@ -236,8 +236,12 @@ static inline U32 hash3(U32 a, U32 b, U32 c) {
   return h;
 }
 
+static inline U8 *ht_bucket(pcm_t *m, U32 h) {
+  return m->ht + ((size_t)((h >> 8) & ((1u << m->htbits) - 1)) << 6);
+}
+
 static inline U8 *ht_find(pcm_t *m, U32 h) {
-  U8 *b = m->ht + ((size_t)((h >> 8) & ((1u << m->htbits) - 1)) << 6);
+  U8 *b = ht_bucket(m, h);
   U8 chk = (U8)h;
   U8 *best;
   int bp, k;
@@ -346,7 +350,7 @@ static void model_init(pcm_t *m) {
   for (i = 0; i < (int)(A2N * 33); i++) m->a2[i] = m->a1[i % 33];
   for (i = 0; i < (int)(A3N * 33); i++) m->a3[i] = m->a1[i % 33];
   m->c0 = 1; m->bpos = 0; m->nib = 1;
-  m->lr1 = P(0); m->lr2 = P(1);
+  m->lr1 = P(14) ? P(14) : P(0); m->lr2 = P(1);
   m->x[NI - 1] = 256;
   m->x2[NM] = 256;
   for (i = 0; i < NCH; i++) m->slot[i] = ht_find(m, hash3(i + 1, 0, 0));
@@ -470,10 +474,19 @@ static inline void update(pcm_t *m, int y) {
     m->nib = 1;
   } else {
     m->nib = (m->nib << 1) | (U32)y;
+    if (P(12) && m->bpos == 3) {
+      U32 h0 = (m->c0 << 1) * 0x6F4F2A35u, h1 = ((m->c0 << 1) | 1) * 0x6F4F2A35u;
+      for (i = 0; i < NCH; i++) {
+        __builtin_prefetch(ht_bucket(m, m->hh[i] + h0));
+        __builtin_prefetch(ht_bucket(m, m->hh[i] + h1));
+      }
+    }
   }
 }
 
 static inline int is_word(U32 c) {
+  if (P(13) == 1) return (c - 'a' < 26u) || (c - 'A' < 26u) || (c - '0' < 10u) || c >= 128 || c < 32;
+  if (P(13) == 2) return c != 32 && c != 10 && c != ',' && c != '.';
   return (c - 'a' < 26u) || (c - 'A' < 26u) || c >= 128;
 }
 
@@ -522,8 +535,18 @@ static inline void update_byte(pcm_t *m) {
     m->hh[2] = hash3(3, c4, 0);
     m->hh[3] = hash3(4, c4, c8 & 0xffff);
     m->hh[4] = hash3(5, m->wh, m->wh ? 0 : (c & 255) + 1);
-    m->hh[5] = hash3(6, c4 & 0xffff00, 0);
-    m->hh[6] = hash3(7, m->wh, m->wh1);
+    switch (P(10)) {
+      case 1: m->hh[5] = hash3(6, c4, c8 & 0xff); break;
+      case 2: m->hh[5] = hash3(6, c4, c8 & 0xffffff); break;
+      case 3: m->hh[5] = hash3(6, m->wh, c4 & 0xff00); break;
+      default: m->hh[5] = hash3(6, c4 & 0xffff00, 0);
+    }
+    switch (P(11)) {
+      case 1: m->hh[6] = hash3(7, c4, c8); break;
+      case 2: m->hh[6] = hash3(7, c4, c8 & 0xff); break;
+      default: m->hh[6] = hash3(7, m->wh, m->wh1);
+    }
+    for (i = 0; i < NCH; i++) __builtin_prefetch(ht_bucket(m, m->hh[i]));
     for (i = 0; i < NCH; i++) m->slot[i] = ht_find(m, m->hh[i]);
   }
 }
@@ -683,6 +706,7 @@ void pcm_enc_block(void *mem, const U8 *src, U32 n) {
     enc_bit(m, 0, 32768);
     for (j = 16; j-- > 0;) enc_bit(m, (n >> j) & 1, 32768);
   }
+  if (P(14) && m->lr1 > P(0)) m->lr1--;
   if (modelled) {
     for (i = 0; i < n; i++) {
       U32 c = src[i];
@@ -725,6 +749,7 @@ int pcm_dec_block(void *mem, U8 *dst) {
     for (j = 0; j < 16; j++) n = (n << 1) | (U32)dec_bit(m, 32768);
     if (n == 0) return PCM_ERR_DATA;
   }
+  if (P(14) && m->lr1 > P(0)) m->lr1--;
   if (modelled) {
     for (i = 0; i < n; i++) {
       for (j = 0; j < 8; j++) {
