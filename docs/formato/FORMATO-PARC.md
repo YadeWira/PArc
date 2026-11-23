@@ -483,7 +483,7 @@ Stream:
 | `U8 version` | 1 |
 | `U8 mode` | 0 = stored: the rest of the stream is the data; 1 = coded |
 | `U8 channels, U8 bits, U8 flags, U8 level` | 1..255 channels; bits 8/16/24/32; flags bit 0 big endian, bit 1 unsigned 8-bit, bit 2 IEEE float (bits = 32); level is informative |
-| configuration | `U8 NF` (0..3), NF × (`U16 order` LE, multiple of 16 in 16..1024, `U8 shift` 1..24), `U8 A1, A2, A3, S2Shift, S2Step, MS, R1` |
+| configuration | `U8 NF` (0..3), NF × (`U16 order` LE, multiple of 16 in 16..1024, `U8 shift` 1..24), `U8 A1, A2, A3, S2Shift, S2Step, MS, R1, R2` (R1 ≤ 7, R2 ≤ 1) |
 | chunks | until type 0 |
 
 Chunks: `U8 type`. Type 1, coded frame: `VInt frames` (1 ≤ frames ≤ 2^17 / channels), `VInt rcLen`
@@ -517,6 +517,9 @@ arithmetic mod 2^32 and arithmetic right shifts:
    Binary decisions: a 32-bit range coder with carry (LZMA style: 5 flush bytes, the first byte
    0), 16-bit probabilities of a 0 starting at 32768, p += (t − p) >> 7 with t = 65408 after a 0 and
    127 after a 1. Raw bits go low bits first into the raw stream, 32 at a time.
+
+5. With R2 bit 0 (no level uses it yet) a final short stage as in 2, on this channel's own
+   last four residuals only, is applied to the residual before coding.
 
 The decoder inverts the stages in reverse order. Models persist across frames; each frame's
 range coder and raw stream are separate and must be used up exactly. Decoder checks: version,

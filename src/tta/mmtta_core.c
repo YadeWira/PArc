@@ -61,6 +61,7 @@ typedef struct {
   const short_t *o;                /* the short stage's other channel (set by ttac_init; the
                                       state must stay where it was initialised) */
   short_t s;
+  short_t s2;                      /* final short stage (configuration r2 bit 0) */
   ent_t e;
   lms_t f[3];
 } chan_t;
@@ -455,7 +456,8 @@ ALWAYS u32 ent_decode(ent_t *e, rcd_t *r, br_t *br, const i32 fast)
 ALWAYS i32 enc_body(state_t *S, i32 *x, usize frames, u8 *rc, usize rccap, usize *rclen,
                     u8 *raw, usize rawcap, usize *rawlen, PARAMS)
 {
-  const i32 nc = S->nch, fast = (r1 & 1) | ((r1 >> 1) & 2), noshort = (r1 >> 1) & 1;
+  const i32 nc = S->nch, fast = (r1 & 1) | ((r1 >> 1) & 2), noshort = (r1 >> 1) & 1,
+            fin = S->cfg.r2 & 1;
   i32 c, j, k;
   usize i;
   rce_t r;
@@ -492,6 +494,12 @@ ALWAYS i32 enc_body(state_t *S, i32 *x, usize frames, u8 *rc, usize rccap, usize
         lms_push(&ch->f[j], od, a1, a2, a3, e, v);
         e = v;
       }
+      if (fin) {
+        p = short_predict(&ch->s2, s2shift, &S->zs);
+        v = SUB32(e, p);
+        short_update(&ch->s2, s2step, &S->zs, e, v);
+        e = v;
+      }
       ent_encode(&ch->e, &r, &bw, ((u32)e << 1) ^ (u32)(e >> 31), fast);
     }
     if (r.p + 64 * nc > r.end || bw.p + 8 * nc > bw.end) return -1;
@@ -512,7 +520,8 @@ ALWAYS i32 enc_body(state_t *S, i32 *x, usize frames, u8 *rc, usize rccap, usize
 /* Decodes frames x nch samples into x.  Returns 0, or 1 for a damaged frame. */
 ALWAYS i32 dec_body(state_t *S, i32 *x, usize frames, const u8 *rc, usize rclen, const u8 *raw, usize rawlen, PARAMS)
 {
-  const i32 nc = S->nch, fast = (r1 & 1) | ((r1 >> 1) & 2), noshort = (r1 >> 1) & 1;
+  const i32 nc = S->nch, fast = (r1 & 1) | ((r1 >> 1) & 2), noshort = (r1 >> 1) & 1,
+            fin = S->cfg.r2 & 1;
   i32 c, j, k;
   usize i;
   rcd_t r;
@@ -530,6 +539,12 @@ ALWAYS i32 dec_body(state_t *S, i32 *x, usize frames, const u8 *rc, usize rclen,
       const short_t *o = ch->o;
       u32 u = ent_decode(&ch->e, &r, &br, fast);
       i32 e = (i32)(u >> 1) ^ -(i32)(u & 1), p, v;
+      if (fin) {
+        p = short_predict(&ch->s2, s2shift, &S->zs);
+        v = ADD32(e, p);
+        short_update(&ch->s2, s2step, &S->zs, v, e);
+        e = v;
+      }
       for (j = nf - 1; j >= 0; j--) {
         const i32 od = j == 0 ? o0 : j == 1 ? o1 : o2, sf = j == 0 ? s0 : j == 1 ? s1 : s2;
         p = lms_predict(&ch->f[j], od, sf);
@@ -569,7 +584,7 @@ ALWAYS i32 dec_body(state_t *S, i32 *x, usize frames, const u8 *rc, usize rclen,
 #define CFG_IS(NF, O0, S0, O1, S1, O2, S2, A1, A2, A3, SSH, SST, MS, R1) \
   (c->nf == NF && c->order[0] == O0 && c->shift[0] == S0 && c->order[1] == O1 && c->shift[1] == S1 && \
    c->order[2] == O2 && c->shift[2] == S2 && c->a1 == A1 && c->a2 == A2 && c->a3 == A3 && \
-   c->s2shift == SSH && c->s2step == SST && c->ms == MS && c->r1 == R1)
+   c->s2shift == SSH && c->s2step == SST && c->ms == MS && c->r1 == R1 && c->r2 == 0)
 
 #define ENC_SPEC(...) if (CFG_IS(__VA_ARGS__)) return enc_body(S, x, frames, rc, rccap, rclen, raw, rawcap, rawlen, __VA_ARGS__);
 #define DEC_SPEC(...) if (CFG_IS(__VA_ARGS__)) return dec_body(S, x, frames, rc, rclen, raw, rawlen, __VA_ARGS__);

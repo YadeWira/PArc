@@ -260,12 +260,12 @@ begin
 end;
 
 { the configuration in the stream header: U8 NF, NF x (U16 order, U8 shift), U8 A1, A2, A3,
-  S2Shift, S2Step, MS, R1 }
+  S2Shift, S2Step, MS, R1, R2 }
 function CfgBytes(const C: TAcConfig): TBytes;
 var
   j, n: Integer;
 begin
-  SetLength(Result, 1 + 3 * C.NF + 7);
+  SetLength(Result, 1 + 3 * C.NF + 8);
   Result[0] := C.NF;
   n := 1;
   for j := 0 to C.NF - 1 do
@@ -277,11 +277,12 @@ begin
   end;
   Result[n] := C.A1; Result[n + 1] := C.A2; Result[n + 2] := C.A3;
   Result[n + 3] := C.S2Shift; Result[n + 4] := C.S2Step; Result[n + 5] := C.MS; Result[n + 6] := C.R1;
+  Result[n + 7] := C.R2;
 end;
 
 function ReadCfg(S: TInStage): TAcConfig;
 var
-  b: array[0..6] of Byte;
+  b: array[0..7] of Byte;
   j: Integer;
 begin
   FillChar(Result, SizeOf(Result), 0);
@@ -297,10 +298,10 @@ begin
        (Result.Shift[j] < 1) or (Result.Shift[j] > 24) then
       Corrupt('tta: invalid configuration');
   end;
-  S.ReadExact(@b[0], 7);
+  S.ReadExact(@b[0], 8);
   Result.A1 := b[0]; Result.A2 := b[1]; Result.A3 := b[2];
-  Result.S2Shift := b[3]; Result.S2Step := b[4]; Result.MS := b[5]; Result.R1 := b[6];
-  if (Result.S2Shift < 1) or (Result.S2Shift > 24) or (Result.MS > 1) or (Result.R1 > 7) then
+  Result.S2Shift := b[3]; Result.S2Step := b[4]; Result.MS := b[5]; Result.R1 := b[6]; Result.R2 := b[7];
+  if (Result.S2Shift < 1) or (Result.S2Shift > 24) or (Result.MS > 1) or (Result.R1 > 7) or (Result.R2 > 1) then
     Corrupt('tta: invalid configuration');
 end;
 
