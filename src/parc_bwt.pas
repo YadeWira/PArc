@@ -22,9 +22,9 @@
   The encoder cuts the input where its statistics change (see "adaptive blocks" below; GRZip
   did it only with `a`): the stream is the same, just with shorter blocks. With `a` the blocks
   are also at most 3/4 of the block size (half at m4), and at most 1/4 where the data were found
-  to be mixed: less memory and faster sorting (GRZip's adaptive blocks were small too). Blocks are compressed and
-  decompressed in parallel (a pool of jobs, written and delivered in order) within the
-  PARC_THREADS budget (parc_parallel).
+  to be mixed: less memory and faster sorting (GRZip's adaptive blocks were small too).
+  Blocks are compressed and decompressed in parallel (a pool of jobs, written and delivered in
+  order) within the PARC_THREADS budget (parc_parallel).
 
   Method string: bwt[:<block>][:m1..m4][:l|:l<N>|:<N>][:h<N>][:e0|:e1|:e2][:a], also b<block>;
   GRZip's other switches (s, d, p, t<N>, i<N>) are accepted and ignored. Defaults: 8 MB, m1,
