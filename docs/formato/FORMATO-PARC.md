@@ -463,3 +463,56 @@ copy may overlap itself). The table is updated at every position where a main by
 before the byte is interpreted; positions inside a match are not. The block must end exactly
 when both streams are used up, at Len bytes; anything else (or a match past Len, or NLens
 larger than NMain + 2⌊Len/255⌋ + 2) is a damaged block (`EArcCorrupt`).
+
+### 6.6 `dispack` (since 2026-11): replaces FreeArc's DisPack
+
+`dispack` is PArc's own filter for x86 and x86-64 machine code (`src/parc_dispack.pas` and the
+walker `src/parc_dispack_walk.inc`, shared by encoder and decoder), written to replace FreeArc's
+DisPack 0.70 (GPL); it is not derived from it. Method names `dispack`, `dispack070` (stored) and
+the preset `exe2`. **`dispack070` blocks written before this change do not decode** (the version
+byte rejects them).
+
+Method string: `dispack070[:<block>][:x]`, also `b<block>`. Block 8 MB by default (1 B .. 1 GB; a
+bare number is 2^N as in every PArc memory parameter); `x` is accepted and ignored. The decoder
+uses the block size as the limit of `Len`.
+
+Stream: `U8 version` (1), then blocks until the end of the stream:
+
+| Field | Value |
+|---|---|
+| `VInt Len` | bytes in the block, 1 ≤ Len ≤ block size |
+| `VInt NReg` | code regions, NReg ≤ Len / 16 + 1 |
+| NReg × region | `VInt Gap`, `VInt RegLen` (≥ 1), `U8 Mode` (0 = 32-bit, 1 = 64-bit), `U32 Va` |
+| 8 × `VInt StreamLen` | OP, D32, ADDR, I16, I32, CALL, JMP, RAW; each ≤ 2·Len + 64 |
+| padding | zero bytes until the stream position (from the version byte) is a multiple of 4 |
+| 8 streams | each followed by zero bytes up to a multiple of 4 |
+
+`VInt` is LEB128 (bit 7 = more), `U32` little endian. Region i starts Gap bytes after the end of
+region i−1 (after the block start for the first) and lies inside the block; the bytes before,
+between and after the regions are taken in order from RAW. A region is rebuilt instruction by
+instruction from the other streams; Va is the virtual address of its first byte (only its value
+modulo 2^32 matters).
+
+Instruction walk (the decoder rebuilds the bytes in this order and every choice depends only on
+bytes already rebuilt). At the start of an instruction, OP byte `D6` is an escape: `D6 00` = the
+byte D6; `D6 n` with 1 ≤ n ≤ 63 = n raw bytes from OP (n ≤ bytes left in the region); other n are
+invalid. Otherwise, from OP: up to 14 prefixes (26 2E 36 3E 64 65 66 67 F0 F2 F3, and 40-4F in
+64-bit mode; a 15th prefix byte is taken as the opcode), then the opcode: `0F xx`, `0F 38 xx` and
+`0F 3A xx`; C4/C5/62 followed by a byte b: in 64-bit mode or when b ≥ C0, VEX (C5: b; C4: b and
+one more byte, map = b & 1F) or EVEX (62: b and two more bytes, map = b & 7) and then the opcode
+byte; in 32-bit mode with b < C0, b is the ModRM of LES/LDS/BOUND. ModRM and SIB come from OP.
+Operand fields, by the opcode maps of the Intel/AMD manuals (the tables in the unit are the
+normative list): 8-bit displacement → OP; 32-bit displacement with a base register (mod = 2) →
+D32 as is; [disp32] without base (mod = 0 and r/m = 5 or SIB base = 5, 32-bit mode; SIB base = 5
+in 64-bit mode) → ADDR; RIP-relative disp32 (64-bit mode, mod = 0, r/m = 5) → ADDR as disp +
+address of the next instruction; 16-bit addressing (67 in 32-bit mode) → D32 (2 bytes) / OP;
+imm8 and rel8 → OP; imm16 → I16; imm16/32 by operand size → I16 / I32; imm64 (B8+r with REX.W)
+→ I32 (8 bytes); moffs → ADDR (32-bit address) or I32 / I16; E8 rel32 → CALL and E9 / 0F 80-8F
+rel32 → JMP as rel + address of the next instruction (with 66 in 32-bit mode: I16). Values in
+ADDR, CALL and JMP are 32-bit, most significant byte first, arithmetic modulo 2^32. An
+instruction that would end past the region is invalid.
+
+Decoder checks: version, VInt ranges, regions inside the block, Mode, padding bytes, escapes,
+every instruction inside its region, every stream used exactly; anything else is a damaged
+block (`EArcCorrupt`). Memory: the encoded block plus the decoded block.
+
