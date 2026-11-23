@@ -97,7 +97,7 @@ type
     FSeg: TObject;               // segmentation model, created on first use
     FBufSize: SizeInt;           // input gathered before cutting it into blocks
     FMixedCap: SizeInt;          // with a: largest piece of a buffer that was cut
-    procedure SubmitJob(var Data: TBytes; Len: SizeInt);
+    procedure SubmitJob(const Data: TBytes; Off, Len: SizeInt);
     procedure FlushBlock(Final: Boolean);
     procedure WriteOldest;
   protected
@@ -131,8 +131,9 @@ function BwtMethodString(const P: TBwtParams; BlockSize: SizeInt): string;
 function BwtEncodeBlockMemory(const P: TBwtParams): Int64;
 function BwtDecodeBlockMemory(const P: TBwtParams): Int64;
 
-{ One block record (VInt Len onwards) for Buf[0..Len); Buf is used as work space and freed. }
-function BwtEncodeBlock(var Buf: TBytes; Len: SizeInt; const P: TBwtParams): TBytes;
+{ One block record (VInt Len onwards) for Buf[Off..Off+Len); the slice is used as work space
+  (only its own bytes are written; the IN_SLACK bytes after it may be read) and Buf is released. }
+function BwtEncodeBlock(var Buf: TBytes; Off, Len: SizeInt; const P: TBwtParams): TBytes;
 
 { For tests: True if the C core's LZP gives the bytes of parc_lzp.LzpEncodeBlock on Inp[0..Len). }
 function BwtLzpSameAsPascal(Inp: PByte; Len: SizeInt; MinLen, HashBits: Integer): Boolean;
@@ -421,7 +422,7 @@ begin
     if T[i] <> T[i - 1] then Inc(Result);
 end;
 
-function BwtEncodeBlock(var Buf: TBytes; Len: SizeInt; const P: TBwtParams): TBytes;
+function BwtEncodeBlock(var Buf: TBytes; Off, Len: SizeInt; const P: TBwtParams): TBytes;
 var
   H, Main, Orig: TBytes;
   n, NMain, NLens, M, OutCap, C, Need: SizeInt;
@@ -456,17 +457,25 @@ begin
   Result := nil;
   if Len < BWT_MIN_CODED then
   begin
-    Stored(@Buf[0]);
+    Stored(@Buf[Off]);
     Exit;
   end;
-  if Length(Buf) < Len + IN_SLACK then SetLength(Buf, Len + IN_SLACK);
+  if Length(Buf) < Off + Len + IN_SLACK then
+  begin
+    // (no slack after the slice: a private copy)
+    Main := Copy(Buf, Off, Len);
+    SetLength(Main, Len + IN_SLACK);
+    Buf := Main;
+    Main := nil;
+    Off := 0;
+  end;
   UseLzp := False;
   NMain := 0; NLens := 0; Esc := 0;
   MinLen := P.LzpMin;
   // the LZP costs about as much as the sort of a few MB: on data with few long repeats (one
   // language's prose, dictionaries, most binaries) it gains nothing, or even loses, and is
   // skipped
-  if (MinLen > 0) and (RepeatShare(@Buf[0], Len) < LZP_MIN_SHARE) then MinLen := 0;
+  if (MinLen > 0) and (RepeatShare(@Buf[Off], Len) < LZP_MIN_SHARE) then MinLen := 0;
   if MinLen > 0 then
   begin
     SetLength(Main, Len + IN_SLACK);
@@ -475,7 +484,7 @@ begin
     HashP := GetMem((SizeInt(2) shl LzpBlockHashBits(Len, Lp.HashSizeLog)) * SizeOf(LongWord));
     Lens := GetMem(Len);
     try
-      UseLzp := LzpEncode(@Buf[0], Len, Lp, HashP, Main, Lens, NMain, NLens, Esc);
+      UseLzp := LzpEncode(@Buf[Off], Len, Lp, HashP, Main, Lens, NMain, NLens, Esc);
       // When the LZP takes away more than LZP_REDO_PCT % of the block with the method's
       // minimum, the data are made of short repeats that the BWT codes better itself (tables,
       // markup, databases): the block is filtered again with 4 times the minimum (adaptive
@@ -485,7 +494,7 @@ begin
       begin
         MinLen := 4 * MinLen;
         Lp := LzpParamsOf(P, Len, MinLen);
-        UseLzp := LzpEncode(@Buf[0], Len, Lp, HashP, Main, Lens, NMain, NLens, Esc);
+        UseLzp := LzpEncode(@Buf[Off], Len, Lp, HashP, Main, Lens, NMain, NLens, Esc);
       end;
       if UseLzp and (NLens > 0) then Move(Lens^, Main[NMain], NLens);
     finally
@@ -505,9 +514,18 @@ begin
   begin
     M := Len;
     Main := nil;
-    T := @Buf[0];
+    T := @Buf[Off];
   end;
   UseSt := (P.Level = 4) and (M >= 2);
+  if UseSt and not UseLzp then
+  begin
+    // the sort transform writes 28 bytes after the data: on a private copy (the slice may be
+    // followed by another job's data)
+    SetLength(Main, M + IN_SLACK);
+    Move(T^, Main[0], M);
+    Buf := nil;
+    T := @Main[0];
+  end;
   A := GetMem((SizeInt(M) + 1) * SizeOf(LongInt));
   Model := nil;
   Extra := nil;
@@ -684,14 +702,14 @@ type
   TBwtEncJob = class(TParallelJob)
   public
     InBuf: TBytes;
-    InLen: SizeInt;
+    InOff, InLen: SizeInt;
     Par: TBwtParams;
     procedure Process; override;
   end;
 
 procedure TBwtEncJob.Process;
 begin
-  OutBuf := BwtEncodeBlock(InBuf, InLen, Par);
+  OutBuf := BwtEncodeBlock(InBuf, InOff, InLen, Par);
   OutSize := Length(OutBuf);
 end;
 
@@ -741,7 +759,7 @@ begin
   end;
 end;
 
-procedure TBwtEncStage.SubmitJob(var Data: TBytes; Len: SizeInt);
+procedure TBwtEncStage.SubmitJob(const Data: TBytes; Off, Len: SizeInt);
 var
   Job: TBwtEncJob;
   H: TBytes;
@@ -772,9 +790,9 @@ begin
     FPool.SetMaxWorkers(FPool.MaxWorkers + 1);
   Job := TBwtEncJob.Create;
   Job.Par := FPar;
-  Job.InBuf := Data;       // the buffer goes to the job, no copy
+  Job.InBuf := Data;       // the buffer goes to the job (a reference, no copy)
+  Job.InOff := Off;
   Job.InLen := Len;
-  Data := nil;
   FQueue[(FHead + FCount) mod Length(FQueue)] := Job;
   Inc(FCount);
   FPool.Submit(Job);
@@ -785,7 +803,7 @@ var
   Cuts: array[0..SEG_MAX - 1] of SizeInt;
   NCuts, k, Pieces, j, Parts: Integer;
   Prev, Last, e, b0: SizeInt;
-  B: TBytes;
+  NB: TBytes;
 begin
   if FLen = 0 then Exit;
   NCuts := 0;
@@ -798,12 +816,14 @@ begin
   end;
   if NCuts <= 1 then
   begin
-    SubmitJob(FCur, FLen);
+    SubmitJob(FCur, 0, FLen);
+    FCur := nil;
     FLen := 0;
     Exit;
   end;
-  // every piece but the last goes now; without more data coming the last one too, else it
-  // stays at the start of the buffer and grows with what follows
+  // every piece but the last goes now (slices of the buffer, no copies: each job writes only its
+  // own bytes); without more data coming the last one too, else it moves to a new buffer and
+  // grows with what follows
   Prev := 0;
   Last := NCuts - 1;
   if Final then Last := NCuts;
@@ -814,11 +834,9 @@ begin
     if FPar.Adaptive then Parts := (Cuts[k] - Prev + FMixedCap - 1) div FMixedCap;
     for j := 0 to Parts - 1 do
     begin
-      e := Prev + (Cuts[k] - Prev) * (j + 1) div Parts - Prev - (Cuts[k] - Prev) * j div Parts;
       b0 := Prev + (Cuts[k] - Prev) * j div Parts;
-      SetLength(B, e + IN_SLACK);   // (room for the coder's look-ahead)
-      Move(FCur[b0], B[0], e);
-      SubmitJob(B, e);
+      e := Prev + (Cuts[k] - Prev) * (j + 1) div Parts - b0;
+      SubmitJob(FCur, b0, e);
     end;
     Prev := Cuts[k];
   end;
@@ -829,7 +847,9 @@ begin
   end
   else
   begin
-    Move(FCur[Prev], FCur[0], FLen - Prev);
+    SetLength(NB, FBufSize + IN_SLACK);
+    Move(FCur[Prev], NB[0], FLen - Prev);
+    FCur := NB;
     FLen := FLen - Prev;
   end;
 end;
