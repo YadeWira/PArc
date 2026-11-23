@@ -559,7 +559,8 @@ begin
     p := LowerCase(Params[k]);
     if (p = '') or (p = 'x') then Continue;
     if p[1] = 'b' then Delete(p, 1, 1);
-    if ParseMemSize(p, m) and (m >= 1) and (m <= XF_MAX_BLOCK) then Result := m;
+    if ParseMemSize(p, m) and (m >= 1) then
+      if m > XF_MAX_BLOCK then Result := XF_MAX_BLOCK else Result := m;
   end;
 end;
 
