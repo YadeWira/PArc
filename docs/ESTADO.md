@@ -1491,7 +1491,47 @@ optionally minus G's; audio from one or two samples back. The predictor is the c
 better (synthetic and palette images: without that test some of them grew up to 77 % under
 grzip). The old `mm` was a byte-oriented per-channel delta and left TGA/TIFF/PPM alone.
 
-<!-- mmtta-table -->
+**Presets** (`img` = 92 uncompressed BMP/TGA/PPM/TIFF files, 194 MB; `wav` = WAV/AIFF from the
+corpus plus WavPack/FLAC samples decoded to 8/16/24/32-bit, float and 6-channel WAV, 215 MB; one
+job at a time, T1 on core 2 and T4 on cores 2-5, best of 2-3 runs with old and new alternating;
+`logs/seq_*.csv`). Old = `main` 762a331 for the `bwt` chains (`img` -m2/-m3/-m5), `main` 21fab03 for
+the rest (the plz/lzma/tta code is the same in both).
+
+| set | preset | T | old size | new size | Δ | comp wall old/new (s) | dec wall old/new (s) | comp MB old/new | dec MB old/new |
+|---|---|---|---:|---:|---:|---:|---:|---:|---:|
+| img | -m5 | 1 | 81,994,390 | 74,934,634 | -8.61 % | 26.41 / 23.29 | 17.35 / 15.71 | 286 / 286 | 70 / 70 |
+| img | -m5 | 4 | 81,995,901 | 74,936,115 | -8.61 % | 7.71 / 6.95 | 5.05 / 4.62 | 463 / 462 | 109 / 148 |
+| img | -m3 | 1 | 84,668,751 | 76,968,999 | -9.09 % | 11.70 / 8.84 | 8.04 / 7.96 | 77 / 77 | 35 / 35 |
+| img | -m3 | 4 | 81,980,853 | 74,931,470 | -8.60 % | 6.84 / 6.14 | 4.84 / 4.42 | 194 / 265 | 101 / 130 |
+| img | -m2 | 1 | 107,286,121 | 92,782,002 | -13.52 % | 4.09 / 3.42 | 1.21 / 1.20 | 77 / 79 | 32 / 32 |
+| img | -m2 | 4 | 85,131,634 | 77,428,666 | -9.05 % | 3.03 / 2.57 | 2.40 / 2.37 | 207 / 214 | 109 / 131 |
+| img | -m5x | 1 | 87,750,109 | 82,256,396 | -6.26 % | 71.09 / 79.83 | 4.83 / 4.81 | 359 / 359 | 40 / 40 |
+| img | -m5x | 4 | 87,557,701 | 82,136,865 | -6.19 % | 19.46 / 20.14 | 1.50 / 1.37 | 1113 / 1084 | 219 / 215 |
+| img | -m2x | 1 | 107,411,111 | 92,885,808 | -13.52 % | 4.10 / 3.62 | 1.15 / 1.13 | 68 / 69 | 30 / 30 |
+| img | -m2x | 4 | 108,769,954 | 94,783,761 | -12.86 % | 2.57 / 2.18 | 0.64 / 0.55 | 327 / 276 | 162 / 149 |
+| img | -mex1 | 1 | 108,754,043 | 94,883,994 | -12.75 % | 4.37 / 3.76 | 1.29 / 1.24 | 48 / 48 | 48 / 48 |
+| img | -mex1 | 4 | 109,164,086 | 95,179,480 | -12.81 % | 1.31 / 1.20 | 0.37 / 0.38 | 305 / 292 | 151 / 145 |
+| wav | -m5 | 1 | 149,045,339 | 140,758,528 | -5.56 % | 28.36 / 24.10 | 35.79 / 16.92 | 184 / 183 | 66 / 45 |
+| wav | -m5 | 4 | 149,047,018 | 140,760,212 | -5.56 % | 13.35 / 10.40 | 9.19 / 6.26 | 400 / 343 | 70 / 55 |
+| wav | -m2 | 1 | 151,246,198 | 143,906,486 | -4.85 % | 7.32 / 6.67 | 7.27 / 5.88 | 74 / 74 | 45 / 45 |
+| wav | -m2 | 4 | 153,069,670 | 145,729,994 | -4.79 % | 2.10 / 1.81 | 1.98 / 1.65 | 144 / 148 | 62 / 50 |
+| wav | -m5x | 1 | 150,115,891 | 142,705,121 | -4.94 % | 15.52 / 11.87 | 7.20 / 6.75 | 184 / 184 | 29 / 29 |
+| wav | -m5x | 4 | 150,118,216 | 142,705,714 | -4.94 % | 10.42 / 8.82 | 3.89 / 2.76 | 350 / 348 | 58 / 41 |
+| wav | -m2x | 1 | 151,448,440 | 143,904,721 | -4.98 % | 14.09 / 13.27 | 13.55 / 10.03 | 54 / 55 | 32 / 31 |
+| wav | -m2x | 4 | 153,592,088 | 145,733,197 | -5.12 % | 3.79 / 3.20 | 3.50 / 2.62 | 144 / 147 | 52 / 36 |
+| wav | -mex1 | 1 | 174,482,178 | 170,434,375 | -2.32 % | 4.03 / 3.99 | 1.66 / 1.50 | 57 / 57 | 52 / 52 |
+| wav | -mex1 | 4 | 174,489,788 | 170,415,518 | -2.33 % | 1.32 / 1.36 | 0.50 / 0.48 | 318 / 313 | 155 / 161 |
+
+Alone (T1, same data): `tta` 155.1 → 139.1 MB (−10.3 %), 14.9 → 14.1 s / 19.8 → 14.2 s, 18 → 10 MB;
+`tta:m1` 155.7 → 141.3 MB, 7.5 → 6.6 s / 7.7 → 6.9 s. `mm` alone on `img`: 1.59 → 1.02 s to filter,
+0.22 → 0.27 s to unfilter (the old one stored TGA/TIFF/PPM untouched; the new one filters them), 7 → 8 MB.
+
+Gaps (measured on a loaded shared machine, so cells within ~3 % are noise): `-m5x` img T1/T4 compresses
+3-12 % slower (lzma's match finder on the filtered images, for 6 % less); `-mex1` wav T4 +3 % to
+compress (within noise; T1 is faster). Peak RSS at T4 on `img` with `bwt` is up to 35 % higher
+(decoding -m3/-m5, compressing -m3): the mm stage itself holds under 1.5 MB, the rest is which `bwt`
+blocks run together; not resolved. `mm` alone unfilters slower than the old one because the old one
+left most of these files untouched.
 
 ## `bwt` replaces GRZip (2026-11-23)
 
