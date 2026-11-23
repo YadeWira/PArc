@@ -12,18 +12,15 @@ var
 {$IFDEF XF_ENC}
   Save: array[0..XF_NSTREAMS - 1] of PByte;
   Tail: Boolean;
-  Lo, Hi, Ib: LongWord;
+  Start: SizeInt;
 {$ELSE}
   Sub: Integer;
 {$ENDIF}
   Tab: PXfTab;
-  Pos, Start, RipAt: SizeInt;
-  Va: LongWord;
-  B, F, ModRM, Md, Rm, Base, Kind, NPfx, Map: Integer;
+  Pos, RipAt: SizeInt;
+  Va, V: LongWord;
+  B, F, ModRM, Kind, NPfx, Map, Base, Count, S: Integer;
   O16, A16, RexW, M64, ModRMDone: Boolean;
-  V: LongWord;
-  N, I, Count: Integer;
-  S: Integer;
 
   { moves Cnt bytes between Plain[Pos] and stream St }
   procedure Xfer(St, Cnt: Integer); inline;
@@ -37,78 +34,35 @@ var
     Inc(Pos, Cnt);
   end;
 
-  procedure Xfer1(St: Integer); inline;
+  { one byte to or from the opcode stream }
+  procedure Op1; inline;
   begin
 {$IFDEF XF_ENC}
-    Sp[St]^ := Plain[Pos];
+    Sp[XS_OP]^ := Plain[Pos];
 {$ELSE}
-    Plain[Pos] := Sp[St]^;
+    Plain[Pos] := Sp[XS_OP]^;
 {$ENDIF}
-    Inc(Sp[St]);
+    Inc(Sp[XS_OP]);
     Inc(Pos);
   end;
 
   { a 32-bit value that the stream keeps as Value + Add (mod 2^32), most significant byte first;
     Plain keeps it little endian }
   procedure XferAddr(St: Integer; Add: LongWord); inline;
-  var
-    X: LongWord;
   begin
 {$IFDEF XF_ENC}
-    X := LoadLE32(@Plain[Pos]) + Add;
-    StoreBE32(Sp[St], X);
+    StoreBE32(Sp[St], LoadLE32(@Plain[Pos]) + Add);
 {$ELSE}
-    X := LoadBE32(Sp[St]) - Add;
-    StoreLE32(@Plain[Pos], X);
+    StoreLE32(@Plain[Pos], LoadBE32(Sp[St]) - Add);
 {$ENDIF}
     Inc(Sp[St], 4);
     Inc(Pos, 4);
   end;
 
-  { call target through the move-to-front table: an index in OP, or XfMtfSize + the address }
-  procedure XferCall(Add: LongWord);
-  var
-    X: LongWord;
-    r, k: Integer;
+  { imm16 / imm32 by operand size }
+  procedure ImmZ; inline;
   begin
-{$IFDEF XF_ENC}
-    X := LoadLE32(@Plain[Pos]) + Add;
-    r := 0;
-    while (r < XfMtfSize) and (C.Mtf[r] <> X) do Inc(r);
-    Sp[XfMap[XS_OP]]^ := r;
-    Inc(Sp[XfMap[XS_OP]]);
-    if r = XfMtfSize then
-    begin
-      StoreBE32(Sp[XfMap[XS_CALL]], X);
-      Inc(Sp[XfMap[XS_CALL]], 4);
-      r := XfMtfSize - 1;
-    end;
-{$ELSE}
-    r := Sp[XfMap[XS_OP]]^;
-    Inc(Sp[XfMap[XS_OP]]);
-    if r >= XfMtfSize then
-    begin
-      X := LoadBE32(Sp[XfMap[XS_CALL]]);
-      Inc(Sp[XfMap[XS_CALL]], 4);
-      r := XfMtfSize - 1;
-    end
-    else
-      X := C.Mtf[r];
-    StoreLE32(@Plain[Pos], X - Add);
-{$ENDIF}
-    for k := r downto 1 do C.Mtf[k] := C.Mtf[k - 1];
-    C.Mtf[0] := X;
-    Inc(Pos, 4);
-  end;
-
-  procedure XferImm(Size: Integer); inline;
-  begin
-    case Size of
-      1: Xfer1(XfMap[XS_I8]);
-      2: Xfer(XfMap[XS_I16], 2);
-      4: Xfer(XfMap[XS_I32], 4);
-      8: Xfer(XfMap[XS_I32], 8);
-    end;
+    if O16 then Xfer(XS_I16, 2) else Xfer(XS_I32, 4);
   end;
 
 begin
@@ -117,11 +71,6 @@ begin
   M64 := R.Mode = 64;
   if M64 then Tab := @XfTab64 else Tab := @XfTab32;
   Va := R.Va;
-{$IFDEF XF_ENC}
-  Lo := R.Va;
-  Hi := R.Va + LongWord(RegLen);
-  Ib := R.ImageBase;
-{$ENDIF}
   Pos := 0;
   Count := 0;
   while Pos < RegLen do
@@ -137,44 +86,14 @@ begin
 {$ENDIF}
       for S := 0 to XF_NSTREAMS - 1 do Sp[S] := C.P[S];
     end;
-    Start := Pos;
 
 {$IFDEF XF_ENC}
-    { jump tables: runs of 32-bit addresses (VA) or image-relative addresses (RVA) that point
-      inside this region }
-    if R.Tables and (RegLen - Pos >= 8) then
-    begin
-      V := LoadLE32(@Plain[Pos]);
-      N := 0;
-      if XfJtVa > 0 then
-        while (N < XF_JT_MAX) and (RegLen - Pos >= 4 * (N + 1)) and
-              (LoadLE32(@Plain[Pos + 4 * N]) - Lo < Hi - Lo) do Inc(N);
-      if N >= XfJtVa then
-      begin
-        Sp[XfMap[XS_OP]]^ := XF_ESC;
-        Sp[XfMap[XS_OP]][1] := XF_SUB_VA + N - 2;
-        Inc(Sp[XfMap[XS_OP]], 2);
-        for I := 1 to N do XferAddr(XfMap[XS_JT], 0);
-        Continue;
-      end;
-      N := 0;
-      if XfJtRva > 0 then
-        while (N < XF_JT_MAX) and (RegLen - Pos >= 4 * (N + 1)) and
-              (LoadLE32(@Plain[Pos + 4 * N]) + Ib - Lo < Hi - Lo) do Inc(N);
-      if N >= XfJtRva then
-      begin
-        Sp[XfMap[XS_OP]]^ := XF_ESC;
-        Sp[XfMap[XS_OP]][1] := XF_SUB_RVA + N - 2;
-        Inc(Sp[XfMap[XS_OP]], 2);
-        for I := 1 to N do XferAddr(XfMap[XS_JT], Ib);
-        Continue;
-      end;
-    end;
+    Start := Pos;
     if Plain[Pos] = XF_ESC then
     begin
-      Sp[XfMap[XS_OP]]^ := XF_ESC;
-      Sp[XfMap[XS_OP]][1] := XF_SUB_LIT;
-      Inc(Sp[XfMap[XS_OP]], 2);
+      Sp[XS_OP][0] := XF_ESC;
+      Sp[XS_OP][1] := XF_SUB_LIT;
+      Inc(Sp[XS_OP], 2);
       Inc(Pos);
       Continue;
     end;
@@ -182,35 +101,17 @@ begin
     if Tail then
       for S := 0 to XF_NSTREAMS - 1 do Save[S] := Sp[S];
 {$ELSE}
-    if Sp[XfMap[XS_OP]]^ = XF_ESC then
+    if Sp[XS_OP]^ = XF_ESC then
     begin
-      Sub := Sp[XfMap[XS_OP]][1];
-      Inc(Sp[XfMap[XS_OP]], 2);
+      Sub := Sp[XS_OP][1];
+      Inc(Sp[XS_OP], 2);
       if Sub = XF_SUB_LIT then
       begin
         Plain[Pos] := XF_ESC;
         Inc(Pos);
       end
-      else if Sub < XF_MAXINSN then
-      begin
-        if Sub > RegLen - Pos then Exit(False);
-        Xfer(XfMap[XS_OP], Sub);
-      end
-      else if Sub >= XF_SUB_VA then
-      begin
-        if Sub >= XF_SUB_RVA then
-        begin
-          N := Sub - XF_SUB_RVA + 2;
-          V := R.ImageBase;
-        end
-        else
-        begin
-          N := Sub - XF_SUB_VA + 2;
-          V := 0;
-        end;
-        if 4 * N > RegLen - Pos then Exit(False);
-        for I := 1 to N do XferAddr(XfMap[XS_JT], V);
-      end
+      else if (Sub < XF_MAXINSN) and (Sub <= RegLen - Pos) then
+        Xfer(XS_OP, Sub)
       else
         Exit(False);
       Continue;
@@ -223,7 +124,7 @@ begin
     A16 := False;
     RexW := False;
     repeat
-      Xfer1(XfMap[XS_OP]);
+      Op1;
       B := Plain[Pos - 1];
       F := Tab^[B];
       if (F and XF_PFX = 0) or (NPfx >= XF_MAXPFX) then Break;
@@ -237,16 +138,16 @@ begin
     ModRM := 0;
     if F and XF_0F <> 0 then
     begin
-      Xfer1(XfMap[XS_OP]);
+      Op1;
       B := Plain[Pos - 1];
       if B = $38 then
       begin
-        Xfer1(XfMap[XS_OP]);
+        Op1;
         F := XF_MODRM;
       end
       else if B = $3A then
       begin
-        Xfer1(XfMap[XS_OP]);
+        Op1;
         F := XF_MODRM or XI_B;
       end
       else
@@ -255,9 +156,8 @@ begin
     else if F and XF_VEX <> 0 then
     begin
       { C4/C5 (VEX) and 62 (EVEX); in 32-bit mode only when the next byte has mod = 3,
-        otherwise LES/LDS/BOUND with that byte as the ModRM. The byte always goes to the
-        opcode stream so that the decoder can tell. }
-      Xfer1(XfMap[XS_OP]);
+        otherwise LES/LDS/BOUND with that byte as the ModRM. }
+      Op1;
       ModRM := Plain[Pos - 1];
       if M64 or (ModRM >= $C0) then
       begin
@@ -265,14 +165,14 @@ begin
         else if B = $C4 then
         begin
           Map := ModRM and $1F;
-          Xfer1(XfMap[XS_OP]);
+          Op1;
         end
         else
         begin
           Map := ModRM and 7;
-          Xfer(XfMap[XS_OP], 2);
+          Xfer(XS_OP, 2);
         end;
-        Xfer1(XfMap[XS_OP]);
+        Op1;
         B := Plain[Pos - 1];
         case Map of
           1: begin
@@ -297,38 +197,36 @@ begin
     begin
       if not ModRMDone then
       begin
-        Xfer1(XfMap[XS_MODRM]);
+        Op1;
         ModRM := Plain[Pos - 1];
       end;
-      Md := ModRM shr 6;
-      Rm := ModRM and 7;
-      if Md <> 3 then
+      if ModRM < $C0 then
       begin
         if A16 and not M64 then
         begin
-          if (Md = 0) and (Rm = 6) then Xfer(XfMap[XS_D32], 2)
-          else if Md = 1 then Xfer1(XfMap[XS_D8])
-          else if Md = 2 then Xfer(XfMap[XS_D32], 2);
+          if ModRM and $C7 = $06 then Xfer(XS_D32, 2)
+          else if ModRM >= $80 then Xfer(XS_D32, 2)
+          else if ModRM >= $40 then Op1;
         end
         else
         begin
-          Base := Rm;
-          if Rm = 4 then
+          Base := ModRM and 7;
+          if Base = 4 then
           begin
-            Xfer1(XfMap[XS_SIB]);
+            Op1;
             Base := Plain[Pos - 1] and 7;
           end;
-          if Md = 1 then Xfer1(XfMap[XS_D8])
-          else if Md = 2 then Xfer(XfMap[XS_D32], 4)
+          if ModRM >= $80 then Xfer(XS_D32, 4)
+          else if ModRM >= $40 then Op1
           else if Base = 5 then
           begin
-            if M64 and (Rm = 5) then
+            if M64 and (ModRM and 7 = 5) then
             begin
               RipAt := Pos;          // RIP-relative: converted once the length is known
               Inc(Pos, 4);
             end
             else
-              XferAddr(XfMap[XS_ADDR], 0);
+              XferAddr(XS_ADDR, 0);
           end;
         end;
       end;
@@ -337,46 +235,40 @@ begin
     Kind := F and XF_IMM;
     case Kind of
       XI_NONE: ;
-      XI_B: Xfer1(XfMap[XS_I8]);
-      XI_W: Xfer(XfMap[XS_I16], 2);
-      XI_Z: if O16 then Xfer(XfMap[XS_I16], 2) else Xfer(XfMap[XS_I32], 4);
-      XI_V: if RexW then Xfer(XfMap[XS_I32], 8) else if O16 then Xfer(XfMap[XS_I16], 2) else Xfer(XfMap[XS_I32], 4);
-      XI_ENTER: begin Xfer(XfMap[XS_I16], 2); Xfer1(XfMap[XS_I8]); end;
-      XI_FAR: begin
-                if O16 then Xfer(XfMap[XS_I16], 2) else Xfer(XfMap[XS_I32], 4);
-                Xfer(XfMap[XS_I16], 2);
-              end;
+      XI_B: Op1;
+      XI_W: Xfer(XS_I16, 2);
+      XI_Z: ImmZ;
+      XI_V: if RexW then Xfer(XS_I32, 8) else ImmZ;
+      XI_ENTER: begin Xfer(XS_I16, 2); Op1; end;
+      XI_FAR: begin ImmZ; Xfer(XS_I16, 2); end;
       XI_MOFFS: if M64 then
                 begin
-                  if A16 then XferAddr(XfMap[XS_ADDR], 0) else Xfer(XfMap[XS_I32], 8);
+                  if A16 then XferAddr(XS_ADDR, 0) else Xfer(XS_I32, 8);
                 end
                 else
                 begin
-                  if A16 then Xfer(XfMap[XS_I16], 2) else XferAddr(XfMap[XS_ADDR], 0);
+                  if A16 then Xfer(XS_I16, 2) else XferAddr(XS_ADDR, 0);
                 end;
-      XI_G3B: if (ModRM shr 3) and 7 < 2 then Xfer1(XfMap[XS_I8]);
-      XI_G3Z: if (ModRM shr 3) and 7 < 2 then
-                if O16 then Xfer(XfMap[XS_I16], 2) else Xfer(XfMap[XS_I32], 4);
-      XI_REL8: Xfer1(XfMap[XS_J8]);
-      XI_CALL, XI_JMP:
-        if O16 and not M64 then Xfer(XfMap[XS_I16], 2)
-        else if Kind = XI_CALL then
-        begin
-          if XfMtfSize > 0 then XferCall(Va + LongWord(Pos + 4))
-          else XferAddr(XfMap[XS_CALL], Va + LongWord(Pos + 4));
-        end
-        else XferAddr(XfMap[XS_JMP], Va + LongWord(Pos + 4));
+      XI_G3B: if ModRM and $38 < $10 then Op1;
+      XI_G3Z: if ModRM and $38 < $10 then ImmZ;
+      XI_REL8: Op1;
+      XI_CALL:
+        if O16 and not M64 then Xfer(XS_I16, 2)
+        else XferAddr(XS_CALL, Va + LongWord(Pos + 4));
+      XI_JMP:
+        if O16 and not M64 then Xfer(XS_I16, 2)
+        else XferAddr(XS_JMP, Va + LongWord(Pos + 4));
     end;
 
     if RipAt >= 0 then
     begin
       V := Va + LongWord(Pos);
 {$IFDEF XF_ENC}
-      StoreBE32(Sp[XfMap[XS_ADDR]], LoadLE32(@Plain[RipAt]) + V);
+      StoreBE32(Sp[XS_ADDR], LoadLE32(@Plain[RipAt]) + V);
 {$ELSE}
-      StoreLE32(@Plain[RipAt], LoadBE32(Sp[XfMap[XS_ADDR]]) - V);
+      StoreLE32(@Plain[RipAt], LoadBE32(Sp[XS_ADDR]) - V);
 {$ENDIF}
-      Inc(Sp[XfMap[XS_ADDR]], 4);
+      Inc(Sp[XS_ADDR], 4);
     end;
 
 {$IFDEF XF_ENC}
@@ -385,10 +277,10 @@ begin
       { the instruction does not fit: the rest of the region goes as raw bytes }
       for S := 0 to XF_NSTREAMS - 1 do Sp[S] := Save[S];
       Pos := Start;
-      Sp[XfMap[XS_OP]]^ := XF_ESC;
-      Sp[XfMap[XS_OP]][1] := RegLen - Pos;
-      Inc(Sp[XfMap[XS_OP]], 2);
-      Xfer(XfMap[XS_OP], RegLen - Pos);
+      Sp[XS_OP][0] := XF_ESC;
+      Sp[XS_OP][1] := RegLen - Pos;
+      Inc(Sp[XS_OP], 2);
+      Xfer(XS_OP, RegLen - Pos);
     end;
 {$ELSE}
     if Pos > RegLen then Exit(False);

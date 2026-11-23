@@ -5,33 +5,38 @@
   displacements, immediates and relative branch targets, each with its own statistics, and a call
   to the same function has a different relative offset from every place it is called. The filter
   decodes the instructions (own length decoder written from the Intel and AMD opcode maps) and
-  sends each field to its own stream:
+  moves the fields whose statistics differ most to their own streams:
 
-    OP     prefixes, opcode bytes (with the VEX/EVEX payload) and escapes
-    MODRM  ModRM bytes             SIB    SIB bytes
-    D8     8-bit displacements     D32    32-bit (and 16-bit) base-relative displacements
+    OP     prefixes, opcode bytes (with the VEX/EVEX payload), ModRM, SIB, 8-bit displacements,
+           8-bit immediates, 8-bit relative branches, and escapes
+    D32    32-bit (and 16-bit) base-relative displacements
     ADDR   absolute addresses: [disp32] without a base register, moffs, and RIP-relative
            displacements converted to absolute (x86-64)
-    I8 / I16 / I32   immediates (I32 also takes the 64-bit ones)
+    I16 / I32   16-bit and 32-bit immediates (I32 also takes the 64-bit ones)
     CALL   E8 targets as absolute addresses      JMP    E9 / 0F 8x targets as absolute
-    J8     8-bit relative branches               JT     entries of jump tables in the code
     RAW    the bytes that are not code
-  Absolute addresses are written most significant byte first (their high bytes repeat and
-  predict the rest). Every decision of the walker is made from bytes the decoder has already
-  rebuilt, so it is exact for any input; garbage parsed as code is only less compressible.
+  The short fields stay with the opcode on purpose: an LZ or CM back end then sees whole
+  instruction shapes (opcode + ModRM + disp8 ...) repeat, and the 32-bit fields, which are
+  mostly unpredictable from their neighbours, no longer break those repeats. Absolute addresses
+  are written most significant byte first (their high bytes repeat). Measured alternatives that
+  lost with LZMA and plz: one stream per field, a move-to-front table for call targets, jump-table
+  detection, little-endian addresses. Every decision of the walker is made from bytes the
+  decoder has already rebuilt, so it is exact for any input; garbage parsed as code is only less
+  compressible. Escape: an instruction starting with D6 (SALC, undefined in 64-bit mode) is
+  written D6 00; D6 n (n = 1..63) is followed by n raw bytes (an instruction cut by the end of a
+  region).
 
   Which bytes are code: the encoder looks for PE (i386 / AMD64, not .NET) and ELF (i386 /
   x86-64) headers in the data and takes their code sections (PE) or executable segments (ELF)
-  with their bitness and virtual addresses; spans without headers are classified by a density
-  test of near calls (E8 with a small offset) in 4 KB windows, 64-bit when REX.W prefixes are
-  common. Inside sections from a header, runs of 32-bit pointers or image-relative offsets into
-  the same section (switch tables of MSVC and others) go to the JT stream.
+  with their bitness and virtual addresses; spans outside any executable found this way are
+  classified by a density test of near calls (E8 with a small offset) in 4 KB windows, as 64-bit
+  code when REX.W prefixes are common.
 
   Stream (version 1; docs/formato/FORMATO-PARC.md §6.6):
     U8 version (= 1), then blocks until the end of the stream:
       VInt Len (bytes of the block, 1..block size), VInt NReg (code regions),
       NReg x ( VInt Gap (raw bytes before the region), VInt RegLen, U8 Mode (0 = 32-bit,
-               1 = 64-bit), U32 Va (virtual address of its first byte), U32 ImageBase ),
+               1 = 64-bit), U32 Va (virtual address of its first byte) ),
       XF_NSTREAMS x VInt StreamLen,
       zero padding to a multiple of 4 bytes from the version byte, then the streams in order,
       each followed by zero padding to a multiple of 4.
@@ -55,23 +60,21 @@ const
   DISPACK_BLOCK = 8 * 1024 * 1024;        // default block
   XF_MAX_BLOCK = 1 shl 30;
 
-  XS_OP = 0; XS_MODRM = 1; XS_SIB = 2; XS_D8 = 3; XS_D32 = 4; XS_ADDR = 5; XS_I8 = 6;
-  XS_I16 = 7; XS_I32 = 8; XS_CALL = 9; XS_JMP = 10; XS_J8 = 11; XS_JT = 12; XS_RAW = 13;
-  XF_NSTREAMS = 14;
+  XS_OP = 0; XS_D32 = 1; XS_ADDR = 2; XS_I16 = 3; XS_I32 = 4; XS_CALL = 5; XS_JMP = 6;
+  XS_RAW = 7;
+  XF_NSTREAMS = 8;
 
 type
   TXfRegion = record
     Start, Len: Int64;        // absolute in the stream (encoder) or in the block
     Mode: Byte;               // 32 or 64
     Va, ImageBase: LongWord;
-    Tables: Boolean;          // look for jump tables (sections from a header)
   end;
   TXfRegionArray = array of TXfRegion;
 
   TXfCtx = record
     P, E: array[0..XF_NSTREAMS - 1] of PByte;   // current position, end (decoder)
     Buf: array[0..XF_NSTREAMS - 1] of array of Byte;   // encoder buffers
-    Mtf: array[0..255] of LongWord;                     // recent call targets
   end;
 
   { Encoder stage. Params = the method split on ':' (Params[0] = 'dispack'/'dispack070'). }
@@ -140,9 +143,6 @@ const
   XF_ESC = $D6;              // SALC: undefined in 64-bit mode, unused by compilers
   XF_SUB_LIT = 0;            // ESC 0: the byte D6 itself
   XF_MAXINSN = 64;           // ESC 1..63: that many raw bytes (end of a region)
-  XF_SUB_VA = $80;           // ESC 80..BF: jump table of 2..65 addresses
-  XF_SUB_RVA = $C0;          // ESC C0..FF: jump table of 2..65 image-relative addresses (>= 3)
-  XF_JT_MAX = 65;
   XF_MAXPFX = 14;
   XF_SLACK = 32 * 1024;      // free bytes per stream between checks (64 instructions)
   XF_LOOK = 64 * 1024;       // look-ahead for headers that cross a block end
@@ -164,34 +164,6 @@ type
 
 var
   XfTab32, XfTab64, XfTab0F: TXfTab;
-  XfMap: array[0..XF_NSTREAMS - 1] of Integer;
-  XfNoJT, XfLE: Boolean;
-  XfMtfSize, XfJtVa, XfJtRva: Integer;
-
-procedure InitExperiments;
-var
-  s: string;
-  i, k: Integer;
-  L: TStringArray;
-begin
-  for i := 0 to XF_NSTREAMS - 1 do XfMap[i] := i;
-  s := GetEnvironmentVariable('XF_MAP');
-  if s <> '' then
-  begin
-    L := s.Split([',']);
-    for i := 0 to High(L) do
-      if i < XF_NSTREAMS then
-      begin
-        k := StrToInt(L[i]);
-        XfMap[i] := k;
-      end;
-  end;
-  XfNoJT := GetEnvironmentVariable('XF_NOJT') <> '';
-  XfLE := GetEnvironmentVariable('XF_LE') <> '';
-  XfJtVa := StrToIntDef(GetEnvironmentVariable('XF_JTVA'), 0);
-  XfJtRva := StrToIntDef(GetEnvironmentVariable('XF_JTRVA'), 0);
-  XfMtfSize := StrToIntDef(GetEnvironmentVariable('XF_MTF'), 0);
-end;
 
 function LoadLE32(P: PByte): LongWord; inline;
 begin
@@ -213,13 +185,11 @@ end;
 
 function LoadBE32(P: PByte): LongWord; inline;
 begin
-  if XfLE then Exit(LoadLE32(P));
   Result := (LongWord(P[0]) shl 24) or (LongWord(P[1]) shl 16) or (LongWord(P[2]) shl 8) or LongWord(P[3]);
 end;
 
 procedure StoreBE32(P: PByte; V: LongWord); inline;
 begin
-  if XfLE then begin StoreLE32(P, V); Exit; end;
   P[0] := Byte(V shr 24); P[1] := Byte(V shr 16); P[2] := Byte(V shr 8); P[3] := Byte(V);
 end;
 
@@ -407,7 +377,6 @@ begin
     R.Mode := Mode;
     R.Va := ImageBase + VAddr;
     R.ImageBase := ImageBase;
-    R.Tables := True;
     if NRegs = Length(Regs) then SetLength(Regs, 2 * NRegs + 8);
     Regs[NRegs] := R;
     Inc(NRegs);
@@ -476,7 +445,6 @@ begin
     R.Mode := Mode;
     R.Va := LongWord(VAddr);
     R.ImageBase := LongWord(VAddr - Off);
-    R.Tables := False;
     if NRegs = Length(Regs) then SetLength(Regs, 2 * NRegs + 8);
     Regs[NRegs] := R;
     Inc(NRegs);
@@ -500,8 +468,7 @@ var
       if RunRex * 2 > RunCalls then R.Mode := 64 else R.Mode := 32;
       R.Va := LongWord(Base + RunStart);
       R.ImageBase := 0;
-      R.Tables := False;
-      if NRegs = Length(Regs) then SetLength(Regs, 2 * NRegs + 8);
+        if NRegs = Length(Regs) then SetLength(Regs, 2 * NRegs + 8);
       Regs[NRegs] := R;
       Inc(NRegs);
     end;
@@ -685,8 +652,8 @@ begin
     FileClose(F);
   end;
   for i := 0 to NR - 1 do
-    WriteLn(StdErr, Format('region %d+%d mode %d va %x ib %x tables %d', [FBase + Rs[i].Start, Rs[i].Len,
-      Rs[i].Mode, Rs[i].Va, Rs[i].ImageBase, Ord(Rs[i].Tables)]));
+    WriteLn(StdErr, Format('region %d+%d mode %d va %x ib %x', [FBase + Rs[i].Start, Rs[i].Len,
+      Rs[i].Mode, Rs[i].Va, Rs[i].ImageBase]));
 end;
 
 procedure TDisPackEncStage.ProcessBlock(N: SizeInt);
@@ -795,7 +762,6 @@ begin
   for s := 0 to XF_NSTREAMS - 1 do
     if Length(FCtx.Buf[s]) > 0 then FCtx.P[s] := @FCtx.Buf[s][0] else FCtx.P[s] := nil;
   XfEnsure(FCtx);
-  FillChar(FCtx.Mtf, SizeOf(FCtx.Mtf), 0);
   SetLength(Hdr, 256);
   HN := 0;
   PutVInt(Hdr, HN, N);
@@ -808,7 +774,6 @@ begin
     PutVInt(Hdr, HN, R.Len);
     PutByte(Hdr, HN, Ord(R.Mode = 64));
     PutU32(Hdr, HN, R.Va);
-    PutU32(Hdr, HN, R.ImageBase);
     { raw gap }
     if R.Start > Prev then
     begin
@@ -1015,11 +980,9 @@ begin
     if b > 1 then Corrupt('dispack: bad region mode');
     Regs[i].Mode := 32 + 32 * b;
     Source.ReadExact(@Regs[i].Va, 4);
-    Source.ReadExact(@Regs[i].ImageBase, 4);
-    Inc(FInPos, 8);
+    Inc(FInPos, 4);
 {$IFDEF ENDIAN_BIG}
     Regs[i].Va := SwapEndian(Regs[i].Va);
-    Regs[i].ImageBase := SwapEndian(Regs[i].ImageBase);
 {$ENDIF}
   end;
   Total := 0;
@@ -1048,7 +1011,6 @@ begin
   end;
 
   if Length(FOut) < N + XF_PAD then SetLength(FOut, N + XF_PAD);
-  FillChar(C.Mtf, SizeOf(C.Mtf), 0);
   Prev := 0;
   for i := 0 to NReg do
   begin
@@ -1092,5 +1054,4 @@ end;
 
 initialization
   InitTables;
-  InitExperiments;
 end.
