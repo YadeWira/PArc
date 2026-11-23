@@ -1,6 +1,6 @@
 /* pcm_core.c - PArc context-mixing compressor (method "cm"), native core.
  *
- * Copyright (c) 2026 PArc authors. MIT License (see LICENSE in this folder).
+ * PArc's own code, MIT license.
  *
  * Written from scratch for PArc from published ideas (bitwise context mixing:
  * hashed bit-history contexts, adaptive state maps, a gated linear mixer in the
@@ -10,7 +10,7 @@
  * Freestanding C: no libc.  The caller (src/parc_cm.pas) provides one zeroed
  * memory arena of pcm_memsize() bytes and two I/O callbacks.  All arithmetic
  * is integer and exactly specified, so every platform produces the same bytes.
- * The stream format is described in docs/formato/FORMATO-PARC.md (section "cm").
+ * The stream format is described in docs/formato/FORMATO-PARC.md §6.6.
  */
 #include <stdint.h>
 #include <stddef.h>
