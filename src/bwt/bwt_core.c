@@ -123,6 +123,126 @@ static void * parc_bwt_memchr(const void * s, int c, size_t n)
 #undef RESTRICT
 #include "qlfc.c"
 
+/* LZP encoder of src/parc_lzp.pas (LzpEncodeBlock, PArc's own, MIT) in C, for the bwt blocks: the same
+   algorithm and the same bytes (tests/bwt.sh compares them), without the barrier (bwt uses one minimum).
+   hb = LzpBlockHashBits(len, hash bits); hash: 2 << hb entries; main: len bytes; lens: lensCap bytes.
+   Returns 1 when the coded block (main + lens) is smaller than the input, else 0. */
+static inline uint64_t lzp_load64(const uint8_t * p) { uint64_t v; __builtin_memcpy(&v, p, 8); return v; }
+
+static inline uint32_t lzp_hash(const uint8_t * p, int shift)
+{
+    return (uint32_t)(((lzp_load64(p - 8) >> 32) * 0x9E3779B97F4A7C15ull) >> shift);
+}
+
+static inline int32_t lzp_match_len(const uint8_t * a, const uint8_t * b, int32_t limit)
+{
+    int32_t r = 0;
+    while (r + 8 <= limit)
+    {
+        uint64_t x = lzp_load64(a + r) ^ lzp_load64(b + r);
+        if (x != 0) return r + (int32_t)(__builtin_ctzll(x) >> 3);
+        r += 8;
+    }
+    while (r < limit && a[r] == b[r]) r++;
+    return r;
+}
+
+#define LZP_PUTLEN(V)                                                                   \
+    do {                                                                                \
+        int32_t v_ = (V);                                                               \
+        if (nl + v_ / 255 + 2 > lensCap) return 0;                                      \
+        while (v_ >= 255) { lens[nl++] = 255; v_ -= 255; }                              \
+        lens[nl++] = (uint8_t)v_;                                                       \
+    } while (0)
+
+int32_t parc_lzp_encode(const uint8_t * in, int32_t len, int32_t minLen, int32_t hb, uint32_t * hash,
+    uint8_t * out, uint8_t * lens, int32_t lensCap, int32_t * nMain, int32_t * nLens, uint8_t * escOut)
+{
+    enum { CTX_START = 8, PF = 8 };
+    uint32_t f4[4][256];
+    uint32_t ring[PF];
+    int32_t i, nm = 0, nl = 0, ringEnd = 0, c;
+    int shift = 64 - hb;
+    uint8_t esc = 0;
+
+    *nMain = 0; *nLens = 0; *escOut = 0;
+    if (len <= 2 * CTX_START) return 0;
+    parc_bwt_memset(f4, 0, sizeof(f4));
+    for (i = 0; i + 4 <= len; i += 4) { f4[0][in[i]]++; f4[1][in[i + 1]]++; f4[2][in[i + 2]]++; f4[3][in[i + 3]]++; }
+    for (; i < len; ++i) f4[0][in[i]]++;
+    {
+        uint64_t best = (uint64_t)f4[0][0] + f4[1][0] + f4[2][0] + f4[3][0];
+        for (c = 1; c < 256; ++c)
+        {
+            uint64_t f = (uint64_t)f4[0][c] + f4[1][c] + f4[2][c] + f4[3][c];
+            if (f < best) { best = f; esc = (uint8_t)c; }
+        }
+    }
+    *escOut = esc;
+    parc_bwt_memset(hash, 0, ((size_t)2 << hb) * sizeof(uint32_t));
+    for (i = 0; i < CTX_START; ++i)
+    {
+        uint8_t b = in[i];
+        out[nm++] = b;
+        if (b == esc) LZP_PUTLEN(0);
+    }
+    i = CTX_START;
+    while (i < len)
+    {
+        uint32_t h;
+        if (i >= ringEnd)
+        {
+            ringEnd = i;
+            while (ringEnd < i + PF && ringEnd < len)
+            {
+                ring[ringEnd & (PF - 1)] = lzp_hash(in + ringEnd, shift) * 2;
+                __builtin_prefetch(&hash[ring[ringEnd & (PF - 1)]]);
+                ringEnd++;
+            }
+        }
+        h = ring[i & (PF - 1)];
+        if (ringEnd < len)
+        {
+            ring[ringEnd & (PF - 1)] = lzp_hash(in + ringEnd, shift) * 2;
+            __builtin_prefetch(&hash[ring[ringEnd & (PF - 1)]]);
+            ringEnd++;
+        }
+        {
+            int32_t p = (int32_t)hash[h], p2 = (int32_t)hash[h + 1];
+            hash[h + 1] = (uint32_t)p;
+            hash[h] = (uint32_t)i;
+            if (p != 0 && i + 8 <= len)
+            {
+                uint64_t cur8 = lzp_load64(in + i);
+                int32_t L = 0, which = 0;
+                if (lzp_load64(in + p) == cur8) L = lzp_match_len(in + p, in + i, len - i);
+                if (p2 != 0 && lzp_load64(in + p2) == cur8)
+                {
+                    int32_t L2 = lzp_match_len(in + p2, in + i, len - i);
+                    if (L2 >= minLen && (L < minLen || L2 > L)) { L = L2; which = 1; }
+                }
+                if (L >= minLen)
+                {
+                    if (nm >= len - 1) return 0;
+                    out[nm++] = esc;
+                    LZP_PUTLEN(2 * (L - minLen) + 1 + which);
+                    i += L;
+                    continue;
+                }
+            }
+        }
+        {
+            uint8_t b = in[i];
+            if (nm >= len - 1) return 0;
+            out[nm++] = b;
+            if (b == esc) LZP_PUTLEN(0);
+            i++;
+        }
+    }
+    *nMain = nm; *nLens = nl;
+    return nm + nl < len;
+}
+
 /* Forward BWT of T[0..n) into U (may be T), A: n int32 of scratch. Returns the primary index (1..n), or < 0. */
 int32_t parc_bwt_forward(const uint8_t * T, uint8_t * U, int32_t * A, int32_t n)
 {

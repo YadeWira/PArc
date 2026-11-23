@@ -8,6 +8,7 @@
                                                    a clean EArcCorrupt, never another exception
     test_filters synth <dir>                       synthetic tables (every delta layout) in <dir>
     test_filters segs <method> <in>                the segments the delta encoder chooses
+    test_filters lzpsame <in> <min> <bits>         bwt's LZP (C) gives the bytes of parc_lzp's
   Exit code 0 = ok. }
 program test_filters;
 
@@ -308,6 +309,23 @@ begin
     end
     else if (ParamCount >= 5) and (ParamStr(1) = 'fuzz') then
       DoFuzz(ParamStr(2), ParamStr(3), StrToInt(ParamStr(4)), StrToInt(ParamStr(5)))
+    else if (ParamCount >= 4) and (ParamStr(1) = 'lzpsame') then
+    begin
+      // the bwt encoder's LZP (C core) against parc_lzp's, block by block
+      Data := LoadFile(ParamStr(2));
+      Len := 0;
+      while Len < Length(Data) do
+      begin
+        i := Length(Data) - Len;
+        if i > 1 shl 20 then i := 1 shl 20;
+        if not BwtLzpSameAsPascal(@Data[Len], i, StrToInt(ParamStr(3)), StrToInt(ParamStr(4))) then
+        begin
+          WriteLn('LZP differs at ', Len);
+          Halt(1);
+        end;
+        Inc(Len, i);
+      end;
+    end
     else if (ParamCount >= 2) and (ParamStr(1) = 'synth') then
       Synth(ParamStr(2))
     else if (ParamCount >= 3) and (ParamStr(1) = 'segs') then

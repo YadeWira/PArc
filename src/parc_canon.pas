@@ -321,6 +321,7 @@ begin
       if BP.LzpMin > 0 then Result := Result + ('l' + IntToStr(BP.LzpMin) + ':h' + IntToStr(BP.LzpHash))
                        else Result := Result + 'l';
       if BP.CoderSet <> 0 then Result := Result + (':e' + IntToStr(BP.CoderSet));
+      if BP.Adaptive then Result := Result + ':a';
       Exit;
     end;
 

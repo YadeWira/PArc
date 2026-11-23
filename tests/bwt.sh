@@ -62,6 +62,13 @@ for f in $FILES; do
   done
 done
 
+# the C core's LZP gives the bytes of parc_lzp's
+for f in text rep3 allbytes mix runs zeros; do
+  for mb in "32 18" "128 20" "8 10" "64 12"; do
+    ck "lzpsame $f $mb" "\"$T\" lzpsame $f $mb >/dev/null"
+  done
+done
+
 # text compresses, the adaptive coder is smaller than the static one, random data stays its size
 "$T" enc bwt:m1 text t1.b 0; "$T" enc bwt:m2 text t2.b 0; "$T" enc bwt rnd r.b 0
 a=$(stat -c %s text); b1=$(stat -c %s t1.b); b2=$(stat -c %s t2.b); r=$(stat -c %s r.b)
