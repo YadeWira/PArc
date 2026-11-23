@@ -34,7 +34,10 @@ typedef U32 (*pcm_io_fn)(void *ctx, U8 *buf, U32 n);
 
 #define PCM_BLK 65536u        /* bytes per block (raw / modelled decision) */
 #define NCD 2                 /* direct contexts: order 0, order 1 */
-#define NCH 8                 /* hashed contexts */
+#ifndef PCM_NCH
+#define PCM_NCH 8
+#endif
+#define NCH PCM_NCH           /* hashed contexts */
 #define NC (NCD + NCH)
 #ifndef PCM_NI
 #define PCM_NI 16
@@ -53,7 +56,7 @@ typedef U32 (*pcm_io_fn)(void *ctx, U8 *buf, U32 n);
 #define IOBUF 65536u
 
 /* tuning parameters (constants in the product build) */
-#define PCM_TDEF {8, 2, 1023, 5, 2, 1, 1024, 6, 0, 2, 0, 0, 1, 0, 0, 3, 0, 0, 3, 0, 2, 6, 0, 3}
+#define PCM_TDEF {8, 2, 1023, 5, 2, 1, 1024, 6, 0, 2, 0, 0, 1, 0, 0, 3, 0, 0, 3, 0, 2, 6, 0, 3, 8, 3}
 #ifdef PCM_TUNE
 int pcm_T[32] = PCM_TDEF;
 #else
@@ -223,7 +226,7 @@ static void layout(U32 htbits, U32 wbits, U32 mtbits, layout_t *L) {
   L->mt = o;  o += (size_t)4 << mtbits;
   L->sm = o;  o += 4 * (NC * 2048 + 64);
   L->w1 = o;  o += 2 * NSETS * NI;
-  L->w2 = o;  o += 2 * 256 * 8;
+  L->w2 = o;  o += 2 * 1024 * 8;
   L->a1 = o;  o += 2 * 256 * 33;
   L->a2 = o;  o += 2 * (size_t)A2N * 33;
   L->a3 = o;  o += 2 * (size_t)A3N * 33;
@@ -434,6 +437,8 @@ static void model_init(pcm_t *m) {
     for (j = 0; j < NI; j++) m->w1[i * NI + j] = (I16)(j < XM + 2 && (!X2ON || (j & 1) == 0) ? P(6) : 0);
   for (i = 0; i < 256; i++)
     for (j = 0; j < 8; j++) m->w2[i * 8 + j] = (I16)(j < NM ? 4096 / NM : 0);
+  for (i = 256; i < 1024; i++)
+    for (j = 0; j < 8; j++) m->w2[i * 8 + j] = (I16)(j < NM ? 4096 / NM : 0);
   for (i = 0; i < 256 * 33; i++) m->a1[i] = (U16)(m->sq[((i % 33) - 16) * 128 + 2048 > 4095 ? 4095 : ((i % 33) - 16) * 128 + 2048] * 16);
   for (i = 0; i < (int)(A2N * 33); i++) m->a2[i] = m->a1[i % 33];
   for (i = 0; i < (int)(A3N * 33); i++) m->a3[i] = m->a1[i % 33];
@@ -530,7 +535,12 @@ static inline int predict(pcm_t *m) {
   dot_all(x, m->w1, m->sel, m->x2);
   for (i = 0; i < NM; i++) m->p1[i] = m->sq[m->x2[i] + 2048];
   }
-  m->sel2 = c0;
+  switch (P(25)) {
+    case 1: m->sel2 = (m->mlen != 0) * 256 + c0; break;
+    case 2: m->sel2 = ord * 8 + m->bpos; break;
+    case 3: m->sel2 = ((m->c4 & 255) >> 5) * 8 * 0 + (m->mlen ? 1 + (m->mlen > 15) : 0) * 256 + c0; break;
+    default: m->sel2 = c0;
+  }
   {
     I32 d = dot16(m->x2, m->w2 + m->sel2 * 8, 8) >> 12;
     pm = squash(m, d);
@@ -681,7 +691,11 @@ static inline void update_byte(pcm_t *m) {
     m->hh[1] = hash3(2, c4 & 0xffffff, 0);
     m->hh[2] = hash3(3, c4, 0);
     m->hh[3] = hash3(4, c4, c8 & 0xffff);
-    m->hh[4] = hash3(5, m->wh, m->wh ? 0 : (c & 255) + 1);
+    switch (P(26)) {
+      case 1: m->hh[4] = hash3(5, m->wh, c & 255); break;
+      case 2: m->hh[4] = hash3(5, m->wh, m->wh ? 0 : (c4 & 0xffff) + 1); break;
+      default: m->hh[4] = hash3(5, m->wh, m->wh ? 0 : (c & 255) + 1);
+    }
     switch (P(10)) {
       case 1: m->hh[5] = hash3(6, c4, c8 & 0xff); break;
       case 2: m->hh[5] = hash3(6, c4, c8 & 0xffffff); break;
@@ -695,6 +709,7 @@ static inline void update_byte(pcm_t *m) {
       case 3: m->hh[6] = hash3(7, c4 & 0xff, m->ind1[c4 & 255]); break;
       case 4: m->hh[6] = hash3(7, c4 & 0xffff, m->ind2[c4 & 0xffff]); break;
       case 5: m->hh[6] = hash3(7, c4 & 0xff, m->ind1[c4 & 255] | (U32)m->ind2[c4 & 0xffff] << 16); break;
+      case 6: m->hh[6] = m->wh ? hash3(7, m->wh, m->wh1) : hash3(7, m->wh1, c4 & 0xff); break;
       default: m->hh[6] = hash3(7, m->wh, m->wh1);
     }
     switch (P(23)) {
@@ -706,6 +721,18 @@ static inline void update_byte(pcm_t *m) {
       case 8: m->hh[7] = hash3(8, c4 & 0xffff0000, 0); break;
       default: m->hh[7] = hash3(8, 0, 0);
     }
+#if NCH > 8
+    switch (P(24)) {
+      case 3: m->hh[8] = hash3(9, c4 & 0xff, m->ind1[c4 & 255]); break;
+      case 4: m->hh[8] = hash3(9, c4 & 0xffff, m->ind2[c4 & 0xffff]); break;
+      case 6: m->hh[8] = hash3(9, c4, c8 & 0xff); break;
+      case 7: m->hh[8] = hash3(9, c4 & 0xff00ff00, 0); break;
+      case 8: m->hh[8] = hash3(9, c4 & 0xffff0000, 0); break;
+      case 9: m->hh[8] = hash3(9, m->wh, c4 & 0xff00); break;
+      case 10: m->hh[8] = hash3(9, c4, c8 & 0xffffff); break;
+      default: m->hh[8] = hash3(9, 0, 0);
+    }
+#endif
     for (i = 0; i < NCH; i++) __builtin_prefetch(ht_bucket(m, m->hh[i]));
     for (i = 0; i < NCH; i++) m->slot[i] = ht_find(m, m->hh[i]);
   }

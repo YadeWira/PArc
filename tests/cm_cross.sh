@@ -22,7 +22,7 @@ build() {   # build <name> <cc and its options> -- <fpc> [options]
   local c=$1; shift
   mkdir -p "$B/$n/units"
   "${cc[@]}" $PCMFLAGS -c "$ROOT/src/cm/pcm_core.c" -o "$B/$n/units/pcm_core.o" >"$B/$n/build.log" 2>&1 &&
-  "$c" -O3 "$@" -Fu"$ROOT/src" -FU"$B/$n/units" -FE"$B/$n" "$ROOT/tests/test_cm.lpr" >>"$B/$n/build.log" 2>&1 ||
+  "$c" -O3 "$@" -Fu"$ROOT/src" -Fo"$B/$n/units" -FU"$B/$n/units" -FE"$B/$n" "$ROOT/tests/test_cm.lpr" >>"$B/$n/build.log" 2>&1 ||
     { echo "no compila test_cm para $n (ver $B/$n/build.log)"; return 1; }
 }
 build linux64 gcc -fno-pie -- fpc || exit 2
