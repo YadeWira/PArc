@@ -1493,106 +1493,98 @@ static coder instead of `m4`'s fast one: smaller on mixed text, still faster tha
 `dict + lzp:64m + grzip:m3:8m:l:a`: bwt's own LZP and the adaptive coder are smaller, faster and
 use much less memory than the separate 64 MB `lzp` stage in front of the static coder.
 
-**Measurements** (old = main a93a44b with GRZip, new = this branch; best of 2 interleaved runs,
-T1 on cores 16 and 20, T4 on 24-27, three cells at a time; size in bytes, times in s (wall),
-memory = peak RSS in MB; `/mnt/IA_LAB/agentes/PArc/bwt/m7.txt`; sets: `prose` = corpus
-`text/txt` (32 MB, 114 files), `small` = 3,247 files of 400 text formats of the corpus (77 MB),
-`silesia` = dickens, webster, xml, samba, nci, reymont (114 MB), `enw` = enwik8, `bmp` = 25 MB
-of corpus bitmaps; the "-mN" rows are the real presets on all files of the set):
+**Measurements, round 2** (old = main 21fab03 with GRZip, new = this branch 5e29210; old and
+new runs alternate, best of 3 for times, highest of 3 for memory; T1 pinned to one of cores
+18/20/22, T4 to 28-31, three T1 cells and one T4 cell at a time on cores that were idle;
+size in bytes, times in s (wall), memory = peak RSS in MB; `/mnt/IA_LAB/agentes/PArc/bwt/q5.txt`;
+sets: `prose` = corpus `text/txt` (32 MB, 114 files), `small` = 3,247 files of 400 text formats
+of the corpus (77 MB), `txtonly` = the 2,080 files of `small` that the presets send to the text
+group (37 MB), `silesia` = dickens, webster, xml, samba, nci, reymont (114 MB), `enw` = enwik8,
+`bmp` = 25 MB of corpus bitmaps; "preset -mN" = the real presets on all files of the set; at T4
+`-m2` uses `ex2t` and `-m4` `ex4t` for the text group, at T1 `-m4` uses no bwt at all):
 
 | set | method (old → new) | T | size old | size new | Δ | comp old/new | comp MB old/new | dec old/new | dec MB old/new |
 |---|---|---|---:|---:|---:|---:|---:|---:|---:|
-| prose | preset -m2 | 1 | 7,439,248 | 6,920,252 | -6.98 % | 2.51 / 2.19 | 61 / 29 | 3.23 / 1.17 | 51 / 25 |
-| prose | preset -m2 | 4 | 7,427,239 | 6,915,395 | -6.89 % | **1.27 / 1.41** | 137 / 79 | 1.69 / 0.60 | 106 / 78 |
-| prose | preset -m3 | 1 | 6,472,615 | 6,430,513 | -0.65 % | 4.84 / 4.35 | 143 / 99 | 5.14 / 2.82 | 96 / 62 |
-| prose | preset -m3 | 4 | 6,947,819 | 6,652,274 | -4.25 % | 3.03 / 2.50 | 130 / 88 | 2.20 / 1.16 | 133 / 79 |
-| prose | preset -m4 | 4 | 6,750,182 | 6,603,176 | -2.18 % | 4.03 / 3.22 | 136 / 88 | 2.62 / 1.75 | 111 / 78 |
-| prose | 3t (new string) | 1 | 6,475,238 | 6,437,196 | -0.59 % | 4.83 / 4.71 | 145 / 100 | 5.04 / 3.06 | 98 / 63 |
-| prose | alone m1 | 1 | 6,610,885 | 6,441,827 | -2.56 % | 8.11 / 5.66 | 73 / 51 | 7.13 / 4.24 | 52 / 41 |
-| prose | alone m1 | 4 | 6,610,885 | 6,441,827 | -2.56 % | 2.57 / 1.65 | 231 / 172 | 2.11 / 1.14 | 175 / 131 |
-| prose | ex4t | 4 | 6,771,063 | 6,611,558 | -2.36 % | 2.43 / 1.64 | 177 / 149 | 2.09 / 1.13 | 136 / 93 |
-| prose | alone m2 | 1 | 6,837,159 | 6,488,073 | -5.11 % | 4.75 / 2.91 | 71 / 51 | 4.73 / 1.76 | 50 / 41 |
-| prose | alone m2 | 4 | 6,837,159 | 6,488,073 | -5.11 % | 1.89 / 1.24 | 221 / 172 | 1.57 / 0.74 | 165 / 132 |
-| prose | ex3t | 4 | 6,964,328 | 6,660,195 | -4.37 % | 1.77 / 1.54 | 167 / 147 | 1.69 / 0.70 | 131 / 111 |
-| prose | alone m3 | 1 | 7,106,846 | 6,488,074 | -8.71 % | 3.47 / 2.78 | 64 / 51 | 5.09 / 1.67 | 52 / 41 |
-| prose | alone m3 | 4 | 7,106,846 | 6,488,074 | -8.71 % | 1.41 / 1.08 | 196 / 172 | 1.71 / 0.68 | 169 / 132 |
-| prose | alone m4 | 1 | 7,384,030 | 6,613,927 | -10.43 % | **2.37 / 2.50** | 64 / 51 | 3.48 / 1.31 | 52 / 41 |
-| prose | alone m4 | 4 | 7,384,030 | 6,613,927 | -10.43 % | **0.88 / 1.01** | 195 / 168 | 1.16 / 0.44 | 170 / 134 |
-| prose | 2t | 1 | 7,424,399 | 6,905,681 | -6.99 % | 2.60 / 2.17 | 62 / 29 | 3.29 / 1.26 | 51 / 25 |
-| prose | ex2t | 4 | 7,415,418 | 6,903,849 | -6.90 % | 1.08 / 1.08 | 132 / 100 | 1.39 / 0.52 | 131 / 79 |
-| small | preset -m2 | 1 | 12,113,500 | 12,094,098 | -0.16 % | 4.01 / 3.72 | **137 / 138** | 1.94 / 0.94 | **84 / 84** |
-| small | preset -m2 | 4 | 11,978,849 | 11,959,815 | -0.16 % | **1.67 / 2.04** | 173 / 162 | 0.96 / 0.50 | 97 / 89 |
-| small | preset -m3 | 1 | 11,396,190 | 11,331,638 | -0.57 % | 7.23 / 6.89 | **108 / 109** | 3.40 / 2.36 | 95 / 87 |
-| small | preset -m3 | 4 | 10,768,359 | 10,692,734 | -0.70 % | 9.03 / 6.44 | **158 / 173** | **0.93 / 1.00** | 106 / 100 |
-| small | preset -m4 | 4 | 10,536,129 | 10,479,862 | -0.53 % | 13.23 / 7.92 | **155 / 198** | 1.49 / 1.35 | **105 / 115** |
-| small | 3t (new string) | 1 | 11,021,638 | 10,853,460 | -1.53 % | 13.31 / 12.46 | 179 / 141 | 9.93 / 7.41 | 193 / 113 |
-| small | alone m1 | 1 | 11,935,462 | 10,913,723 | -8.56 % | 10.28 / 6.65 | 70 / 48 | 8.16 / 4.65 | 50 / 35 |
-| small | alone m1 | 4 | 11,935,462 | 10,913,723 | -8.56 % | 3.60 / 2.74 | 255 / 84 | 2.89 / 1.99 | 172 / 48 |
-| small | ex4t | 4 | 11,068,760 | 10,822,096 | -2.23 % | 4.05 / 3.02 | 75 / 55 | 2.71 / 1.84 | 42 / 38 |
-| small | alone m2 | 1 | 12,248,407 | 11,143,128 | -9.02 % | 10.07 / 7.06 | 66 / 48 | 5.96 / 3.96 | 46 / 35 |
-| small | alone m2 | 4 | 12,248,407 | 11,143,128 | -9.02 % | 2.68 / 2.41 | 242 / 81 | 1.68 / 1.32 | 157 / 47 |
-| small | ex3t | 4 | 11,233,231 | 11,067,503 | -1.48 % | 3.02 / 2.45 | 79 / 56 | 1.53 / 1.27 | 40 / 35 |
-| small | alone m3 | 1 | 11,392,942 | 11,143,127 | -2.19 % | 6.12 / 4.56 | 60 / 48 | 7.27 / 2.63 | 48 / 35 |
-| small | alone m3 | 4 | 11,392,942 | 11,143,127 | -2.19 % | **2.42 / 2.58** | 219 / 82 | 2.61 / 1.19 | 144 / 48 |
-| small | alone m4 | 1 | 11,582,418 | 11,439,666 | -1.23 % | 6.17 / 5.81 | 60 / 48 | 6.21 / 2.38 | 48 / 34 |
-| small | alone m4 | 4 | 11,582,418 | 11,439,666 | -1.23 % | **1.91 / 2.22** | 219 / 81 | 1.61 / 0.85 | 160 / 49 |
-| small | 2t | 1 | 10,888,183 | 11,360,142 | +4.33 % | 4.78 / 3.69 | 28 / 21 | 3.95 / 1.60 | 20 / 17 |
-| small | ex2t | 4 | 10,887,211 | 11,360,142 | +4.34 % | 2.19 / 1.94 | 76 / 52 | 1.73 / 0.79 | 44 / 36 |
-| silesia | 3t (new string) | 1 | 16,156,300 | 16,052,197 | -0.64 % | 14.58 / 12.19 | 201 / 158 | 14.00 / 7.35 | 165 / 105 |
-| silesia | alone m1 | 1 | 16,254,444 | 15,850,824 | -2.48 % | 23.37 / 12.18 | 92 / 56 | 19.60 / 8.04 | 56 / 49 |
-| silesia | alone m1 | 4 | 16,254,444 | 15,850,824 | -2.48 % | 8.38 / 4.68 | 325 / 206 | 6.39 / 3.10 | 197 / 128 |
-| silesia | ex4t | 4 | 16,268,965 | 16,105,906 | -1.00 % | 9.76 / 5.60 | 311 / 173 | 7.55 / 2.67 | 186 / 112 |
-| silesia | alone m2 | 1 | 17,012,953 | 16,442,119 | -3.36 % | 14.56 / 8.54 | 77 / 56 | 14.43 / 4.30 | 55 / 50 |
-| silesia | alone m2 | 4 | 17,012,953 | 16,442,119 | -3.36 % | 6.07 / 3.99 | 281 / 190 | 5.10 / 1.75 | 190 / 125 |
-| silesia | ex3t | 4 | 16,969,066 | 16,696,873 | -1.60 % | 4.48 / 3.49 | 252 / 162 | 4.38 / 1.68 | 165 / 97 |
-| silesia | alone m3 | 1 | 17,922,811 | 16,442,118 | -8.26 % | 12.80 / 8.93 | 69 / 56 | 15.29 / 4.54 | 57 / 49 |
-| silesia | alone m3 | 4 | 17,922,811 | 16,442,118 | -8.26 % | **3.66 / 4.64** | 252 / 191 | 4.98 / 1.92 | 179 / 118 |
-| silesia | alone m4 | 1 | 18,459,621 | 16,870,210 | -8.61 % | **6.94 / 6.98** | 69 / 57 | 8.46 / 3.03 | 57 / 50 |
-| silesia | alone m4 | 4 | 18,459,621 | 16,870,210 | -8.61 % | **2.88 / 3.45** | 252 / 187 | 3.39 / 1.09 | 188 / 139 |
-| silesia | 2t | 1 | 18,367,833 | 17,478,926 | -4.84 % | 8.22 / 7.91 | 70 / 32 | 10.18 / 2.87 | 58 / 30 |
-| silesia | ex2t | 4 | 18,364,964 | 17,478,439 | -4.83 % | **2.41 / 3.18** | 236 / 117 | 2.93 / 1.00 | 168 / 85 |
-| enw | preset -m2 | 1 | 26,789,612 | 25,078,398 | -6.39 % | 8.65 / 7.43 | 67 / 33 | 11.08 / 3.71 | 59 / 29 |
-| enw | preset -m4 | 4 | 24,270,562 | 23,916,942 | -1.46 % | 7.06 / 4.61 | 218 / 150 | 6.62 / 2.89 | 195 / 138 |
-| enw | 3t (new string) | 1 | 23,977,500 | 23,529,913 | -1.87 % | 18.46 / 15.44 | 258 / 163 | 19.63 / 10.01 | 160 / 138 |
-| enw | alone m1 | 1 | 23,830,734 | 23,552,511 | -1.17 % | 19.98 / 16.57 | 76 / 56 | 22.06 / 11.55 | 56 / 49 |
-| enw | alone m1 | 4 | 23,830,734 | 23,552,511 | -1.17 % | 7.13 / 5.03 | 277 / 193 | 7.70 / 3.71 | 213 / 189 |
-| enw | ex4t | 4 | 24,270,562 | 23,916,942 | -1.46 % | 8.19 / 4.96 | 214 / 149 | 6.10 / 3.52 | 208 / 143 |
-| enw | alone m2 | 1 | 24,794,991 | 23,706,827 | -4.39 % | 16.77 / 10.08 | 76 / 56 | 16.43 / 5.96 | 55 / 51 |
-| enw | alone m2 | 4 | 24,794,991 | 23,706,827 | -4.39 % | 5.07 / 3.22 | 279 / 191 | 4.37 / 2.00 | 217 / 182 |
-| enw | ex3t | 4 | 25,206,848 | 24,075,309 | -4.49 % | 7.04 / 3.55 | 214 / 148 | 4.44 / 1.95 | 203 / 140 |
-| enw | alone m3 | 1 | 25,550,017 | 23,706,828 | -7.21 % | 11.80 / 10.15 | 68 / 56 | 17.81 / 5.70 | 58 / 51 |
-| enw | alone m3 | 4 | 25,550,017 | 23,706,828 | -7.21 % | 4.41 / 3.55 | 239 / 192 | 5.86 / 2.38 | 219 / 187 |
-| enw | alone m4 | 1 | 26,576,343 | 24,144,249 | -9.15 % | **8.03 / 9.93** | 68 / 58 | 10.74 / 5.82 | 58 / 49 |
-| enw | alone m4 | 4 | 26,576,343 | 24,144,249 | -9.15 % | **3.02 / 3.55** | 240 / 191 | 4.17 / 1.44 | 226 / 190 |
-| enw | 2t | 1 | 26,789,612 | 25,078,398 | -6.39 % | **9.37 / 9.60** | 67 / 33 | 14.02 / 4.63 | 59 / 29 |
-| enw | ex2t | 4 | 26,783,816 | 25,078,408 | -6.37 % | 3.82 / 3.02 | 188 / 105 | 4.29 / 1.31 | 209 / 104 |
-| bmp | bmp | 1 | 5,626,207 | 5,527,607 | -1.75 % | 7.28 / 4.67 | 40 / 31 | 3.94 / 2.27 | **27 / 27** |
-| bmp | bmp | 4 | 5,626,207 | 5,527,607 | -1.75 % | 2.01 / 1.62 | 116 / 65 | 1.23 / 0.81 | 48 / 43 |
-| bmp | bmpfast | 1 | 6,018,795 | 5,758,968 | -4.32 % | 2.41 / 1.83 | 43 / 26 | 2.07 / 0.77 | 33 / 21 |
-| bmp | bmpfast | 4 | 6,018,795 | 5,758,968 | -4.32 % | 0.76 / 0.68 | **61 / 64** | 0.72 / 0.30 | 64 / 40 |
+| prose | preset -m2 | 4 | 7,427,239 | 6,927,474 | -6.73 % | 0.75 / 0.63 | 133 / 109 | 0.91 / 0.63 | 113 / 76 |
+| prose | preset -m3 | 4 | 6,947,819 | 6,752,343 | -2.81 % | 1.68 / 0.69 | 127 / 105 | 1.05 / 0.40 | 133 / 78 |
+| prose | preset -m4 | 4 | 6,750,182 | 6,603,176 | -2.18 % | 2.22 / 1.26 | 136 / 112 | 1.47 / 0.90 | 132 / 78 |
+| prose | ex3t | 4 | 6,964,328 | 6,763,330 | -2.89 % | 1.03 / 0.62 | 167 / 110 | 0.90 / 0.38 | 127 / 70 |
+| prose | alone m4 | 1 | 7,384,030 | 6,810,506 | -7.77 % | 1.89 / 1.59 | 64 / 53 | 2.37 / 1.92 | 52 / 41 |
+| prose | alone m4 | 4 | 7,384,030 | 6,810,506 | -7.77 % | 0.55 / 0.50 | 195 / 181 | 0.72 / 0.62 | 169 / 134 |
+| prose | 2t | 1 | 7,424,399 | 6,914,152 | -6.87 % | 1.94 / 1.73 | 62 / 33 | 2.32 / 1.94 | 51 / 25 |
+| prose | ex2t | 1 | 7,415,418 | 6,911,356 | -6.80 % | 1.95 / 1.75 | 62 / 33 | 2.30 / 1.90 | 51 / 25 |
+| prose | ex2t | 4 | 7,415,418 | 6,911,356 | -6.80 % | 0.64 / 0.54 | 131 / 116 | 0.71 / 0.61 | 130 / 72 |
+| small | preset -m2 | 1 | 12,113,500 | 11,965,682 | -1.22 % | 3.21 / 3.19 | **135 / 136** | 1.54 / 1.08 | **84 / 85** |
+| small | preset -m2 | 4 | 11,978,849 | 11,831,417 | -1.23 % | **0.99 / 1.00** | 165 / 159 | 0.55 / 0.39 | 96 / 92 |
+| small | preset -m3 | 1 | 11,396,190 | 11,331,638 | -0.57 % | 5.83 / 5.58 | **108 / 111** | 2.77 / 1.94 | 95 / 87 |
+| small | preset -m3 | 4 | 10,768,359 | 10,579,556 | -1.75 % | 5.62 / 5.61 | 162 / 156 | 0.57 / 0.53 | 106 / 94 |
+| small | preset -m4 | 1 | 10,481,352 | 10,481,352 | +0.00 % | 10.04 / 9.84 | **258 / 259** | 3.26 / 3.04 | **273 / 274** |
+| small | preset -m4 | 4 | 10,536,129 | 10,479,862 | -0.53 % | 5.25 / 5.24 | **188 / 192** | 0.88 / 0.75 | **103 / 105** |
+| small | ex4t | 4 | 11,068,760 | 10,822,096 | -2.23 % | 2.33 / 1.69 | 75 / 63 | 1.63 / 1.04 | 41 / 37 |
+| small | ex3t | 1 | 11,233,231 | 10,944,862 | -2.57 % | 5.86 / 3.98 | 30 / 22 | 3.11 / 2.20 | 21 / 16 |
+| small | ex3t | 4 | 11,233,231 | 10,944,862 | -2.57 % | 1.97 / 1.36 | 76 / 66 | 0.97 / 0.73 | 42 / 37 |
+| small | alone m3 | 1 | 11,392,942 | 11,043,577 | -3.07 % | 4.58 / 3.99 | 61 / 48 | 5.51 / 2.18 | 48 / 35 |
+| small | alone m3 | 4 | 11,392,942 | 11,043,577 | -3.07 % | 1.37 / 1.28 | 221 / 94 | 1.49 / 0.71 | 150 / 48 |
+| small | alone m4 | 1 | 11,582,418 | 11,392,853 | -1.64 % | 3.39 / 2.95 | 61 / 50 | 3.27 / 1.48 | 48 / 34 |
+| small | alone m4 | 4 | 11,582,418 | 11,392,853 | -1.64 % | 1.05 / 1.03 | 212 / 100 | 0.93 / 0.61 | 160 / 53 |
+| small | 2t | 1 | 10,888,183 | 10,981,101 | +0.85 % | 3.73 / 3.62 | 28 / 25 | 3.17 / 2.12 | 20 / 16 |
+| small | ex2t | 1 | 10,887,211 | 10,981,102 | +0.86 % | 3.89 / 3.54 | 28 / 25 | 3.41 / 2.05 | 20 / 16 |
+| small | ex2t | 4 | 10,887,211 | 10,981,102 | +0.86 % | 1.32 / 1.17 | 71 / 69 | 1.03 / 0.67 | 45 / 37 |
+| txtonly | ex4t | 4 | 4,550,728 | 4,494,474 | -1.24 % | 1.06 / 0.98 | **49 / 59** | **0.67 / 0.71** | **30 / 38** |
+| txtonly | 2t | 1 | 4,656,469 | 4,508,643 | -3.17 % | **1.46 / 1.50** | 27 / 23 | 1.28 / 0.86 | 18 / 13 |
+| txtonly | 2t | 4 | 4,656,469 | 4,508,643 | -3.17 % | 0.55 / 0.51 | **41 / 47** | 0.43 / 0.31 | 27 / 25 |
+| silesia | ex4t | 4 | 16,268,965 | 16,105,906 | -1.00 % | 4.48 / 2.24 | 294 / 173 | 3.01 / 1.42 | 186 / 103 |
+| silesia | ex3t | 1 | 16,969,066 | 16,542,521 | -2.51 % | 9.95 / 6.30 | 77 / 33 | 6.60 / 3.30 | 56 / 30 |
+| silesia | ex3t | 4 | 16,969,066 | 16,542,521 | -2.51 % | 2.90 / 1.93 | 260 / 138 | 2.38 / 0.97 | 166 / 77 |
+| silesia | alone m3 | 4 | 17,922,811 | 15,935,585 | -11.09 % | 2.08 / 1.91 | 252 / 227 | 2.71 / 1.09 | 172 / 155 |
+| silesia | alone m3:h20:a | 4 | 17,841,513 | 16,542,520 | -7.28 % | 2.12 / 1.76 | 234 / 135 | 2.85 / 0.89 | 124 / 73 |
+| silesia | alone m4 | 1 | 18,459,621 | 17,719,011 | -4.01 % | 5.46 / 3.98 | 69 / 59 | 6.21 / 4.40 | 57 / 49 |
+| silesia | alone m4 | 4 | 18,459,621 | 17,719,011 | -4.01 % | 1.63 / 1.16 | 252 / 222 | 1.88 / 1.48 | 188 / 137 |
+| silesia | 2t | 1 | 18,367,833 | 17,704,284 | -3.61 % | 5.72 / 4.73 | 70 / 35 | 6.26 / 4.96 | 58 / 30 |
+| silesia | ex2t | 1 | 18,364,964 | 17,703,420 | -3.60 % | 5.62 / 4.68 | 70 / 35 | 6.34 / 4.92 | 58 / 30 |
+| silesia | ex2t | 4 | 18,364,964 | 17,703,420 | -3.60 % | 1.63 / 1.40 | 232 / 135 | 2.00 / 1.42 | 144 / 98 |
+| enw | ex3t | 4 | 25,206,848 | 24,595,067 | -2.43 % | 3.72 / 1.85 | 209 / 115 | 2.62 / 1.09 | 203 / 97 |
+| enw | alone m4 | 1 | 26,576,343 | 24,866,641 | -6.43 % | 6.54 / 4.63 | 68 / 59 | 8.45 / 6.93 | 58 / 49 |
+| enw | alone m4 | 4 | 26,576,343 | 24,866,641 | -6.43 % | 1.75 / 1.32 | 240 / 231 | 2.23 / 2.01 | 217 / 188 |
+| enw | 2t | 1 | 26,789,612 | 25,115,580 | -6.25 % | 6.83 / 5.52 | 68 / 36 | 8.48 / 6.60 | 59 / 28 |
+| enw | ex2t | 1 | 26,783,816 | 25,115,551 | -6.23 % | 6.62 / 5.05 | 68 / 36 | 7.92 / 6.30 | 59 / 28 |
+| enw | ex2t | 4 | 26,783,816 | 25,115,551 | -6.23 % | 2.31 / 1.65 | 176 / 129 | 2.33 / 1.99 | 186 / 96 |
+| bmp | bmp | 1 | 5,626,207 | 5,527,607 | -1.75 % | 5.11 / 3.62 | 39 / 31 | 2.72 / 1.75 | **27 / 27** |
+| bmp | bmp | 4 | 5,626,207 | 5,527,607 | -1.75 % | 1.33 / 0.98 | 116 / 69 | 0.69 / 0.46 | 51 / 40 |
+| bmp | bmpfast | 1 | 6,018,795 | 5,764,718 | -4.22 % | 1.98 / 1.40 | 43 / 28 | 1.63 / 0.83 | 33 / 20 |
+| bmp | bmpfast | 4 | 6,018,795 | 5,764,718 | -4.22 % | 0.55 / 0.44 | **65 / 65** | 0.46 / 0.24 | 58 / 52 |
 
-Bold = new worse. The machine was heavily loaded by other jobs during this run (load ~40 on 64
-threads, the HT siblings of these cores busy), so the times are about 1.5× those of quieter runs
-and differences under ~15 % flip between runs; sizes are exact. The same matrix run 1 h earlier
-(`m6.txt`, nearly the same code) gave, for the cells in bold: `-m2` prose T4 0.63 vs 0.80 s,
-`-m2` small T4 1.06 vs 1.12 s, alone `m4` small T1 3.87 vs 3.98 s, `bmp` dec 27.5 vs 27.6 MB.
+Bold = new worse. Changes since round 1: `m4` uses the order-5 sort transform (blocks of 1 MB
+or more) with the fast coder (about a third less compression time than the BWT); `2t`/`ex2t` use the static coder; blocks with few runs take the adaptive coder instead of
+the static one below 30 % runs (−0.2..−0.3 % on small and Silesia for +2..4 % time); the pieces of a
+cut block are slices of the buffer instead of copies; the encoder queue holds jobs by memory past
+threads + 1 (`m2`..`m4`), so small pieces queue behind a slow block (ex2t Silesia T4 1.76 →
+1.40 s, `2t` on `txtonly` T4 0.66 → 0.51 s); the LZP second pass also at `m2`/`m3`.
 
-**Where it does not win (2026-11-23):**
-- *`m4` alone (`grzip:m4` without `a`) compression time at T4, and at T1 on large files*
-  (prose, Silesia, enwik8: 0–20 % slower): GRZip's `m4` is an order-4 sort transform, a radix
-  sort; libsais' BWT is a full suffix sort and at T4 four of them compete for the memory bus
-  (CPU time grows 2× from T1 to T4 against 1.5× for GRZip). Sizes are 1.2–9 % smaller,
-  decompression 2.5–3× faster, memory 15–30 % lower. The presets use `m4` with `a`
-  (`2t`, `ex2t`), where the blocks are half as big and it is as fast or faster except Silesia.
-- *`2t`/`ex2t` on `small`* (3,247 files of 400 formats in one solid block): +4.3 % size. GRZip's
-  MTF coder is better than QLFC's fast coder on very redundant structured files; the static
-  coder would give −1.5 % but costs 20 % more time, the adaptive one is smaller than GRZip
-  (`ex4t`: −2.2 %) but slower than `m4`. With the real `-m2` preset (only the `$text` files go to
-  bwt) the archive is smaller than GRZip's.
-- *Peak memory of `-m3`/`-m4` at T4 on `small`* (+9/+27 %): the text block finishes earlier and
-  the other solid block's `4x4` takes the free threads (it grows its queue with idle budget
-  tokens; `bwt:m1:h20:a` alone uses 25 % less memory than GRZip on the same data).
-- One-percent memory differences in a few T1 preset cells (`-m2`/`-m3` small).
+**Where it does not win (2026-11-23, round 2):**
+- *`2t`/`ex2t` alone on all of `small`*: +0.85 % size (was +4.3 %). On the files that the presets
+  actually send to `2t` (`txtonly`) it is −3.2 %, and the real `-m2` preset is −1.2 % on `small`.
+  What is left is QLFC's static coder against GRZip's on very redundant structured files: the
+  adaptive coder closes it (−0.6 %) but is 2× slower per byte; per-block choices by size, runs or
+  estimated entropy were measured on the dumped blocks and none pays: its gain is spread evenly
+  (1.5–2 % on every kind of block). LZP from 48 instead of 32 gives +0.16 % but slows `-m2` at T4
+  by 3–5 %, so `ex2t` keeps 32.
+- *Text-group memory at T4* (`ex4t` +20 % comp / +27 % dec, `2t` +15 % comp on `txtonly`, and
+  with them `-m4` T4 +2 %): bwt's jobs hold more than GRZip's — the LZP output beside the input
+  slice and 4 bytes per byte for the suffix array, about 6 bytes per byte of the piece at the
+  same time. The time is 7–10 % better there. Capping the queue
+  growth at `m1` (it does not extend its queue) took `-m4` T4 from 205 to 195 MB; giving the
+  memory back further means fewer blocks in flight, which costs the time again.
+- *`-m2`/`-m3` T1 memory on `small` (+0.7 % / +2.4 %)*: the binary group (identical code) sets the
+  peak; bwt's text pass alone uses 10–25 % less than GRZip's (`2t` T1: 25 vs 28 MB); the 1–3 MB
+  difference in the whole process was not tracked further.
+  `-m4` T1 rows: no bwt block at all (identical archives), so the ±1 % there is run-to-run noise.
+- *`txtonly` `2t` T1 time* (1.50 vs 1.46 s, within run-to-run spread: alternating runs gave
+  1.44–1.51 vs 1.40–1.50) and `-m2` small T4 (1.00 vs 0.99; 6 alternating runs: 0.97–1.08
+  vs 1.02–1.16).
+- *Peak memory with two solid blocks at T4 is bimodal* in both (old `-m4` small: 157 MB at 6.3 s
+  or 190 MB at 5.3 s depending on which block finishes first and lets `4x4` grow into its threads);
+  new is always in the faster mode (5.2 s, 192–196 MB).
 
 ## Verified platforms (0.0.2)
 
