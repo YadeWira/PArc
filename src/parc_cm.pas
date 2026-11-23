@@ -67,6 +67,7 @@ type
     FStarted, FEnd: Boolean;
     FErr: TObject;
     procedure Start;
+    procedure CheckErr;
   public
     destructor Destroy; override;
     function Read(Buf: PByte; Count: SizeInt): SizeInt; override;
@@ -99,7 +100,9 @@ procedure pcm_enc_end(mem: Pointer); cdecl; external name 'pcm_enc_end';
 function pcm_dec_block(mem: Pointer; dst: PByte): LongInt; cdecl; external name 'pcm_dec_block';
 
 const
-  CM_PROBE = 1 shl 20;      // inputs up to this size get tables sized to them
+  CM_SMALL = 1 shl 20;      // inputs up to this size get tables sized to them
+  CM_PROBE = 16 shl 20;     // inputs up to this size: the header carries the size and the
+                            // decoder decodes the whole stream at once, then frees the model
 
 function ParseCmLevel(const Parts: TStringArray): Integer;
 var
@@ -126,7 +129,7 @@ var
   b: LongWord;
 begin
   pcm_level_sizes(Level, htb, wb, mtb);
-  if (Total >= 0) and (Total <= CM_PROBE) then
+  if (Total >= 0) and (Total <= CM_SMALL) then
   begin
     // 4 buckets (16 nibble slots) per input byte at most; the history and the match table
     // need not be larger than the input
@@ -148,7 +151,9 @@ var
 begin
   if DataSize > 0 then CmSizes(Level, DataSize, htb, wb, mtb)
   else CmSizes(Level, -1, htb, wb, mtb);
-  Result := Int64(pcm_memsize(htb, wb, mtb)) + CM_PROBE + 2 * CM_BLOCK + (1 shl 20);
+  Result := Int64(pcm_memsize(htb, wb, mtb)) + 2 * CM_BLOCK + (1 shl 20);
+  if (DataSize <= 0) or (DataSize > CM_PROBE) then Inc(Result, CM_PROBE)
+  else Inc(Result, DataSize);
 end;
 
 function AllocModel(htb, wb, mtb: LongWord; out Raw: Pointer): Pointer;
@@ -206,11 +211,20 @@ end;
 procedure TCmEncStage.Start(Total: SizeInt);
 var
   htb, wb, mtb: LongWord;
-  h: array[0..3] of Byte;
+  h: array[0..8] of Byte;
+  hl: Integer;
 begin
   CmSizes(FLevel, Total, htb, wb, mtb);
   h[0] := CM_STREAM_VERSION; h[1] := htb; h[2] := wb; h[3] := mtb;
-  Emit(@h[0], 4);
+  hl := 5;
+  if Total >= 0 then
+  begin
+    h[4] := 1;
+    h[5] := Byte(Total); h[6] := Byte(Total shr 8); h[7] := Byte(Total shr 16); h[8] := Byte(Total shr 24);
+    hl := 9;
+  end
+  else h[4] := 0;
+  Emit(@h[0], hl);
   FModel := AllocModel(htb, wb, mtb, FRaw);
   if pcm_open(FModel, htb, wb, mtb, @EncIo, Self, 0) <> 0 then
     raise Exception.Create('cm: bad table sizes');
@@ -246,15 +260,24 @@ begin
   begin
     if not FStarted then
     begin
-      if Length(FBuf) = 0 then SetLength(FBuf, CM_PROBE + 1);
       n := CM_PROBE + 1 - FLen;
       if n > Count then n := Count;
+      if FLen + n > Length(FBuf) then
+      begin
+        if 2 * Length(FBuf) > FLen + n then SetLength(FBuf, 2 * Length(FBuf))
+        else SetLength(FBuf, FLen + n);
+      end;
       Move(Buf^, FBuf[FLen], n);
       Inc(FLen, n); Inc(Buf, n); Dec(Count, n);
       if FLen > CM_PROBE then
       begin
         Start(-1);     // large input: the level's sizes
         Flush(False);
+        if Length(FBuf) > 2 * CM_BLOCK then
+        begin
+          // keep only a block's worth of buffer from now on
+          SetLength(FBuf, 2 * CM_BLOCK);
+        end;
       end;
     end
     else
@@ -305,34 +328,72 @@ end;
 
 procedure TCmDecStage.Start;
 var
-  h: array[0..3] of Byte;
+  h: array[0..8] of Byte;
+  total, got: SizeInt;
+  r: LongInt;
 begin
   FStarted := True;
-  if not Source.ReadExactOrEof(@h[0], 4) then Corrupt('cm: empty stream');
+  if not Source.ReadExactOrEof(@h[0], 5) then Corrupt('cm: empty stream');
   if h[0] <> CM_STREAM_VERSION then Corrupt('cm: unknown stream version');
-  if (h[1] < 10) or (h[1] > 24) or (h[2] < 16) or (h[2] > 27) or (h[3] < 12) or (h[3] > 25) then
-    Corrupt('cm: bad table sizes');
+  if (h[1] < 10) or (h[1] > 24) or (h[2] < 16) or (h[2] > 27) or (h[3] < 12) or (h[3] > 25) or
+     (h[4] > 1) then
+    Corrupt('cm: bad header');
+  total := -1;
+  if h[4] = 1 then
+  begin
+    Source.ReadExact(@h[5], 4);
+    total := SizeInt(LongWord(h[5]) or (LongWord(h[6]) shl 8) or (LongWord(h[7]) shl 16) or
+      (LongWord(h[8]) shl 24));
+    if total > CM_PROBE then Corrupt('cm: bad header');
+  end;
   FModel := AllocModel(h[1], h[2], h[3], FRaw);
-  SetLength(FOut, CM_BLOCK);
   pcm_open(FModel, h[1], h[2], h[3], @DecIo, Self, 1);
+  if total < 0 then
+  begin
+    SetLength(FOut, CM_BLOCK);
+    Exit;
+  end;
+  // known (small) size: decode it all now and free the model before the stages above
+  // allocate theirs
+  SetLength(FOut, total + CM_BLOCK);
+  got := 0;
+  repeat
+    r := pcm_dec_block(FModel, @FOut[got]);
+    CheckErr;
+    if r < 0 then Corrupt('cm: damaged stream');
+    Inc(got, r);
+    if got > total then Corrupt('cm: damaged stream');
+  until r = 0;
+  if got <> total then Corrupt('cm: damaged stream');
+  FreeMem(FRaw);
+  FRaw := nil; FModel := nil;
+  FEnd := True;
+  FPos := 0;
+  FLen := total;
+end;
+
+procedure TCmDecStage.CheckErr;
+var
+  e: TObject;
+begin
+  if FErr <> nil then
+  begin
+    e := FErr;
+    FErr := nil;
+    raise e;
+  end;
 end;
 
 function TCmDecStage.Read(Buf: PByte; Count: SizeInt): SizeInt;
 var
   r: LongInt;
-  e: TObject;
 begin
   Result := 0;
   if not FStarted then Start;
   while (FPos >= FLen) and not FEnd do
   begin
     r := pcm_dec_block(FModel, @FOut[0]);
-    if FErr <> nil then
-    begin
-      e := FErr;
-      FErr := nil;
-      raise e;
-    end;
+    CheckErr;
     if r < 0 then Corrupt('cm: damaged stream');
     if r = 0 then
     begin

@@ -42,13 +42,14 @@ typedef U32 (*pcm_io_fn)(void *ctx, U8 *buf, U32 n);
 #define IOBUF 65536u
 
 /* tuning parameters (constants in the product build) */
-#define PCM_TDEF {8, 2, 1023, 5, 2, 1, 1024, 6, 0, 2, 0, 0, 0, 0, 0, 3, 0, 0, 3, 0, 2, 6}
+#define PCM_TDEF {8, 2, 1023, 5, 2, 1, 1024, 6, 0, 2, 0, 0, 1, 0, 0, 3, 0, 0, 3, 0, 2, 6}
 #ifdef PCM_TUNE
 int pcm_T[24] = PCM_TDEF;
 #else
 static const int pcm_T[24] = PCM_TDEF;
 #endif
 #define P(i) pcm_T[i]
+#define SMR (P(22) ? 8 : 1)
 
 /* ------------------------------------------------------------------------ */
 
@@ -206,7 +207,7 @@ static void layout(U32 htbits, U32 wbits, U32 mtbits, layout_t *L) {
   L->o1 = o;  o += 65536;
   L->o2s = o;  o += 65536;
   L->mt = o;  o += (size_t)4 << mtbits;
-  L->sm = o;  o += 4 * (NC * 256 + 64);
+  L->sm = o;  o += 4 * (NC * 2048 + 64);
   L->w1 = o;  o += 2 * NSETS * NI;
   L->w2 = o;  o += 2 * 256 * 8;
   L->a1 = o;  o += 2 * 256 * 33;
@@ -408,8 +409,8 @@ static inline void sm_update(pcm_t *m, U32 *t, int y, int limit) {
 static void model_init(pcm_t *m) {
   int i, j;
   init_tables(m);
-  for (i = 0; i < NC * 256 + 64; i++) m->sm[i] = m->smi0[i & 255];
-  for (i = NC * 256; i < NC * 256 + 64; i++) m->sm[i] = (1u << 31);
+  for (i = 0; i < NC * 2048 + 64; i++) m->sm[i] = m->smi0[i & 255];
+  for (i = NC * 2048; i < NC * 2048 + 64; i++) m->sm[i] = (1u << 31);
   for (i = 0; i < NSETS; i++)
     for (j = 0; j < NI; j++) m->w1[i * NI + j] = (I16)(j < 2 * NC + 2 && (j & 1) == 0 ? P(6) : 0);
   for (i = 0; i < 256; i++)
@@ -430,22 +431,23 @@ static inline int predict(pcm_t *m) {
   U32 c0 = m->c0, nib = m->nib;
   int i, ord = 0;
   U32 pat = 0;
+  U32 bsm = P(22) ? m->bpos * 256 : 0;
   I32 pm, p;
   /* direct contexts */
   {
     U8 *sp = P(16) ? m->o2s + (((m->c4 >> 8) & 255) << 8) + c0 : m->o0 + c0;
-    U32 s = *sp, k = s;
+    U32 s = *sp, k = s + bsm;
     U32 v = m->sm[k] >> 20;
     m->sp[0] = sp; m->smx[0] = k;
     x[0] = m->st[v]; x[1] = (I16)(P(4) ? ((I32)v - 2048) >> P(4) : 0);
     sp = m->o1 + ((m->c4 & 255) << 8) + c0;
-    s = *sp; k = 256 + s; v = m->sm[k] >> 20;
+    s = *sp; k = 256 * SMR + s + bsm; v = m->sm[k] >> 20;
     m->sp[1] = sp; m->smx[1] = k;
     x[2] = m->st[v]; x[3] = (I16)(P(4) ? ((I32)v - 2048) >> P(4) : 0);
   }
   for (i = 0; i < NCH; i++) {
     U8 *sp = m->slot[i] + nib;
-    U32 s = *sp, k = (U32)(i + NCD) * 256 + s;
+    U32 s = *sp, k = (U32)(i + NCD) * 256 * SMR + s + bsm;
     U32 v = m->sm[k] >> 20;
     m->sp[i + NCD] = sp; m->smx[i + NCD] = k;
     if (P(8) && s == 0) { x[2 * (i + NCD)] = 0; x[2 * (i + NCD) + 1] = 0; }
@@ -464,7 +466,7 @@ static inline int predict(pcm_t *m) {
       U32 v;
       lb = l < 16 ? l : (l < 32 ? 16 : (l < 64 ? 17 : (l < 128 ? 18 : (l < 256 ? 19 : 20))));
       m->mctx = lb * 2 + bit;
-      m->msmx = NC * 256 + m->mctx;
+      m->msmx = NC * 2048 + m->mctx;
       v = m->sm[m->msmx] >> 20;
       x[2 * NC] = m->st[v];
       x[2 * NC + 1] = (I16)(bit ? (lb << 6) : -(I32)(lb << 6));
