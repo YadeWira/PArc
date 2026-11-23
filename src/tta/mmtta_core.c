@@ -814,6 +814,127 @@ ALWAYS void mm2_dec(mm_t *m, u8 *buf, const u8 *prev, usize nrows, const i32 nch
   }
 }
 
+
+/* ---------------------------------------------------------------- 8-bit images, fast paths */
+
+ALWAYS u8 mm_p8(const i32 kind, u32 a, u32 b, u32 c)
+{
+  u32 mx, mn;
+  switch (kind) {
+  case 2: return (u8)b;
+  case 3: return (u8)(a + b - c);
+  case 4:
+    mx = a > b ? a : b;
+    mn = a < b ? a : b;
+    return (u8)(c >= mx ? mn : c <= mn ? mx : a + b - c);
+  case 5: return (u8)((a + b) >> 1);
+  default: return (u8)a;
+  }
+}
+
+#if defined(__SSE2__) && !defined(TTAC_NO_SIMD)
+/* predictions of 16 bytes at once (unsigned bytes; the same values as mm_p8) */
+ALWAYS __m128i mm_p8v(const i32 kind, __m128i a, __m128i b, __m128i c)
+{
+  __m128i mx, mn, g, m1, m2, one;
+  switch (kind) {
+  case 2: return b;
+  case 3: return _mm_sub_epi8(_mm_add_epi8(a, b), c);
+  case 4:
+    mx = _mm_max_epu8(a, b);
+    mn = _mm_min_epu8(a, b);
+    g = _mm_sub_epi8(_mm_add_epi8(a, b), c);
+    m1 = _mm_cmpeq_epi8(_mm_max_epu8(c, mx), c);          /* c >= mx */
+    m2 = _mm_cmpeq_epi8(_mm_min_epu8(c, mn), c);          /* c <= mn */
+    g = _mm_or_si128(_mm_and_si128(m2, mx), _mm_andnot_si128(m2, g));
+    return _mm_or_si128(_mm_and_si128(m1, mn), _mm_andnot_si128(m1, g));
+  case 5:
+    one = _mm_set1_epi8(1);
+    return _mm_sub_epi8(_mm_avg_epu8(a, b), _mm_and_si128(_mm_xor_si128(a, b), one));
+  default: return a;
+  }
+}
+#endif
+
+/* encoder, unsigned bytes, rows: residuals in place of the samples, then the cross pass */
+ALWAYS void mm2_enc8(mm_t *m, const u8 *src, const u8 *prev, u8 *dst, usize nrows,
+                     const i32 nch, const i32 kind, const i32 cross)
+{
+  usize y;
+  i32 i, x;
+  const i32 N = nch, w = m->width, rb = m->rowbytes, n = w * nch;
+  for (y = 0; y < nrows; y++) {
+    const u8 *cur = src + y * rb, *up = y ? cur - rb : prev;
+    u8 *out = dst + y * rb;
+    if (!up) {
+      for (i = 0; i < N && i < n; i++) out[i] = cur[i];
+      for (; i < n; i++) out[i] = (u8)(cur[i] - cur[i - N]);
+    } else {
+      for (i = 0; i < N && i < n; i++) out[i] = (u8)(cur[i] - up[i]);
+      i = N;
+#if defined(__SSE2__) && !defined(TTAC_NO_SIMD)
+      for (; i + 16 <= n; i += 16) {
+        __m128i a = _mm_loadu_si128((const __m128i *)(cur + i - N));
+        __m128i b = _mm_loadu_si128((const __m128i *)(up + i));
+        __m128i c = _mm_loadu_si128((const __m128i *)(up + i - N));
+        __m128i v = _mm_loadu_si128((const __m128i *)(cur + i));
+        _mm_storeu_si128((__m128i *)(out + i), _mm_sub_epi8(v, mm_p8v(kind, a, b, c)));
+      }
+#endif
+      for (; i < n; i++) out[i] = (u8)(cur[i] - mm_p8(kind, cur[i - N], up[i], up[i - N]));
+    }
+    if (cross && nch >= 2) {
+      if (nch == 2)
+        for (x = 0; x < w; x++) out[2 * x + 1] = (u8)(out[2 * x + 1] - out[2 * x]);
+      else
+        for (x = 0; x < w; x++) {
+          u8 g = out[x * N + 1];
+          out[x * N] = (u8)(out[x * N] - g);
+          out[x * N + 2] = (u8)(out[x * N + 2] - g);
+        }
+    }
+    for (i = n; i < rb; i++) out[i] = cur[i];
+  }
+}
+
+/* decoder, unsigned bytes, rows, in place */
+ALWAYS void mm2_dec8(mm_t *m, u8 *buf, const u8 *prev, usize nrows,
+                     const i32 nch, const i32 kind, const i32 cross)
+{
+  usize y;
+  i32 i, x;
+  const i32 N = nch, w = m->width, rb = m->rowbytes, n = w * nch;
+  for (y = 0; y < nrows; y++) {
+    u8 *cur = buf + y * rb;
+    const u8 *up = y ? cur - rb : prev;
+    if (cross && nch >= 2) {
+      if (nch == 2)
+        for (x = 0; x < w; x++) cur[2 * x + 1] = (u8)(cur[2 * x + 1] + cur[2 * x]);
+      else
+        for (x = 0; x < w; x++) {
+          u8 g = cur[x * N + 1];
+          cur[x * N] = (u8)(cur[x * N] + g);
+          cur[x * N + 2] = (u8)(cur[x * N + 2] + g);
+        }
+    }
+    if (!up) {
+      for (i = N; i < n; i++) cur[i] = (u8)(cur[i] + cur[i - N]);
+    } else if (kind == 2) {
+      for (i = 0; i < n; i++) cur[i] = (u8)(cur[i] + up[i]);
+    } else {
+      for (i = 0; i < N && i < n; i++) cur[i] = (u8)(cur[i] + up[i]);
+      for (; i < n; i++) cur[i] = (u8)(cur[i] + mm_p8(kind, cur[i - N], up[i], up[i - N]));
+    }
+  }
+}
+
+#define K8E(NCH, K) if (m->pred == K) { if (m->cross) mm2_enc8(m, src, prev, dst, nrows, NCH, K, 1); \
+  else mm2_enc8(m, src, prev, dst, nrows, NCH, K, 0); return; }
+#define N8E(NCH) if (m->nch == NCH) { K8E(NCH, 0) K8E(NCH, 2) K8E(NCH, 3) K8E(NCH, 4) K8E(NCH, 5) }
+#define K8D(NCH, K) if (m->pred == K) { if (m->cross) mm2_dec8(m, buf, prev, nrows, NCH, K, 1); \
+  else mm2_dec8(m, buf, prev, nrows, NCH, K, 0); return; }
+#define N8D(NCH) if (m->nch == NCH) { K8D(NCH, 0) K8D(NCH, 2) K8D(NCH, 3) K8D(NCH, 4) K8D(NCH, 5) }
+
 /* the common layouts get their own loops, the rest the generic one */
 #define MM_SPECS2(X) X(1, 1, 0, 1) X(3, 1, 0, 1) X(4, 1, 0, 1)
 #define MM_SPECS1(X) X(1, 1, 0, 1) X(2, 2, 0, 0) X(1, 2, 0, 0) X(2, 1, 0, 1)
@@ -850,6 +971,7 @@ ALWAYS void mm2_dec(mm_t *m, u8 *buf, const u8 *prev, usize nrows, const i32 nch
    cost != 0: nothing is written, m->cost grows by the residuals' cost. */
 void mm_enc_rows(mm_t *m, const u8 *src, const u8 *prev, u8 *dst, usize nrows, i32 cost)
 {
+  if (!cost && m->bytes == 1 && m->uns && !m->be) { N8E(1) N8E(2) N8E(3) N8E(4) }
   if (cost) {
     const i32 cost = 1;
     MM_SPECS2(E2)
@@ -863,6 +985,7 @@ void mm_enc_rows(mm_t *m, const u8 *src, const u8 *prev, u8 *dst, usize nrows, i
 
 void mm_dec_rows(mm_t *m, u8 *buf, const u8 *prev, usize nrows)
 {
+  if (m->bytes == 1 && m->uns && !m->be) { N8D(1) N8D(2) N8D(3) N8D(4) }
   MM_SPECS2(D2)
   mm2_dec(m, buf, prev, nrows, m->nch, m->bytes, m->be, m->uns, m->pred, m->cross);
 }
@@ -974,4 +1097,32 @@ u32 mm_find_stride(const u8 *p, usize len, u32 n, u32 smin, u32 smax, u32 k1, u3
   ref = mm_dist_cost(p, len, n, smax, k2);
   if (!m || c * 100 > ref * 85) return 0;
   return m;
+}
+
+/* ================================================================ LZ cost estimate
+
+   Whether mm pays is decided by how a fast LZ sees a sample, raw and filtered: greedy matches
+   of at least 4 bytes through a hash of the next 4 bytes (tab: 2^14 positions given by the
+   caller), a literal costing 9 bits and a match 24.  Returns the cost in bits. */
+u64 mm_lz_cost(const u8 *p, usize n, u32 *tab)
+{
+  usize i = 0, j;
+  u64 c = 0;
+  for (j = 0; j < (1u << 14); j++) tab[j] = 0xFFFFFFFFu;
+  while (i + 4 <= n) {
+    u32 v = p[i] | ((u32)p[i + 1] << 8) | ((u32)p[i + 2] << 16) | ((u32)p[i + 3] << 24);
+    u32 h = (v * 2654435761u) >> 18, cand = tab[h];
+    tab[h] = (u32)i;
+    if (cand != 0xFFFFFFFFu && p[cand] == p[i] && p[cand + 1] == p[i + 1] && p[cand + 2] == p[i + 2] &&
+        p[cand + 3] == p[i + 3]) {
+      usize l = 4;
+      while (i + l < n && p[cand + l] == p[i + l]) l++;
+      c += 24;
+      i += l;
+    } else {
+      c += 9;
+      i++;
+    }
+  }
+  return c + 9 * (n - i);
 }

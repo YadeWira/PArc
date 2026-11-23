@@ -112,7 +112,7 @@ function ParseMmEncParams(const Params: TStringArray): TMmEncParams;
 implementation
 
 uses
-  parc_bytes, parc_plzenc,
+  parc_bytes,
   parc_tta;   // parc_tta links mmtta_core.o (once)
 
 procedure mm_enc_rows(m: PMmCore; src, prev, dst: PByte; nrows: SizeUInt; cost: LongInt); cdecl; external name 'mm_enc_rows';
@@ -121,6 +121,7 @@ procedure mm_enc_1d(m: PMmCore; src, dst: PByte; frames: SizeUInt; cost: LongInt
 procedure mm_dec_1d(m: PMmCore; buf: PByte; frames: SizeUInt); cdecl; external name 'mm_dec_1d';
 function mm_state_size: SizeUInt; cdecl; external name 'mm_state_size';
 procedure mm_costs_2d(m: PMmCore; src: PByte; nrows: SizeUInt; cost: PQWord); cdecl; external name 'mm_costs_2d';
+function mm_lz_cost(p: PByte; n: SizeUInt; tab: PLongWord): QWord; cdecl; external name 'mm_lz_cost';
 function mm_find_stride(p: PByte; len: SizeUInt; n, smin, smax, k1, k2: LongWord): LongWord; cdecl; external name 'mm_find_stride';
 
 { ---------------------------------------------------------------------------------------- }
@@ -533,14 +534,14 @@ end;
 
 { Does the filter pay?  The residuals of smooth data compress much better, but synthetic and
   palette images (flat areas, repeated patterns) often compress better as they are.  A fast LZ
-  (plz:1) on the same sample, raw and filtered, decides. }
-function LzSize(P: PByte; N: SizeInt): SizeInt;
+  estimate on the same sample, raw and filtered, decides. }
+function LzSize(P: PByte; N: SizeInt): QWord;
 var
-  D: TBytes;
+  Tab: array of LongWord;
 begin
-  if PlzEncodeMem(['plz', '1'], P, N, D) then Result := Length(D) else Result := N;
+  SetLength(Tab, 1 shl 14);
+  Result := mm_lz_cost(P, N, @Tab[0]);
 end;
-
 function TMmEncStage.Pays(Data: PByte; Len: SizeInt): Boolean;
 var
   Lim, Units: SizeInt;
