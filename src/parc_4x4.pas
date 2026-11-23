@@ -112,7 +112,7 @@ const
   REPEAT_SHARE = 0.04;          // repeated share of a noise run from which it is packed
   NOISE_EST_RANDOM = 0.96;      // the same in a block that is near-random as a whole
   NOISE_MINE0_RANDOM = 0.98;    // and the order-0 entropy from which its cells are tried
-  NOISE_EST = 0.9995;            // LZ estimate (over the cell's size) from which a cell is noise
+  NOISE_EST = 0.998;             // LZ estimate (over the cell's size) from which a cell is noise
   EST_WINDOW = 1 shl 20;        // match distance of the estimate
   GEAR_SHIFT = 55;              // anchors: about one every 2^(64-GEAR_SHIFT) bytes
   MB = 1 shl 20;
