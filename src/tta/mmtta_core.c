@@ -6,7 +6,7 @@
    explicit (unsigned casts), signed right shifts are arithmetic (gcc, clang),
    so the output is the same with every compiler and target.  The per-sample
    pipeline, the residual coder and the stream are described in
-   src/parc_tta.pas and docs/formato/FORMATO-PARC.md (6.6). */
+   src/parc_tta.pas and docs/formato/FORMATO-PARC.md (6.8). */
 
 typedef short i16;
 typedef int i32;
