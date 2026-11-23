@@ -20,12 +20,14 @@
   output does not depend on the platform or the thread count.
 
   The encoder cuts the input where its statistics change (see "adaptive blocks" below; GRZip
-  did it only with `a`, which is accepted): the stream is the same, just with shorter blocks. Blocks are compressed and
+  did it only with `a`): the stream is the same, just with shorter blocks. With `a` the levels
+  m2..m4 also cut at half the block size (less memory and faster sorting; GRZip's adaptive
+  blocks were small too). Blocks are compressed and
   decompressed in parallel (a pool of jobs, written and delivered in order) within the
   PARC_THREADS budget (parc_parallel).
 
-  Method string: bwt[:<block>][:m1..m4][:l|:l<N>|:<N>][:h<N>][:e0|:e1|:e2], also b<block>;
-  GRZip's other switches (a, s, d, p, t<N>, i<N>) are accepted and ignored. Defaults: 8 MB, m1,
+  Method string: bwt[:<block>][:m1..m4][:l|:l<N>|:<N>][:h<N>][:e0|:e1|:e2][:a], also b<block>;
+  GRZip's other switches (s, d, p, t<N>, i<N>) are accepted and ignored. Defaults: 8 MB, m1,
   LZP with minimum match 32 and 18 hash bits. m1 = adaptive coder, m2 and m3 = static, m4 =
   fast; e0/e1/e2 choose fast/static/adaptive explicitly. A bare integer is the LZP minimum; a
   bare memory size the block (as with GRZip). `grzip:...` strings are written as `bwt:...` by
@@ -75,8 +77,8 @@ type
     Coder: Integer;          // BWT_CODER_*
     LzpMin: Integer;         // 0 = no LZP
     LzpHash: Integer;
-    Adaptive: Boolean;       // a (GRZip's adaptive block): accepted; the blocks are always cut
-                             // where the statistics change
+    Adaptive: Boolean;       // a (GRZip's adaptive block): at m2..m4 blocks of at most half
+                             // the block size (they are always cut where the data change)
   end;
 
   { Encoder: blocks of BlockSize bytes compressed in parallel and written in order. }
@@ -89,7 +91,8 @@ type
     FQueue: TJobArray;
     FHead, FCount: Integer;
     FHeaderDone: Boolean;
-    FSeg: TObject;               // segmentation model (a), created on first use
+    FSeg: TObject;               // segmentation model, created on first use
+    FBufSize: SizeInt;           // input gathered before cutting it into blocks
     procedure SubmitJob(var Data: TBytes; Len: SizeInt);
     procedure FlushBlock(Final: Boolean);
     procedure WriteOldest;
@@ -124,8 +127,8 @@ function BwtMethodString(const P: TBwtParams; BlockSize: SizeInt): string;
 function BwtEncodeBlockMemory(const P: TBwtParams): Int64;
 function BwtDecodeBlockMemory(const P: TBwtParams): Int64;
 
-{ One block record (VInt Len onwards), for tests. }
-function BwtEncodeBlock(Inp: PByte; Len: SizeInt; const P: TBwtParams): TBytes;
+{ One block record (VInt Len onwards) for Buf[0..Len); Buf is used as work space and freed. }
+function BwtEncodeBlock(var Buf: TBytes; Len: SizeInt; const P: TBwtParams): TBytes;
 
 { For tests: True if the C core's LZP gives the bytes of parc_lzp.LzpEncodeBlock on Inp[0..Len). }
 function BwtLzpSameAsPascal(Inp: PByte; Len: SizeInt; MinLen, HashBits: Integer): Boolean;
@@ -149,6 +152,7 @@ procedure parc_bwt_set_alloc(a: TBwtAllocFn; f: TBwtFreeFn); cdecl; external nam
 function parc_bwt_forward(T, U: PByte; A: PLongInt; n: LongInt): LongInt; cdecl; external name 'parc_bwt_forward';
 function parc_bwt_inverse(T, U: PByte; A: PLongInt; n, primary: LongInt): LongInt; cdecl; external name 'parc_bwt_inverse';
 function parc_qlfc_model_size(coder: LongInt): LongInt; cdecl; external name 'parc_qlfc_model_size';
+function parc_repeat_share(input: PByte; len: LongInt; tab: PLongWord): LongInt; cdecl; external name 'parc_repeat_share';
 function parc_lzp_encode(input: PByte; len, minLen, hb: LongInt; hash: PLongWord; output, lens: PByte; lensCap: LongInt;
   out nMain, nLens: LongInt; out esc: Byte): LongInt; cdecl; external name 'parc_lzp_encode';
 function parc_qlfc_encode(input, output, buffer: PByte; n, outputSize, coder: LongInt; model: Pointer): LongInt; cdecl;
@@ -284,6 +288,7 @@ begin
   if P.LzpMin > 0 then Result := Result + ':l' + IntToStr(P.LzpMin) + ':h' + IntToStr(P.LzpHash)
   else Result := Result + ':l';
   if P.CoderSet >= 0 then Result := Result + ':e' + IntToStr(P.CoderSet);
+  if P.Adaptive then Result := Result + ':a';
 end;
 
 function LzpParamsOf(const P: TBwtParams; BlockSize: SizeInt; MinLen: Integer): TLzpParams;
@@ -339,8 +344,8 @@ end;
 
 function BwtEncodeBlockMemory(const P: TBwtParams): Int64;
 begin
-  // input + BWT buffer + suffix array (4 bytes per byte) + model; the LZP table only before
-  // the sort
+  // the block being filled + LZP output (or the input) + suffix array (4 bytes per byte) +
+  // model; the LZP table and the input only before the sort
   Result := 6 * Int64(P.BlockSize) + 2 shl 20;
 end;
 
@@ -367,22 +372,51 @@ end;
 
 { ---------------- one block ---------------- }
 
-function BwtEncodeBlock(Inp: PByte; Len: SizeInt; const P: TBwtParams): TBytes;
+const
+  { A block whose BWT output has fewer runs than 1/FEW_RUNS of its bytes is coded with the
+    adaptive coder at every level }
+  FEW_RUNS = 8;
+  { LZP only when at least this share (per mille) of the block looks like long repeats }
+  LZP_MIN_SHARE = 70;
+
+function RepeatShare(P: PByte; n: SizeInt): Integer;
 var
-  H: TBytes;
+  Tab: PLongWord;
+begin
+  Tab := GetMem(65536 * SizeOf(LongWord));
+  try
+    Result := parc_repeat_share(P, n, Tab);
+  finally
+    FreeMem(Tab);
+  end;
+end;
+
+function CountRuns(T: PByte; n: SizeInt): SizeInt;
+var
+  i: SizeInt;
+begin
+  Result := 1;
+  for i := 1 to n - 1 do
+    if T[i] <> T[i - 1] then Inc(Result);
+end;
+
+function BwtEncodeBlock(var Buf: TBytes; Len: SizeInt; const P: TBwtParams): TBytes;
+var
+  H, Main, Orig: TBytes;
   n, NMain, NLens, M, OutCap, C, Need: SizeInt;
   Lp: TLzpParams;
   Hash: array of LongWord;
-  Main: TBytes;
   Lens: PByte;
   Esc, Flags: Byte;
-  UseLzp: Boolean;
+  UseLzp, Ok: Boolean;
   MinLen: Integer;
   A: PLongInt;
   Model, OutP, Scratch, Extra: Pointer;
   Primary: LongInt;
+  T: PByte;
+  Coder: Integer;
 
-  procedure Stored;
+  procedure Stored(X: PByte);
   begin
     n := 0;
     SetLength(H, 16);
@@ -391,58 +425,67 @@ var
     Inc(n);
     SetLength(Result, n + Len);
     Move(H[0], Result[0], n);
-    if Len > 0 then Move(Inp^, Result[n], Len);
+    if Len > 0 then Move(X^, Result[n], Len);
   end;
 
 begin
   Result := nil;
   if Len < BWT_MIN_CODED then
   begin
-    Stored;
+    Stored(@Buf[0]);
     Exit;
   end;
+  if Length(Buf) < Len + IN_SLACK then SetLength(Buf, Len + IN_SLACK);
   UseLzp := False;
   NMain := 0; NLens := 0; Esc := 0;
-  SetLength(Main, Len + IN_SLACK);
   MinLen := P.LzpMin;
+  // the LZP costs about as much as the sort of a few MB: on data with few long repeats (one
+  // language's prose, most binaries) it gains nothing and is skipped
+  if (MinLen > 0) and (RepeatShare(@Buf[0], Len) < LZP_MIN_SHARE) then MinLen := 0;
   if MinLen > 0 then
   begin
+    SetLength(Main, Len + IN_SLACK);
     Lp := LzpParamsOf(P, Len, MinLen);
     SetLength(Hash, SizeInt(2) shl LzpBlockHashBits(Len, Lp.HashSizeLog));
     Lens := GetMem(Len);
-    UseLzp := LzpEncode(Inp, Len, Lp, Hash, Main, Lens, NMain, NLens, Esc);
-    // When the LZP takes away more than LZP_REDO_PCT % of the block with the method's minimum,
-    // the data are made of short repeats that the BWT codes better itself (tables, markup,
-    // databases): the block is filtered again with 4 times the minimum (adaptive coder only: the
-    // second pass costs time that the fast levels do not have)
-    if UseLzp and (P.Coder = BWT_CODER_ADAPTIVE) and ((Len - NMain) * 100 > Len * LZP_REDO_PCT) and
-       (4 * MinLen <= LZP_MAX_MIN) then
-    begin
-      MinLen := 4 * MinLen;
-      Lp := LzpParamsOf(P, Len, MinLen);
-      UseLzp := LzpEncode(Inp, Len, Lp, Hash, Main, Lens, NMain, NLens, Esc);
+    try
+      UseLzp := LzpEncode(@Buf[0], Len, Lp, Hash, Main, Lens, NMain, NLens, Esc);
+      // When the LZP takes away more than LZP_REDO_PCT % of the block with the method's
+      // minimum, the data are made of short repeats that the BWT codes better itself (tables,
+      // markup, databases): the block is filtered again with 4 times the minimum (adaptive
+      // coder only: the second pass costs time that the fast levels do not have)
+      if UseLzp and (P.Coder = BWT_CODER_ADAPTIVE) and ((Len - NMain) * 100 > Len * LZP_REDO_PCT) and
+         (4 * MinLen <= LZP_MAX_MIN) then
+      begin
+        MinLen := 4 * MinLen;
+        Lp := LzpParamsOf(P, Len, MinLen);
+        UseLzp := LzpEncode(@Buf[0], Len, Lp, Hash, Main, Lens, NMain, NLens, Esc);
+      end;
+      if UseLzp and (NLens > 0) then Move(Lens^, Main[NMain], NLens);
+    finally
+      FreeMem(Lens);
     end;
-    if UseLzp and (NLens > 0) then Move(Lens^, Main[NMain], NLens);
     Hash := nil;
-    FreeMem(Lens);
-    Lens := nil;
   end;
-  if UseLzp then M := NMain + NLens
+  // the sort works in place: on the LZP output (the input is no longer needed: if the block
+  // does not compress it is rebuilt), or on the input itself (restored by the inverse BWT)
+  if UseLzp then
+  begin
+    M := NMain + NLens;
+    Buf := nil;
+    T := @Main[0];
+  end
   else
   begin
     M := Len;
-    Move(Inp^, Main[0], Len);
+    Main := nil;
+    T := @Buf[0];
   end;
-  if M < 1 then
-  begin
-    Stored;
-    Exit;
-  end;
-  A := GetMem(SizeInt(M) * SizeOf(LongInt));
+  A := GetMem((SizeInt(M) + 1) * SizeOf(LongInt));
   Model := nil;
   Extra := nil;
   try
-    Primary := parc_bwt_forward(@Main[0], @Main[0], A, M);
+    Primary := parc_bwt_forward(T, T, A, M);
     if Primary < 1 then raise EOutOfMemory.Create('bwt: suffix sorting failed');
     // the coder's output and scratch inside the suffix array when they fit
     OutCap := M;
@@ -458,19 +501,23 @@ begin
       OutP := Extra;
       Scratch := PByte(Extra) + M + OUT_SLACK;
     end;
-    Model := GetMem(parc_qlfc_model_size(P.Coder));
-    C := parc_qlfc_encode(@Main[0], OutP, Scratch, M, OutCap, P.Coder, Model);
+    // The coders spend their time per run of the BWT output: when the runs are few (very
+    // redundant data) the adaptive coder costs little more than the others and is much better
+    // there (the fixed weights of the static and fast coders adapt badly to long runs)
+    Coder := P.Coder;
+    if (Coder <> BWT_CODER_ADAPTIVE) and (P.CoderSet < 0) and (CountRuns(T, M) * FEW_RUNS < M) then
+      Coder := BWT_CODER_ADAPTIVE;
+    Model := GetMem(parc_qlfc_model_size(Coder));
+    C := parc_qlfc_encode(T, OutP, Scratch, M, OutCap, Coder, Model);
     FreeMem(Model);
     Model := nil;
-    Main := nil;
-    // the block record
     if C > 0 then
     begin
       SetLength(H, 64);
       n := 0;
       PutVInt(H, n, Len);
       H[n] := 1; Inc(n);
-      Flags := P.Coder;
+      Flags := Coder;
       if UseLzp then Flags := Flags or 4;
       H[n] := Flags; Inc(n);
       if UseLzp then
@@ -489,12 +536,28 @@ begin
         Move(OutP^, Result[n], C);
       end;
     end;
+    if Result = nil then
+    begin
+      // does not compress: back to the input, stored
+      if Extra <> nil then begin FreeMem(Extra); Extra := nil; end;
+      Ok := parc_bwt_inverse(T, T, A, M, Primary) = 0;
+      if Ok and UseLzp then
+      begin
+        SetLength(Orig, Len);
+        SetLength(Hash, SizeInt(2) shl LzpBlockHashBits(Len, Lp.HashSizeLog));
+        Ok := LzpDecodeBlock(T, NMain, T + NMain, NLens, Esc, @Orig[0], Len, Lp, Lp.HashSizeLog, Hash);
+        Main := nil;
+        T := @Orig[0];
+      end;
+      if not Ok then raise EOutOfMemory.Create('bwt: block could not be restored');
+      Stored(T);
+    end;
   finally
     if Model <> nil then FreeMem(Model);
     if Extra <> nil then FreeMem(Extra);
     FreeMem(A);
   end;
-  if Result = nil then Stored;
+  Buf := nil;
 end;
 
 { ---------------- adaptive blocks (a) ----------------
@@ -517,6 +580,7 @@ const
   SEG_MAX = 64;              // pieces per block
   SEG_PENALTY = 49152;     // bits of the whole piece (the samples see 1/SEG_STRIDE of it)
   SEG_DIV = 32;
+  SEG_DIV_A = 32;            // with a
   SEG_TAB = 65536;
   SEG_ONE = 65536;           // fixed point: costs in 1/65536 bit
 
@@ -527,7 +591,8 @@ type
   TSegModel = class
     T: array of TSegPair;           // [ctx * 256 + sym]: left and right counts together
     C: array[0..255] of TSegPair;   // per context
-    constructor Create;
+    Divisor: Integer;               // a split must save 1/Divisor of the cost (+ the penalty)
+    constructor Create(ADivisor: Integer);
   end;
 
 var
@@ -584,8 +649,9 @@ begin
   end;
 end;
 
-constructor TSegModel.Create;
+constructor TSegModel.Create(ADivisor: Integer);
 begin
+  Divisor := ADivisor;
   SetLength(T, 65536);
   BuildSegLog;
 end;
@@ -614,7 +680,7 @@ begin
   for c := 0 to 255 do Whole := Whole + FLogF(M.C[c].R);
   for k := 0 to 65535 do Whole := Whole - FLogF(M.T[k].R);
   Cur := Whole;
-  BestCost := Whole - Whole div SEG_DIV - SEG_PENALTY * SEG_ONE div SEG_STRIDE;
+  BestCost := Whole - Whole div M.Divisor - SEG_PENALTY * SEG_ONE div SEG_STRIDE;
   Best := 0;
   i := SEG_STRIDE;
   Stop := n - SEG_MIN;
@@ -672,9 +738,8 @@ type
 
 procedure TBwtEncJob.Process;
 begin
-  OutBuf := BwtEncodeBlock(@InBuf[0], InLen, Par);
+  OutBuf := BwtEncodeBlock(InBuf, InLen, Par);
   OutSize := Length(OutBuf);
-  InBuf := nil;
 end;
 
 constructor TBwtEncStage.Create(ATarget: TOutStage; const Params: TStringArray);
@@ -683,6 +748,10 @@ var
 begin
   FPar := ParseBwtParams(Params);
   inherited Create(ATarget);
+  // GRZip's adaptive block (a) at the faster levels: also at most half the block, which keeps
+  // the memory of the threads and the time of the sort down; m1 keeps the whole block
+  FBufSize := FPar.BlockSize;
+  if FPar.Adaptive and (FPar.Level >= 2) and (FBufSize >= 2 * SEG_MIN) then FBufSize := FBufSize div 2;
   Threads := PoolWorkers(BWT_MAXTHREADS);
   if Threads > 0 then SetLength(FQueue, Threads + 1) else SetLength(FQueue, 1);
   FPool := TJobPool.Create(Threads, Length(FQueue));
@@ -775,7 +844,8 @@ begin
   NCuts := 0;
   if FLen >= 2 * SEG_MIN then
   begin
-    if FSeg = nil then FSeg := TSegModel.Create;
+    if FSeg = nil then
+      if FPar.Adaptive then FSeg := TSegModel.Create(SEG_DIV_A) else FSeg := TSegModel.Create(SEG_DIV);
     Pieces := 1;
     SegSplitAll(TSegModel(FSeg), @FCur[0], FLen, Cuts, NCuts, Pieces, 0);
   end;
@@ -792,7 +862,8 @@ begin
   if Final then Last := NCuts;
   for k := 0 to Last - 1 do
   begin
-    B := Copy(FCur, Prev, Cuts[k] - Prev);
+    SetLength(B, Cuts[k] - Prev + IN_SLACK);   // (room for the coder's look-ahead)
+    Move(FCur[Prev], B[0], Cuts[k] - Prev);
     SubmitJob(B, Cuts[k] - Prev);
     Prev := Cuts[k];
   end;
@@ -810,26 +881,32 @@ end;
 
 procedure TBwtEncStage.DoWrite(Buf: PByte; Count: SizeInt);
 var
-  k: SizeInt;
+  k, Cap: SizeInt;
 begin
   while Count > 0 do
   begin
-    if Length(FCur) < FPar.BlockSize then
+    // the buffer keeps IN_SLACK bytes after the block for the coder's look-ahead
+    Cap := Length(FCur) - IN_SLACK;
+    if Cap < FBufSize then
     begin
       // grow with the data (small inputs do not reserve the whole block)
       k := FLen + Count;
       if k < 64 * 1024 then k := 64 * 1024;
-      if k < 2 * Length(FCur) then k := 2 * Length(FCur);
-      if k > FPar.BlockSize then k := FPar.BlockSize;
-      if k > Length(FCur) then SetLength(FCur, k);
+      if k < 2 * Cap then k := 2 * Cap;
+      if k > FBufSize then k := FBufSize;
+      if k > Cap then
+      begin
+        SetLength(FCur, k + IN_SLACK);
+        Cap := k;
+      end;
     end;
-    k := Length(FCur) - FLen;
+    k := Cap - FLen;
     if k > Count then k := Count;
     Move(Buf^, FCur[FLen], k);
     Inc(FLen, k);
     Inc(Buf, k);
     Dec(Count, k);
-    if FLen = FPar.BlockSize then FlushBlock(False);
+    if FLen = FBufSize then FlushBlock(False);
   end;
 end;
 

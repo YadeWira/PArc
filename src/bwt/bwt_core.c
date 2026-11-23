@@ -243,6 +243,27 @@ int32_t parc_lzp_encode(const uint8_t * in, int32_t len, int32_t minLen, int32_t
     return nm + nl < len;
 }
 
+/* Share of long repeats in in[0..len), in per mille, estimated from content-defined anchors (about
+   one position in 32, chosen by its 4 bytes, so repeats are found at any offset): the share of
+   anchors whose next 32 bytes were already seen at an earlier anchor. tab: 65536 entries. */
+int32_t parc_repeat_share(const uint8_t * in, int32_t len, uint32_t * tab)
+{
+    int64_t anchors = 0, hits = 0;
+    int32_t i;
+    parc_bwt_memset(tab, 0, 65536 * sizeof(uint32_t));
+    for (i = 0; i + 40 <= len; i++)
+    {
+        uint32_t v; __builtin_memcpy(&v, in + i, 4);
+        if (((v * 0x9E3779B1u) >> 27) != 0) continue;
+        anchors++;
+        uint64_t k = (lzp_load64(in + i) * 0x9E3779B97F4A7C15ull) ^ (lzp_load64(in + i + 8) * 0xC2B2AE3D27D4EB4Full) ^
+                     (lzp_load64(in + i + 16) * 0x165667B19E3779F9ull) ^ (lzp_load64(in + i + 24) * 0x27D4EB2F165667C5ull);
+        uint32_t slot = (uint32_t)(k >> 48), chk = (uint32_t)k | 1;
+        if (tab[slot] == chk) hits++; else tab[slot] = chk;
+    }
+    return anchors ? (int32_t)(hits * 1000 / anchors) : 0;
+}
+
 /* Forward BWT of T[0..n) into U (may be T), A: n int32 of scratch. Returns the primary index (1..n), or < 0. */
 int32_t parc_bwt_forward(const uint8_t * T, uint8_t * U, int32_t * A, int32_t n)
 {
