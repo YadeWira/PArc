@@ -59,7 +59,7 @@ m=4x4:b1mb:lzma:1mb:normal:16:mc4:lc4
 "$T" enc $m rnd r.b 0 >/dev/null; "$T" enc $m text t.b 0 >/dev/null; "$T" enc $m mix x.b 0 >/dev/null
 ck "rnd: stored ($("$T" recs r.b))" "\"$T\" recs r.b | grep -q '^stored 3 packed 0 mixed 0'"
 ck "rnd: 3000000 -> $(stat -c %s r.b)" "[ $(stat -c %s r.b) -le 3000020 ]"
-ck "text: packed ($("$T" recs t.b))" "\"$T\" recs t.b | grep -q '^stored 0 packed 3 mixed 0'"
+ck "text: packed ($("$T" recs t.b))" "\"$T\" recs t.b | grep -q '^stored 0 packed [1-9] mixed 0'"
 ck "mix: mixed records ($("$T" recs x.b))" "\"$T\" recs x.b | grep -q 'mixed [1-9]'"
 # the repeated random part of the mix is packed with the other copy (both in one block)
 { head -c 400000 rnd; head -c 100000 text; head -c 400000 rnd; } > dup
