@@ -104,13 +104,10 @@ What makes this possible (all inside `.parc`; the codecs are unchanged):
 - **Buffered output**: `TStreamSink` accumulates 64 KB before writing. Codecs emitted many
   small pieces (especially PPMd's range coder) and ~14% of the time went into `write`. PPMd on
   20 MB of text dropped from 4.6 s to ~2.7–3.5 s (FreeArc: 2.86 s).
-- **LZMA `fast`**: FreeArc's additions to `GetOptimumFast` were ported (main-match pruning by
-  length/distance and relaxed rep-match acceptance). `-m3` used to lose 0.8% on binaries; now
-  it wins.
-- **LZMA `ht4`**: FreeArc's hash-table match finder (rows of `mc` positions with a hash tag in
-  the high bits, no `son` array) is ported; 0.0.2 mapped `ht4` to `hc4`. `fast`/`normal` (the
-  `ht4` profiles) compress the same as FreeArc and faster. The next position's hash row/head is
-  prefetched in `ht4` and `bt4`. Streams are standard LZMA: 0.0.2 decodes them.
+- **LZMA `fast`**: since 2026-11-23 the SDK's `GetOptimumFast` with own thresholds (FreeArc's
+  additions, ported earlier, were removed; see "LZMA encoder without FreeArc code" below).
+- **LZMA `ht4`**: since 2026-11-23 PArc's own row finder (FreeArc's hash-table finder, ported
+  earlier, was removed). Streams are standard LZMA: 0.0.2 decodes them.
 - **LZMA decoder fast path**: whole symbols are decoded without input checks while 20 or more
   input bytes remain (LzmaDec style); the literal and match symbols are x86-64 assembler with a
   Pascal fallback (i386, or `-dPARC_NOASM`). The stream tail and truncated/corrupt input take
@@ -149,15 +146,9 @@ What makes this possible (all inside `.parc`; the codecs are unchanged):
   (hash head, first tree node, its children), and the optimal parser drops two SDK 18+ speed
   shortcuts that cost ratio (it always prices the literal, tries the short rep like SDK 9.x) and
   refreshes prices every 32 matches. `normal` and `max` are now smaller than FreeArc's.
-- **LZMA multi-thread match finder** (port of LzFindMt, `normal`/`max` only). bt4: same output
-  as one thread. ht4 (the `normal` default): 2 threads, the BT thread walks the HT4 rows and
-  the list of matches is the one of FreeArc's multi-thread finder (rows report every longer
-  match from length 4, hash2/hash3 matches only when closer, skipped positions also search
-  their row), which is smaller than the one-thread list: like FreeArc, ht4 output with 2+
-  threads differs from 1 thread (that one is FreeArc `-mt1`'s). 512 MB TILIN slice,
-  `lzma:8mb:normal`: 1 thread 257,005,522, 2+ threads 256,882,467 (FreeArc `-mt1`
-  257,058,517, `-mt4` 256,920,905); `96mb`: 253,641,041 / 253,540,503 (FreeArc 253,723,647 /
-  253,565,992). Threads: `TLzmaEncParams.NumThreads` = 1 (one thread), 2 (compressing thread
+- **LZMA multi-thread match finder** (port of LzFindMt, `normal`/`max` only). bt4 and (since
+  2026-11-23) the own ht4: same output as one thread (ht4: 2 threads, the BT thread searches the
+  rows). Threads: `TLzmaEncParams.NumThreads` = 1 (one thread), 2 (compressing thread
   + a BT thread that also hashes) or 3 (+ a separate hash thread, like the SDK; the hash
   thread is light); 0 = automatic: the per-thread grant `LzmaEncThreadGrant` if a caller set
   one, otherwise this block's share of the global thread budget (`ThreadShare`, at least 2),
@@ -244,7 +235,7 @@ What makes this possible (all inside `.parc`; the codecs are unchanged):
   `BudgetWaitBegin`/`End` (also the 2-thread mode's inline hash, run by the BT thread).
 - **Deterministic output**: the same binary, input and `PARC_THREADS` always write the same
   archive (`tests/determinism.sh`). Different N may differ only through the preset
-  alternatives `(a|b||c)` (N=1, 2, ≥3), lzma ht4's 1-thread match list, and the 4x4 block size
+  alternatives `(a|b||c)` (N=1, 2, ≥3) and the 4x4 block size
   for fast inner methods (see block scheduling below); otherwise, with the same method string,
   every codec gives the same stream for any N.
 - **Block scheduling under the budget** (branch perf3/sched):
@@ -265,7 +256,7 @@ What makes this possible (all inside `.parc`; the codecs are unchanged):
     4x4 block is a quarter of what is left, down to a quarter block, so a solid block ends with
     several small pieces instead of one or two big ones. Both depend only on the data and on
     `PARC_THREADS` (and are off with 1 thread): **archive bytes depend on N** (they already did
-    through the `(a|b)` presets and ht4) but are identical across runs with the same N.
+    through the `(a|b)` presets) but are identical across runs with the same N.
   - LZMA `bt4` (same output with any number of threads) always uses its 3 threads when the
     budget has 3 or more, even if the block's share is smaller: the threads hold tokens only
     while they work, so the last block picks up the tokens the others leave.
@@ -1663,6 +1654,44 @@ threads + 1 (`m2`..`m4`), so small pieces queue behind a slow block (ex2t Silesi
   or 190 MB at 5.3 s depending on which block finishes first and lets `4x4` grow into its threads);
   new is always in the faster mode (5.2 s, 192–196 MB).
 
+## LZMA encoder without FreeArc code (2026-11-23)
+
+The LZMA encoder (`src/parc_lzmaenc.pas`) was the LZMA SDK 26.03 (public domain) plus pieces
+from FreeArc 0.67: the `ht4` hash-table match finder (single and multi-thread match lists), the
+default-cycles (`mc`) formula, the `:fast` parser additions and the method-string parser
+(`parse_LZMA`). Those were removed **without reading their bodies** and replaced; everything
+else is the SDK. The stream is unchanged (standard LZMA1, decoder untouched); the new pieces are
+in `formato/FORMATO-PARC.md` §6.11:
+
+- **`ht4`: own row finder** (`src/parc_lzmarf.inc`, instantiated per row shape with macros): a
+  64-bit multiplicative hash picks a cache-aligned row; the row is a ring of the newest
+  positions with a few hash bits as tags, compared all at once in a 64-bit word (SWAR) so only
+  tag hits read the window; search stops at the first position out of the window. Shapes:
+  32 B × 7 entries / 64 B × 14 (4-bit tags, 32-bit positions) for the optimal parser, 32 B × 6
+  (8-bit tags) for `:fast`, and for dictionaries up to 32 MB (the 4x4 blocks of `-m3`/`-m4`)
+  16 B × 4 / 32 B × 8 with 6-bit tags and **24-bit positions** (4 bytes per entry: the
+  position modulo 2^24, every candidate is verified and the distance bounded by the dictionary,
+  so the stream is always valid). Row memory: 3/4 of the dictionary or input (all of it for the
+  24-bit shapes), `h<size>` overrides. `mc` = candidates verified (default 4 + fb/8).
+- **Multi-thread `ht4`** reuses the SDK's LzFindMt pipeline: the BT thread runs the row
+  search from length 3 and the LZ thread keeps the pairs longer than its hash2/hash3 matches,
+  exactly as for `bt4`, so **`ht4` gives the same stream with 1, 2 or 3 threads** (FreeArc's
+  multi-thread list made it depend on N).
+- **`:fast` parser**: the SDK's `GetOptimumFast` with own measured thresholds (len-3 matches at
+  ≥ 2 KB and len-4 at ≥ 64 KB become literals, `ChangePair` at 32× instead of 128×, a rep of L
+  beats a match of L + 4 at ≥ 16 KB).
+- `mc` = 0: bt 16 + fb/2, hc4 half of it (the SDK's `LzmaEncProps_Normalize`; hc4 was
+  16 + fb/4), ht4 4 + fb/8. Method-string parser rewritten from the documented syntax (same
+  strings accepted; `h` is now meaningful).
+- The window keeps 1/4 of slack instead of the SDK's 1/2 (less memory when the input is larger
+  than the dictionary; the block moves twice as often, ~1 ms per MB moved).
+
+Tests: `tests/lzma_enc.sh` (test_lzmaenc full: round trips, LzmaEncodeMem, invalid parameters,
+thread budget, multi-thread == one thread for bt4 and every ht4 shape also with normalization;
+liblzma decodes the dumped streams; assembler == `-dPARC_NOASM`; round trips through `parc` for
+every shape, same archive twice and with 1/4 threads; damaged archives fail cleanly) and
+`tests/lzma_cross.sh` (same streams on linux64, linux32, linuxarm64/QEMU, win64, win32/Wine).
+
 ## Verified platforms (0.0.2)
 
 | platform | binary | tests |
@@ -1705,6 +1734,8 @@ bash tests/filters_cross.sh       # delta/lzp: mismos bytes en linux64/linux32/l
 bash tests/mmtta.sh               # tta/mm: detección, ida y vuelta en todos los niveles, trozos al azar, C con y sin SIMD, dañados, presets
 bash tests/mmtta_cross.sh         # tta/mm: mismos bytes en linux64/linux32/linuxarm64 (QEMU)/win64/win32 (Wine)
 bash tests/cm_cross.sh            # cm: mismos bytes en linux64 (SSE2 y C)/linux32/linuxarm64 (NEON)/win64/win32
+bash tests/lzma_enc.sh            # codificador LZMA: test_lzmaenc, liblzma, asm == Pascal, formas de ht4 por parc, dañados
+bash tests/lzma_cross.sh          # codificador LZMA: mismos streams en linux64/linux32/linuxarm64 (QEMU)/win64/win32
 # plz_bench: cualquier método en memoria por las cadenas (tamaño, CPU y pared)
 fpc -O3 -Fusrc -Fobuild/linux64/units -Flbuild/linux64/units -FUbuild/tests/units -FEbuild/tests tests/plz_bench.lpr
 # liberar/reusar un trabajo del pool apenas termina (ventana ampliada con -dPARC_RACE_TEST)
