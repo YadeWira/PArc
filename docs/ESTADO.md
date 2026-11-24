@@ -1,4 +1,4 @@
-# PArc status (2026-11-20)
+# PArc status (2026-11-24)
 
 PArc is an archiver written in **Free Pascal** with its own format, **`.parc`**, for Windows 7+
 (x86/x64) and Linux x64. It does not read or write `.arc` and has no GUI: support for `.arc`
@@ -1665,6 +1665,106 @@ threads + 1 (`m2`..`m4`), so small pieces queue behind a slow block (ex2t Silesi
   or 190 MB at 5.3 s depending on which block finishes first and lets `4x4` grow into its threads);
   new is always in the faster mode (5.2 s, 192–196 MB).
 
+## Own policy layer: presets, file groups, canonical methods, data-type detection (2026-11-24)
+
+The last FreeArc-derived "policy" code is gone: the port of `decode_method` and its textual
+substitution table (`src/parc_presets_data.inc`, `arc.groups`), the port of `LimitAndCanonize`
+(per-class `ShowCompressionMethod`, dictionary limiting, 32-bit adjustments), the port of
+`detect_datatype` (`mmdet.cpp`) and the `parseMem64`-style helpers. They were replaced from their
+interfaces and their observable output only (the FreeArc sources and the old unit bodies were not
+read beyond the interface sections).
+
+**Presets** (`src/parc_presets.pas`). A table of rows `name [levels] [$group] = chain [from K
+threads: chain]`, where a level family is written with `N` for the digit (`Nbinary`, `exNt`,
+`N`, `Nx`), the chain may name other rows of the same level (`Norep+exe+Nxb`), and the rows of a
+preset in order are its file groups. A small resolver expands `-m` texts: alternatives by threads
+(`(a|b)name`, `a|b|c`), `chain/$group=chain` overrides (a later one replaces and goes last, empty
+removes), `bin/text` shorthand, `name:params` appending the params, `P$group` = that group of
+preset P, unknown names kept for the encoder to reject. `--print-config` prints the rows.
+Result: for all 493 well-formed `-m` texts of `tests/policy_methods.txt` with 1, 2, 3, 4 and 8
+threads the chains are **identical** to the replaced code (2,465 lines). Different only for texts
+the old code turned into nonsense (`5+delta`, `orep+5`, `5/`, `x/$bmp=2`, `5$text`...): now a
+preset inside a longer chain contributes its default chain, `P$group` resolves, `bin/` works.
+
+**File groups**. Own table: each group lists its masks (`*.ext`, globs on the base name such as
+`readme.*`, `*.??_`, `*.ear?`), `<other>` marks where unmatched files sort. Literal extensions go
+through a hash; `?` is one UTF-8 character. Membership (a file can match several groups, the
+lowest one in the preset wins) and the sort order are those of before on the 43,000 names of the
+corpus (only a file literally named like a group header, e.g. `$text`, sorts differently).
+
+**Canonical methods and limits** (`src/parc_canon.pas`). Each stage is parsed with its codec's own
+parser (`ParseLzmaEncParams`, `ParseOrepMethod`, `ParseLzpParams`, `ParseBwtParams`,
+`ParseDictParams`, `ParseLz4EncParams`, `ParseTtaEncParams`, `PlzCanon`, `DispackBlockSize`) and
+written back in one form (units, defaults omitted); windows/dictionaries/blocks are cut to the
+block size + 1 % + 512 bytes, rounded to KB up to 4 MB and to MB above (lzma at least 32 KB,
+lzp/bwt hash bits to the block); a 32-bit build keeps the lzma encoder within 2 GB. For all 343
+preset chains at 11 block sizes (0 B … 5 GB) the stored text is **identical** to before, also
+on linux32. Differences only where the old canonizer misread the codec's syntax (`lzma:24` took 24
+as the dictionary, `fb64`, `d1m`, `mf=bt4`, `dict:b32m` and `lz4:b1m` were ignored, `h20` became
+`h20b`): now the codec's own reading is stored. `CanonStageMem` (shrinking a stage for `-lc` and
+the automatic memory limit) now uses each codec's memory model (`LzmaEncMemory` with dictionaries
+m·2^k, `OrepFitWindow`, `PlzCanon`, lzp/dict/bwt/ppmd/4x4 estimates) instead of fixed fractions,
+so it shrinks less for the same budget; `FitEncodeMem` still re-measures until the chain fits.
+
+**Detector** (`src/parc_filetype.pas`). Answers per 64 KB chunk which chain family suits the bytes.
+`$compressed`: order-0 entropy ≥ 7.62 bits and few byte pairs repeated within 256 bytes (99 %
+agreement with the old detector on 5,826 corpus chunks). `$text`: below 7.6 bits, a linear score
+of order-0 entropy, share of letters (and a step above 30 %), and on a 16 KB sample from the middle
+order-1 entropy, how often the byte that followed the same 3 / 5 bytes last time comes again, and
+greedy-LZ coverage; integer arithmetic only (fixed-point log2 by an integer algorithm), so every
+platform gives the same answer (`tests/policy_cross.sh`). The weights were fitted (weighted
+logistic regression) on 5,826 chunks of a 371 MB corpus sample against the real sizes of the
+`-m5` text and binary chains, with the share sent to ppmd held at the old detector's.
+Its `$text` volume (bytes sent to ppmd) equals the old one's; at the chunk level it ties
+the old detector within ±0.2 % of size depending on the set (the old one, built for the same
+question, is a strong baseline: the oracle is 0.9 % below both at `-m5`).
+
+Detection speed (5,826 chunks of the 371 MB sample, 209 MB, 5 passes, one core): old
+1.59–1.63 s, new 1.29–1.33 s (about 19 % faster; above 7.6 bits only the pair test runs).
+
+Archives, old (`main` e4e76fd) vs new, best of 2, cores 32-39 (`hold` = another corpus sample,
+1,330 files, 185 MB, not used for the fitting; `mixed` = the 371 MB sample the weights were
+fitted on). Sizes in bytes, times in s, memory = peak RSS in MB. Times at T4 below ~3 s vary
+±10 % between runs on this shared machine (the same cells swapped sign between two series).
+
+| set | T | level | size old → new | compress s | decompress s | compress MB | decompress MB |
+|---|---|---|---|---|---|---|---|
+| hold | 1 | -m1 | 101787223 → 101787223 (identical) | 2.41 → 2.48 | 0.75 → 0.77 | 175 → 173 | 115 → 116 |
+| hold | 1 | -m2 | 94092319 → 93907792 (−0.20 %) | 8.14 → 8.13 | 1.84 → 1.85 | 317 → 318 | 206 → 210 |
+| hold | 1 | -m3 | 91013856 → 90745368 (−0.29 %) | 20.20 → 20.09 | 5.18 → 5.12 | 346 → 339 | 210 → 210 |
+| hold | 1 | -m4 | 88630031 → 88390166 (−0.27 %) | 36.44 → 33.77 | 5.88 → 5.85 | 315 → 307 | 210 → 210 |
+| hold | 1 | -m5 | 87644540 → 87523547 (−0.14 %) | 45.42 → 43.35 | 6.44 → 6.55 | 1162 → 1163 | 222 → 234 |
+| hold | 1 | -m9 | 87164750 → 87130285 (−0.04 %) | 68.29 → 66.02 | 7.27 → 7.42 | 1560 → 1551 | 350 → 348 |
+| hold | 1 | -mx | 87164750 → 87130285 (−0.04 %) | 68.83 → 65.97 | 7.37 → 7.44 | 1562 → 1552 | 351 → 346 |
+| hold | 4 | -m1 | 102456171 → 102456171 (identical) | 0.92 → 0.88 | 0.32 → 0.33 | 289 → 277 | 238 → 239 |
+| hold | 4 | -m2 | 98026944 → 97935987 (−0.09 %) | 2.03 → 2.04 | 0.55 → 0.64 | 387 → 441 | 258 → 268 |
+| hold | 4 | -m3 | 89604598 → 89085662 (−0.58 %) | 8.06 → 7.86 | 1.79 → 1.81 | 457 → 471 | 273 → 290 |
+| hold | 4 | -m4 | 88874885 → 88533673 (−0.38 %) | 11.67 → 11.51 | 1.78 → 2.23 | 489 → 502 | 298 → 283 |
+| hold | 4 | -m5 | 87636484 → 87571456 (−0.07 %) | 15.25 → 14.64 | 2.50 → 2.28 | 1150 → 1137 | 389 → 439 |
+| hold | 4 | -m9 | 87164750 → 87130285 (−0.04 %) | 38.27 → 36.42 | 4.38 → 4.35 | 1665 → 1654 | 547 → 545 |
+| hold | 4 | -mx | 87164750 → 87130285 (−0.04 %) | 38.26 → 36.72 | 4.40 → 4.45 | 1660 → 1655 | 557 → 545 |
+| mixed | 4 | -m2 | 195387543 → 195927564 (+0.28 %) | 4.32 → 4.33 | 1.09 → 1.03 | 497 → 499 | 320 → 354 |
+| mixed | 4 | -m3 | 180669163 → 180805156 (+0.08 %) | 15.75 → 15.56 | 2.67 → 2.65 | 536 → 517 | 366 → 363 |
+| mixed | 4 | -m5 | 178213620 → 178463020 (+0.14 %) | 26.40 → 26.24 | 4.47 → 4.37 | 1456 → 1477 | 575 → 524 |
+
+Levels without content detection (`-m1`, explicit methods) give byte-identical archives. With
+the old detector in place, the new presets, groups and canonical text gave byte-identical
+archives at 48 level/thread combinations (`-m4`…`-m9`, `-mx`, `-mxx`, `-m1x`…`-m9x`, `-mex1`…
+`-mex9`, `-m1d`/`5d`/`9d`, `-m2t`/`5t`, `-m3xt`; T1 and T4). The differences above are the
+detector's alone: about 3–6 % of the bytes change group (both ways), so the effect per set is
+±0.3 % in size and mostly noise in time; memory moves with the block layout (e.g. hold `-m5`
+T4: the text block is 15.6 MB instead of 14.1 MB, i.e. three 7 MB ppmd jobs decoded at once
+instead of two: +50 MB decode RSS).
+
+**Remaining gaps.** The detector does not beat the old one everywhere: `mixed` (its own fitting
+set) is +0.08…0.28 % at T4, `hold` −0.04…−0.58 %. A file-level evaluation (each file compressed
+alone with the `-m5` text and binary chains) shows the old detector within 0.2 % of the best
+linear/tree models of these statistics, and both 0.9 % above the oracle: a better answer needs
+better estimates of the two coders (tried: a small PPM and a greedy-LZ cost estimate, too slow
+or not better), or a level-aware bias (`TEXT_LEVEL_BIAS`, wired but all zero: at `-m2` a bwt-vs-plz
+choice would gain ~0.2 % at 1.3x the bwt volume). Decode memory at hold `-m5` T4 (+13 %) and
+`-m2` T4 compression memory (+14 %) are layout effects of that grouping.
+
 ## Verified platforms (0.0.2)
 
 | platform | binary | tests |
@@ -1707,6 +1807,8 @@ bash tests/filters_cross.sh       # delta/lzp: mismos bytes en linux64/linux32/l
 bash tests/mmtta.sh               # tta/mm: detección, ida y vuelta en todos los niveles, trozos al azar, C con y sin SIMD, dañados, presets
 bash tests/mmtta_cross.sh         # tta/mm: mismos bytes en linux64/linux32/linuxarm64 (QEMU)/win64/win32 (Wine)
 bash tests/cm_cross.sh            # cm: mismos bytes en linux64 (SSE2 y C)/linux32/linuxarm64 (NEON)/win64/win32
+bash tests/policy.sh              # presets, grupos, métodos canónicos, detector, tamaños de memoria (igual que el código reemplazado)
+bash tests/policy_cross.sh        # detector/presets/grupos: misma respuesta en linux64/linux32/linuxarm64/win64/win32
 # plz_bench: cualquier método en memoria por las cadenas (tamaño, CPU y pared)
 fpc -O3 -Fusrc -Fobuild/linux64/units -Flbuild/linux64/units -FUbuild/tests/units -FEbuild/tests tests/plz_bench.lpr
 # liberar/reusar un trabajo del pool apenas termina (ventana ampliada con -dPARC_RACE_TEST)
