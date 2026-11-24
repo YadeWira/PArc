@@ -83,8 +83,9 @@ if that fails, PArc warns and skips it.
 | `--recompress` | when updating, rebuild every block with the requested method instead of copying intact ones |
 | `-x<pattern>` | exclude files; may be repeated |
 
-Presets choose a method per file type, like FreeArc: through `arc.groups` (extension) and, when
-the preset distinguishes text or already-compressed data, by inspecting content. Each
+Presets choose a method per file type: through the file groups (by name and extension, see
+`--print-config`) and, when the preset distinguishes text or already-compressed data, by
+inspecting content (PArc's own detector, `src/parc_filetype.pas`). Each
 compressor's dictionary is reduced to the block size, so extracting a small file does not
 require the full preset memory.
 
@@ -434,7 +435,7 @@ parc x secret.parc -kf/media/usb/key.bin -pSecret
 | option | effect |
 |---|---|
 | `-kb` | `x`/`e`: keep broken files. Without it, a file whose CRC does not match, or that could not be completed because its block is damaged, is **deleted** (like FreeArc) and reported; with `-kb` whatever was written stays |
-| `--print-config` | print the built-in method substitution table, what each `-m0`…`-mxx` resolves to with the current thread budget (`-mt<N>` changes it) and the file groups (`arc.groups`), then exit. Works with or without a command |
+| `--print-config` | print the built-in preset table (rows `name [levels] [$group] = chain`, `N` = the level digit, with the variant used from K threads on), what each `-m0`…`-mxx` resolves to with the current thread budget (`-mt<N>` changes it) and the file groups with their masks, then exit. Works with or without a command |
 
 ### Damaged blocks
 

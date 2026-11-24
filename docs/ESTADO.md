@@ -47,8 +47,10 @@ The rest of the FreeArc 0.67 tree is in git history (commit `82ea8d9`) and in Fr
   the presets (`-m1`/`-m2`, `$compressed` up to `-m4`, `3xt`) and Tornado (`tor`) is gone: see
   "plz" and "Tornado removed" below for the design and the measurements; stream format in
   `formato/FORMATO-PARC.md` §6.2.
-- FreeArc built-in presets ported: `-m0`…`-m9`, `-mx`, `-mxx` and the `d/t/xt/xb/binary` families
-  (the `rep` family is now `orep`: `-m5orep` = `orep:96m:l512`).
+- Presets `-m0`…`-m9`, `-mx`, `-mxx` and the `d/t/xt/xb/binary/ex` families (the `rep` family
+  is now `orep`: `-m5orep` = `orep:96m:l512`), with the same syntax as FreeArc's; since
+  2026-11-24 the preset table, the file groups, the canonical method text and the data-type
+  detector are PArc's own code (see "Own policy layer" below).
 - `ppmd` (2026-11) is PPMd var.I from the public-domain LZMA SDK (`Ppmd8`), ported to Pascal
   with x86-64 assembler for the symbol coder and `UpdateModel`; it replaced FreeArc's PPMd (a
   step towards relicensing). Same ratio as before plus an 8-byte stream header; `ppmd` blocks
@@ -187,7 +189,7 @@ What makes this possible (all inside `.parc`; the codecs are unchanged):
   the stream before 4x4: the document set's 66 MB binary block became 24+23 MB, two jobs on
   four threads (9.9 s at `-m4`); now 22+22+3, 5.3 s. With J >= N, or a small last block,
   nothing changes: smaller blocks only cost ratio there (executables +0.05..0.7 %).
-- **Presets by thread count** (`src/parc_presets_data.inc`, lines marked `// PARC`): like
+- **Presets by thread count** (then `src/parc_presets_data.inc`; since 2026-11-24 the preset table of `src/parc_presets.pas`): like
   FreeArc's `-mtN`, the `(a|b)` alternatives follow `PARC_THREADS`: one thread uses
   single-stream methods, 2+ threads the 4x4 ones. Binaries (FreeArc's method in brackets):
   `-m1` `rep+tor:4:h4m` [`tor:4`] / `rep+4x4:tor:3` [same]; `-m2` `rep+exe+delta+tor:6`

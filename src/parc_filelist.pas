@@ -522,8 +522,8 @@ begin
     begin
       Len := ReadChunk(Fs, Positions[i], BlockSize, Buf);
       // (un trozo vacío va con un puntero no nulo: con nil el C devuelve la lista de tipos)
-      if Len > 0 then Types[i] := DetectDatatype(@Buf[0], Len)
-      else Types[i] := DetectDatatype(@Dummy, 0);
+      if Len > 0 then Types[i] := DetectDatatype(@Buf[0], Len, CurLevel)
+      else Types[i] := DetectDatatype(@Dummy, 0, CurLevel);
     end;
   finally
     Fs.Free;

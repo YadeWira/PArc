@@ -627,16 +627,18 @@ end;
 
 function FileGroupRank(const Name: string): Integer;
 var
-  LcBase, LcExt: string;
+  LcBase, LcExt, LcName: string;
   i, r: Integer;
 begin
   SplitName(Name, LcBase, LcExt);
   Result := ExtRank.Get(LcExt, MaxInt);
+  LcName := '';
   for i := 0 to High(GlobRanks) do
   begin
     r := GlobRanks[i];
     if r >= Result then Break;
-    if MaskMatches(Masks[r], AsciiLower(Name), LcBase, LcExt) then Exit(r);
+    if (Masks[r].Kind = mkPathGlob) and (LcName = '') then LcName := AsciiLower(Name);
+    if MaskMatches(Masks[r], LcName, LcBase, LcExt) then Exit(r);
   end;
   if Result = MaxInt then Result := OtherRank;
 end;
@@ -650,11 +652,11 @@ begin
   SplitName(Name, LcBase, LcExt);
   r := ExtRank.Get(LcExt);
   if r >= 0 then Result := QWord(1) shl Masks[r].Group;
-  if Length(GlobRanks) = 0 then Exit;
-  LcName := AsciiLower(Name);
+  LcName := '';
   for i := 0 to High(GlobRanks) do
   begin
     r := GlobRanks[i];
+    if (Masks[r].Kind = mkPathGlob) and (LcName = '') then LcName := AsciiLower(Name);
     if MaskMatches(Masks[r], LcName, LcBase, LcExt) then
       Result := Result or (QWord(1) shl Masks[r].Group);
   end;

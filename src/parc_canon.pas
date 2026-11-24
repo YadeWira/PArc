@@ -10,6 +10,8 @@
   size plus 1 % and 512 bytes, rounded up to KB (up to 4 MB) or to MB (above):
     lzma dictionary (at least 32 KB), orep window, dict/lzp/bwt block (lzp/bwt hash bits to
     the block), plz window (its own rounding, PlzCanon), the inner method of 4x4.
+  A 32-bit build also keeps the lzma encoder within 2 GB (a smaller dictionary of the form
+  m * 2^k).
   Memory limit (CanonStageMem): one stage shrunk so that its encoder fits in a byte budget,
   from each codec's own memory model; FitEncodeMem (parc_encoders) calls it on the stage that
   uses most until the whole chain fits.
@@ -50,6 +52,7 @@ const
   MB = Int64(1024) * 1024;
   GB = Int64(1024) * 1024 * 1024;
   LZMA_MIN_DICT = 32 * KB;
+  LZMA_MAX_32 = 2 * GB;       // lzma encoder memory in a 32-bit process
   T4X4_MAX_JOBS = 16;   // as parc_encoders (jobs in flight)
 
 { ------------------------------------------------------------------------------------------ }
@@ -145,6 +148,11 @@ var
 begin
   P := ParseLzmaEncParams(Parts);
   if (Limit > 0) and (Int64(P.DictSize) > Limit) then P.DictSize := Limit;
+  {$IFNDEF CPU64}
+  // a 32-bit process: the encoder in at most 2 GB (its address space is 2..4 GB)
+  if MemLim <= 0 then MemLim := LZMA_MAX_32;
+  if MemLim > LZMA_MAX_32 then MemLim := LZMA_MAX_32;
+  {$ENDIF}
   // memory: the next smaller dictionary of the form m * 2^k (m = 8..15) until it fits
   if MemLim > 0 then
     while (P.DictSize > MB) and (LzmaEncMemory(P) > QWord(MemLim)) do
@@ -296,7 +304,8 @@ begin
         Blk := m;
         Own := Own + ':b' + MemText(m);
       end
-      else if (Parts[k][1] in ['0'..'9']) and ParseMem(Parts[k], m) then
+      else if (Parts[k][1] in ['0'..'9']) and not (Parts[k][Length(Parts[k])] in ['0'..'9']) and
+        ParseMem(Parts[k], m) then
       begin
         Blk := m;
         Own := Own + ':b' + MemText(m);

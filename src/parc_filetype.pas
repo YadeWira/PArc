@@ -40,12 +40,13 @@ type
     NearPairs: Integer;   // pairs seen again within 256 bytes, per 1024 (only H0 >= 7.6 bits)
   end;
 
-{ Type of Buf[0..BufSize-1]. With Buf = nil: the list of types it can answer. }
-function DetectDatatype(Buf: PByte; BufSize: Integer): string;
+{ Type of Buf[0..BufSize-1] for the preset level Level (1..9; the bias towards '$text' can
+  depend on the level's chains). With Buf = nil: the list of types it can answer. }
+function DetectDatatype(Buf: PByte; BufSize: Integer; Level: Integer = 5): string;
 
 { The statistics behind the answer (tests, tuning), and the answer from them. }
 function DatatypeStats(Buf: PByte; BufSize: Integer): TDatatypeStats;
-function DatatypeOfStats(const S: TDatatypeStats): string;
+function DatatypeOfStats(const S: TDatatypeStats; Level: Integer = 5): string;
 
 implementation
 
@@ -300,7 +301,7 @@ begin
   end;
 end;
 
-function DatatypeOfStats(const S: TDatatypeStats): string;
+function DatatypeOfStats(const S: TDatatypeStats; Level: Integer): string;
 var
   Score: Int64;
 begin
@@ -312,13 +313,15 @@ begin
     Int64(W_HIT3) * S.Hit3 + Int64(W_HIT5) * S.Hit5 + Int64(W_MATCH) * S.MatchBytes +
     Int64(W_SPACES) * S.Spaces + Int64(W_CONTROLS) * S.Controls;
   if S.Letters > TEXT_LETTER_STEP then Inc(Score, W_LETTER_STEP);
-  if Score > TEXT_BIAS then Result := '$text';
+  if Level < 1 then Level := 1;
+  if Level > 9 then Level := 9;
+  if Score > TEXT_BIAS + TEXT_LEVEL_BIAS[Level] then Result := '$text';
 end;
 
-function DetectDatatype(Buf: PByte; BufSize: Integer): string;
+function DetectDatatype(Buf: PByte; BufSize: Integer; Level: Integer): string;
 begin
   if Buf = nil then Exit('$compressed $text');
-  Result := DatatypeOfStats(DatatypeStats(Buf, BufSize));
+  Result := DatatypeOfStats(DatatypeStats(Buf, BufSize), Level);
 end;
 
 procedure FreePool;

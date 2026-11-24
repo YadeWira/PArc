@@ -12,3 +12,5 @@
   TEXT_BIAS = -158029;
   W_SPACES = 0;
   W_CONTROLS = 0;
+  // per level (the chains differ): added to TEXT_BIAS
+  TEXT_LEVEL_BIAS: array[1..9] of Int64 = (0, 0, 0, 0, 0, 0, 0, 0, 0);
