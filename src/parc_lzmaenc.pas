@@ -525,21 +525,20 @@ end;
 { Forma de fila para mc candidatos. }
 function RfShapeFor(mc: LongWord): LongWord;
 begin
-  if GetEnvironmentVariable('RFS') <> '' then Exit(StrToInt(GetEnvironmentVariable('RFS')));
   if mc <= 7 then Result := 0 else Result := 1;
 end;
 
 { Forma de fila para un stream: con el parser rápido (:fast) las etiquetas de 8 bits (menos
-  candidatos falsos, más rápido); con el óptimo, la más densa; con pocos candidatos y un
-  diccionario de hasta 16 MB (small: los bloques de 4x4), la de 16 bytes con posiciones de
-  24 bits (la posición módulo 2^24: una entrada más vieja que 2^24 posiciones parece más
-  nueva, pero todo candidato se verifica contra la ventana y la distancia se limita al
-  diccionario, así que la salida es válida igual). }
+  candidatos falsos, más rápido); con el óptimo, la más densa: con un diccionario de hasta
+  32 MB (small: los bloques de 4x4) las de posiciones de 24 bits (4 bytes por entrada; la
+  posición módulo 2^24: una entrada más vieja que 2^24 posiciones parece más nueva, pero todo
+  candidato se verifica contra la ventana y la distancia no pasa del diccionario, así que la
+  salida es válida igual; solo se pierden matches a más de 16 MB), si no las de 32 bits. }
 function RfShapeForAlgo(mc: LongWord; algo: Integer; small: Boolean): LongWord;
 begin
-  if GetEnvironmentVariable('RFS') <> '' then Exit(StrToInt(GetEnvironmentVariable('RFS')));
   if (algo = 0) and (mc <= 6) then Result := 2
   else if small and (mc <= 4) then Result := 3
+  else if small and (mc <= 8) then Result := 4
   else Result := RfShapeFor(mc);
 end;
 
@@ -557,7 +556,6 @@ begin
   begin
     // 3/4 de la entrada; las formas de 4 bytes por entrada, toda
     if shape in [3, 4] then b := dataSize else b := QWord(dataSize) * 3 div 4;
-    if GetEnvironmentVariable('RFB') <> '' then b := QWord(dataSize) * StrToInt(GetEnvironmentVariable('RFB')) div 16;
   end;
   r := b div bytes;
   if r < kRfMinRows then r := kRfMinRows;
@@ -3670,29 +3668,22 @@ begin
   Result := Backward(cur);
 end;
 
-var
-  TunCP: LongWord = 5; TunT2: LongWord = $80; TunT3: LongWord = 2048; TunT4: LongWord = 65536; TunT5: LongWord = $FFFFFFFF;
-  TunR2: LongWord = 1 shl 9; TunR3: LongWord = 1 shl 15; TunR4: LongWord = 16384;
+{ Umbrales propios de GetOptimumFast (medidos en binarios y texto; el SDK: >> 7, solo el
+  match de 2 a distancia >= 128 y los reps de L + 2 / L + 3). }
+const
+  kFastCP = 5;                  // ChangePair: bigDist >> 5 > smallDist
+  kFastLit3 = 2048;             // match de 3 a esta distancia o más: literal
+  kFastLit4 = 65536;            // match de 4 a esta distancia o más: literal
+  kFastRep4 = 16384;            // rep de L contra match de L + 4 a esta distancia o más: rep
 
-procedure LoadTun;
-  procedure G(const n: string; var v: LongWord);
-  var s: string;
-  begin
-    s := GetEnvironmentVariable(n);
-    if s <> '' then v := StrToInt64(s);
-  end;
-begin
-  G('TCP', TunCP); G('TT2', TunT2); G('TT3', TunT3); G('TT4', TunT4); G('TT5', TunT5);
-  G('TR2', TunR2); G('TR3', TunR3); G('TR4', TunR4);
-end;
-
-{ ChangePair del SDK: bigDist es mucho más lejana que smallDist (más de 128 veces). }
+{ ChangePair: bigDist es mucho más lejana que smallDist (más de 32 veces; el SDK, 128). }
 function ChangePair(smallDist, bigDist: LongWord): Boolean; inline;
 begin
-  Result := (bigDist shr TunCP) > smallDist;
+  Result := (bigDist shr kFastCP) > smallDist;
 end;
 
-{ GetOptimumFast: port directo de LzmaEnc.c del SDK 26.03 (dominio público). }
+{ GetOptimumFast: port de LzmaEnc.c del SDK 26.03 (dominio público) con los umbrales de
+  arriba. }
 function TLzmaEnc.GetOptimumFast: LongWord;
 var
   numAvail, mainDist, mainLen, numPairs, repIndex, repLen, i, len, limit, len1, newDist,
@@ -3752,17 +3743,16 @@ begin
       Dec(mainLen);
       mainDist := dist2;
     end;
-    if (mainLen = 2) and (mainDist >= TunT2) then mainLen := 1
-    else if (mainLen = 3) and (mainDist >= TunT3) then mainLen := 1
-    else if (mainLen = 4) and (mainDist >= TunT4) then mainLen := 1
-    else if (mainLen = 5) and (mainDist >= TunT5) then mainLen := 1;
+    if (mainLen = 2) and (mainDist >= $80) then mainLen := 1
+    else if (mainLen = 3) and (mainDist >= kFastLit3) then mainLen := 1
+    else if (mainLen = 4) and (mainDist >= kFastLit4) then mainLen := 1;
   end;
 
   if repLen >= 2 then
     if (repLen + 1 >= mainLen)
-      or ((repLen + 2 >= mainLen) and (mainDist >= TunR2))
-      or ((repLen + 3 >= mainLen) and (mainDist >= TunR3))
-      or ((repLen + 4 >= mainLen) and (mainDist >= TunR4)) then
+      or ((repLen + 2 >= mainLen) and (mainDist >= (1 shl 9)))
+      or ((repLen + 3 >= mainLen) and (mainDist >= (1 shl 15)))
+      or ((repLen + 4 >= mainLen) and (mainDist >= kFastRep4)) then
     begin
       FBackRes := repIndex;
       MovePos(repLen - 1);
@@ -4056,7 +4046,7 @@ begin
   begin
     if mc > kRfMaxCap then mc := kRfMaxCap;
     mf.rowsBudget := P.HashSize;
-    mf.rowShape := RfShapeForAlgo(mc, P.Algorithm, d <= (1 shl 24));
+    mf.rowShape := RfShapeForAlgo(mc, P.Algorithm, d <= (32 shl 20));
   end;
   mf.cutValue := mc;
 
@@ -4441,7 +4431,7 @@ begin
     mc := P.MatchFinderCycles;
     if mc = 0 then mc := LzmaDefaultCycles(P.MatchFinder, P.NumFastBytes);
     if mc > kRfMaxCap then mc := kRfMaxCap;
-    RfLayout(LongWord(d), P.HashSize, RfShapeForAlgo(LongWord(mc), P.Algorithm, False), cap, rb, nr);
+    RfLayout(LongWord(d), P.HashSize, RfShapeForAlgo(LongWord(mc), P.Algorithm, d <= (32 shl 20)), cap, rb, nr);
     Hash := 4 * kFix4HashSize + QWord(nr) * rb + 64;
   end
   else
@@ -4962,6 +4952,4 @@ begin
   end;
 end;
 
-initialization
-  LoadTun;
 end.

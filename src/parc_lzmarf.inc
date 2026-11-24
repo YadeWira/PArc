@@ -65,7 +65,8 @@ begin
       {$ENDIF}
       if i >= RF_CAP then Dec(i, RF_CAP);
       {$IF RF_PB = 3}
-      delta := LongWord(pos - PLongWord(row + RF_TA + 3 * i)^) and $FFFFFF;
+      // (leída desde el byte anterior: no pasa del final de la fila ni de la línea de caché)
+      delta := LongWord(pos - (PLongWord(row + RF_TA - 1 + 3 * i)^ shr 8)) and $FFFFFF;
       if LongWord(delta - 1) >= LongWord(mmm - 1) then Break;
       {$ELSE}
       delta := LongWord(pos - e[i]);
