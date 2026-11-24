@@ -1698,6 +1698,7 @@ bash tests/ppmd.sh                # PPMd: ida y vuelta, streams dañados y bit a
 bash tests/ppmd_asm.sh            # PPMd: ensamblador == Pascal (-dPARC_NOASM)
 bash tests/orep.sh                # OREP: etapas, parámetros, 1..8 hilos, C == Pascal (-dOREP_NO_NATIVE), dañados
 bash tests/plz.sh                 # plz: niveles, ventanas, streaming == memoria, asm == Pascal, dañados
+bash tests/4x4.sh                 # 4x4: inner plz/lz4/lzma/ppmd, 1/4/8 hilos, ruido guardado, dañados
 bash tests/plz_cross.sh           # plz: mismos bytes en linux64/linux32/linuxarm64 (QEMU)/win64/win32 (Wine)
 bash tests/delta.sh               # delta: tablas sintéticas de cada formato, trozos al azar, asm == Pascal, dañados
 bash tests/lzp.sh                 # lzp: parámetros de los presets y extremos, trozos al azar, dañados

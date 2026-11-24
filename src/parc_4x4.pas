@@ -116,6 +116,8 @@ const
   EST_WINDOW = 1 shl 20;        // match distance of the estimate
   GEAR_SHIFT = 55;              // anchors: about one every 2^(64-GEAR_SHIFT) bytes
   MB = 1 shl 20;
+  PLZ_CACHE_MAX = 2 * MB;        // encoder: blocks up to this size reuse plz engines
+  RECYCLE_MAX = 4 * MB;          // decoder: records up to this size keep their buffers for the next
 
   IK_OTHER = 0;
   IK_LZMA = 1;
@@ -585,9 +587,13 @@ begin
   if InnerKindOf(AInner) in [IK_PLZ, IK_LZ4] then FNoise := 2;
   FHint := AHint;
   Threads := PoolWorkers(FX_MAXTHREADS);
-  if Threads > 0 then SetLength(FQueue, Threads + 1) else SetLength(FQueue, 1);
+  // one job per thread: the block being filled is the extra one
+  if Threads > 0 then SetLength(FQueue, Threads) else SetLength(FQueue, 1);
   FPool := TJobPool.Create(Threads, FX_MAXTHREADS + 1);
-  if InnerKindOf(FInner) = IK_PLZ then FPlzCache := TPlzEncCache.Create;
+  // plz engines reused between blocks: their tables cost more time than the compression of a
+  // small block; with big blocks each job allocates its own (a cache would keep one engine for
+  // every block size it saw, the tail blocks included)
+  if (InnerKindOf(FInner) = IK_PLZ) and (FBlockSize <= PLZ_CACHE_MAX) then FPlzCache := TPlzEncCache.Create;
   FTarget := 0;
 end;
 
@@ -675,7 +681,7 @@ begin
         end;
     end;
     // the input buffer goes back for the next blocks (no new pages to fault in)
-    if (Length(Job.InBuf) >= FTarget) and (FNumFree < Length(FQueue)) then
+    if (Length(Job.InBuf) >= FTarget) and (FNumFree < 1) then
     begin
       if FNumFree = Length(FFree) then SetLength(FFree, FNumFree + 4);
       FFree[FNumFree] := Job.InBuf;
@@ -697,7 +703,9 @@ begin
   if FCount = Length(FQueue) then
   begin
     // every job of the queue is running: one thread more if the budget has a token for it
-    if (FPool.MaxWorkers > 0) and (Length(FQueue) <= FX_MAXTHREADS) and FPool.CanGrow(FX_MAXTHREADS) then
+    // (not past the budget: each queued job holds a block)
+    if (FPool.MaxWorkers > 0) and (Length(FQueue) <= Min(FX_MAXTHREADS, BudgetThreads)) and
+       FPool.CanGrow(FX_MAXTHREADS) then
     begin
       SetLength(Q, Length(FQueue) + 1);
       for i := 0 to FCount - 1 do Q[i] := FQueue[(FHead + i) mod Length(FQueue)];
@@ -749,7 +757,11 @@ begin
         Dec(FNumFree);
         FCur := FFree[FNumFree];
         FFree[FNumFree] := nil;
-      end;
+      end
+      else if FIn > 0 then
+        // not the first block: more data is coming, the whole block at once (growing it
+        // step by step copies it and leaves the heap fragmented)
+        SetLength(FCur, FTarget);
     end;
     Cap := Length(FCur);
     if Cap < FTarget then
@@ -804,7 +816,7 @@ type
     PackLen: SizeInt;
     Segs: array of SizeInt;
     NSegs: Integer;
-    Tmp: TBytes;
+    DataLen: SizeInt;           // PackLen + the stored bytes
     procedure Unpack(Dst: PByte; DstLen: SizeInt);
     procedure Process; override;
   end;
@@ -860,8 +872,11 @@ begin
   if Kind = REC_PACKED then
   begin
     Unpack(@OutBuf[0], OutSize);
+    if OutSize > RECYCLE_MAX then Data := nil;   // not needed any more (see ReleaseJob)
     Exit;
   end;
+  // the packed segments decode joined at the start of OutBuf; then, from the last segment
+  // back, each one moves to its place (never to the left) and the stored ones are copied in
   GLen := 0;
   j := 0;
   while j < NSegs do
@@ -869,38 +884,34 @@ begin
     Inc(GLen, Segs[j]);
     Inc(j, 2);
   end;
-  if SizeInt(Length(Tmp)) < GLen then
+  Unpack(@OutBuf[0], GLen);
+  Off := OutSize;
+  GOff := GLen;
+  SOff := DataLen;
+  for j := NSegs - 1 downto 0 do
   begin
-    Tmp := nil;
-    SetLength(Tmp, GLen);
-  end;
-  Unpack(@Tmp[0], GLen);
-  Off := 0;
-  GOff := 0;
-  SOff := PackLen;
-  for j := 0 to NSegs - 1 do
-  begin
+    Dec(Off, Segs[j]);
     if Odd(j) then
     begin
+      Dec(SOff, Segs[j]);
       Move(Data[SOff], OutBuf[Off], Segs[j]);
-      Inc(SOff, Segs[j]);
     end
     else
     begin
-      Move(Tmp[GOff], OutBuf[Off], Segs[j]);
-      Inc(GOff, Segs[j]);
+      Dec(GOff, Segs[j]);
+      if GOff <> Off then Move(OutBuf[GOff], OutBuf[Off], Segs[j]);
     end;
-    Inc(Off, Segs[j]);
   end;
+  if OutSize > RECYCLE_MAX then Data := nil;
 end;
 
 constructor T4x4DecStage.Create(ASource: TInStage; const AInner: string);
 var
   lz: TLzmaEncParams;
 begin
-  inherited Create(ASource, FX_MAXTHREADS, 1);
-  // records can be small (the stored noise runs): read ahead by bytes too
-  ReadAheadBytes := 16 * MB;
+  inherited Create(ASource, FX_MAXTHREADS, 0);
+  // records can be small (the stored noise runs): read ahead by bytes too (with threads)
+  if PoolWorkers(FX_MAXTHREADS) > 0 then ReadAheadBytes := 16 * MB;
   FInner := AInner;
   FKind := InnerKindOf(AInner);
   if FKind = IK_LZMA then
@@ -944,7 +955,8 @@ end;
 procedure T4x4DecStage.ReleaseJob(Job: TParallelJob);
 begin
   // packed records keep their buffers for the next ones (stored ones gave theirs away)
-  if (T4x4DecJob(Job).Kind <> REC_STORED) and (FNumFree < QueueCapacity) then
+  // (only small ones: a big buffer kept idle costs more memory than its pages cost time)
+  if (T4x4DecJob(Job).Kind <> REC_STORED) and (Job.OutSize <= RECYCLE_MAX) and (FNumFree < 2) then
   begin
     if FNumFree = Length(FFreeJobs) then SetLength(FFreeJobs, FNumFree + 8);
     FFreeJobs[FNumFree] := Job;
@@ -1032,6 +1044,7 @@ begin
         SetLength(Job.Data, Need);
       end;
       Job.PackLen := PackLen;
+      Job.DataLen := Need;
       Source.ReadExact(@Job.Data[0], Need);
     end;
   except
