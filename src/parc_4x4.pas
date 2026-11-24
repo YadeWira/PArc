@@ -77,6 +77,7 @@ type
     FKind: Integer;
     Flc, Flp, Fpb: Integer;
     FStarted, FEnded: Boolean;
+    FInline: Boolean;                 // no pool threads: jobs run in the reading thread
     FFreeJobs: TJobArray;
     FNumFree: Integer;
     function RdVInt: QWord;
@@ -117,6 +118,7 @@ const
   GEAR_SHIFT = 55;              // anchors: about one every 2^(64-GEAR_SHIFT) bytes
   MB = 1 shl 20;
   PLZ_CACHE_MAX = 2 * MB;        // encoder: blocks up to this size reuse plz engines
+  RECYCLE_OUT_MAX = 16 * MB;     // decoder: jobs of records up to this size are kept for the next
   RECYCLE_MAX = 4 * MB;          // decoder: records up to this size keep their buffers for the next
 
   IK_OTHER = 0;
@@ -812,14 +814,39 @@ type
   public
     Stage: T4x4DecStage;
     Kind: Byte;
-    Data: TBytes;               // packed bytes, then (REC_MIXED) the stored segments
+    Data: PByte;                // packed bytes, then (REC_MIXED) the stored segments; REC_STORED:
+    DataCap: SizeInt;           // the record (not cleared: no zero-fill in the reading thread)
     PackLen: SizeInt;
     Segs: array of SizeInt;
     NSegs: Integer;
     DataLen: SizeInt;           // PackLen + the stored bytes
     procedure Unpack(Dst: PByte; DstLen: SizeInt);
     procedure Process; override;
+    procedure NeedData(N: SizeInt);
+    procedure DropData;
+    destructor Destroy; override;
   end;
+
+procedure T4x4DecJob.NeedData(N: SizeInt);
+begin
+  if DataCap >= N then Exit;
+  DropData;
+  Data := GetMem(N);
+  DataCap := N;
+end;
+
+procedure T4x4DecJob.DropData;
+begin
+  if Data <> nil then FreeMem(Data);
+  Data := nil;
+  DataCap := 0;
+end;
+
+destructor T4x4DecJob.Destroy;
+begin
+  DropData;
+  inherited Destroy;
+end;
 
 { The packed bytes into Dst[0..DstLen); zeros and a warning if they do not decode. }
 procedure T4x4DecJob.Unpack(Dst: PByte; DstLen: SizeInt);
@@ -832,19 +859,19 @@ begin
     case Stage.FKind of
       IK_LZMA:
         begin
-          R := LzmaDecodeRaw(@Data[0], PackLen, Dst, DstLen, Stage.Flc, Stage.Flp, Stage.Fpb, W);
+          R := LzmaDecodeRaw(Data, PackLen, Dst, DstLen, Stage.Flc, Stage.Flp, Stage.Fpb, W);
           if (R = lzDataError) or (R = lzBadProps) or (W <> DstLen) then
             Corrupt('4x4: lzma record does not decode');
         end;
       IK_PLZ:
-        if not PlzDecodeMem(@Data[0], PackLen, Dst, DstLen) then
+        if not PlzDecodeMem(Data, PackLen, Dst, DstLen) then
           Corrupt('4x4: plz record does not decode');
       IK_LZ4:
-        if not Lz4DecodeMem(@Data[0], PackLen, Dst, DstLen) then
+        if not Lz4DecodeMem(Data, PackLen, Dst, DstLen) then
           Corrupt('4x4: lz4 record does not decode');
     else
       begin
-        T := DecompressMem(Stage.FInner, @Data[0], PackLen, DstLen);
+        T := DecompressMem(Stage.FInner, Data, PackLen, DstLen);
         Move(T[0], Dst^, DstLen);
       end;
     end;
@@ -863,16 +890,22 @@ var
   j: Integer;
   GLen, Off, GOff, SOff: SizeInt;
 begin
-  if Kind = REC_STORED then Exit;     // ReadJob already put the bytes in OutBuf
   if SizeInt(Length(OutBuf)) < OutSize then
   begin
     OutBuf := nil;
     SetLength(OutBuf, OutSize);
   end;
+  if Kind = REC_END then Exit;   // read straight into OutBuf
+  if Kind = REC_STORED then
+  begin
+    Move(Data^, OutBuf[0], OutSize);
+    if OutSize > RECYCLE_MAX then DropData;
+    Exit;
+  end;
   if Kind = REC_PACKED then
   begin
     Unpack(@OutBuf[0], OutSize);
-    if OutSize > RECYCLE_MAX then Data := nil;   // not needed any more (see ReleaseJob)
+    if OutSize > RECYCLE_MAX then DropData;   // not needed any more (see ReleaseJob)
     Exit;
   end;
   // the packed segments decode joined at the start of OutBuf; then, from the last segment
@@ -902,7 +935,7 @@ begin
       if GOff <> Off then Move(OutBuf[GOff], OutBuf[Off], Segs[j]);
     end;
   end;
-  if OutSize > RECYCLE_MAX then Data := nil;
+  if OutSize > RECYCLE_MAX then DropData;
 end;
 
 constructor T4x4DecStage.Create(ASource: TInStage; const AInner: string);
@@ -911,7 +944,8 @@ var
 begin
   inherited Create(ASource, FX_MAXTHREADS, 0);
   // records can be small (the stored noise runs): read ahead by bytes too (with threads)
-  if PoolWorkers(FX_MAXTHREADS) > 0 then ReadAheadBytes := 16 * MB;
+  FInline := PoolWorkers(FX_MAXTHREADS) = 0;
+  if not FInline then ReadAheadBytes := 16 * MB;
   FInner := AInner;
   FKind := InnerKindOf(AInner);
   if FKind = IK_LZMA then
@@ -954,9 +988,9 @@ end;
 
 procedure T4x4DecStage.ReleaseJob(Job: TParallelJob);
 begin
-  // packed records keep their buffers for the next ones (stored ones gave theirs away)
+  // jobs keep their buffers for the next records
   // (only small ones: a big buffer kept idle costs more memory than its pages cost time)
-  if (T4x4DecJob(Job).Kind <> REC_STORED) and (Job.OutSize <= RECYCLE_MAX) and (FNumFree < 2) then
+  if (Job.OutSize <= RECYCLE_OUT_MAX) and (FNumFree < 2) then
   begin
     if FNumFree = Length(FFreeJobs) then SetLength(FFreeJobs, FNumFree + 8);
     FFreeJobs[FNumFree] := Job;
@@ -1007,11 +1041,21 @@ begin
     Job.Kind := b;
     Job.OutSize := RawLen;
     Job.NSegs := 0;
-    if b = REC_STORED then
+    if (b = REC_STORED) and FInline then
     begin
-      Job.OutBuf := nil;
-      SetLength(Job.OutBuf, RawLen);
+      // one thread: straight to the output (no copy to keep in memory)
+      if SizeInt(Length(Job.OutBuf)) < SizeInt(RawLen) then
+      begin
+        Job.OutBuf := nil;
+        SetLength(Job.OutBuf, RawLen);
+      end;
       Source.ReadExact(@Job.OutBuf[0], RawLen);
+      Job.Kind := REC_END;     // (nothing left for Process)
+    end
+    else if b = REC_STORED then
+    begin
+      Job.NeedData(RawLen);
+      Source.ReadExact(Job.Data, RawLen);
     end
     else
     begin
@@ -1038,14 +1082,10 @@ begin
       PackLen := RdVInt;
       if (PackLen = 0) or (PackLen >= GSum) then Corrupt('4x4: invalid record size');
       Need := PackLen + Sum;
-      if SizeInt(Length(Job.Data)) < SizeInt(Need) then
-      begin
-        Job.Data := nil;
-        SetLength(Job.Data, Need);
-      end;
+      Job.NeedData(Need);
       Job.PackLen := PackLen;
       Job.DataLen := Need;
-      Source.ReadExact(@Job.Data[0], Need);
+      Source.ReadExact(Job.Data, Need);
     end;
   except
     Job.Free;
