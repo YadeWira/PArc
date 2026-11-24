@@ -367,9 +367,12 @@ const
     'lzma:4mb:normal:ht4:mc12:h64kb',
     'lzma:4mb:fast:ht4:mc9:h1mb'
   );
-  QuickMethods: array[0..5] of string = (
+  // (las 5 formas de fila de ht4: fast mc6, normal mc4/mc8 con diccionario chico, normal
+  // mc6/mc12 con diccionario grande)
+  QuickMethods: array[0..10] of string = (
     'lzma:64kb:normal:bt4', 'lzma:64kb:fast:hc4', 'lzma:1mb:max', 'lzma:1mb:bt3:lc0:lp2:pb0', 'lzma:64mb:fastest',
-    'lzma:64kb:ht4:mc100000');
+    'lzma:64kb:ht4:mc100000', 'lzma:64mb:fast:32:mc6:lc4', 'lzma:16mb:normal:16:mc4:lc4',
+    'lzma:24mb:normal:20:mc6:lc5:pb1', 'lzma:64mb:normal:mc6', 'lzma:64mb:normal:16:mc12');
 
 procedure RunSet(const Name: string; const Data: TBytes; const OrigPath: string);
 var

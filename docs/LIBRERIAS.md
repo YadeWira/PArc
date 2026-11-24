@@ -12,7 +12,7 @@ document records where each one comes from, what it was verified against, and wh
 
 | Component | In FreeArc 0.67 | Ported version | Notes |
 |---|---|---|---|
-| LZMA SDK (`Compression/LZMA2/C`) | 2009-02 | 26.x | The LZMA stream and x86 BCJ do not change; the new encoder produces valid bytes, not identical ones. `GetOptimumFast` keeps FreeArc's additions (length/distance pruning and relaxed rep-matches) |
+| LZMA SDK (`Compression/LZMA2/C`) | 2009-02 | 26.x | The LZMA stream and x86 BCJ do not change; the new encoder produces valid bytes, not identical ones. Since 2026-11 the encoder has no FreeArc code: SDK 26.03 (public domain) plus PArc's own `ht4` row finder, `:fast` thresholds and method-string parser (FORMATO-PARC.md §6.11) |
 | LZ4 (`Compression/LZ4`) | 2011-2012 | 1.11.1 (BSD-2) | Since 2026-11 the `lz4` stream is a standard LZ4 Frame (readable by the `lz4` tool), no longer FreeArc's framing. 1.11 adds the "position after the previous ip-1" candidate to the fast compressor (0.2-2% smaller, same speed); HC level 9 is unchanged |
 | PPMd (D. Shkarin, modified by FreeArc) | var. H/I | LZMA SDK `Ppmd8` (var.I rev.1, public domain) | Since 2026-11 `ppmd` is a new port of the LZMA SDK's PPMd8 (no FreeArc code; streams are not compatible with the old ones). Bit-identical to the SDK's C; same ratio as FreeArc's var.I with restart |
 | SREP | 3.93 beta (2013) | 3.93a beta (2014-10-11) | freeware by Bulat Ziganshin; v1–v4 format |
@@ -34,7 +34,7 @@ document records where each one comes from, what it was verified against, and wh
 | Component | Ported from | Verification |
 |---|---|---|
 | LZMA (decompression) | reference specification (LzmaSpec) | streams generated with Python and the SDK; `tests/run_lzma_tests.py` |
-| LZMA (compression) | LZMA SDK 26.03 + FreeArc's `fast` additions | valid streams verified with liblzma (`tests/run_lzma_tests.py`) and round-trip in `.parc` |
+| LZMA (compression) | LZMA SDK 26.03 (`LzmaEnc.c`, `LzFind.c`, `LzFindMt.c`; Igor Pavlov, public domain) + own code: the `ht4` match finder (rows of tagged positions, SWAR tag match; `src/parc_lzmarf.inc`), the `:fast` parser thresholds, the default cycles for `ht4` and the method-string parser; nothing from FreeArc | `tests/lzma_enc.sh`: `test_lzmaenc` (round trips, LzmaEncodeMem, invalid parameters, thread budget, multi-thread == one thread for `bt4` and `ht4` also with position normalization), the streams decode with liblzma, assembler == `-dPARC_NOASM`, round trips through `parc` for every `ht4` row shape, same archive twice and with 1/4 threads, damaged archives; `tests/lzma_cross.sh`: identical streams on linux64, linux32, linuxarm64 (QEMU), win64 and win32 (Wine) |
 | x86 BCJ (`exe`) | LZMA SDK 26.03 | against compiled `Bra86.c`, with buffer splits (`tests/bcj.sh`) |
 | LZ4 (decompression) | LZ4 Frame spec + block semantics of `LZ4_decompress_safe` (own code); linked blocks, block/content checksums and content size are read | `tests/lz4frame.sh`: PArc ↔ `lz4` tool both ways, damaged and cut frames |
 | LZ4 (compression) | LZ4 1.11.1 (`LZ4_compress_default` and `LZ4_compress_HC` level 9), BSD-2 notice kept in `parc_lz4enc.pas`; frame with independent blocks, no checksums | block bytes identical to LZ4 1.11.1 in C (`LZ4_LIB_DIR=... tests/lz4frame.sh`) |
