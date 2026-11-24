@@ -11,8 +11,6 @@
 # Entre N distintos la salida PUEDE cambiar, y es legítimo:
 #  - los presets eligen alternativas "a|b||c" según los hilos (DecodeMethod(.., BudgetThreads),
 #    como -mtN de FreeArc): -m1..-m5 usan otros métodos con N=1, N=2 y N>=3;
-#  - lzma ht4 :normal/:max usa con 1 hilo la lista de matches de FreeArc -mt1 y con 2 o más la
-#    del multihilo (más chica), como FreeArc;
 #  - en -m1..-m4 (4x4 con método interno rápido y sin :b explícito) el tamaño de bloque de 4x4
 #    sale de los datos y de N (Adaptive4x4Block: al menos 3 bloques por hilo);
 #  - el límite de memoria de compresión (-lc, o 75 % de la RAM; en 32 bits <= 2,25 GB) achica
@@ -98,19 +96,18 @@ for L in $LEVELS; do
   echo "  info -m$L: iguales entre N:${info:- ninguno}"
 done
 
-# Métodos explícitos (sin presets): la salida no depende de N, salvo lzma ht4 :normal/:max
-# (1 hilo contra 2 o más). Bloques chicos para que 4x4 reparta muchos trabajos entre hilos y
+# Métodos explícitos (sin presets): la salida no depende de N (también lzma ht4 :normal, que
+# desde 2026-11-23 da el mismo stream con 1, 2 o 3 hilos). Bloques chicos para que 4x4 reparta muchos trabajos entre hilos y
 # reuse motores de plz (TPlzEncCache) en el orden que salga.
 for m in "4x4:plz:1:256kb" "4x4:plz:3:256kb" "4x4:plz:5:256kb" "orep:16mb+4x4:lzma:1mb:normal" \
          "orep:8mb:l512:s16+exe+delta+lzma:8mb:max" "lzma:16mb:max:bt4" "4x4:b512kb:grzip:m1" \
-         "dict+lzp+ppmd:6" "lzma:16mb:normal:ht4"; do
+         "dict+lzp+ppmd:6" "lzma:16mb:normal:ht4" "lzma:64mb:normal:mc12" "lzma:24mb:normal:mc6"; do
   ref=""; hs=""; diff=0
   for T in $THREADS; do
     rm -f x.parc
     PARC_THREADS=$T "$PARC" a -m"$m" x.parc d --no-progress >log 2>&1; rc=$?
     if [ $rc -ne 0 ]; then bad "-m$m N=$T: rc=$rc: $(tail -1 log)"; diff=2; break; fi
     h=$(md5sum < x.parc | cut -c1-32)
-    case "$m:$T" in *ht4:1) hs="$hs $T:aparte"; continue ;; esac   # lista de -mt1
     [ -z "$ref" ] && ref=$h
     [ "$h" != "$ref" ] && diff=1
     hs="$hs $T:${h:0:8}"
