@@ -422,6 +422,7 @@ type
     Segs: array of SizeInt;     // REC_MIXED: lengths, packed and stored alternating
     NSegs: Integer;
     Data: TBytes;               // REC_PACKED/REC_MIXED: the packed bytes
+    Stored: TBytes;             // REC_MIXED: the stored segments, if taken out of InBuf
     function Pack(Src: PByte; Len: SizeInt; out D: TBytes): Boolean;
     procedure FindNoise(var Runs: TNoiseRuns; out NR: Integer);
     procedure Process; override;
@@ -526,8 +527,9 @@ var
   Runs: TNoiseRuns;
   NR, k: Integer;
   G: TBytes;
-  GLen, Pos0: SizeInt;
+  GLen, SLen, Pos0: SizeInt;
   Grant: Integer;
+  ok: Boolean;
 begin
   // the blocks are already spread over the threads: one thread for the inner method
   Grant := LzmaEncThreadGrant;
@@ -542,28 +544,86 @@ begin
       Exit;
     end;
     // the bytes between the noise runs are packed together (they keep their common context)
-    // and the runs are stored after them
+    // and the runs are stored after them. The smaller of the two parts is copied aside: the
+    // packed part to G, or the runs to Stored (then the packed part is moved to the front of
+    // InBuf, which the runs no longer need)
     SetLength(Segs, 2 * NR + 1);
-    SetLength(G, InLen);
-    GLen := 0;
     Pos0 := 0;
+    SLen := 0;
     for k := 0 to NR - 1 do
     begin
       Segs[NSegs] := Runs[k].Lo - Pos0;
       Segs[NSegs + 1] := Runs[k].Hi - Runs[k].Lo;
       Inc(NSegs, 2);
-      Move(InBuf[Pos0], G[GLen], Runs[k].Lo - Pos0);
-      Inc(GLen, Runs[k].Lo - Pos0);
+      Inc(SLen, Runs[k].Hi - Runs[k].Lo);
       Pos0 := Runs[k].Hi;
     end;
     if Pos0 < InLen then
     begin
       Segs[NSegs] := InLen - Pos0;
       Inc(NSegs);
-      Move(InBuf[Pos0], G[GLen], InLen - Pos0);
-      Inc(GLen, InLen - Pos0);
     end;
-    if (GLen > 0) and Pack(@G[0], GLen, Data) then RecKind := REC_MIXED
+    GLen := InLen - SLen;
+    if GLen <= SLen then
+    begin
+      SetLength(G, GLen);
+      GLen := 0;
+      Pos0 := 0;
+      for k := 0 to NSegs - 1 do
+      begin
+        if not Odd(k) then
+        begin
+          Move(InBuf[Pos0], G[GLen], Segs[k]);
+          Inc(GLen, Segs[k]);
+        end;
+        Inc(Pos0, Segs[k]);
+      end;
+      ok := (GLen > 0) and Pack(@G[0], GLen, Data);
+      G := nil;
+    end
+    else
+    begin
+      SetLength(Stored, SLen);
+      SLen := 0;
+      GLen := 0;
+      Pos0 := 0;
+      for k := 0 to NSegs - 1 do
+      begin
+        if Odd(k) then
+        begin
+          Move(InBuf[Pos0], Stored[SLen], Segs[k]);
+          Inc(SLen, Segs[k]);
+        end
+        else
+        begin
+          if GLen <> Pos0 then Move(InBuf[Pos0], InBuf[GLen], Segs[k]);
+          Inc(GLen, Segs[k]);
+        end;
+        Inc(Pos0, Segs[k]);
+      end;
+      ok := Pack(@InBuf[0], GLen, Data);
+      if not ok then
+      begin
+        // back to the original order for a stored record
+        Pos0 := InLen;
+        for k := NSegs - 1 downto 0 do
+        begin
+          Dec(Pos0, Segs[k]);
+          if Odd(k) then
+          begin
+            Dec(SLen, Segs[k]);
+            Move(Stored[SLen], InBuf[Pos0], Segs[k]);
+          end
+          else
+          begin
+            Dec(GLen, Segs[k]);
+            if GLen <> Pos0 then Move(InBuf[GLen], InBuf[Pos0], Segs[k]);
+          end;
+        end;
+        Stored := nil;
+      end;
+    end;
+    if ok then RecKind := REC_MIXED
     else
     begin
       RecKind := REC_STORED;
@@ -674,11 +734,15 @@ begin
           PutVInt(H, n, Length(Job.Data));
           Emit(@H[0], n);
           Emit(@Job.Data[0], Length(Job.Data));
-          Off := 0;
-          for j := 0 to Job.NSegs - 1 do
+          if Job.Stored <> nil then Emit(@Job.Stored[0], Length(Job.Stored))
+          else
           begin
-            if Odd(j) then Emit(@Job.InBuf[Off], Job.Segs[j]);
-            Inc(Off, Job.Segs[j]);
+            Off := 0;
+            for j := 0 to Job.NSegs - 1 do
+            begin
+              if Odd(j) then Emit(@Job.InBuf[Off], Job.Segs[j]);
+              Inc(Off, Job.Segs[j]);
+            end;
           end;
         end;
     end;
