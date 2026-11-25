@@ -78,9 +78,11 @@ type
     Flc, Flp, Fpb: Integer;
     FStarted, FEnded: Boolean;
     FInline: Boolean;                 // no pool threads: jobs run in the reading thread
+    FStoredAhead: Int64;              // stored bytes of the records read and not delivered
     FFreeJobs: TJobArray;
     FNumFree: Integer;
     function RdVInt: QWord;
+    procedure SetReadAhead;
   protected
     function ReadJob: TParallelJob; override;
     procedure ReleaseJob(Job: TParallelJob); override;
@@ -890,6 +892,7 @@ type
     Segs: array of SizeInt;
     NSegs: Integer;
     DataLen: SizeInt;           // PackLen + the stored bytes
+    StoredBytes: Int64;         // stored bytes of the record (read-ahead accounting)
     procedure Unpack(Dst: PByte; DstLen: SizeInt);
     procedure Process; override;
     procedure NeedData(N: SizeInt);
@@ -1015,7 +1018,7 @@ begin
   inherited Create(ASource, FX_MAXTHREADS, 0);
   // records can be small (the stored noise runs): read ahead by bytes too (with threads)
   FInline := PoolWorkers(FX_MAXTHREADS) = 0;
-  if not FInline then ReadAheadBytes := 16 * MB;
+  SetReadAhead;
   FInner := AInner;
   FKind := InnerKindOf(AInner);
   if FKind = IK_LZMA then
@@ -1058,6 +1061,8 @@ end;
 
 procedure T4x4DecStage.ReleaseJob(Job: TParallelJob);
 begin
+  Dec(FStoredAhead, T4x4DecJob(Job).StoredBytes);
+  SetReadAhead;
   // jobs keep their buffers for the next records
   // (only small ones: a big buffer kept idle costs more memory than its pages cost time)
   if (Job.OutSize <= RECYCLE_OUT_MAX) and (FNumFree < 2) then
@@ -1111,9 +1116,11 @@ begin
     Job.Kind := b;
     Job.OutSize := RawLen;
     Job.NSegs := 0;
-    if (b = REC_STORED) and FInline then
+    Job.StoredBytes := 0;
+    if b = REC_STORED then
     begin
-      // one thread: straight to the output (no copy to keep in memory)
+      // straight to the output (no second copy in memory)
+      Job.StoredBytes := RawLen;
       if SizeInt(Length(Job.OutBuf)) < SizeInt(RawLen) then
       begin
         Job.OutBuf := nil;
@@ -1121,11 +1128,6 @@ begin
       end;
       Source.ReadExact(@Job.OutBuf[0], RawLen);
       Job.Kind := REC_END;     // (nothing left for Process)
-    end
-    else if b = REC_STORED then
-    begin
-      Job.NeedData(RawLen);
-      Source.ReadExact(Job.Data, RawLen);
     end
     else
     begin
@@ -1148,6 +1150,7 @@ begin
         if (Sum <> RawLen) or (GSum = 0) then Corrupt('4x4: invalid record');
         Job.NSegs := NS;
         Sum := RawLen - GSum;    // stored bytes after the packed ones
+        Job.StoredBytes := Sum;
       end;
       PackLen := RdVInt;
       if (PackLen = 0) or (PackLen >= GSum) then Corrupt('4x4: invalid record size');
@@ -1161,7 +1164,17 @@ begin
     Job.Free;
     raise;
   end;
+  Inc(FStoredAhead, Job.StoredBytes);
+  SetReadAhead;
   Result := Job;
+end;
+
+{ Read-ahead in bytes: 16 MB of records to decode, not counting their stored bytes (they cost
+  nothing to decode, and records that are mostly stored would leave the threads waiting for the
+  next slow one). }
+procedure T4x4DecStage.SetReadAhead;
+begin
+  if not FInline then ReadAheadBytes := 16 * MB + FStoredAhead;
 end;
 
 initialization
