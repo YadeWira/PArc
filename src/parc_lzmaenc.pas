@@ -555,7 +555,8 @@ begin
   if b = 0 then
   begin
     // 3/4 de la entrada; las formas de 4 bytes por entrada, toda
-    if shape in [3, 4] then b := dataSize else b := QWord(dataSize) * 3 div 4;
+    if (shape in [3, 4]) or ((shape in [0, 1]) and (dataSize <= (32 shl 20))) then b := dataSize
+    else b := QWord(dataSize) * 3 div 4;
   end;
   r := b div bytes;
   if r < kRfMinRows then r := kRfMinRows;
@@ -4046,7 +4047,7 @@ begin
   begin
     if mc > kRfMaxCap then mc := kRfMaxCap;
     mf.rowsBudget := P.HashSize;
-    mf.rowShape := RfShapeForAlgo(mc, P.Algorithm, d <= (32 shl 20));
+    mf.rowShape := RfShapeForAlgo(mc, P.Algorithm, d <= (16 shl 20));
   end;
   mf.cutValue := mc;
 
@@ -4431,7 +4432,7 @@ begin
     mc := P.MatchFinderCycles;
     if mc = 0 then mc := LzmaDefaultCycles(P.MatchFinder, P.NumFastBytes);
     if mc > kRfMaxCap then mc := kRfMaxCap;
-    RfLayout(LongWord(d), P.HashSize, RfShapeForAlgo(LongWord(mc), P.Algorithm, d <= (32 shl 20)), cap, rb, nr);
+    RfLayout(LongWord(d), P.HashSize, RfShapeForAlgo(LongWord(mc), P.Algorithm, d <= (16 shl 20)), cap, rb, nr);
     Hash := 4 * kFix4HashSize + QWord(nr) * rb + 64;
   end
   else
