@@ -530,7 +530,7 @@ end;
 
 { Forma de fila para un stream: con el parser rápido (:fast) las etiquetas de 8 bits (menos
   candidatos falsos, más rápido); con el óptimo, la más densa: con un diccionario de hasta
-  32 MB (small: los bloques de 4x4) las de posiciones de 24 bits (4 bytes por entrada; la
+  16 MB (small: los bloques de 4x4 de -m3) las de posiciones de 24 bits (4 bytes por entrada; la
   posición módulo 2^24: una entrada más vieja que 2^24 posiciones parece más nueva, pero todo
   candidato se verifica contra la ventana y la distancia no pasa del diccionario, así que la
   salida es válida igual; solo se pierden matches a más de 16 MB), si no las de 32 bits. }

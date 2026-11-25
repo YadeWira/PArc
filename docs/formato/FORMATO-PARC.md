@@ -772,7 +772,7 @@ replaced. Method string, parsed in order, case-insensitive (`*...` is ignored):
 | `fb<n>`, `mc<n>`, `lc<n>` (0..8), `lp<n>` (0..4), `pb<n>` (0..4), `a<n>` | fast bytes, cycles, literal/position contexts, algorithm (0 = fast parser, ≥ 1 = optimal) |
 | `bt2`, `bt3`, `bt4`, `hc4`, `ht4`, `mf=<finder>` | match finder |
 | `fastest` / `fast` / `normal` / `max` / `ultra` | a0 fb5 mc1 / a0 fb32 / a1 fb32 / a1 fb128 / a1 fb128 mc128; `ht4` (`bt4` for max/ultra) if no finder was given yet |
-| `h<size>` | memory for the `ht4` rows (default: 3/4 of the dictionary or of the input; all of it for the 24-bit row shapes) |
+| `h<size>` | memory for the `ht4` rows (default: 3/4 of the dictionary or of the input; all of it for the 24-bit row shapes and dictionaries up to 32 MB) |
 
 `mc` = 0 picks 16 + fb/2 for `bt2`/`bt3`/`bt4`, half of that for `hc4` (the SDK's
 `LzmaEncProps_Normalize`) and 4 + fb/8 for `ht4`. In `ht4`, `mc` is the number of candidates whose
@@ -784,10 +784,10 @@ with a tag of 4, 6 or 8 other hash bits; the tags of a row are compared all at o
 64-bit word (SWAR), rotated so the newest comes first, and only the candidates with the right
 tag read the window; the search stops at the first one out of the window. Row shapes: 32 bytes
 with 7 tags of 4 bits and 32-bit positions; 64 bytes with 14; 32 bytes with 6 tags of 8 bits
-(the `:fast` parser); and, for dictionaries up to 32 MB, 16 bytes with 4 entries and 32 bytes
+(the `:fast` parser); and, for dictionaries up to 16 MB, 16 bytes with 4 entries and 32 bytes
 with 8, 6-bit tags and 24-bit positions (the position modulo 2^24: every candidate is verified
-against the window and the distance never exceeds the dictionary, so the stream is valid; only
-matches farther than 16 MB are lost). Pairs come out in increasing length like `bt4`'s, so the
+against the window and the distance never exceeds the dictionary, so the stream is valid even
+past 2^24 positions; with a dictionary of at most 16 MB no in-window distance is lost). Pairs come out in increasing length like `bt4`'s, so the
 multi-thread finder (a thread searches the rows from length 3, the compressing thread keeps
 the pairs longer than its hash2/hash3 matches) writes the same stream as one thread.
 
