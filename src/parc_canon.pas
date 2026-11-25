@@ -344,6 +344,12 @@ begin
       'dict': Result := CanonDict(Parts, Limit, MemLim);
       'lzp': Result := CanonLzp(Parts, Limit, MemLim);
       'bwt': Result := CanonBwt(Parts, Limit, MemLim);
+      'grzip':
+        begin
+          // the codec bwt replaced: its parameters are read by bwt
+          Parts[0] := 'bwt';
+          Result := CanonBwt(Parts, Limit, MemLim);
+        end;
       'plz': Result := PlzCanon(Parts, Limit, MemLim);   // (rounds its window to 64 KB)
       'lz4': Result := CanonLz4(Parts);
       'tta': Result := CanonTta(Parts);
