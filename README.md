@@ -194,7 +194,8 @@ the code derived from GPL sources; the current inventory:
 | `lzma`, `exe` (BCJ) | LZMA SDK (+ FreeArc's `fast` additions in the encoder) | public domain (the FreeArc additions are GPL-derived) |
 | `lz4` | LZ4 1.11.1 | BSD-2 (notice kept) |
 | `bwt` (block sorting of the text and bitmap presets; replaced GRZip, 2026-11-23) | own code + libsais 2.12.2 (unchanged) + libbsc 3.4.1's QLFC coders (translated to C) | own (MIT-ready) + Apache-2.0 (notices in `src/bwt/`) |
-| `rep`, `4x4`, `dict`, `mm`, `tta`, `srep` | ports of FreeArc 0.67 `Compression/` | GPL-derived, pending rewrite |
+| `4x4` (parallel blocks with an inner method; replaced FreeArc's, 2026-11-23) | own code | own (MIT-ready) |
+| `rep`, `dict`, `mm`, `tta`, `srep` | ports of FreeArc 0.67 `Compression/` | GPL-derived, pending rewrite |
 | `cm` | lpaq1 (Matt Mahoney) | GPL-2.0-derived, pending rewrite |
 
 The FreeArc-derived codec ports come from FreeArc 0.67 sources by Bulat Ziganshin and

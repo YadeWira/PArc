@@ -23,7 +23,7 @@ The rest of the FreeArc 0.67 tree is in git history (commit `82ea8d9`) and in Fr
 | phase | status |
 |---|---|
 | FreeArc/PArc bugs | ✅ closed (the `.arc` parity fixes remain as history; see tag `entrega-arc`) |
-| Ported codecs | ✅ closed (LZMA, LZ4, PPMd, 4x4, Dict, LZP, Delta, MM, TTA, BCJ, SREP; DisPack replaced by an own x86/x64 filter 2026-11-23; Tornado was ported too and removed after 0.0.5, replaced by the own `plz`; REP replaced by OREP, MIT, 2026-11; GRZip replaced by the own `bwt`, 2026-11-23) |
+| Ported codecs | ✅ closed (LZMA, LZ4, PPMd, Dict, LZP, Delta, MM, TTA, BCJ, SREP; DisPack replaced by an own x86/x64 filter 2026-11-23; Tornado was ported too and removed after 0.0.5, replaced by the own `plz`; REP replaced by OREP, MIT, 2026-11; GRZip replaced by the own `bwt`, 2026-11-23; 4x4 replaced by an own stage, 2026-11-23) |
 | `.arc` compatibility | ❌ dropped: rejected with a message pointing to FreeArc-ex |
 | GUI | ❌ dropped |
 | `.zip/.7z/.rar` containers | ➡ moved to FreeArc-ex (tag `entrega-arc`) |
@@ -166,14 +166,8 @@ What makes this possible (all inside `.parc`; the codecs are unchanged):
   `LzmaEncMaxThreads(P)` tells how many threads a stream can use (3 for bt4, 2 for ht4, else
   1) and `LzmaEncThreadsFor(P)` how many it would take now. `tests/lzma_threads.sh` checks
   the thread peak under `PARC_THREADS`.
-- **4x4 and nearly random blocks**: FreeArc does not even try a 4x4 block whose order-0
-  entropy is >= 99 % (`r99`). PArc looks at each ~1 MB piece of such a block: runs of pieces
-  that repeat (>= 4 % covered by repeats of 8+ bytes) are compressed as 4x4 blocks of their
-  own and the random pieces are stored, so the inner method never walks the random MBs (the
-  4x4 format already allows blocks of any size; old decoders read it). JPEG/MP3 barely repeat
-  and stay stored whole, as in FreeArc. Before, one repeating piece made the whole block go
-  through the inner method: TILIN.tar `-m4` with 4 threads took 78 s (FreeArc 58 s); now
-  55–61 s at 1,042 MB (FreeArc 1,050 MB), and `-m1` 9.1 s -> 6.3 s.
+- **4x4 and nearly random blocks**: see "Own `4x4` replacing FreeArc's (2026-11-23)" below (noise
+  cells stored apart in mixed records).
 - **Solid blocks like FreeArc**: without `-s` there is no size cap (only the cuts that `dict`/
   `grzip`/`lzp`/`tta`/`mm` need and the file groups). The old automatic cap (64 MB for
   `-m1`…`-m3`, 32 MB above) predates 4x4/LZMA threads inside a block and cut the repeats between
@@ -1663,6 +1657,60 @@ threads + 1 (`m2`..`m4`), so small pieces queue behind a slow block (ex2t Silesi
   or 190 MB at 5.3 s depending on which block finishes first and lets `4x4` grow into its threads);
   new is always in the faster mode (5.2 s, 192–196 MB).
 
+## Own `4x4` replacing FreeArc's (2026-11-23)
+
+FreeArc's 4x4 (GPL; encoder in `parc_encoders`, decoder in `parc_methods`) is gone, removed
+without reading its bodies. `src/parc_4x4.pas` is PArc's own stage (MIT): same method name and
+parameters (`4x4[:b<mem>][:r<N>][:t][:i]:<inner>`), new stream (`formato/FORMATO-PARC.md` §6.11:
+`"4X"` + version, stored / packed / mixed records, end record). **Old `4x4` blocks no longer
+decode.** Encoder: one record per block, blocks compressed on a pool of the thread budget and
+written in order (queue = threads; plz engines reused only for blocks <= 2 MB). With a slow inner
+method (lzma, ppmd, chains; not plz/lz4) 64 KB cells with order-0 entropy >= r and an LZ+entropy
+estimate (4-byte matches up to 1 MB back) saving < 0.2 % (< 4 % in a near-random block) are
+noise; runs of >= 256 KB of noise are stored apart unless a content-defined repeat scan finds
+them repeated in the block (a repeat touching a run's end is cut off the run), and the rest of the
+block is packed as one stream (it keeps its context). Decoder: records decoded in parallel and
+delivered in order; a packed part that does not decode gives zeros and a warning; read-ahead of
+16 MB plus the stored bytes in flight. `tests/4x4.sh` (110 checks); `tests/cli.sh` and the full
+suite pass.
+
+Old (main e4e76fd) vs new, PARC_THREADS=4 unless T1, taskset 8 cores, best of 3 (sizes are
+exact; times in s, memory peak RSS in MB, comp / dec). Sets copied from the corpus: `exe`
+151 MB of executables/installers, `mixed` 152 MB of documents/other/poly/fonts, `noisy` 115 MB of
+archives/video, `s20` one 18 MB near-random installer. At T1 the presets do not use 4x4 (same
+bytes).
+
+| set | method | T | size | comp s old/new | comp MB | dec s | dec MB |
+|---|---|---|---|---|---|---|---|
+| exe | -m1 | 4 | −0.23 % | 0.56 / 0.58 | 248 / 270 | 0.26 / 0.28 | 199 / 184 |
+| exe | -m2 | 4 | −0.42 % | 0.83 / 0.85 | 386 / 372 | 0.22 / 0.23 | 206 / 231 |
+| exe | -m3 | 4 | −0.43 % | 3.21 / 3.11 | 333 / 339 | 0.66 / 0.59 | 176 / 192 |
+| exe | -m4 | 4 | −1.00 % | 7.72 / 4.52 | 357 / 366 | 1.31 / 1.06 | 194 / 216 |
+| exe | -m5 | 4 | −0.38 % | 10.11 / 9.71 | 797 / 687 | 2.18 / 1.91 | 308 / 312 |
+| mixed | -m1 | 4 | −0.03 % | 0.62 / 0.63 | 276 / 258 | 0.24 / 0.24 | 232 / 167 |
+| mixed | -m2 | 4 | −0.42 % | 1.53 / 1.51 | 327 / 298 | 0.43 / 0.43 | 235 / 184 |
+| mixed | -m3 | 4 | −0.46 % | 5.88 / 6.13 | 355 / 318 | 1.18 / 1.01 | 223 / 174 |
+| mixed | -m4 | 4 | −0.59 % | 6.02 / 6.26 | 365 / 328 | 1.29 / 1.41 | 225 / 181 |
+| mixed | -m5 | 4 | −0.02 % | 12.97 / 13.16 | 1054 / 1001 | 1.53 / 1.54 | 402 / 380 |
+| noisy | -m1..-m5 | 4 | −0.14..−0.26 % | ≤ old (0.47/0.49 at -m1) | 253–895 / 281–1170 | ≤ old | ≤ old |
+| s20 | -m1..-m5 | 4 | −0.20..−0.41 % | 0.09–0.56 / 0.10–0.47 | 82–106 / 83–110 | 0.04–0.13 / 0.04–0.09 | 49–53 / 42–48 |
+| exe | 4x4:lzma | 1 / 4 | −0.53 % | 20.8→15.8 / 14.8→8.6 | 377→254 / 518→369 | 3.17→2.42 / 3.15→1.21 | 168→201 / 238→332 |
+| mixed | 4x4:lzma | 1 / 4 | −9.15 % | 28.6→28.0 / 14.4→13.8 | 324→224 / 553→386 | 3.01→2.97 / 1.56→1.38 | 216→146 / 267→278 |
+| noisy | 4x4:lzma | 1 / 4 | −0.24 % | 29.1→25.4 / 17.9→14.2 | 363→286 / 504→317 | 3.47→2.82 / 2.04→1.49 | 212→162 / 249→234 |
+| exe | 4x4:plz | 1 / 4 | −0.45 % | 1.89→1.96 / 0.77→0.85 | 137→90 / 304→246 | = | 83→85 / 174→126 |
+| mixed | 4x4:plz | 1 / 4 | −7.80 / −0.62 % | 2.66→2.74 / 1.09→1.17 | 87→84 / 229→217 | = | 89→81 / 167→113 |
+| noisy | 4x4:plz | 1 / 4 | −0.01 / **+0.56 %** | 2.13→2.37 / 0.76→0.85 | 86→86 / 230→180 | ≤ | 87→76 / 155→84 |
+| all | 4x4:lz4 | 1 / 4 | −0.01..−0.09 % | faster (1.02→0.55 …) | ≤ | ≤ | ≤ (exe T4 109→138) |
+| exe | 4x4:b7mb:ppmd | 1 / 4 | −0.20 % | 18.2→16.4 / 8.9→8.8 | = | 21.6→18.3 / 6.80→6.86 | 95→102 / 307→366 |
+| mixed/noisy | 4x4:b7mb:ppmd | 1 / 4 | −0.10..−0.20 % | ≤ | ≤ | ≤ (mixed T4 8.26→8.50) | ≤ |
+
+Gaps (cells not won): `4x4:plz` alone is 4–12 % slower to compress (no noise analysis for plz;
+plz engines are not cached for 8 MB blocks, which saves 40–60 MB) and +0.56 % on `noisy` at T4;
+decode memory of `4x4:lzma` (64 MB blocks) is higher because the blocks now decode in parallel
+(2.6× faster at T4) and of exe `-m2..-m4` (+12..25 MB); `4x4:ppmd` decoding at T4 is a tie in
+time for +59 MB (records mostly stored need read-ahead by bytes); the near-random `s20` file is
+0.1 s slower with lzma/plz (the cell analysis), and `-m1` compression memory on exe is +22 MB.
+
 ## Verified platforms (0.0.2)
 
 | platform | binary | tests |
@@ -1698,6 +1746,7 @@ bash tests/ppmd.sh                # PPMd: ida y vuelta, streams dañados y bit a
 bash tests/ppmd_asm.sh            # PPMd: ensamblador == Pascal (-dPARC_NOASM)
 bash tests/orep.sh                # OREP: etapas, parámetros, 1..8 hilos, C == Pascal (-dOREP_NO_NATIVE), dañados
 bash tests/plz.sh                 # plz: niveles, ventanas, streaming == memoria, asm == Pascal, dañados
+bash tests/4x4.sh                 # 4x4: inner plz/lz4/lzma/ppmd, 1/4/8 hilos, ruido guardado, dañados
 bash tests/plz_cross.sh           # plz: mismos bytes en linux64/linux32/linuxarm64 (QEMU)/win64/win32 (Wine)
 bash tests/delta.sh               # delta: tablas sintéticas de cada formato, trozos al azar, asm == Pascal, dañados
 bash tests/lzp.sh                 # lzp: parámetros de los presets y extremos, trozos al azar, dañados

@@ -754,3 +754,42 @@ the data repeats best), the predictor and cross with the smallest residual cost 
 (64 KB with `d1`/`d2`), and stores (mode 0) when a fast LZ estimate on that sample is not smaller
 filtered than raw (synthetic and palette images often compress better as they are). Packed
 16-bit pixels (RGB555/565) and colour-mapped TGA are stored.
+
+### 6.11 `4x4` (since 2026-11)
+
+`4x4` is PArc's own parallel block stage (`src/parc_4x4.pas`), replacing FreeArc's 4x4 (GPL;
+nothing is derived from it). **`4x4` blocks written before this change do not decode.** Method
+string as before: `4x4[:b<mem>][:r<N>][:t<N>][:i<N>]:<inner method>` — the 4x4 parameters are
+the leading ones that start with a digit or whose second character is a digit; the rest is the
+inner method (`plz:1:1mb` if there is none). `t` and `i` are accepted and ignored. The block size
+is `b`, else the inner method's window (plz, lz4) or its first memory size, else 8 MB.
+
+Stream: `"4X"` + `U8 version` (1), then records until an end record. `VInt` is LEB128 (7 bits per
+byte, low first).
+
+| Record | Layout |
+|---|---|
+| end | `U8 0` |
+| stored | `U8 1, VInt rawLen, rawLen bytes` |
+| packed | `U8 2, VInt rawLen, VInt packLen, packLen bytes` — the inner method's stream of all rawLen bytes |
+| mixed | `U8 3, VInt rawLen, VInt n, n × VInt segLen, VInt packLen, packLen bytes, stored bytes` |
+
+`rawLen` is 1..2^31−1 and `packLen` is smaller than the bytes it packs. In a mixed record the
+segments (n ≥ 2, summing to rawLen) alternate packed / stored starting with a packed one (which
+may be empty): the packed segments, joined, are the inner method's stream of `packLen` bytes;
+then come the stored segments' bytes in order. Every record decodes on its own: the decoder runs
+them on a pool of the thread budget and delivers them in order. A packed part that does not
+decode becomes zeros with a warning (the file's CRC reports it) and the next records continue;
+a damaged record header is an error.
+
+The encoder (none of this is in the stream) makes one record per block, compressed in parallel.
+With a slow inner method (not plz/lz4) it looks for noise in 64 KB cells: order-0 entropy at or
+above `r` (default 99 %) and an estimate of an LZ with entropy coding (4-byte greedy matches up to
+1 MB back) that saves less than 0.2 % (4 % in a block whose own order-0 entropy is at or above
+`r`). Runs of at least 256 KB of noise cells are stored in a mixed record unless at least 4 % of
+the run repeats elsewhere in the block or is repeated (content-defined anchors, ~1 per 512 bytes,
+then byte comparison), so the inner method spends no time on data it cannot shrink and the parts
+around a run keep their common context. The stream depends on the data, the parameters and the
+block size only; the block size depends on `PARC_THREADS` only through the PArc-wide rules for
+fast inner methods (`Adaptive4x4Block`, `Balance4x4` and, with 2+ threads, equal blocks for the
+tail of a solid block whose size is known).
