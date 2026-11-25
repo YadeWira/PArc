@@ -22,7 +22,9 @@
      list (after the default) that is in the file's group set, otherwise the default. If the
      list has a `$text` or `$compressed` method, the content is checked: big files are sampled
      at 3 (from 128 KB) or 5 (from 8 MB) evenly spread places, 64 KB each, and the verdict of
-     more than half of the samples counts; small files are judged together with their
+     more than half of the samples counts (all of them for text when the default method is
+     lzma in its max mode, -m6 and up: against it the text methods only win on clear text);
+     small files are judged together with their
      neighbours of the same kind and extension (runs of up to 1 MB: whole files from the
      start of the run, and from its middle file, until 64 KB each; both must agree). Text moves default
      and compressed files to `$text`; compressed data moves any file to `$compressed` (cheap
@@ -558,6 +560,7 @@ type
     Order: TIntArray;
     Units: ^TCheckUnit;
     UFirst, UCount: Integer;
+    StrictText: Boolean;
     procedure Process; override;
   end;
 
@@ -681,6 +684,8 @@ begin
         Samples := Samples - Votes[vNone];
         for W := vText to vBin do
           if 2 * Votes[W] > Samples then V := W;
+        // against a strong binary method, text has to be text everywhere
+        if (V = vText) and StrictText and (Votes[vText] < Samples) then V := vMixed;
         Verdict := V;
       end
       else
@@ -848,6 +853,24 @@ begin
   Result := (Signature(Method) = '+storing') or (Trim(Method) = '');
 end;
 
+{ The default method is a strong binary coder (lzma in its max mode, -m6 and up): files go to
+  the text method only when every sample is text. }
+function StrongBinary(const Method: string): Boolean;
+var
+  St, Parts: TStringArray;
+  i, j: Integer;
+begin
+  Result := False;
+  St := Method.Split(['+']);
+  for i := 0 to High(St) do
+    if StageName(St[i]) = 'lzma' then
+    begin
+      Parts := Trim(St[i]).Split([':']);
+      for j := 1 to High(Parts) do
+        if LowerCase(Trim(Parts[j])) = 'max' then Exit(True);
+    end;
+end;
+
 function GmIndex(const GM: TGroupMethods; const G: string): Integer;
 var
   i: Integer;
@@ -1010,6 +1033,7 @@ begin
       Jobs[High(Jobs)].Units := @Units[0];
       Jobs[High(Jobs)].UFirst := u;
       Jobs[High(Jobs)].UCount := j - u;
+      Jobs[High(Jobs)].StrictText := StrongBinary(GM[0].Method);
       u := j;
     end;
     Pool := TJobPool.Create(PoolWorkers(32), Length(Jobs));
