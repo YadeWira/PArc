@@ -340,14 +340,20 @@ begin
   Result := (a < NR) and (R[a].Lo < Hi);
 end;
 
-{ Adds to each run its overlap with [Lo, Hi). }
+{ A repeat [Lo, Hi) (a copy or its original) against the runs it overlaps. }
 procedure Credit(var R: array of TNoiseRun; NR: Integer; Lo, Hi: SizeInt);
 var
   k: Integer;
 begin
   for k := 0 to NR - 1 do
     if (R[k].Hi > Lo) and (R[k].Lo < Hi) then
-      Inc(R[k].Cov, Min(Hi, R[k].Hi) - Max(Lo, R[k].Lo));
+    begin
+      // a repeat that reaches an end of the run is cut off it (the run keeps the rest);
+      // one inside the run counts towards packing the whole run
+      if Hi >= R[k].Hi then R[k].Hi := Max(R[k].Lo, Lo)
+      else if Lo <= R[k].Lo then R[k].Lo := Min(R[k].Hi, Hi)
+      else Inc(R[k].Cov, Hi - Lo);
+    end;
 end;
 
 { For each run R[i], how many of its bytes take part in a repeat inside Buf[0..Len), as the
@@ -514,7 +520,7 @@ begin
   RepeatScan(@InBuf[0], InLen, Runs, NR);
   n := 0;
   for k := 0 to NR - 1 do
-    if Runs[k].Cov < REPEAT_SHARE * (Runs[k].Hi - Runs[k].Lo) then
+    if (Runs[k].Hi - Runs[k].Lo >= NOISE_RUN) and (Runs[k].Cov < REPEAT_SHARE * (Runs[k].Hi - Runs[k].Lo)) then
     begin
       Runs[n] := Runs[k];
       Inc(n);
