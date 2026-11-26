@@ -77,6 +77,7 @@ const
   MIN_SECTOR = 512;
   MAX_SECTOR = 64 shl 20;
   MAX_AUTO_SECTORS = 1 shl 25;   // automatic sizing: at most 32 Mi sectors (64 MB of checks)
+  MAX_AUTO_SECTOR = 1 shl 20;    //   and sectors of at most 1 MB (repair keeps a stripe in memory)
   IO_CHUNK = 4 shl 20;
 
 type
@@ -233,7 +234,7 @@ function RecoveryPlan(ProtLen: Int64; const Spec: string; out SectorSize, Parity
   out Stripes, RecLen: Int64): Boolean;
 var
   R: TRrSpec;
-  Budget, N, S, Best, Value: Int64;
+  Budget, N: Int64;
   SS, m, BestSS, BestM: Integer;
   BestS: Int64;
 begin
@@ -257,14 +258,14 @@ begin
   end;
   if R.Kind = rkPercent then Budget := Round(ProtLen * R.Percent / 100.0)
   else Budget := R.Bytes;
-  // Sector size: the smallest (from 512 bytes, powers of two) whose checks take at most 1/8 of
-  // the budget, and with at most 32 Mi sectors; given with ";<size>": that one. Then as many
+  // Sector size: the smallest (from 512 bytes, powers of two, up to 1 MB) whose checks take at
+  // most 1/8 of the budget, and with at most 32 Mi sectors; given with ";<size>": that one. Then as many
   // parity sectors per stripe as fit (at least one).
   if R.Sector > 0 then SS := R.Sector
   else
   begin
     SS := MIN_SECTOR;
-    while (SS < MAX_SECTOR) and (((ProtLen + SS - 1) div SS > MAX_AUTO_SECTORS) or
+    while (SS < MAX_AUTO_SECTOR) and (((ProtLen + SS - 1) div SS > MAX_AUTO_SECTORS) or
                                  (2 * ((ProtLen + SS - 1) div SS) > Budget div 8)) do
       SS := SS * 2;
   end;
@@ -354,7 +355,7 @@ procedure WriteRecoveryRecord(S: TStream; Base, ProtLen: Int64; const Spec: stri
 var
   R: TRecData;
   SS, m, j, Got, n, x: Integer;
-  Stripes, RecLen, k, Sector, si, pi, i: Int64;
+  Stripes, RecLen, Sector, si, pi: Int64;
   ii: SizeInt;
   jj: Integer;
   Buf, Pad: TBytes;
@@ -502,7 +503,7 @@ var
   F: TStream;
   Outp: TFileStream;
   R: TRecData;
-  RecPos, Start, N, P, S, k, i, st, idx, Base, TabLen, CmpPos: Int64;
+  RecPos, Start, N, P, S, k, st, idx, Base, TabLen, CmpPos: Int64;
   ii: SizeInt;
   SS, m, W, kk, q, j, Got, x, nchunk, Try_, Len: Integer;
   DescOk, TabOk, Fixed, Differs: Boolean;
@@ -676,8 +677,11 @@ begin
       end;
 
       // Rebuild every stripe with damage, or whose CRC does not match (undetected damage)
-      SetLength(Mem, Int64(RS_MAX_SECTORS) * SS);
-      SetLength(Saved, Int64(RS_MAX_SECTORS) * SS);
+      // a stripe: its data sectors (the longest stripe) and its parity
+      kk := RsStripeLen(N, S, 0) + m;
+      if kk > RS_MAX_SECTORS then kk := RS_MAX_SECTORS;
+      SetLength(Mem, Int64(kk) * SS);
+      SetLength(Saved, Int64(kk) * SS);
       SetLength(Ptrs, RS_MAX_SECTORS);
       SetLength(Present, RS_MAX_SECTORS);
       SetLength(Erased, RS_MAX_SECTORS);

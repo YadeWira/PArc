@@ -552,6 +552,7 @@ var
 begin
   r.Init(PByte(Payload), Length(Payload));
   HaveArchive := False; HaveBlocks := False; HaveNames := False; HaveKinds := False;
+  Kinds := nil;
   HaveSizes := False; HaveCrcs := False; HaveTimes := False;
   N := 0; Z := 0; B := 0;
   repeat
