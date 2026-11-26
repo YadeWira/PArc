@@ -119,12 +119,15 @@ type
     Comment: RawByteString;
     SFXSize: Int64;
     HasRecovery: Boolean;
+    HasNoDataBlock: Boolean;             // DataBlocks[0] is the pseudo-block of the entries without data
     Rec: TRecDesc;
     RecPos: Int64;                       // absolute position of the recovery record
     Notice: string;                      // '' or a warning (damaged tail, index found by scanning)
     constructor Open(const AFileName: string);
     { The compressed bytes of a block, as an input stage (does not own the stream). }
     function OpenBlockData(const Block: TArcBlock): TInStage;
+    { Closes the archive file (the parsed index stays); OpenBlockData fails afterwards. }
+    procedure CloseStream;
     destructor Destroy; override;
     property FileName: string read FFileName;
   end;
@@ -351,8 +354,14 @@ begin
   inherited Destroy;
 end;
 
+procedure TArchive.CloseStream;
+begin
+  FreeAndNil(FStream);
+end;
+
 function TArchive.OpenBlockData(const Block: TArcBlock): TInStage;
 begin
+  if FStream = nil then Corrupt('archive already closed');
   if (Block.Pos < 0) or (Block.CompSize < 0) or (Block.Pos + Block.CompSize > ArcSize) then
     Corrupt('data block outside the archive');
   Result := TFileSliceStage.Create(FStream, Block.Pos, Block.CompSize);
@@ -581,6 +590,7 @@ begin
             DataBlocks[i].Method := 'storing';
             DataBlocks[i].Pos := FBase + HEAD_SIZE;
           end;
+          HasNoDataBlock := Z > 0;
           if Z > 0 then
           begin
             DataBlocks[0].FileCount := Z;

@@ -15,7 +15,7 @@ const
   PARC_VERSION = '0.0.5';
   // Método por defecto: el mismo que FreeArc (-m4)
   DEFAULT_METHOD = '4';
-  // Directorio y footer: lo mismo que usa FreeArc
+  // Índice del archivo (FORMATO-PARC.md §2.3)
   DIR_METHOD = 'lzma:1mb:normal:bt4:32';
   EXIT_NOMEM = 7;      // algún bloque pide más memoria que -ld
 
@@ -1438,6 +1438,36 @@ begin
   end;
 end;
 
+{ ¿Se puede agregar en el lugar (FORMATO-PARC.md §3a)? Solo a/u/f que conservan todos los
+  archivos y todos los bloques enteros, en orden, sin recomprimir ni cambiar contraseñas, en un
+  archivo de una pieza sin registro de recuperación (lo dejaría como espacio muerto) y que se
+  leyó sin avisos (un final dañado se limpia reescribiendo). Lo nuevo va al final del archivo. }
+function CanAppendInPlace(A: TArchive; const Cmd, ArcName: string; const Entries: TWriteEntryArray;
+  const Groups: TSolidGroupArray; Removed, Replaced: Integer; Recompress, ChangeData: Boolean;
+  VolumeSize: Int64): Boolean;
+var
+  g, f, Next: Integer;
+  VolBase: string;
+begin
+  Result := False;
+  if (A = nil) or (A.Notice <> '') or A.HasRecovery then Exit;
+  if not ((Cmd = 'a') or (Cmd = 'u') or (Cmd = 'f')) then Exit;
+  if Recompress or ChangeData or (Removed > 0) or (Replaced > 0) then Exit;
+  if (VolumeSize > 0) or IsVolumeSet(ArcName, VolBase) then Exit;
+  if GetEnvironmentVariable('PARC_NO_APPEND') <> '' then Exit;   // (tests: force a rewrite)
+  Next := Ord(A.HasNoDataBlock);
+  for g := 0 to High(Groups) do
+    if Groups[g].CopyFrom <> nil then
+    begin
+      if (Groups[g].CopyFrom <> A) or (Groups[g].CopyBlock <> Next) then Exit;
+      Inc(Next);
+    end
+    else
+      for f := 0 to High(Groups[g].Files) do
+        if Entries[Groups[g].Files[f]].SrcArc <> nil then Exit;
+  Result := Next = Length(A.DataBlocks);
+end;
+
 { a (agregar/reemplazar), u (solo si es más nuevo), f (solo actualizar lo que ya está),
   d (borrar). Sobre un archivo existente, los bloques que se conservan enteros se copian tal
   cual y los que pierden archivos se reempaquetan; se escribe un temporal que reemplaza al
@@ -1771,6 +1801,11 @@ begin
     Newest := 0;
     for i := 0 to High(Entries) do
       if Entries[i].Meta.MTimeNs > Newest then Newest := Entries[i].Meta.MTimeNs;
+    if CanAppendInPlace(A, Cmd, ArcName, Entries, Groups, Removed, Replaced, Recompress, ChangeData, Opt.VolumeSize) then
+    begin
+      Opt.AppendTo := A;
+      SfxPrefix := nil;   // the stub stays where it is
+    end;
     T0 := GetTickCount64;
     Cpu0 := ProcessCpuMs;
     St := WriteArchive(ArcName, Entries, Groups, Opt, @LogLine);
@@ -1781,7 +1816,7 @@ begin
     for i := 0 to High(JoinArcs) do JoinArcs[i].Free;
     JoinArcs := nil;
   end;
-  FinishArchive(ArcName, Opt.VolumeSize);
+  if Opt.AppendTo = nil then FinishArchive(ArcName, Opt.VolumeSize);
   FinalName := ArcName;
   // PArc ya no crea autoextraíbles; si el archivo ya traía un módulo delante, se conserva
   if Length(SfxPrefix) > 0 then

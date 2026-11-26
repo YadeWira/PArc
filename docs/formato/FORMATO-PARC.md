@@ -65,8 +65,9 @@ still read.
 A data block is the output of its method string's encoder chain (compression stages, then the
 cipher stage with `-p`, §3b) over the concatenation of its files, in index order. Blocks have no
 header: the index lists, per block, its method, its number of files and its stored size, and
-the blocks of a *run* are stored back to back from the run's start. PArc writes one run that
-starts right after the head. A block may be empty (0 stored bytes).
+the blocks of a *run* are stored back to back from the run's start. A written archive has one
+run that starts right after the head; appending in place adds one per append (§3a). A block may
+be empty (0 stored bytes).
 
 Entries without data — directories and symbolic links — are not in any block (§3, `ARCHIVE`).
 
@@ -156,14 +157,24 @@ Why the order and the separate kinds: entries without data need no size, CRC or 
 need no kind. Directory and file times share one column so that runs of equal dates compress to
 almost nothing.
 
-### 3a. Updating
+### 3a. Updating and appending
 
-PArc rewrites an archive into a temporary file and replaces it at the end. Blocks whose files all
-stay are **copied as stored bytes** (never decompressed or recompressed; encrypted blocks keep
-their cipher stage and nonce); blocks that lose files are repacked. The index, the locator and
-the recovery record are always rebuilt. The format also allows appending in place (new blocks
-after the old locator, a second run in `BLOCKS`, a new index and locator at the end); PArc does
-not do it yet.
+**Appending in place.** When an update only adds files and keeps every file and every block of
+the archive (`a`/`u`/`f` with new names only, no recompression, no password change), the archive
+is a single file without a recovery record, and it was read without warnings, PArc writes after
+the current end of the file: the new data blocks, a new index whose `BLOCKS` has two (or more)
+runs — the old blocks where they are, the new ones after the old locator — and a new locator.
+The old blocks are not read or rewritten; the old index and locator stay as dead bytes between
+the runs. If anything fails (or is cancelled) the file is cut back to its old size, which is the
+old archive byte for byte; if the process is killed, the file ends in garbage and readers find
+the old index by scanning (§2.5) with a warning, and the next update rewrites it clean. Any
+other update, or one with `PARC_NO_APPEND` set in the environment, rewrites the archive.
+
+**Rewriting.** PArc writes a temporary file and replaces the archive at the end. Blocks whose
+files all stay are **copied as stored bytes** (never decompressed or recompressed; encrypted
+blocks keep their cipher stage and nonce); blocks that lose files are repacked. The index, the
+locator and the recovery record are rebuilt, in one run with no dead bytes (`ch` compacts an
+archive that was appended to).
 
 ## 3b. Encryption (scheme 1)
 
@@ -275,9 +286,10 @@ is always rewritten, with the `-hp` password given for that run.
 ## 4. Writing: invariants PArc must satisfy
 
 - `Uv` in the shortest form; every length and count matches what follows.
-- Data blocks of a run are contiguous and in index order; the index follows the last data block,
-  the end locator follows the index, and the recovery record (if any) follows the locator and
-  ends the file.
+- Data blocks of a run are contiguous and in index order; the index follows the last data block
+  of the last run (an appended archive has the old index and locator before the last run), the
+  end locator follows the index, and the recovery record (if any) follows the locator and ends
+  the file.
 - Each file CRC is that of its original data; the index header's CRCs are those of the stored
   and the decoded payload.
 - Names are UTF-8 with `/` as separator, relative, without `..` or a root. On Windows, `\` is
@@ -376,7 +388,7 @@ and 40 KB (5 %) less, because checks are 16-bit and verified per stripe.
 
 - Stronger per-file hash than CRC-32 (e.g. a BLAKE2b section)? To be decided.
 - Hard links, ACLs, extended attributes: future optional sections.
-- Appending in place (§3a).
+- Reclaiming the dead bytes of appended archives without a full rewrite.
 
 ## 6. Codec streams that differ from FreeArc
 

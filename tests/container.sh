@@ -48,6 +48,13 @@ ck "lb: head, index, locator"                 'P lb ab.parc | grep -q "^  head" 
 ck "starts with the head magic"               '[ "$(head -c 8 ab.parc | od -An -tx1 | tr -d " \n")" = "504172630d0a1a0a" ]'
 ck "ends with the end locator magic"          '[ "$(tail -c 4 ab.parc)" = "PAel" ]'
 
+# the archive as described by FORMATO-PARC.md, read by an independent Python reader
+spec() { python3 -I "$ROOT/tests/container_spec.py" "$1" | grep -v = > spec.out &&
+  P lt "$1" | python3 -I "$ROOT/tests/container_spec.py" --from-lt > lt.out && [ -s lt.out ] && cmp -s spec.out lt.out; }
+ck "spec reader = parc lt (-m5)"              'spec ab.parc'
+q a ab2.parc src -m0 -s- --archive-comment=xyz -rr2%
+ck "spec reader = parc lt (-m0 -s-, comment, -rr)" 'spec ab2.parc && python3 -I "$ROOT/tests/container_spec.py" ab2.parc | grep -q "comment=78797a" && python3 -I "$ROOT/tests/container_spec.py" ab2.parc | grep -q "recovery=2%"'
+
 echo '-- determinism'
 q a d1.parc src -m5; q a d2.parc src -m5
 ck "same input, same archive (-m5)"           'cmp -s d1.parc d2.parc'
@@ -76,12 +83,39 @@ ck "k: locked"                                'P lb u.parc | grep -q "locked=yes
 ck "locked: a refused"                        '[ $(code a u.parc new.txt) = 1 ]'
 ck "locked: d refused"                        '[ $(code d u.parc new.txt) = 1 ]'
 
+echo '-- appending in place (only new files, every block kept whole)'
+q a ap.parc src -m2; cp ap.parc ap0.parc; old=$(stat -c %s ap0.parc)
+printf 'appended\n' > app1.txt; q a ap.parc app1.txt
+ck "append: the old archive is an untouched prefix" 'cmp -n $old ap0.parc ap.parc && [ $(stat -c %s ap.parc) -gt $old ]'
+ck "append: tested, new file listed"          'okt ap.parc && P l ap.parc | grep -q app1.txt'
+ck "append: spec reader (two block runs)"     'spec ap.parc'
+cp ap0.parc rw.parc; PARC_NO_APPEND=1 q a rw.parc app1.txt
+ck "append = rewrite (same listing)"          'diff <(P lt ap.parc | sed 1,/^Files:/d) <(P lt rw.parc | sed 1,/^Files:/d) >/dev/null'
+printf 'two\n' > app2.txt; q a ap.parc app2.txt
+ck "second append"                            'okt ap.parc && P l ap.parc | grep -q app2.txt && cmp -n $old ap0.parc ap.parc'
+cp ap.parc apr.parc; printf 'changed\n' > app1.txt; q a apr.parc app1.txt
+ck "replacing a file rewrites (still valid)"  'okt apr.parc && ! cmp -s -n $old ap0.parc apr.parc'
+cp ap0.parc cut.parc; head -c 5000 /dev/urandom >> cut.parc
+ck "interrupted append: old index found by scanning" 'P l cut.parc 2>&1 | grep -q "Warning:" && okt cut.parc'
+q a cut.parc app2.txt
+ck "next update rewrites it clean"            '! P l cut.parc 2>&1 | grep -q "Warning:" && okt cut.parc && P l cut.parc | grep -q app2.txt'
+q a apx.parc src -m1 -rr3%; cp apx.parc apx0.parc; q a apx.parc app2.txt
+ck "with a recovery record: rewritten, record kept" 'P r apx.parc | grep -q "No damaged" && ! cmp -s -n $(stat -c %s apx0.parc) apx0.parc apx.parc'
+q a app.parc src -m1 -pSecret $KDF; cp app.parc app0.parc
+ck "append to -p archive, wrong password: refused, unchanged" '[ $(code a app.parc app2.txt -pWrong) = 5 ] && cmp -s app.parc app0.parc'
+q a app.parc app2.txt -pSecret
+ck "append to -p archive"                     'cmp -n $(stat -c %s app0.parc) app0.parc app.parc && okt app.parc -pSecret && P lb app.parc | grep "^  data" | tail -1 | grep -q xchacha20'
+q a aph.parc src -m1 -hpSecret $KDF; q a aph.parc app2.txt -pSecret
+ck "append to -hp archive: index still encrypted" '[ $(code l aph.parc) = 5 ] && P l aph.parc -pSecret | grep -q app2.txt'
+
 echo '-- SFX stub'
 head -c 5000 /dev/urandom > stub; q a s0.parc src -m1 -rr3%; cat stub s0.parc > s.parc
 ck "stub: listed and tested"                  'P lb s.parc | grep -q "SFX=5000" && okt s.parc'
 rm -rf o; q x s.parc -dpo -o+ -y; ck "stub: extracted"  'same src o/src'
 q a s.parc new.txt
 ck "stub kept on update"                      'cmp -s <(head -c 5000 s.parc) stub && okt s.parc && P l s.parc | grep -q new.txt'
+cp s.parc s2.parc; q d s2.parc new.txt
+ck "stub kept on a rewrite (d)"               'cmp -s <(head -c 5000 s2.parc) stub && okt s2.parc && ! P l s2.parc | grep -q new.txt'
 cp s.parc sd.parc; flip sd.parc 9000; rm -f fixed.sd.parc; q r sd.parc
 ck "stub: repair restores it byte-identical"  'cmp -s fixed.sd.parc s.parc'
 

@@ -58,8 +58,8 @@ function RecoveryPlan(ProtLen: Int64; const Spec: string; out SectorSize, Parity
 { True if Spec is a valid -rr specification. }
 function RecoverySpecValid(const Spec: string): Boolean;
 
-{ Appends the record to S, protecting S[0, ProtLen) (S.Position must be ProtLen). }
-procedure WriteRecoveryRecord(S: TStream; ProtLen: Int64; const Spec: string);
+{ Appends the record to S, protecting S[Base, Base + ProtLen) (S.Position must be at its end). }
+procedure WriteRecoveryRecord(S: TStream; Base, ProtLen: Int64; const Spec: string);
 
 { Checks the archive with its record and, if something is damaged and repairable, writes
   DestName (fixed.<name>) with it repaired; the original is never touched. DestName is '' if
@@ -350,7 +350,7 @@ end;
 
 { --- building ---------------------------------------------------------------------------- }
 
-procedure WriteRecoveryRecord(S: TStream; ProtLen: Int64; const Spec: string);
+procedure WriteRecoveryRecord(S: TStream; Base, ProtLen: Int64; const Spec: string);
 var
   R: TRecData;
   SS, m, j, Got, n, x: Integer;
@@ -358,7 +358,7 @@ var
   ii: SizeInt;
   jj: Integer;
   Buf, Pad: TBytes;
-  Base: Int64;
+  Done: Int64;
   Written: Int64;
 
   procedure Put(P: PByte; Len: Int64);
@@ -389,13 +389,13 @@ begin
   if n < SS then n := SS;
   SetLength(Buf, n);
   SetLength(Pad, SS);
-  S.Position := 0;
+  S.Position := Base;
   Sector := 0;
-  Base := 0;
-  while Base < ProtLen do
+  Done := 0;
+  while Done < ProtLen do
   begin
     Got := n;
-    if Base + Got > ProtLen then Got := ProtLen - Base;
+    if Done + Got > ProtLen then Got := ProtLen - Done;
     S.ReadBuffer(Buf[0], Got);
     x := 0;
     while x < Got do
@@ -423,12 +423,12 @@ begin
       Inc(x, j);
       Inc(Sector);
     end;
-    Inc(Base, Got);
+    Inc(Done, Got);
     CheckCancel;
   end;
   for ii := 0 to Stripes - 1 do R.StripeCrc[ii] := R.StripeCrc[ii] xor CRC_INIT;
   for ii := 0 to R.P - 1 do PutCheck(R, R.N + ii, CalcCRC(@R.Parity[ii * SS], SS));
-  S.Position := ProtLen;
+  S.Position := Base + ProtLen;
   Written := 0;
   EmitRecord(R, @Put);
   if Written <> RecLen then raise Exception.Create('recovery record: unexpected size');

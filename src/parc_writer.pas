@@ -1,7 +1,8 @@
-{ Escritura de archivos .parc (FORMATO-PARC.md).
-  Orden en disco: HEADER + descriptor, bloques de datos (sin descriptor), DIR_BLOCK +
-  descriptor, FOOTER + descriptor. Se escribe a un temporal que se renombra al final: si algo
-  falla a mitad de camino no queda un archivo roto con el nombre final. }
+{ Escritura de archivos .parc (FORMATO-PARC.md §1-§4, contenedor versión 2).
+  Orden en disco: cabeza (16 bytes), bloques de datos uno tras otro, índice (encabezado +
+  secciones), localizador final y, con -rr, el registro de recuperación (parc_recovery). Se
+  escribe a un temporal que se renombra al final: si algo falla a mitad de camino no queda un
+  archivo roto con el nombre final. }
 unit parc_writer;
 
 {$mode objfpc}{$H+}
@@ -33,14 +34,14 @@ type
   TSolidGroupArray = array of TSolidGroup;
 
   TWriteOptions = record
-    DirMethod: string;    // compresión del directorio y del footer
+    DirMethod: string;    // compresión del índice
     Comment: RawByteString;
     Recovery: string;     // especificación del registro de recuperación ('' = sin), ya resuelta
     KeepTemp: Boolean;    // no renombrar: el llamador llama a FinishArchive (p. ej. después de
                           // cerrar el archivo viejo, que en Windows no se puede reemplazar abierto)
     Encryption: string;   // -ae=: "chacha" (XChaCha20-Poly1305) o "aes" (AES-256-GCM), con :t/:m/:p
     DataPassword: RawByteString;     // -p: cifra los bloques de datos ('' = sin cifrar)
-    HeadersPassword: RawByteString;  // -hp: cifra también directorio y footer
+    HeadersPassword: RawByteString;  // -hp: cifra también el índice
     VolumeSize: Int64;    // -v: volúmenes de este tamaño (FileName.001, .002...); solo .parc
     Parallel: Boolean;    // comprimir grupos de datos independientes en paralelo
     Locked: Boolean;      // -k / k: marca de bloqueado en el footer (no se modifica más)
@@ -48,6 +49,11 @@ type
       (-op, consola) y todo se reempaqueta solo con DataPassword ('' = sin cifrar), sin exigir
       que sea la de los bloques viejos. }
     ChangePassword: Boolean;
+    { <> nil: append to this archive in place (FORMATO-PARC.md §3a). Groups that copy one of its
+      blocks (CopyFrom = AppendTo, every block of it, in order) are referenced where they are;
+      the new blocks, a new index and a new locator are written after the end of the file. On
+      failure the file is cut back to its old size. The caller does not call FinishArchive. }
+    AppendTo: TArchive;
   end;
 
   TWriteStats = record
@@ -58,7 +64,7 @@ type
   TLogProc = procedure(const Msg: string);
 
 { Escribe el archivo completo. Los grupos se escriben en orden; los directorios (entradas con
-  Meta.IsDir) van en un bloque inicial sin datos, como hace FreeArc. }
+  Meta.IsDir) y los enlaces van primero en el índice, sin bloque (FORMATO-PARC.md §3). }
 function WriteArchive(const FileName: string; const Entries: TWriteEntryArray;
   const Groups: array of TSolidGroup; const Opt: TWriteOptions; Log: TLogProc): TWriteStats;
 
@@ -131,10 +137,11 @@ end;
 { The index payload (FORMATO-PARC.md §3): a list of sections "U8 id · Uv length · bytes",
   ended by id 0. Entries in index order: the ones without data (directories, links) first,
   then the files of each data block in block order. NoData: Blocks[0] is the pseudo-block of
-  the entries without data (it has no bytes and is not stored as a block). FirstPos: where
-  the first data block starts (from the archive start). }
+  the entries without data (it has no bytes and is not stored as a block). Base: where the
+  archive starts in the stream (block positions are absolute; runs are made of the blocks
+  that follow each other). }
 function BuildIndex(const Entries: array of TWriteEntry; const Blocks: array of TDataBlock;
-  NoData: Boolean; FirstPos: Int64; const Opt: TWriteOptions): TBytes;
+  NoData: Boolean; Base: Int64; const Opt: TWriteOptions): TBytes;
 var
   w, f: TByteWriter;
   All: array of TDirFile;
@@ -207,9 +214,20 @@ begin
   if NB > 0 then
   begin
     f.Clear;
-    f.Uv(1);
-    f.Uv(QWord(FirstPos));
-    f.Uv(NB);
+    // runs: blocks stored back to back (one, unless the archive was appended to in place)
+    ca.Clear;
+    k := 0;
+    i := B0;
+    for b := B0 to High(Blocks) do
+      if (b = High(Blocks)) or (Blocks[b + 1].Pos <> Blocks[b].Pos + Blocks[b].CompSize) then
+      begin
+        ca.Uv(QWord(Blocks[i].Pos - Base));
+        ca.Uv(b - i + 1);
+        Inc(k);
+        i := b + 1;
+      end;
+    f.Uv(k);
+    f.Raw(PByte(ca.Data), ca.Len);
     MethMap.Init(64);
     MethNames := nil;
     SetLength(DirIdx, NB);
@@ -521,6 +539,29 @@ begin
     Src.Free;
   end;
   Result.CompSize := S.Position - Result.Pos;
+  SetLength(Result.Files, Length(G.Files));
+  for i := 0 to High(G.Files) do
+    with Entries[G.Files[i]] do
+    begin
+      Result.Files[i].Entry := G.Files[i];
+      Result.Files[i].Size := SrcArc.Files[SrcIndex].Size;
+      Result.Files[i].Crc := SrcArc.Files[SrcIndex].Crc;
+      if Meta.IsDir then Inc(Stats.Dirs)
+      else begin Inc(Stats.Files); Inc(Stats.Bytes, Meta.Size); end;
+    end;
+end;
+
+{ Appending in place: a whole block of the archive, described where it already is. }
+function OldBlockOf(const Entries: array of TWriteEntry; const G: TSolidGroup;
+  var Stats: TWriteStats): TDataBlock;
+var
+  Blk: TArcBlock;
+  i: Integer;
+begin
+  Blk := G.CopyFrom.DataBlocks[G.CopyBlock];
+  Result.Method := Blk.Method;
+  Result.Pos := Blk.Pos;
+  Result.CompSize := Blk.CompSize;
   SetLength(Result.Files, Length(G.Files));
   for i := 0 to High(G.Files) do
     with Entries[G.Files[i]] do
@@ -1023,8 +1064,15 @@ var
   Sizes: array of Int64;
   Ahead: Int64;
   HadToken: Boolean;
+  Append: Boolean;
+  Base, OldSize: Int64;
+  OldBlocks: array of TDataBlock;
 begin
   Result := Default(TWriteStats);
+  Append := Opt.AppendTo <> nil;
+  Base := 0;
+  OldSize := 0;
+  OldBlocks := nil;
   if not EncoderAvailable(Opt.DirMethod) then
     raise EUnsupportedEncoder.CreateFmt('cannot compress with "%s" yet', [Opt.DirMethod]);
   for i := 0 to High(Groups) do
@@ -1036,7 +1084,9 @@ begin
   Total := 0;
   for i := 0 to High(Groups) do
     if Groups[i].CopyFrom <> nil then
-      Inc(Total, Groups[i].CopyFrom.DataBlocks[Groups[i].CopyBlock].CompSize)
+    begin
+      if not Append then Inc(Total, Groups[i].CopyFrom.DataBlocks[Groups[i].CopyBlock].CompSize);
+    end
     else
       for n := 0 to High(Groups[i].Files) do
         if not Entries[Groups[i].Files[n]].Meta.IsDir then Inc(Total, Entries[Groups[i].Files[n]].Meta.Size);
@@ -1044,13 +1094,25 @@ begin
   Tmp := TempArchiveName(FileName);
   Ok := False;
   ProgressBegin('Compressing', Total);
-  if Opt.VolumeSize > 0 then S := TVolumeStream.CreateWrite(Tmp, Opt.VolumeSize)
+  if Append then
+  begin
+    // the blocks stay where they are: the archive's own stream is not needed any more
+    Base := Opt.AppendTo.SFXSize;
+    Opt.AppendTo.CloseStream;
+    S := TFileStream.Create(FsPath(FileName), fmOpenReadWrite or fmShareDenyWrite);
+    OldSize := S.Size;
+    S.Position := OldSize;
+  end
+  else if Opt.VolumeSize > 0 then S := TVolumeStream.CreateWrite(Tmp, Opt.VolumeSize)
   else S := TFileStream.Create(FsPath(Tmp), fmCreate);
   try
     try
       // Head: magic, container version, CRC
-      EncodeHead(@Small[0]);
-      S.WriteBuffer(Small[0], HEAD_SIZE);
+      if not Append then
+      begin
+        EncodeHead(@Small[0]);
+        S.WriteBuffer(Small[0], HEAD_SIZE);
+      end;
 
       // Directorios primero, en un bloque sin datos (como splitToSolidBlocks de FreeArc)
       DirGroup := Default(TSolidGroup);   // CopyFrom = nil: los registros locales no se inicializan solos
@@ -1075,10 +1137,19 @@ begin
       end;
       for i := 0 to High(Groups) do
         if Length(Groups[i].Files) > 0 then
-        begin
-          AllGroups[n] := Groups[i];
-          Inc(n);
-        end;
+          if Append and (Groups[i].CopyFrom <> nil) then
+          begin
+            // a block of the archive appended to: referenced, not written
+            if Groups[i].CopyFrom <> Opt.AppendTo then raise Exception.Create('append: foreign block');
+            k := Length(OldBlocks);
+            SetLength(OldBlocks, k + 1);
+            OldBlocks[k] := OldBlockOf(Entries, Groups[i], Result);
+          end
+          else
+          begin
+            AllGroups[n] := Groups[i];
+            Inc(n);
+          end;
       SetLength(AllGroups, n);
 
       // Bloques más grandes primero (como la planificación LPT): los hilos empiezan por lo que
@@ -1111,9 +1182,12 @@ begin
             end;
         if n < 2 then UseParallel := False;   // los directorios solos no justifican hilos
       end;
+      // (not when a block reads files of an old block: they are read in order)
       if UseParallel then
-        for i := 0 to High(Entries) do
-          if Entries[i].SrcArc <> nil then UseParallel := False;
+        for i := 0 to High(AllGroups) do
+          for k := 0 to High(AllGroups[i].Files) do
+            with Entries[AllGroups[i].Files[k]] do
+              if (SrcArc <> nil) and not Meta.IsDir and not Meta.IsLink then UseParallel := False;
       if UseParallel then
         for i := 0 to High(AllGroups) do
           if AllGroups[i].CopyFrom <> nil then UseParallel := False;
@@ -1213,23 +1287,40 @@ begin
       CheckCancel;
       Enc4x4TotalHint := 0;
 
+      // appending: the old blocks go first (after the entries without data), where they are
+      if Length(OldBlocks) > 0 then
+      begin
+        k := Ord(Length(DirGroup.Files) > 0);
+        n := Length(Blocks);
+        SetLength(Blocks, n + Length(OldBlocks));
+        for i := n - 1 downto k do Blocks[i + Length(OldBlocks)] := Blocks[i];
+        for i := 0 to High(OldBlocks) do Blocks[k + i] := OldBlocks[i];
+      end;
+
       // Index, end locator and, with -rr, the recovery record (it protects everything before it)
-      IndexPos := S.Position;
-      WriteIndex(S, IndexPos, BuildIndex(Entries, Blocks, Length(DirGroup.Files) > 0, HEAD_SIZE, Opt), Opt);
-      EncodeLocator(@Small[0], IndexPos, S.Position + LOC_SIZE);
+      IndexPos := S.Position - Base;
+      WriteIndex(S, IndexPos, BuildIndex(Entries, Blocks, Length(DirGroup.Files) > 0, Base, Opt), Opt);
+      EncodeLocator(@Small[0], IndexPos, S.Position + LOC_SIZE - Base);
       S.WriteBuffer(Small[0], LOC_SIZE);
-      if Opt.Recovery <> '' then WriteRecoveryRecord(S, S.Position, Opt.Recovery);
-      Result.ArcSize := S.Size;
+      if Opt.Recovery <> '' then WriteRecoveryRecord(S, Base, S.Position - Base, Opt.Recovery);
+      if Append then S.Size := S.Position;
+      Result.ArcSize := S.Size - Base;
       Ok := True;
     finally
       Enc4x4TotalHint := 0;
+      // a failed append leaves the archive as it was
+      if Append and not Ok then
+        try
+          S.Size := OldSize;
+        except
+        end;
       S.Free;
     end;
   finally
-    if not Ok then
+    if not Ok and not Append then
       if Opt.VolumeSize > 0 then DeleteVolumesFrom(Tmp, 1) else DeleteFile(FsPath(Tmp));
   end;
-  if not Opt.KeepTemp then FinishArchive(FileName, Opt.VolumeSize);
+  if not Opt.KeepTemp and not Append then FinishArchive(FileName, Opt.VolumeSize);
 end;
 
 function TempArchiveName(const FileName: string): string;
