@@ -434,8 +434,12 @@ begin
     for i := 0 to High(Res.Unrecoverable) do
       if i < 200 then L := L + ' ' + IntToStr(Res.Unrecoverable[i]);
     if Length(Res.Unrecoverable) > 200 then L := L + ' ...';
-    ErrLn(Format('ERROR: %d unrecoverable sector(s) (more damage in the same stripe than the record can repair):%s',
-      [Length(Res.Unrecoverable), L]));
+    if Res.Info.Parity = 0 then
+      ErrLn(Format('ERROR: %d damaged sector(s); this record has no parity (only checks) and cannot repair them',
+        [Length(Res.Unrecoverable)]))
+    else
+      ErrLn(Format('ERROR: %d unrecoverable sector(s) (more damage in the same stripe than the record can repair):%s',
+        [Length(Res.Unrecoverable), L]));
     if Dest <> '' then ErrLn('A partially repaired copy was written to ' + Dest);
     Exit(2);
   end;

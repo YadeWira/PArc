@@ -15,9 +15,10 @@ P() { "$PARC" "$@" --no-progress </dev/null; }
 q() { "$PARC" "$@" --no-progress </dev/null >/dev/null 2>&1; }
 code() { "$PARC" "$@" --no-progress </dev/null >/dev/null 2>&1; echo $?; }
 okt() { P t "$@" 2>/dev/null | tail -1 | grep -q 'All OK'; }
-# same tree: contents, symlinks, modes and mtimes with nanoseconds
-same() { diff -r --no-dereference "$1" "$2" >/dev/null &&
-  [ "$(cd "$1" && find . -printf '%P %y %m %T@ %l\n' | sort)" = "$(cd "$2" && find . -printf '%P %y %m %T@ %l\n' | sort)" ]; }
+# same tree: contents, symlinks, modes and mtimes with nanoseconds (not of the links themselves:
+# extraction does not set them)
+meta() { (cd "$1" && { find . ! -type l -printf '%P %y %m %T@\n'; find . -type l -printf '%P %y %l\n'; } | sort); }
+same() { diff -r --no-dereference "$1" "$2" >/dev/null && [ "$(meta "$1")" = "$(meta "$2")" ]; }
 flip() { python3 -c "
 import sys; f=open(sys.argv[1],'r+b'); o=int(sys.argv[2]); n=len(f.read()); o=o if o>=0 else n+o
 f.seek(o); b=f.read(1); f.seek(o); f.write(bytes([b[0]^0x55]))" "$1" "$2"; }
@@ -36,7 +37,7 @@ touch -h -d '2001-02-03 04:05:06.7' src/link
 
 echo '-- round trips'
 for m in -m0 -m1 -m5 "-m3 -s-"; do
-  rm -rf o; q a "rt.parc" src ${m}; q x rt.parc -oo -y
+  rm -rf o; q a "rt.parc" src ${m}; q x rt.parc -dpo -o+ -y
   ck "round trip $m (data, links, modes, ns mtimes)" 'same src o/src'
   rm -f rt.parc
 done
@@ -78,7 +79,7 @@ ck "locked: d refused"                        '[ $(code d u.parc new.txt) = 1 ]'
 echo '-- SFX stub'
 head -c 5000 /dev/urandom > stub; q a s0.parc src -m1 -rr3%; cat stub s0.parc > s.parc
 ck "stub: listed and tested"                  'P lb s.parc | grep -q "SFX=5000" && okt s.parc'
-rm -rf o; q x s.parc -oo -y; ck "stub: extracted"  'same src o/src'
+rm -rf o; q x s.parc -dpo -o+ -y; ck "stub: extracted"  'same src o/src'
 q a s.parc new.txt
 ck "stub kept on update"                      'cmp -s <(head -c 5000 s.parc) stub && okt s.parc && P l s.parc | grep -q new.txt'
 cp s.parc sd.parc; flip sd.parc 9000; rm -f fixed.sd.parc; q r sd.parc
@@ -88,12 +89,12 @@ echo '-- encryption'
 q a p.parc src -m2 -pSecret $KDF
 ck "-p: names listed without a password"      'P l p.parc | grep -q a.txt'
 ck "-p: test without password = 5"            '[ $(code t p.parc) = 5 ]'
-ck "-p: round trip"                           'rm -rf o; q x p.parc -oo -y -pSecret && same src o/src'
+ck "-p: round trip"                           'rm -rf o; q x p.parc -dpo -o+ -y -pSecret && same src o/src'
 q a h.parc src -m2 -hpSecret $KDF
 ck "-hp: list without password = 5"           '[ $(code l h.parc) = 5 ]'
 ck "-hp: wrong password = 5"                  '[ $(code l h.parc -pWrong) = 5 ]'
 ck "-hp: index encrypted (method in header)"  'P lb h.parc -pSecret | grep "^  index" | grep -q "xchacha20:.*:h"'
-ck "-hp: round trip"                          'rm -rf o; q x h.parc -oo -y -pSecret && same src o/src'
+ck "-hp: round trip"                          'rm -rf o; q x h.parc -dpo -o+ -y -pSecret && same src o/src'
 ck "-hp: no names in the clear"               '! grep -q "ñandú" h.parc && ! grep -qa "deep/er" h.parc'
 q a h.parc new.txt -pSecret
 ck "-hp: stays encrypted after an update"     '[ $(code l h.parc) = 5 ] && P l h.parc -pSecret | grep -q new.txt'

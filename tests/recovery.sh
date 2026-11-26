@@ -120,7 +120,7 @@ ck "burst beyond S*m sectors: exit 2"         '[ $(code r hv.parc) = 2 ]'
 ck "never reported as repaired"               '! P r hv.parc 2>/dev/null | grep -q "^Repaired"'
 q a c.parc d -m1 -rr0.1%
 damage c.parc c1.parc 1 burst 100
-ck "checks only: damage detected, exit 2"     '[ $(code r c1.parc) = 2 ] && P r c1.parc | grep -q "Damaged sectors"'
+ck "checks only: damage detected, exit 2"     '[ $(code r c1.parc) = 2 ] && P r c1.parc 2>/dev/null | grep -q "Damaged sectors"'
 ck "no record: exit 1"                        'q a n.parc d -m1; [ $(code r n.parc) = 1 ]'
 
 echo '-- stub, volumes, small archives, updates'
