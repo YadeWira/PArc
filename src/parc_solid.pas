@@ -21,7 +21,9 @@
      at 3 (from 128 KB) or 5 (from 8 MB) evenly spread places, 64 KB each, and the verdict of
      more than half of the samples counts, and a file whose first sample is text and has no
      compressed sample goes to text; when the default method is lzma in its max mode (-m6 and
-     up) text needs every sample (against it the text methods only win on clear text);
+     up) text needs every sample (against it the text methods only win on clear text). An
+     extension with 8 or more files of the same kind keeps one verdict when one covers 90 % of
+     its judged bytes (a few big object files that look like text in places stay binary);
      small files are judged together with their
      neighbours of the same kind and extension (runs of up to 1 MB: whole files from the
      start of the run, and from its middle file, until 64 KB each; both must agree). Text moves default
@@ -113,6 +115,8 @@ const
   MB = 1024 * KB;
   SAMPLE = 64 * KB;          // bytes of a content sample
   RUN_BYTES = 1024 * KB;     // small files judged together, up to this many bytes
+  CLASS_FILES = 8;           // an extension with this many files keeps one verdict...
+  CLASS_PCT = 90;            // ...when one verdict covers this share of its judged bytes
   SMALL_FILE = 64 * KB;      // below this, files are judged in runs with their neighbours
   MIN_JUDGE = 4 * KB;        // fewer bytes than this: no verdict (the name decides)
   RUN_FILES = 256;           // at most this many small files per run
@@ -724,6 +728,10 @@ var
   Starts: TIntArray;
   Tmp: TPlanBlock;
   Data, Solid: Boolean;
+  VBytes: array[TVerdict] of Int64;
+  Tot: Int64;
+  V: TVerdict;
+  x, y: Integer;
 
   procedure AddUnit(Kd: TCheckKind; F, C: Integer);
   var
@@ -861,6 +869,36 @@ begin
       end;
     finally
       for i := 0 to High(Jobs) do Jobs[i].Free;
+    end;
+    // an extension shared by many files keeps one verdict: when one verdict covers at least
+    // 90 % of the judged bytes of the class (same group rank, extension and kind by name), the
+    // other files of the class follow it (a few big object files that look like text in places
+    // stay with the rest of their kind)
+    u := 0;
+    while u < nu do
+    begin
+      j := u;
+      if Units[u].Kind = ckData then
+        while (j + 1 < nu) and (Units[j + 1].Kind = ckData) and
+              (K[Order[Units[j + 1].First]].Home = K[Order[Units[u].First]].Home) and
+              (K[Order[Units[j + 1].First]].Ext = K[Order[Units[u].First]].Ext) and
+              (Kind[Order[Units[j + 1].First]] = Kind[Order[Units[u].First]]) do Inc(j);
+      n := 0;
+      FillChar(VBytes, SizeOf(VBytes), 0);
+      for x := u to j do
+        for y := Units[x].First to Units[x].First + Units[x].Count - 1 do
+        begin
+          Inc(n);
+          Inc(VBytes[Units[x].Verdict], Files[Order[y]].Size);
+        end;
+      if (Units[u].Kind = ckData) and (n >= CLASS_FILES) and (K[Order[Units[u].First]].Ext <> '') then
+      begin
+        Tot := VBytes[vText] + VBytes[vComp] + VBytes[vBin] + VBytes[vMixed];
+        for V := vText to vBin do
+          if (Tot > 0) and (VBytes[V] * 100 >= Tot * CLASS_PCT) then
+            for x := u to j do Units[x].Verdict := V;
+      end;
+      u := j + 1;
     end;
     for u := 0 to nu - 1 do
       for j := Units[u].First to Units[u].First + Units[u].Count - 1 do
