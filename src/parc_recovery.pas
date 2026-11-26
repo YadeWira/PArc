@@ -78,7 +78,7 @@ const
   MAX_SECTOR = 64 shl 20;
   MAX_AUTO_SECTORS = 1 shl 25;   // automatic sizing: at most 32 Mi sectors (64 MB of checks)
   MAX_AUTO_SECTOR = 1 shl 20;    //   and sectors of at most 1 MB (repair keeps a stripe in memory)
-  IO_CHUNK = 4 shl 20;
+  IO_CHUNK = 1 shl 20;
 
 type
   TBoolArr = array of Boolean;
@@ -802,7 +802,7 @@ begin
 
       // The record itself: rewritten if it is not what it should be (descriptors, tables,
       // checks of damaged or falsely flagged sectors, rebuilt parity)
-      SetLength(Cmp, 1 shl 20);
+      SetLength(Cmp, 256 shl 10);
       CmpPos := RecPos;
       Differs := F.Size <> RecPos + R.D.RecLen;
       if not Differs then EmitRecord(R, @Compare);
