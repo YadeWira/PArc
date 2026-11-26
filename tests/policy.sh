@@ -139,7 +139,8 @@ echo '-- detection'
 printf 'a' > one
 head -c 300000 /dev/urandom > rnd
 head -c 300000 /dev/zero > zeros
-cat "$ROOT"/docs/*.md | head -c 400000 > text
+# prose only: the benchmark tables of ESTADO.md read as numeric data, not text
+cat "$ROOT"/docs/USO.md "$ROOT"/README.md "$ROOT"/docs/formato/FORMATO-PARC.md | head -c 400000 > text
 python3 -c "
 import struct, sys
 sys.stdout.buffer.write(b''.join(struct.pack('<IIhh', i * 7, 100000 + i * 3, i % 50, -i % 9) for i in range(40000)))" > table
