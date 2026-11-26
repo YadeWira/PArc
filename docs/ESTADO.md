@@ -1,4 +1,4 @@
-# PArc status (2026-11-24)
+# PArc status (2026-11-26)
 
 PArc is an archiver written in **Free Pascal** with its own format, **`.parc`**, for Windows 7+
 (x86/x64) and Linux x64. It does not read or write `.arc` and has no GUI: support for `.arc`
@@ -32,7 +32,7 @@ The rest of the FreeArc 0.67 tree is in git history (commit `82ea8d9`) and in Fr
 
 ## What it does today
 
-- `.parc` format: nanosecond timestamps, Windows attributes, Unix permissions and links,
+- `.parc` format (own container, format 2 since 2026-11-26; FORMATO-PARC.md §1-§5): nanosecond timestamps, Windows attributes, Unix permissions and links,
   Reed-Solomon recovery (`-rr`), volumes (`-v`), authenticated encryption (`-p`/`-hp`:
   XChaCha20-Poly1305 or AES-256-GCM in 64 KiB chunks, Argon2id; own code, see
   [FORMATO-PARC.md §3b](formato/FORMATO-PARC.md)), stdin/stdout (`-si`, `-so`, `-`), long paths and cancellation without partial files.
@@ -264,6 +264,112 @@ What makes this possible (all inside `.parc`; the codecs are unchanged):
   is smaller, as the sub-second part only on top of the `Time` column (tag 8): 6–10 % smaller
   directories with random nanoseconds.
 - Recovery is Reed-Solomon only; the `.arc` XOR scheme is gone.
+
+## Own container format and recovery record (2026-11-26)
+
+The last structural FreeArc piece outside the codecs is gone: `.parc` now has its own container
+(format 2) and its own recovery record (`parc-rr1`), designed from first principles; spec in
+[FORMATO-PARC.md §1-§5](formato/FORMATO-PARC.md). Clean room: the old reader/writer were read
+only for their *interface* and for PArc's own logic (encryption, update planning, SFX, volumes);
+FreeArc's sources and format documents and the writer/-rr parser of the old `parc_recovery` were
+not read. No backward compatibility: archives of PArc 0.0.5 and earlier are rejected with
+*old PArc format*.
+
+What replaced what:
+
+| before (FreeArc structure) | now (own) |
+|---|---|
+| `HEADER` block + local descriptors (`ArC`/`PAr\x01`, VInt, CStr, CRC) | 16-byte head (magic `PArc\r\n\x1a\n`, version, CRC); data blocks have no header at all |
+| `DIR_BLOCK` columns + optional tagged fields at the end | index = header (magic, own position, lengths, method, 3 CRCs) + payload of typed sections with a skippable/mandatory bit: `ARCHIVE`, `BLOCKS` (runs, method table, per-block columns), `NAMES` (front-coded directory table, NUL-terminated base names, directory number absolute or delta by trial), `KINDS` (only for entries without data), `SIZES` and `MTIME` (fixed-width big-endian or LEB128/ns-delta, chosen by compressing a sample), `CRCS` (not for empty files), `UNIXMODE`, `WINATTR`, `LINKS`, `COMMENT`, `RECOVERY` |
+| `FOOTER` block (+ "provisional footer" before the record) listing every control block | 24-byte end locator (index position, archive length, CRC); with a damaged or cut tail the index is found by scanning backwards for its header |
+| block positions relative to the directory, every block listed | blocks in runs: one start position per run, positions from the stored sizes |
+| directories in a first data block of 0 bytes | entries without data come first and belong to no block |
+| VInt (FreeArc's `ByteStream.hs`) and CStr | LEB128 `Uv`, zigzag `Sv`, `UBE(w)`, `Str`, `ZStr` (`parc_bytes`); VInt/CStr removed |
+| recovery = two storing `RECOVERY_BLOCK`s (sectors; addinfo + 32-bit CRC per sector), found through the footer | `parc-rr1`: descriptor at both ends of the record, stripe CRC table twice, 16-bit check per sector, parity on `parc_rs` (unchanged RS code); found from the end of the file without the index, so it also repairs the index, locator and head, and repair rewrites the record too (byte-identical output) |
+| updates always copy the whole archive into a temporary file | same, plus **append in place** when only files are added and the old index is small: new blocks + new index after the end; the old bytes are not read; cut back on failure |
+
+Results are in the table below (`/mnt/IA_LAB/agentes/PArc/container`, cores 32-47, best of 2-3,
+main `0fb00ff` = old vs this branch = new).
+
+Sets (copies from the corpus): **many** = 10,000 files < 40 KB from text/document/image/font
+(998 dirs, 87 MB), **tiny** = 100,000 synthetic files of 0–300 bytes in 1,000 dirs, **big** = 5
+files of 21–40 MB (video/audio). Old = main `0fb00ff`, new = this branch. Times in seconds
+(best of 2-3, `taskset` 36 for T1, 32-35 for T4), memory = max RSS.
+
+**Archive size** (the data blocks are identical; the difference is the container):
+
+| set | options | old bytes | new bytes | Δ |
+|---|---|---|---|---|
+| many | `-m0` | 87,577,378 | 87,574,832 | −2,546 (−1.9 % of the overhead) |
+| many | `-m0 -s-` | 87,602,652 | 87,591,199 | −11,453 (−7 %) |
+| many | `-m2` | 37,311,291 | 37,307,995 | −3,296 |
+| many (fresh ns mtimes) | `-m5` | overhead 125,149 | 122,242 | −2.3 % |
+| tiny | `-m0` | 15,266,283 | 15,248,432 | −17,851 |
+| tiny | `-m0 -s-` | 15,557,908 | 15,354,738 | −203,170 (−1.3 %) |
+| tiny | `-m2` | 423,865 | 398,470 | −25,395 (−6 %) |
+| big | `-m0` / `-m2` | overhead 371 / 432 | 289 / 341 | −80 / −91 |
+
+**Speed and memory** (old → new; T1 and T4):
+
+| set, options | add | list | extract | test | update (+1 file) | max RSS (add / x) |
+|---|---|---|---|---|---|---|
+| many `-m0` T1 | 0.33 → 0.37 | 0.06 → 0.06 | 0.41 → 0.41 | 0.07 → 0.07 | 0.22 → **0.16** | 18.2/7.3 → 17.2/7.3 MB |
+| many `-m0` T4 | 0.37 → 0.36 | 0.06 → 0.07 | 0.41 → 0.48 | 0.08 → 0.07 | 0.21 → 0.18 | 22.7/7.3 → 20.8/7.3 |
+| many `-m0 -s-` T1 | 8.66 → 8.25 | 0.07 → 0.05 | 0.42 → 0.43 | 0.47 → 0.52 | 8.01 → **0.16** | 22.1/8.3 → 19.7/7.9 |
+| many `-m0 -s-` T4 | 8.61 → 8.57 | 0.06 → 0.05 | 1.30 → 1.37 | 0.33 → 0.33 | 7.98 → **0.20** | 26.9/15.0 → 24.0/14.5 |
+| many `-m2` T1 | 4.22 → 4.29 | 0.06 → 0.05 | 1.24 → 1.17 | 0.80 → 0.77 | 0.19 → 0.15 | 228/156 → 228/156 |
+| many `-m2` T4 | 1.36 → 1.29 | 0.06 → 0.06 | 0.71 → 0.76 | 0.35 → 0.33 | 0.18 → 0.15 | 258/125 → 242/123 |
+| tiny `-m0` T1 | 1.83 → 1.79 | 0.39 → 0.34 | 3.20 → 3.11 | 0.32 → 0.29 | 0.74 → 0.64 | 53/23 → 52/22 |
+| tiny `-m0` T4 | 1.75 → 1.83 | 0.37 → 0.36 | 2.91 → 3.14 | 0.38 → 0.32 | 0.72 → 0.65 | 63/23 → 62/22 |
+| tiny `-m0 -s-` T1 | 14.55 → 8.98 | 0.40 → 0.35 | 3.16 → 3.14 | 23.8 → 23.4 | 30.9 → 28.9 | 78/38 → 76/29 |
+| tiny `-m0 -s-` T4 | 9.11 → 11.80 * | 0.42 → 0.36 | 24.0 → 25.2 * | 23.8 → 25.7 * | 32.2 → 35.2 * | 89/171 → 85/166 |
+| tiny `-m2` T1 | 3.17 → 3.03 | 0.37 → 0.33 | 2.96 → 2.99 | 0.44 → 0.41 | 0.80 → 0.73 | 82/41 → 81/41 |
+| tiny `-m2` T4 | 2.46 → 2.42 | 0.39 → 0.40 | 2.73 → 2.89 | 0.35 → 0.37 | 0.71 → 0.64 | 88/104 → 88/103 |
+| big `-m0` T1 | 0.17 → 0.15 | 0.01 → 0.01 | 0.14 → 0.13 | 0.06 → 0.05 | 0.17 → **0.02** | 7.5/4.2 → 6.8/4.3 |
+| big `-m2` T1 | 2.17 → 2.13 | 0.01 → 0.01 | 0.69 → 0.72 | 0.64 → 0.64 | 0.15 → **0.03** | 178/118 → 181/118 |
+| big `-m2` T4 | 0.75 → 0.74 | 0.01 → 0.01 | 0.33 → 0.33 | 0.27 → 0.25 | 0.17 → **0.03** | 272/156 → 276/154 |
+
+\* 100,000 one-file blocks with 4 threads are dominated by noise (scheduling, 100k small writes):
+a re-run of `a` four times each gave old 9.67–11.36 s, new 9.18–11.43 s (best: new faster), and
+`t` old 24.0–24.8, new 24.1–24.4. The other differences of ±0.07 s are within run-to-run noise;
+the code path for data blocks is unchanged (only index building/parsing is new). The index is
+built with up to six extra trial compressions of ≤ 32,768-entry samples (≈ +0.04 s on `many -m0`
+T1).
+
+**Update**: "update" adds one file. On `many`/`big` it is now an append in place (no copy of the
+archive): 0.16 s instead of 8 s with `-s-`; the old index stays as dead bytes (+131 KB on the
+87 MB `many`, 0.15 %). On `tiny` the index is 88 % of the archive, so PArc rewrites instead (no
+growth). After an append the archive is 1 index bigger than a rewritten one; `ch` compacts it.
+
+**Recovery record** (T1, `-m0` archives of big = 144 MB and many* = 232 MB; a damage of 3
+sectors repaired; all repairs byte-identical):
+
+| set | `-rr` | old record (parity) | new record (parity) | parity bytes per record byte | build s / MB | repair s / MB |
+|---|---|---|---|---|---|---|
+| big | 1% | 2,005,588 (840 × 2 KB) | 1,287,084 (558 × 2 KB) | 0.858 → 0.888 | 0.35/12.4 → 0.26/7.6 | 0.18/6.7 → 0.17/6.3 |
+| big | 5% | 7,682,748 (12,705 × 512) | 7,103,090 (12,705 × 512) | 0.847 → 0.916 | 1.22/31.4 → 0.94/13.1 | 0.35/12.3 → 0.27/12.6 |
+| many* | 1% | 3,223,171 (1,350 × 2 KB) | 2,066,583 (896 × 2 KB) | 0.858 → 0.888 | 0.72/20.5 → 0.59/18.0 | 0.36/9.9 → 0.39/7.5 |
+| many* | 5% | 12,345,832 (20,416 × 512) | 11,413,965 (20,416 × 512) | 0.847 → 0.916 | 2.05/54.2 → 1.82/22.5 | 0.58/19.3 → 0.32/16.5 |
+
+(*many* in this run was the sets directory with its fresh-ns copy: 232 MB.) At 5 % the new record
+has exactly the same parity (same sectors, stripes and m: same tolerance to scattered and burst
+damage) in 7.5–8 % fewer bytes. At 1 % the old record overshot to 1.39 % (m = 3); the new one
+stays at 0.89 % (m = 2, the parity count nearest to the budget): less absolute protection for
+`-rr1%`, but more per byte (+3.5 %); `-rr1.4%` gives the old protection in fewer bytes. The new
+record also survives damage the old one could not: in its own descriptor, in the index or the
+end locator (the old record was found through the footer), and in its check table.
+
+Tests: `tests/container.sh` (round trips of every entry kind with ns times and modes, update,
+delete, lock, comment, SFX stub, `-p`/`-hp`, volumes, determinism, append in place, damaged
+tails/heads/indexes, 60 random flips, and an independent Python reader of the spec,
+`tests/container_spec.py`, compared with `parc lt`), `tests/recovery.sh` (replaces
+`rs_recovery.sh`: `-rr` syntax, scattered damage up to m per stripe and bursts up to S·m sectors
+repaired byte-identical, damage in the index/locator/head/parity/checks/tables/descriptors, SFX,
+volumes, 1-byte archive; beyond the budget exit 2), `tests/container_cross.sh` (`ch` with
+`-rr`, comment, lock, `-mlzma`, `-s-` gives the same bytes and `lt`, and `r` the same repair, on
+linux64, linux32, linuxarm64 (qemu), win64 and win32 (Wine)).
+
+Remaining FreeArc-like traits are behaviour or generic technique only (GPL-AUDIT.md §3).
 
 ## SREP replaced by OSREP (2026-11-26)
 
@@ -2161,7 +2267,8 @@ SREP with the 32-bit binary was verified under Wine and with an archive cross-ch
 ./build.sh linux64
 bash tests/cli.sh tests/cli_options.sh tests/cli_commands.sh
 bash tests/stdio.sh tests/volumes.sh
-bash tests/rs_recovery.sh tests/parc_crypt.sh tests/cm.sh tests/bwt.sh tests/bcj2.sh
+bash tests/container.sh tests/recovery.sh tests/container_cross.sh   # container format 2, parc-rr1, cross-platform bytes
+bash tests/parc_crypt.sh tests/cm.sh tests/bwt.sh tests/bcj2.sh
 bash tests/dispack.sh tests/srep.sh tests/bcj.sh
 bash tests/run_tornado_tests.sh tests/crypto_vectors.sh tests/crc.sh tests/extract_parallel.sh
 bash tests/run_lzma_tests.py build/tests/test_lzma
@@ -2207,5 +2314,5 @@ PARC_THREADS=4 build/tests/test_jobfree
 
 ## Possible next steps
 
-1. `.parc`-specific fuzzing (updates and damage) plus volume/encryption tests in the suite.
-2. Ideas for format v2 (stronger per-file hash, ACLs/xattrs).
+1. Container: reclaiming the dead index of appended archives without a full rewrite; optional
+   sections for a stronger per-file hash, hard links, ACLs/xattrs (FORMATO-PARC.md §5c).
