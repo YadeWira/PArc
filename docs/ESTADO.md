@@ -23,7 +23,7 @@ The rest of the FreeArc 0.67 tree is in git history (commit `82ea8d9`) and in Fr
 | phase | status |
 |---|---|
 | FreeArc/PArc bugs | ✅ closed (the `.arc` parity fixes remain as history; see tag `entrega-arc`) |
-| Ported codecs | ✅ closed (LZMA, LZ4, PPMd, Dict, LZP, Delta, MM, TTA, BCJ, SREP; DisPack replaced by an own x86/x64 filter 2026-11-23; Tornado was ported too and removed after 0.0.5, replaced by the own `plz`; REP replaced by OREP, MIT, 2026-11; GRZip replaced by the own `bwt`, 2026-11-23; 4x4 replaced by an own stage, 2026-11-23) |
+| Ported codecs | ✅ closed; the file planning port (`ArhiveFileList.hs`) was replaced by the own `parc_solid` 2026-11-23 and 4x4 by the own `parc_4x4` 2026-11-24, see GPL-AUDIT.md (LZMA, LZ4, PPMd, Dict, LZP, Delta, MM, TTA, BCJ, SREP; DisPack replaced by an own x86/x64 filter 2026-11-23; Tornado was ported too and removed after 0.0.5, replaced by the own `plz`; REP replaced by OREP, MIT, 2026-11; GRZip replaced by the own `bwt`, 2026-11-23; 4x4 replaced by an own stage, 2026-11-23) |
 | `.arc` compatibility | ❌ dropped: rejected with a message pointing to FreeArc-ex |
 | GUI | ❌ dropped |
 | `.zip/.7z/.rar` containers | ➡ moved to FreeArc-ex (tag `entrega-arc`) |
@@ -1710,6 +1710,117 @@ decode memory of `4x4:lzma` (64 MB blocks) is higher because the blocks now deco
 (2.6× faster at T4) and of exe `-m2..-m4` (+12..25 MB); `4x4:ppmd` decoding at T4 is a tie in
 time for +59 MB (records mostly stored need read-ahead by bytes); the near-random `s20` file is
 0.1 s slower with lzma/plz (the cell analysis), and `-m1` compression memory on exe is +22 MB.
+
+## Own solid-block planning replaces the `ArhiveFileList.hs` port (2026-11-23)
+
+`src/parc_filelist.pas` (1470 lines, a step-by-step port of FreeArc's `ArhiveFileList.hs`,
+`find_type`, `typeByCompressor`, `splitBy`…) and the FreeArc-style `PlanUpdate` (`join_lists` +
+merge) are gone. Inventory of what else is FreeArc-derived outside the codecs:
+[`GPL-AUDIT.md`](GPL-AUDIT.md). The replacement is `src/parc_solid.pas` (MIT, own design; the
+header of the unit is the spec):
+
+- *Rules*: the `[File groups]` table compiled once into hashed base names and extensions plus
+  the few wildcard masks; a file gets its set of matching groups and a home group.
+- *Order*: home group, extension, folder, name; then **twins**: a file whose base name appeared
+  earlier in the same (group, extension) run moves right behind the first one, so copies kept in
+  several folders (versions, other targets) end up together. With `-s-`/`-s1f` or when
+  everything is stored the input order is kept (it does not matter there, and it is cheaper).
+- *Kind*: first group of the `-m` list in the file's set; content decides when the list has
+  `$text`/`$compressed`: 1, 3 or 5 samples of 64 KB (by size), majority vote (unanimous for text
+  when the default is `lzma:max`, `-m6` and up); small files (runs up to 1 MB, two samples) are
+  judged together with their same-extension neighbours; compressed data moves any kind to
+  `$compressed`, text only default/compressed files; `$wav`/`$bmp` that do not look like media
+  fall back. Parallel reading in a job pool; the result depends only on the bytes.
+- *Blocks*: `-s` limits as documented (USO.md), `tta`/`mm` without explicit layout one file per
+  block, at most one `dict`/`lzp` block or four `bwt` blocks per solid block; blocks in the order
+  of their first file.
+- *Updates*: whole old blocks are copied; a block that loses or replaces files is rewritten in
+  its order (the new version in the place of the old one) with the list's method of the same
+  stages (or its old method); new files that replace nothing go into new blocks (adding files
+  never rewrites old blocks). `--recompress`/`d -m` plan everything again, old files keeping the
+  kind of their block.
+
+Tests: `tests/solid.sh` (round trips with every `-s` form and several levels, the `-s` limits,
+kinds by name and content, twins, the bwt cap, T1 == T8 plan, updates, edge cases). With the
+own 4x4 merged: `./build.sh all` builds every target and all 34 `tests/*.sh` pass (`fixes.sh`
+needs sudo and `bench_vs_freearc.sh` needs `ARC_EXE`, not run).
+
+Measured against main `e4e76fd` (old) on three sets copied to IA_LAB: `fpc` (FPC units for
+i386-linux and i386-win32 plus docs, 301 MB, 3065 files: the same unit names in two targets),
+`mixed` (corpus sample of every category, 409 MB, 3946 files) and `txt` (corpus `text` files of
+20 KB–6 MB, 399 MB, 1698 files). Cores 40-47 (`taskset`), best of 3, `a` then `t`; MB = peak RSS.
+The machine was shared and noisy (repeated runs of the same binary vary by up to 5–10 %).
+
+| set | T | -m | size old | size new | Δ size | comp s old/new | comp MB old/new | test s old/new | test MB old/new |
+|---|---|---|---|---|---|---|---|---|---|
+| fpc | 1 | 1 | 41218474 | 40903728 | -0.76% | 2.77 / 2.82 | 172 / 171 | 0.79 / 0.76 | 116 / 116 |
+| fpc | 4 | 1 | 42950094 | 42681722 | -0.62% | 1.19 / 1.16 | 247 / 244 | 0.30 / 0.32 | 200 / 202 |
+| fpc | 1 | 2 | 29723438 | 29445548 | -0.93% | 9.35 / 9.70 | 311 / 310 | 1.14 / 1.09 | 244 / 244 |
+| fpc | 4 | 2 | 31388394 | 31130723 | -0.82% | 2.30 / 2.39 | 499 / 505 | 0.33 / 0.32 | 397 / 398 |
+| fpc | 1 | 3 | 28308087 | 28195909 | -0.40% | 13.88 / 13.67 | 322 / 322 | 2.30 / 2.21 | 210 / 210 |
+| fpc | 4 | 3 | 27263669 | 27081949 | -0.67% | 8.92 / 9.16 | 536 / 553 | 0.78 / 0.74 | 388 / 404 |
+| fpc | 1 | 4 | 26855395 | 26806279 | -0.18% | 30.79 / 32.14 | 291 / 290 | 2.28 / 2.24 | 210 / 210 |
+| fpc | 4 | 4 | 26386036 | 26204247 | -0.69% | 10.65 / 10.77 | 626 / 665 | 0.71 / 0.72 | 425 / 419 |
+| fpc | 1 | 5 | 24621612 | 24588327 | -0.14% | 60.21 / 63.19 | 1124 / 1122 | 2.17 / 2.27 | 210 / 210 |
+| fpc | 4 | 5 | 25057432 | 24878760 | -0.71% | 17.43 / 16.72 | 1413 / 1379 | 0.75 / 0.74 | 392 / 428 |
+| fpc | 1 | 6 | 22898904 | 22805053 | -0.41% | 106.40 / 106.73 | 574 / 573 | 1.95 / 1.94 | 214 / 213 |
+| fpc | 4 | 6 | 22898904 | 22805053 | -0.41% | 34.32 / 34.19 | 1214 / 1213 | 1.10 / 1.07 | 351 / 352 |
+| fpc | 1 | 7 | 22841309 | 22739648 | -0.45% | 130.28 / 132.53 | 878 / 877 | 2.26 / 2.21 | 245 / 246 |
+| fpc | 4 | 7 | 22841309 | 22739648 | -0.45% | 39.47 / 38.87 | 1837 / 1862 | 1.20 / 1.15 | 415 / 413 |
+| fpc | 1 | 8 | 22777433 | 22724549 | -0.23% | 130.08 / 127.78 | 1077 / 1077 | 2.31 / 2.18 | 310 / 310 |
+| fpc | 4 | 8 | 22777433 | 22722872 | -0.24% | 37.93 / 37.45 | 2102 / 2154 | 1.21 / 1.21 | 543 / 543 |
+| fpc | 1 | 9 | 22777721 | 22730275 | -0.21% | 111.03 / 111.43 | 1207 / 1205 | 2.09 / 2.02 | 350 / 349 |
+| fpc | 4 | 9 | 22777721 | 22728565 | -0.22% | 35.12 / 35.24 | 2395 / 2416 | 1.12 / 1.10 | 584 / 584 |
+| fpc | 1 | x | 22777721 | 22730275 | -0.21% | 117.92 / 119.87 | 1207 / 1205 | 2.19 / 2.12 | 349 / 349 |
+| fpc | 4 | x | 22777721 | 22728565 | -0.22% | 36.18 / 36.15 | 2393 / 2415 | 1.17 / 1.17 | 571 / 583 |
+| mixed | 1 | 1 | 199246734 | 199261734 | +0.01% | 4.29 / 4.06 | 177 / 176 | 1.29 / 1.28 | 117 / 117 |
+| mixed | 4 | 1 | 200085040 | 200098785 | +0.01% | 1.57 / 1.58 | 280 / 278 | 0.52 / 0.52 | 248 / 245 |
+| mixed | 1 | 2 | 179758794 | 179215682 | -0.30% | 14.26 / 13.76 | 321 / 319 | 3.11 / 3.36 | 218 / 215 |
+| mixed | 4 | 2 | 184492718 | 184082402 | -0.22% | 3.88 / 3.78 | 464 / 479 | 1.17 / 1.11 | 304 / 267 |
+| mixed | 1 | 3 | 173178031 | 172744493 | -0.25% | 34.17 / 33.31 | 372 / 371 | 8.65 / 8.76 | 211 / 212 |
+| mixed | 4 | 3 | 168949494 | 168899353 | -0.03% | 14.82 / 14.04 | 509 / 512 | 2.62 / 2.68 | 366 / 360 |
+| mixed | 1 | 4 | 168010452 | 167871763 | -0.08% | 60.50 / 60.27 | 345 / 339 | 11.27 / 11.39 | 324 / 372 |
+| mixed | 4 | 4 | 168173463 | 167856934 | -0.19% | 17.03 / 17.58 | 633 / 634 | 3.34 / 3.29 | 404 / 335 |
+| mixed | 1 | 5 | 166477619 | 166417349 | -0.04% | 84.47 / 83.01 | 1187 / 1178 | 12.67 / 14.04 | 350 / 409 |
+| mixed | 4 | 5 | 173028542 | 166408178 | -3.83% | 24.46 / 22.06 | 1413 / 1450 | 4.14 / 4.36 | 593 / 672 |
+| mixed | 1 | 6 | 165142431 | 165082874 | -0.04% | 138.04 / 130.56 | 681 / 695 | 15.51 / 15.64 | 615 / 727 |
+| mixed | 4 | 6 | 165142431 | 165082874 | -0.04% | 75.63 / 72.91 | 1212 / 1236 | 8.48 / 8.61 | 898 / 1030 |
+| mixed | 1 | 7 | 165085734 | 165028909 | -0.03% | 132.13 / 130.13 | 1081 / 1069 | 13.88 / 15.04 | 616 / 728 |
+| mixed | 4 | 7 | 165085734 | 165028909 | -0.03% | 72.52 / 70.50 | 1314 / 1357 | 8.48 / 8.28 | 924 / 1066 |
+| mixed | 1 | 8 | 165055566 | 164990270 | -0.04% | 141.61 / 142.19 | 1754 / 1741 | 14.86 / 15.42 | 616 / 728 |
+| mixed | 4 | 8 | 165055566 | 164990270 | -0.04% | 75.20 / 71.17 | 1887 / 1872 | 8.50 / 7.90 | 998 / 1122 |
+| mixed | 1 | 9 | 165035869 | 164973313 | -0.04% | 134.56 / 154.03 | 2984 / 2965 | 15.37 / 15.90 | 616 / 728 |
+| mixed | 4 | 9 | 165035869 | 164973313 | -0.04% | 77.29 / 70.83 | 3093 / 3061 | 8.40 / 8.09 | 1115 / 1247 |
+| mixed | 1 | x | 165035869 | 164973313 | -0.04% | 128.66 / 129.88 | 2987 / 2967 | 14.16 / 14.55 | 616 / 728 |
+| mixed | 4 | x | 165035869 | 164973313 | -0.04% | 72.04 / 69.21 | 3096 / 3072 | 8.00 / 8.00 | 1113 / 1247 |
+| txt | 1 | 2 | 69693581 | 69668510 | -0.04% | 11.27 / 11.39 | 313 / 317 | 4.33 / 4.49 | 204 / 204 |
+| txt | 4 | 2 | 69023812 | 68896603 | -0.18% | 3.27 / 3.28 | 352 / 369 | 1.35 / 1.35 | 200 / 206 |
+| txt | 1 | 3 | 66156072 | 66197156 | +0.06% | 22.63 / 22.20 | 370 / 369 | 7.32 / 7.11 | 210 / 210 |
+| txt | 4 | 3 | 61470318 | 61198213 | -0.44% | 11.38 / 11.73 | 430 / 425 | 2.00 / 2.02 | 267 / 268 |
+| txt | 1 | 4 | 60155253 | 59747345 | -0.68% | 43.90 / 43.65 | 338 / 340 | 10.34 / 9.99 | 365 / 368 |
+| txt | 4 | 4 | 59775637 | 59712120 | -0.11% | 14.95 / 14.76 | 550 / 542 | 2.48 / 2.47 | 260 / 272 |
+| txt | 1 | 5 | 57396690 | 57033135 | -0.63% | 69.29 / 70.57 | 1170 / 1169 | 11.31 / 10.99 | 390 / 393 |
+| txt | 4 | 5 | 57394508 | 57210705 | -0.32% | 21.86 / 21.98 | 1361 / 1410 | 3.94 / 3.82 | 607 / 643 |
+| txt | 1 | 9 | 55298582 | 55572624 | +0.50% | 139.32 / 154.25 | 2210 / 2390 | 12.87 / 11.49 | 902 / 875 |
+| txt | 4 | 9 | 55298582 | 55572624 | +0.50% | 76.35 / 81.67 | 2304 / 2477 | 9.22 / 8.77 | 1092 / 1078 |
+
+Size: smaller in 47 of 50 cells (fpc −0.14..−0.93 %, every level; mixed −0.03..−0.30 %; txt
+−0.04..−0.68 % up to `-m5`). Cells not won, and why:
+- *`txt -m9` +0.50 %* (and 10 % slower, +8 % memory when compressing): against `lzma:max` the
+  choice between the text chain (dict+lzp+ppmd) and the binary one is nearly a tie file by file
+  (the moved files differ by 1–5 %), and on this set the old classification happened to land
+  better; making text stricter or looser (tried: unanimous, majority, 40 %, first sample, plain
+  ASCII) loses elsewhere (`mixed -m9`, `txt -m4`, `fpc -m3`). The rule kept is the best overall.
+- *`mixed -m1` +0.01 %* and *`txt -m3` T1 +0.06 %*: ties (14 KB of 200 MB, 41 KB of 66 MB).
+- *Decode memory `mixed -m6`..`-mx` +18 %* (616 → 728 MB at T1): about 20 MB more of that set is
+  `$text` (by name or content), and dict+lzp keep several copies of their block while decoding.
+  Decode time is the same within noise.
+- *Compression time at T1 `fpc -m2`/`-m4`/`-m5` +3..5 %*: the order puts the two targets' copies
+  of each unit together (−0.2..−0.9 % size) and the LZ encoders find more and longer matches.
+  Measured alone (one method, no planning) `plz:4` T1 gave 8.37 s old vs 8.29–8.74 s new: within
+  this machine's noise. Planning itself is cheaper than before (a `-m` whose groups all store,
+  i.e. order + content checks only: fpc 1.34 vs 1.79 s, mixed 1.48 vs 2.09 s at T1).
+- Compression memory at T4 varies ±5 % from run to run in both builds (`fpc -m4` 626/665 MB).
 
 ## Verified platforms (0.0.2)
 

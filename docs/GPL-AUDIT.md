@@ -20,9 +20,9 @@ which files go together) is fine; porting the code is not.
 | `src/parc_filelist.pas:1-1470` (whole unit) | file sort "gerpn", `reorder`, `find_type`, `splitFileTypes`/`check`/`bestType`/`chooseType`, `splitToSolidBlocks`, `splitBy`/`splitLenMin`/`splitLenMax`/`solidBlockLen`, `parseSolidOption`, `typeByCompressor`, `VeryFast?` | step-by-step port of `ArhiveFileList.hs`, `Cmdline.hs` (`parseSolidOption`, `find_type`, `clevel`), `Compression.hs` (`typeByCompressor`), `Utils.hs` (`match`, `merge`), `UTF8Z.hs` (`comparePS`) | high | **removed**: replaced by own `parc_solid.pas` (2026-11-23) |
 | `src/parc.lpr:1118-1153` `GroupNewEntries` | calls the above | glue | low | rewritten over `parc_solid` |
 | `src/parc.lpr:1160-1304` `PlanUpdate` | `join_lists` + merge by the gerpn key + `splitToSolidBlocks` keeping whole old blocks | port of the update path of `ArhiveFileList.hs`/`Utils.hs merge` | high | **rewritten** (own plan: copy whole blocks, rewrite broken ones in place, new files in new blocks) |
-| `src/parc_encoders.pas:44-500` `T4x4EncStage`/`T4x4EncJob` | 4x4 encoder: per-block `[Int32 OutSize][U32 InSize]` records, version word 0, `order0_compression_ratio` skip, block size rule | port of `_4x4MTCompressor` (`Compression/4x4/C_4x4.cpp`) and its stream format | high | rewrite (own stream) |
+| `src/parc_encoders.pas:44-500` `T4x4EncStage`/`T4x4EncJob` | 4x4 encoder: per-block `[Int32 OutSize][U32 InSize]` records, version word 0, `order0_compression_ratio` skip, block size rule | port of `_4x4MTCompressor` (`Compression/4x4/C_4x4.cpp`) and its stream format | high | **removed**: own `parc_4x4.pas`, own stream (FORMATO-PARC §6.11) |
 | `src/parc_encoders.pas:552-690` `Parse4x4`, `Balance4x4`, `Adaptive4x4Block`, `Has4x4BlockParam` | 4x4 parameters (`b`, `t`, `r`, inner method) | `parse_4x4` of `C_4x4.cpp` (parameter syntax) + own balancing | medium (syntax) / low (balancing is ours) | parameters kept (observable), code rewritten with the stage |
-| `src/parc_methods.pas:210-400` `Inner4x4Method`, `T4x4Stage`, `T4x4Job` | 4x4 decoder | port of the `C_4x4.cpp` reader/format | high | rewrite (own stream) |
+| `src/parc_methods.pas:210-400` `Inner4x4Method`, `T4x4Stage`, `T4x4Job` | 4x4 decoder | port of the `C_4x4.cpp` reader/format | high | **removed**: own `parc_4x4.pas`, own stream (FORMATO-PARC §6.11) |
 | `src/parc_parallel.pas:21-25, 126-160, 794-941` `TParallelBlockStage` | ordered parallel block decoding | "como el MTCompressor de FreeArc" (idea: decode blocks in a pool, deliver in order); the pool, budget and job ring are our own code (git: 0bbbbbd, eb2f7d7, 45f1ddf, written for PArc) | low | comment reworded; nothing to port |
 | `src/parc_parallel.pas:1-20, 160-790` budget, `TJobPool` | thread budget, pools | own (PArc) | none | — |
 | `src/parc_encoders.pas:85-125, 689-1125` (non-4x4) | chain builder, memory estimates, `FitEncodeMem`, `LimitMethodToSize`, srep/bcj/orep stages | own code; *behaviour* of FreeArc's `SetDictionary`/`limit_compression_memory` (comments at :90, :101) | low | keep; reword comments |
@@ -47,13 +47,13 @@ Codecs (outside this audit, listed for completeness): `parc_srep.pas` (SREP 3.93
 additions (agent a), `parc_presets*`/`parc_canon`/`parc_filetype`/`parc_methods` helpers
 (agent b; `parc_presets_data.inc` is FreeArc's `arc.ini`/`arc.groups` text).
 
-## 2. Rewrite plan for this round (status in ESTADO.md)
+## 2. Rewritten in this round (details and measurements in ESTADO.md)
 
-- `parc_filelist.pas` → removed; replaced by `parc_solid.pas` (own design, documented in
+- `parc_filelist.pas` → removed (done); replaced by `parc_solid.pas` (own design, documented in
   `ESTADO.md` "Solid planning"): same CLI semantics for `-s…`, `-ds`-like ordering by type and
   extension, own twin clustering, own content typing, own block splitting and update planning.
-- `PlanUpdate` in `parc.lpr` → own merge/plan over `parc_solid`.
-- 4x4 → own stream format (`FORMATO-PARC.md` §6.11) and own encoder/decoder (`parc_4x4.pas`).
+- `PlanUpdate` in `parc.lpr` → own plan over `parc_solid` (done).
+- 4x4 → own stream format (`FORMATO-PARC.md` §6.11) and own encoder/decoder (`parc_4x4.pas`): done.
 
 (See ESTADO.md for what landed and the measurements.)
 
