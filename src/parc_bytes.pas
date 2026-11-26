@@ -1,5 +1,14 @@
-{ Lectura de los tipos primitivos del formato (el formato base de FreeArc §2) desde un buffer en memoria.
-  Toda lectura verifica límites y lanza EArcCorrupt si se sale del buffer. }
+{ Primitive encoding of PArc's container (docs/formato/FORMATO-PARC.md §1.2), read from and
+  written to memory buffers. Every read checks bounds and raises EArcCorrupt when it would leave
+  the buffer.
+
+  - fixed-size integers: little-endian (U16/U32/U64);
+  - Uv: unsigned LEB128 (7 bits per byte, low group first, high bit = more bytes follow), at most
+    10 bytes, always the shortest form (a reader rejects overlong or overflowing encodings);
+  - Sv: signed, zigzag-mapped ((v shl 1) xor (v sar 63)) and then Uv;
+  - UBE(w): an unsigned value in exactly w bytes, big-endian (fixed-width columns, which a
+    general-purpose compressor models better than varints);
+  - Str: Uv length + that many bytes; ZStr: bytes up to a 0 byte (only for path columns). }
 unit parc_bytes;
 
 {$mode objfpc}{$H+}
@@ -22,26 +31,46 @@ type
     function Remaining: SizeInt;
     procedure Skip(N: SizeInt);
     function U8: Byte;
+    function U16: Word;
     function U32: LongWord;
-    function VInt: QWord;
-    function VIntSize: SizeInt;       // VInt que tiene que caber en SizeInt (conteos, longitudes)
-    function CStr: RawByteString;     // UTF-8 terminado en NUL
+    function U64: QWord;
+    function Uv: QWord;
+    function UvSize: SizeInt;         // Uv that must fit in SizeInt and in what is left (counts)
+    function Sv: Int64;
+    function UBE(W: Integer): QWord;
+    function Str: RawByteString;
+    function ZStr: RawByteString;     // UTF-8 up to a 0 byte
     function Bytes(N: SizeInt): RawByteString;
   end;
 
-  { Serialización de los tipos primitivos (el formato base de FreeArc §2) en un buffer que crece. }
+  { Serialization into a growing buffer. }
   TByteWriter = record
     Data: TBytes;
     Len: SizeInt;
     procedure Clear;
     procedure Raw(Buf: Pointer; Count: SizeInt);
     procedure U8(V: Byte);
+    procedure U16(V: Word);
     procedure U32(V: LongWord);
-    procedure I64(V: Int64);
-    procedure VInt(V: QWord);         // siempre en la forma más corta, como FreeArc
-    procedure CStr(const S: RawByteString);
+    procedure U64(V: QWord);
+    procedure Uv(V: QWord);
+    procedure Sv(V: Int64);
+    procedure UBE(V: QWord; W: Integer);
+    procedure Str(const S: RawByteString);
+    procedure ZStr(const S: RawByteString);
     function Bytes: TBytes;
   end;
+
+{ Zigzag: small signed values (either sign) to small unsigned ones. }
+function ZigZag(V: Int64): QWord; inline;
+function UnZigZag(V: QWord): Int64; inline;
+{ Bytes needed to hold V in UBE (0 for V = 0). }
+function UBEWidth(V: QWord): Integer;
+{ Little-endian loads/stores on byte buffers. }
+function GetU32(P: PByte): LongWord; inline;
+function GetU64(P: PByte): QWord; inline;
+procedure PutU32(P: PByte; V: LongWord); inline;
+procedure PutU64(P: PByte; V: QWord); inline;
 
 { Memory size of a method parameter: "<digits>[unit]", unit b (bytes), k, m or g (KB, MB, GB;
   an optional "b" after it: "kb", "mb", "gb"), or none (or "^"): a power of two, "24" = 16 MB.
@@ -98,6 +127,49 @@ begin
   raise EArcCorrupt.Create('damaged archive: ' + Msg);
 end;
 
+function ZigZag(V: Int64): QWord;
+begin
+  if V >= 0 then Result := QWord(V) shl 1
+  else Result := ((not QWord(V)) shl 1) or 1;
+end;
+
+function UnZigZag(V: QWord): Int64;
+begin
+  if (V and 1) = 0 then Result := Int64(V shr 1)
+  else Result := Int64(not (V shr 1));
+end;
+
+function UBEWidth(V: QWord): Integer;
+begin
+  Result := 0;
+  while (Result < 8) and (V <> 0) do
+  begin
+    V := V shr 8;
+    Inc(Result);
+  end;
+end;
+
+function GetU32(P: PByte): LongWord;
+begin
+  Result := LongWord(P[0]) or (LongWord(P[1]) shl 8) or (LongWord(P[2]) shl 16) or (LongWord(P[3]) shl 24);
+end;
+
+function GetU64(P: PByte): QWord;
+begin
+  Result := QWord(GetU32(P)) or (QWord(GetU32(P + 4)) shl 32);
+end;
+
+procedure PutU32(P: PByte; V: LongWord);
+begin
+  P[0] := Byte(V and $FF); P[1] := Byte((V shr 8) and $FF); P[2] := Byte((V shr 16) and $FF); P[3] := Byte(V shr 24);
+end;
+
+procedure PutU64(P: PByte; V: QWord);
+begin
+  PutU32(P, LongWord(V));
+  PutU32(P + 4, LongWord(V shr 32));
+end;
+
 procedure TByteReader.Init(AData: PByte; ASize: SizeInt);
 begin
   Data := AData;
@@ -117,66 +189,100 @@ end;
 
 procedure TByteReader.Skip(N: SizeInt);
 begin
-  if (N < 0) or (N > Size - Pos) then Corrupt('read outside block');
+  if (N < 0) or (N > Size - Pos) then Corrupt('read outside the structure');
   Inc(Pos, N);
 end;
 
 function TByteReader.U8: Byte;
 begin
-  if Pos >= Size then Corrupt('read outside block');
+  if Pos >= Size then Corrupt('read outside the structure');
   Result := Data[Pos];
   Inc(Pos);
 end;
 
+function TByteReader.U16: Word;
+begin
+  if Size - Pos < 2 then Corrupt('read outside the structure');
+  Result := Word(Data[Pos]) or (Word(Data[Pos + 1]) shl 8);
+  Inc(Pos, 2);
+end;
+
 function TByteReader.U32: LongWord;
 begin
-  if Size - Pos < 4 then Corrupt('read outside block');
-  Result := LongWord(Data[Pos]) or (LongWord(Data[Pos + 1]) shl 8) or
-            (LongWord(Data[Pos + 2]) shl 16) or (LongWord(Data[Pos + 3]) shl 24);
+  if Size - Pos < 4 then Corrupt('read outside the structure');
+  Result := GetU32(@Data[Pos]);
   Inc(Pos, 4);
 end;
 
-function TByteReader.VInt: QWord;
-var
-  First: Byte;
-  n, i: Integer;
+function TByteReader.U64: QWord;
 begin
-  First := U8;
-  Dec(Pos);
-  // n = cantidad de bits 1 consecutivos en la parte baja del primer byte
-  n := 0;
-  while (n < 8) and (((First shr n) and 1) = 1) do Inc(n);
-  if n = 8 then
-  begin
-    if Size - Pos < 9 then Corrupt('entero truncado');
-    Result := 0;
-    for i := 8 downto 1 do Result := (Result shl 8) or Data[Pos + i];
-    Inc(Pos, 9);
-    Exit;
-  end;
-  if Size - Pos < n + 1 then Corrupt('entero truncado');
-  Result := 0;
-  for i := n downto 0 do Result := (Result shl 8) or Data[Pos + i];
-  Result := Result shr (n + 1);
-  Inc(Pos, n + 1);
+  if Size - Pos < 8 then Corrupt('read outside the structure');
+  Result := GetU64(@Data[Pos]);
+  Inc(Pos, 8);
 end;
 
-function TByteReader.VIntSize: SizeInt;
+function TByteReader.Uv: QWord;
+var
+  b: Byte;
+  Shift: Integer;
+begin
+  Result := 0;
+  Shift := 0;
+  repeat
+    if Pos >= Size then Corrupt('truncated integer');
+    b := Data[Pos];
+    Inc(Pos);
+    if Shift = 63 then
+    begin
+      if b > 1 then Corrupt('integer too large');
+    end
+    else if Shift > 63 then Corrupt('integer too large');
+    Result := Result or (QWord(b and $7F) shl Shift);
+    Inc(Shift, 7);
+  until b < $80;
+  if (b = 0) and (Shift > 7) then Corrupt('non-canonical integer');
+end;
+
+function TByteReader.UvSize: SizeInt;
 var
   v: QWord;
 begin
-  v := VInt;
-  if v > QWord(High(SizeInt)) then Corrupt('valor demasiado grande');
+  v := Uv;
+  if v > QWord(High(SizeInt)) then Corrupt('value too large');
   Result := SizeInt(v);
 end;
 
-function TByteReader.CStr: RawByteString;
+function TByteReader.Sv: Int64;
+begin
+  Result := UnZigZag(Uv);
+end;
+
+function TByteReader.UBE(W: Integer): QWord;
+var
+  i: Integer;
+begin
+  if (W < 0) or (W > 8) or (Size - Pos < W) then Corrupt('read outside the structure');
+  Result := 0;
+  for i := 0 to W - 1 do Result := (Result shl 8) or Data[Pos + i];
+  Inc(Pos, W);
+end;
+
+function TByteReader.Str: RawByteString;
+var
+  n: SizeInt;
+begin
+  n := UvSize;
+  Result := Bytes(n);
+  SetCodePage(Result, CP_UTF8, False);
+end;
+
+function TByteReader.ZStr: RawByteString;
 var
   e: SizeInt;
 begin
   e := Pos;
   while (e < Size) and (Data[e] <> 0) do Inc(e);
-  if e >= Size then Corrupt('cadena sin terminar');
+  if e >= Size then Corrupt('unterminated name');
   SetLength(Result, e - Pos);
   if e > Pos then Move(Data[Pos], Result[1], e - Pos);
   SetCodePage(Result, CP_UTF8, False);
@@ -185,7 +291,7 @@ end;
 
 function TByteReader.Bytes(N: SizeInt): RawByteString;
 begin
-  if (N < 0) or (N > Size - Pos) then Corrupt('read outside block');
+  if (N < 0) or (N > Size - Pos) then Corrupt('read outside the structure');
   SetLength(Result, N);
   if N > 0 then Move(Data[Pos], Result[1], N);
   Inc(Pos, N);
@@ -209,48 +315,64 @@ end;
 
 procedure TByteWriter.U8(V: Byte);
 begin
-  Raw(@V, 1);
+  if Len >= Length(Data) then SetLength(Data, 2 * Len + 256);
+  Data[Len] := V;
+  Inc(Len);
+end;
+
+procedure TByteWriter.U16(V: Word);
+begin
+  U8(Byte(V));
+  U8(Byte(V shr 8));
 end;
 
 procedure TByteWriter.U32(V: LongWord);
 var
   b: array[0..3] of Byte;
 begin
-  b[0] := Byte(V); b[1] := Byte(V shr 8); b[2] := Byte(V shr 16); b[3] := Byte(V shr 24);
+  PutU32(@b[0], V);
   Raw(@b[0], 4);
 end;
 
-procedure TByteWriter.I64(V: Int64);
-begin
-  U32(LongWord(QWord(V)));
-  U32(LongWord(QWord(V) shr 32));
-end;
-
-{ Con n+1 bytes (n = 0..7) entran valores < 2^(7*(n+1)): se guarda V shl (n+1) con n bits 1
-  abajo. Desde 2^56: byte 0xFF + 8 bytes (FastBufferData Integer de ByteStream.hs). }
-procedure TByteWriter.VInt(V: QWord);
+procedure TByteWriter.U64(V: QWord);
 var
-  n, i: Integer;
-  X: QWord;
-  b: array[0..8] of Byte;
+  b: array[0..7] of Byte;
 begin
-  n := 0;
-  while (n < 8) and (V >= (QWord(1) shl (7 * (n + 1)))) do Inc(n);
-  if n = 8 then
-  begin
-    b[0] := $FF;
-    for i := 1 to 8 do b[i] := Byte(V shr (8 * (i - 1)));
-    Raw(@b[0], 9);
-    Exit;
-  end;
-  X := (V shl (n + 1)) or ((QWord(1) shl n) - 1);
-  for i := 0 to n do b[i] := Byte(X shr (8 * i));
-  Raw(@b[0], n + 1);
+  PutU64(@b[0], V);
+  Raw(@b[0], 8);
 end;
 
-procedure TByteWriter.CStr(const S: RawByteString);
+procedure TByteWriter.Uv(V: QWord);
 begin
-  if Pos(#0, S) > 0 then raise Exception.Create('cadena con NUL');
+  while V >= $80 do
+  begin
+    U8(Byte(V) or $80);
+    V := V shr 7;
+  end;
+  U8(Byte(V));
+end;
+
+procedure TByteWriter.Sv(V: Int64);
+begin
+  Uv(ZigZag(V));
+end;
+
+procedure TByteWriter.UBE(V: QWord; W: Integer);
+var
+  i: Integer;
+begin
+  for i := W - 1 downto 0 do U8(Byte(V shr (8 * i)));
+end;
+
+procedure TByteWriter.Str(const S: RawByteString);
+begin
+  Uv(Length(S));
+  Raw(PChar(S), Length(S));
+end;
+
+procedure TByteWriter.ZStr(const S: RawByteString);
+begin
+  if System.Pos(#0, S) > 0 then raise Exception.Create('name with a NUL byte');
   Raw(PChar(S), Length(S));
   U8(0);
 end;

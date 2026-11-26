@@ -364,7 +364,6 @@ begin
     [A.FileName, A.ArcSize, A.SFXSize, BoolToStr(A.Locked, 'yes', 'no'), A.Recovery]));
   OutLn('Control blocks:');
   for i := 0 to High(A.ControlBlocks) do PrintBlock(A.ControlBlocks[i]);
-  PrintBlock(A.Footer);
   OutLn('Data blocks:');
   for i := 0 to High(A.DataBlocks) do
   begin
@@ -409,22 +408,35 @@ begin
     ErrLn('ERROR: ' + ArcName + ' has no recovery record (create one with -rr)');
     Exit(1);
   end;
-  OutLn(Format('Recovery record %s: %d sector(s) of %d bytes',
-    [Res.Info.Version, Res.Info.RecSectors, Res.Info.SectorSize]));
-  if Length(Res.BadSectors) = 0 then
+  if Res.Info.Parity > 0 then
+    OutLn(Format('Recovery record %s: %d parity sector(s) of %d bytes (%d stripe(s), %d per stripe), %s bytes protected',
+      [Res.Info.Version, Res.Info.RecSectors, Res.Info.SectorSize, Res.Info.Stripes, Res.Info.Parity, Num(Res.Info.ProtLen)]))
+  else
+    OutLn(Format('Recovery record %s: checks only (sectors of %d bytes), %s bytes protected: it detects damage but cannot repair it',
+      [Res.Info.Version, Res.Info.SectorSize, Num(Res.Info.ProtLen)]));
+  if (Length(Res.BadSectors) = 0) and (Res.BadRecord = 0) and (Length(Res.Unrecoverable) = 0) then
   begin
     OutLn('No damaged sectors.');
     Exit(0);
   end;
-  L := '';
-  for i := 0 to High(Res.BadSectors) do L := L + ' ' + IntToStr(Res.BadSectors[i]);
-  OutLn(Format('Damaged sectors (%d):%s', [Length(Res.BadSectors), L]));
+  if Length(Res.BadSectors) > 0 then
+  begin
+    L := '';
+    for i := 0 to High(Res.BadSectors) do
+      if i < 200 then L := L + ' ' + IntToStr(Res.BadSectors[i]);
+    if Length(Res.BadSectors) > 200 then L := L + ' ...';
+    OutLn(Format('Damaged sectors (%d):%s', [Length(Res.BadSectors), L]));
+  end;
+  if Res.BadRecord > 0 then OutLn('The recovery record itself was damaged too.');
   if Length(Res.Unrecoverable) > 0 then
   begin
     L := '';
-    for i := 0 to High(Res.Unrecoverable) do L := L + ' ' + IntToStr(Res.Unrecoverable[i]);
-    ErrLn(Format('ERROR: %d unrecoverable sector(s) (too many damaged sectors in the same group for the record to repair):%s',
+    for i := 0 to High(Res.Unrecoverable) do
+      if i < 200 then L := L + ' ' + IntToStr(Res.Unrecoverable[i]);
+    if Length(Res.Unrecoverable) > 200 then L := L + ' ...';
+    ErrLn(Format('ERROR: %d unrecoverable sector(s) (more damage in the same stripe than the record can repair):%s',
       [Length(Res.Unrecoverable), L]));
+    if Dest <> '' then ErrLn('A partially repaired copy was written to ' + Dest);
     Exit(2);
   end;
   OutLn(Format('Repaired %d sector(s) -> %s', [Length(Res.Repaired), Dest]));
@@ -1514,6 +1526,7 @@ begin
   Skipped := TStringList.Create;
   Skipped.Sorted := True;
   if Exists then A := TArchive.Open(ArcName);
+  if (A <> nil) and (A.Notice <> '') then ErrLn('Warning: ' + A.Notice);
   try
     // PArc ya no crea autoextraíbles, pero si el archivo ya traía un módulo delante se
     // guarda (lo que va antes del archivo) y se vuelve a poner al actualizarlo.
@@ -1733,11 +1746,11 @@ begin
     // Un archivo con -hp sigue con los encabezados cifrados aunque al actualizarlo no se repita
     // -hp (antes quedaban en claro): con la contraseña principal, si es la que los abre
     if (A <> nil) and (MO.HeadersPassword = '') and not MO.NoDataPwd and not MO.NoHeadPwd and
-       (WithoutCipher(A.Footer.Method) <> A.Footer.Method) then
+       (WithoutCipher(A.IndexBlk.Method) <> A.IndexBlk.Method) then
     begin
       if ChangeData and (MO.DataPassword <> '') then
         Opt.HeadersPassword := MO.DataPassword    // ch -p<nueva>: los encabezados también
-      else if (ArchivePassword <> '') and CryptMethodPasswordOk(A.Footer.Method, ArchivePassword) then
+      else if (ArchivePassword <> '') and CryptMethodPasswordOk(A.IndexBlk.Method, ArchivePassword) then
         Opt.HeadersPassword := ArchivePassword
       else
         ErrLn('Warning: the archive headers were encrypted with another password; give it with -hp to keep them encrypted');
@@ -1904,6 +1917,7 @@ begin
   TOpt.ToStdout := False;
   try
     A := TArchive.Open(ArcName);
+    if A.Notice <> '' then ErrLn('Warning: ' + A.Notice);
     try
       Result := CmdExtract(A, 't', TOpt);
     finally
@@ -2526,6 +2540,7 @@ begin
       Retry := False;
       try
         A := TArchive.Open(ArcName);
+        if A.Notice <> '' then ErrLn('Warning: ' + A.Notice);
         try
           if Cmd = 'lb' then CmdBlocks(A)
           else if Cmd = 'lt' then CmdTechList(A)
