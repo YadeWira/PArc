@@ -118,6 +118,9 @@ def main():
         ('orep+4x4 (un bloque)', 'b', ['-morep:64mb+4x4:b2mb:lzma:2mb:fast']),
         ('lzma mt (un bloque)', 'b', ['-mlzma:16mb:normal:bt4']),
         ('-m3 -s- (bloques con 4x4)', 'g', ['-s-', '-m3']),
+        # srep (OSREP) no crea hilos: usa la ficha del bloque
+        ('srep -s- (bloques en paralelo)', 'g', ['-s-', '-msrep:l64:a1+lzma:8mb:normal:bt4']),
+        ('srep+4x4 (un bloque)', 'b', ['-msrep+4x4:b2mb:lzma:2mb:fast']),
     ]
     # orep con sus hilos propios (OREP 0.0.5: toman fichas por los ganchos)
     cases.append(('orep con hilos (PARC_OREP_THREADS=3)', 'b', ['-morep:64mb:l256+4x4:b2mb:lzma:2mb:fast']))

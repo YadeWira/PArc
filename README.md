@@ -53,7 +53,7 @@ writes the same bytes.
   without the C library and linked statically:
   `storing`, `lzma`, `ppmd`, `bwt` (block-sorting compressor; replaces FreeArc's GRZip), `dict`, `orep` (long-range matcher, MIT; replaces FreeArc's
   `rep`), `delta`, `plz`, `lzp`, `mm`,
-  `tta`, `4x4`, `exe` (BCJ x86), `lz4`, `dispack070` (own x86/x64 filter), `srep` (SREP) and `cm` (context mixing), alone or in
+  `tta`, `4x4`, `exe` (BCJ x86), `lz4`, `dispack070` (own x86/x64 filter), `srep` (OSREP -m6, long-range matches over the whole solid block) and `cm` (context mixing), alone or in
   chains (`exe+dispack070+lzma`, `srep+lzma`, …). `plz` is PArc's own LZ codec, the engine of
   `-m1`/`-m2` and of `$compressed` files up to `-m4`: it replaced FreeArc's Tornado (`tor`),
   which was removed after 0.0.5 — smaller, faster to compress and 2–3× faster to decompress
@@ -195,7 +195,8 @@ the code derived from GPL sources; the current inventory:
 | `lz4` | LZ4 1.11.1 | BSD-2 (notice kept) |
 | `bwt` (block sorting of the text and bitmap presets; replaced GRZip, 2026-11-23) | own code + libsais 2.12.2 (unchanged) + libbsc 3.4.1's QLFC coders (translated to C) | own (MIT-ready) + Apache-2.0 (notices in `src/bwt/`) |
 | `4x4` (parallel blocks with an inner method; replaced FreeArc's, 2026-11-23) | own code | own (MIT-ready) |
-| `rep`, `dict`, `mm`, `tta`, `srep` | ports of FreeArc 0.67 `Compression/` | GPL-derived, pending rewrite |
+| `rep`, `dict`, `mm`, `tta` | ports of FreeArc 0.67 `Compression/` | GPL-derived, pending rewrite |
+| `srep` (OSREP -m6, replaced FreeArc's SREP 2026-11-26) | OSREP 0.0.16 by osrep, vendored in `src/osrep/` | MIT (`src/osrep/LICENSE`) |
 | `cm` | lpaq1 (Matt Mahoney) | GPL-2.0-derived, pending rewrite |
 
 The FreeArc-derived codec ports come from FreeArc 0.67 sources by Bulat Ziganshin and

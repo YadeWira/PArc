@@ -28,19 +28,6 @@ type
     constructor Create(ATarget: TOutStage);
   end;
 
-  { srep (Compression/SREP): se acumula el bloque y se codifica en DoFinish; el bloque de
-    FreeArc antepone un byte (1 = stream srep, 0 = guardado tal cual si no conviene). }
-  TSrepEncStage = class(TOutStage)
-  private
-    FData: TBytes;
-    FLen: SizeInt;
-  protected
-    procedure DoWrite(Buf: PByte; Count: SizeInt); override;
-    procedure DoFinish; override;
-  public
-    constructor Create(ATarget: TOutStage);
-  end;
-
 var
   { Bytes de entrada de todo lo que se va a comprimir (lo fija el escritor del archivo; 0 si no
     se sabe, p. ej. -si). Con pocos datos para los hilos, 4x4 achica sus bloques (ver
@@ -93,7 +80,7 @@ implementation
 uses
   Math, parc_filters, parc_ppmd, parc_methods, parc_lzp, parc_parallel, parc_lzmaenc,
   parc_orep, parc_delta, parc_dictenc, parc_tta, parc_mm, parc_bwt,
-  parc_crypt, parc_canon, parc_lz4enc, parc_dispack, parc_srep, parc_cm, parc_bcj2, parc_plzenc,
+  parc_crypt, parc_canon, parc_lz4enc, parc_dispack, parc_osrep, parc_cm, parc_bcj2, parc_plzenc,
   parc_4x4;
 
 function StageName(const Stage: string): string; forward;
@@ -295,7 +282,8 @@ end;
   - dict: ~3 veces el bloque; bwt: ~6 veces el bloque (BwtEncodeBlockMemory) por bloque en
     vuelo; dispack: ~2 veces su bloque;
   - orep: lo que dice OrepEncMemory (anillo de la ventana + un bloque, tabla de anclas, búferes);
-  - cm y srep guardan todo el bloque (cm: ~4 veces más sus modelos de 64 MB; srep: ~3 veces);
+  - cm guarda todo el bloque (~4 veces más sus modelos de 64 MB);
+  - srep: el bloque, la salida y lo que reserva OSREP (SrepEncMemory);
   - 4x4: los trabajos en vuelo (hasta los hilos, máx. 16) por (método interno + 2 bloques);
   - delta: su bloque (8 MB por defecto) y las tablas del análisis;
   - filtros (exe, mm, tta, bcj2) y cifrado: búferes de unos MB. }
@@ -359,7 +347,7 @@ begin
           Result := 2 * B + 2 * MB_;
         end;
       'cm': Result := CmEncMemory(ParseCmLevel(Parts), DataSize);
-      'srep': Result := 3 * DataSize + 64 * MB_;
+      'srep', 'osrep': Result := SrepEncMemory(ParseSrepMethod(Parts), DataSize);
       'lz4': Result := 3 * FirstMemParam(Parts, MB_) + MB_;
       'plz': Result := PlzEncMemory(ParsePlzEncParams(Parts), True) + MB_;
       '4x4':
@@ -473,7 +461,7 @@ begin
       'lz4': if not Lz4EncAvailable(Stage) then Exit(False);
       'plz': if not PlzEncAvailable(Stage) then Exit(False);
       'storing', 'exe', 'ppmd', 'lzp', 'lzma', 'orep', 'delta', 'dict', 'tta', 'mm', 'bwt', 'grzip', 'cm',
-      'dispack', 'dispack070', 'srep', 'bcj2', 'exe2': ;
+      'dispack', 'dispack070', 'srep', 'osrep', 'bcj2', 'exe2': ;
     else
       Exit(False);
     end;
@@ -529,8 +517,9 @@ begin
     'bcj2', 'exe2': Result := TBcj2EncStage.Create(Target);
     'dispack', 'dispack070':
       Result := TDisPackEncStage.Create(Target, DispackBlockSize(Parts));
-    'srep':
-      Result := TSrepEncStage.Create(Target);
+    'srep', 'osrep':
+      // (Enc4x4BlockHint: el bloque sólido, para reservar su memoria de una vez)
+      Result := TSrepEncStage.Create(Target, ParseSrepMethod(Parts), Enc4x4BlockHint);
     'lzp':
       begin
         { MinCompression ("N%"): lo usa solo el compresor; ParseLzpParams lo saltea. }
@@ -549,56 +538,6 @@ begin
   else
     raise EUnsupportedEncoder.CreateFmt('cannot compress with "%s" yet', [Stage]);
   end;
-end;
-
-{ TSrepEncStage }
-
-constructor TSrepEncStage.Create(ATarget: TOutStage);
-begin
-  inherited Create(ATarget);
-  FData := nil;
-  FLen := 0;
-end;
-
-procedure TSrepEncStage.DoWrite(Buf: PByte; Count: SizeInt);
-var
-  Cap: SizeInt;
-begin
-  if Count <= 0 then Exit;
-  if FLen + Count > Length(FData) then
-  begin
-    Cap := Length(FData);
-    if Cap = 0 then Cap := 64 * 1024;
-    while Cap < FLen + Count do Cap := Cap * 2;
-    SetLength(FData, Cap);
-  end;
-  Move(Buf^, FData[FLen], Count);
-  Inc(FLen, Count);
-end;
-
-procedure TSrepEncStage.DoFinish;
-var
-  Enc: TBytes;
-  Flag: Byte;
-begin
-  if FLen > 0 then
-  begin
-    Enc := SrepEncode(@FData[0], FLen);
-    if (Length(Enc) = 0) or (Length(Enc) >= FLen) then
-    begin
-      // no conviene: se guarda tal cual (0)
-      Flag := 0;
-      Emit(@Flag, 1);
-      Emit(@FData[0], FLen);
-    end
-    else
-    begin
-      Flag := 1;
-      Emit(@Flag, 1);
-      Emit(@Enc[0], Length(Enc));
-    end;
-  end;
-  inherited DoFinish;
 end;
 
 { Memoria: si detrás de orep (después de filtros 1:1) va lzma con match finder bt/hc, su memoria

@@ -23,7 +23,7 @@ The rest of the FreeArc 0.67 tree is in git history (commit `82ea8d9`) and in Fr
 | phase | status |
 |---|---|
 | FreeArc/PArc bugs | ✅ closed (the `.arc` parity fixes remain as history; see tag `entrega-arc`) |
-| Ported codecs | ✅ closed; the file planning port (`ArhiveFileList.hs`) was replaced by the own `parc_solid` 2026-11-23 and 4x4 by the own `parc_4x4` 2026-11-24, see GPL-AUDIT.md (LZMA, LZ4, PPMd, Dict, LZP, Delta, MM, TTA, BCJ, SREP; DisPack replaced by an own x86/x64 filter 2026-11-23; Tornado was ported too and removed after 0.0.5, replaced by the own `plz`; REP replaced by OREP, MIT, 2026-11; GRZip replaced by the own `bwt`, 2026-11-23; 4x4 replaced by an own stage, 2026-11-23) |
+| Ported codecs | ✅ closed; the file planning port (`ArhiveFileList.hs`) was replaced by the own `parc_solid` 2026-11-23 and 4x4 by the own `parc_4x4` 2026-11-24, see GPL-AUDIT.md (LZMA, LZ4, PPMd, Dict, LZP, Delta, MM, TTA, BCJ; DisPack replaced by an own x86/x64 filter 2026-11-23; Tornado was ported too and removed after 0.0.5, replaced by the own `plz`; REP replaced by OREP, MIT, 2026-11; SREP replaced by OSREP -m6, MIT, 2026-11-26; GRZip replaced by the own `bwt`, 2026-11-23; 4x4 replaced by an own stage, 2026-11-23) |
 | `.arc` compatibility | ❌ dropped: rejected with a message pointing to FreeArc-ex |
 | GUI | ❌ dropped |
 | `.zip/.7z/.rar` containers | ➡ moved to FreeArc-ex (tag `entrega-arc`) |
@@ -264,6 +264,82 @@ What makes this possible (all inside `.parc`; the codecs are unchanged):
   is smaller, as the sub-second part only on top of the `Time` column (tag 8): 6–10 % smaller
   directories with random nanoseconds.
 - Recovery is Reed-Solomon only; the `.arc` XOR scheme is gone.
+
+## SREP replaced by OSREP (2026-11-26)
+
+FreeArc's SREP (GPL; `parc_srep.pas`, a port of SREP 3.93) is gone; the method `srep` is now
+OSREP's long-range `-m6` (OSREP 0.0.16 by osrep, MIT), vendored unchanged in `src/osrep/`
+(version, commit and sha256 in `src/osrep/VERSION`; `build.sh` compiles its four C files for
+every target, the tarball's prebuilt objects are not used). Glue: `src/parc_osrep.pas`. Syntax
+and block layout in [FORMATO-PARC.md §6.13](formato/FORMATO-PARC.md): `srep[:l<n>][:a<n>][:b<mem>]`
+(defaults l512, a16, b8mb; `osrep` is an alias; FreeArc's `m3f` is ignored). Old `srep` blocks no
+longer decode (FreeArc SREP blocks get a clear error).
+
+Also fixed on the way: `TStreamSink` passed a >2 GB write to `TStream.WriteBuffer`, whose count
+is a `Longint`, so the block was silently cut (a 5 GiB srep block lost 4 GiB); it now writes in
+1 GB pieces, and the srep stage emits in 64 MB pieces. And main's SREP port could not decode its
+own TILIN.tar archive (`t`: Access violation, a 1.8 GB block); OSREP has no 2/4 GiB limit
+(`tests/srep.sh` with `SREP_BIG=5`: a 5 GiB block with repeats across 2^31 and 2^32, 161 s /
+10.3 GB to compress, 46 s to extract).
+
+Benchmark (2026-11-26, Linux x64, taskset 4 cores, median of 3; `L` = `lzma:96m:fast:32:mc6:lc4`;
+old = main `a780ca9`, new = OSREP; RSS = peak of compression; decompression = `parc t`):
+
+| data | method | T | old size | new size | Δ size | old comp | new comp | old dec | new dec | old RSS | new RSS |
+|---|---|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|
+| TILIN.tar 1.88 GB | `srep` | 1 | 1,371,759,563 | 1,051,079,276 | −23.4 % | 381 s | 29.4 s | fails | 3.2 s | 5.4 GB | 2.8 GB |
+| TILIN.tar | `srep+L` | 1 | 1,060,373,693 | 775,069,737 | −26.9 % | 488 s | 133 s | fails | 36.9 s | 5.4 GB | 2.8 GB |
+| TILIN.tar | `srep+L` | 4 | 1,060,373,693 | 775,069,737 | −26.9 % | 577 s | 134 s | fails | 37.7 s | 5.4 GB | 2.8 GB |
+| TILIN.tar | `srep+plz:4` | 1 | 1,080,238,096 | 786,009,823 | −27.2 % | 369 s | 41.0 s | fails | 5.3 s | 5.6 GB | 2.9 GB |
+| TILIN.tar | `srep+plz:4` | 4 | 1,080,238,096 | 786,009,823 | −27.2 % | 376 s | 41.1 s | fails | 5.5 s | 5.6 GB | 2.9 GB |
+| mixed.tar 474 MB | `srep` | 1 | 391,125,465 | 388,850,363 | −0.58 % | 117 s | 8.2 s | 1.0 s | 1.1 s | 1.41 GB | 0.85 GB |
+| mixed.tar | `srep+L` | 1 | 218,593,008 | 218,386,102 | −0.09 % | 153 s | 43.6 s | 11.6 s | 11.6 s | 1.41 GB | 0.85 GB |
+| mixed.tar | `srep+L` | 4 | 218,593,008 | 218,386,102 | −0.09 % | 151 s | 42.9 s | 11.5 s | 11.6 s | 1.41 GB | 0.85 GB |
+| mixed.tar | `srep+plz:4` | 1 | 226,802,363 | 226,634,063 | −0.07 % | 132 s | 19.9 s | 2.3 s | 2.4 s | 1.45 GB | 0.89 GB |
+| mixed.tar | `srep+plz:4` | 4 | 226,802,363 | 226,634,063 | −0.07 % | 122 s | 19.3 s | 2.3 s | 2.4 s | 1.45 GB | 0.89 GB |
+| text.tar 268 MB | `srep` | 1 | 233,877,667 | 232,362,007 | −0.65 % | 67.4 s | 4.2 s | 0.5 s | 0.6 s | 0.76 GB | 0.51 GB |
+| text.tar | `srep+L` | 1 | 67,123,945 | 67,085,070 | −0.06 % | 84.3 s | 19.0 s | 4.0 s | 4.2 s | 0.76 GB | 0.51 GB |
+| text.tar | `srep+L` | 4 | 67,123,945 | 67,085,070 | −0.06 % | 79.9 s | 18.2 s | 3.9 s | 4.0 s | 0.76 GB | 0.51 GB |
+| text.tar | `srep+plz:4` | 1 | 69,638,637 | 69,599,490 | −0.06 % | 73.8 s | 7.9 s | 1.3 s | 1.5 s | 0.79 GB | 0.55 GB |
+| text.tar | `srep+plz:4` | 4 | 69,638,637 | 69,599,490 | −0.06 % | 73.4 s | 8.7 s | 1.4 s | 1.5 s | 0.79 GB | 0.55 GB |
+
+mixed.tar: 4,431 files copied from the sample corpus (document, executable, image, audio,
+archive, font, poly, other, text); text.tar: 5,060 files of its `text` folder. OSREP's search is
+one thread, so T1 and T4 differ only in lzma's match finder; the archive is the same.
+
+`l64:a1` instead of the default `l512:a16` (T4, median of 3): behind lzma TILIN −0.11 %
+(774,237,598) but 2.8 times slower (374 s) and decompression 58 s; mixed +0.16 %, text +0.03 %.
+Behind plz: TILIN −0.17 % at 3.9 times the time, mixed −0.04 %, text +0.13 %. The default stays.
+
+Presets (only measured; nothing changed), `PARC_THREADS=4`, one run:
+
+| data | level | chain | size | comp | dec | RSS |
+|---|---|---|---:|---:|---:|---:|
+| TILIN.tar | `-m5` | `dict:64mb:80%:l8192:m400:s100+lzp:64mb:90%:65:h22:d1mb+4x4:b7mb:ppmd:12:192mb` (text) | 1,234,496,808 | 489 s | 191 s | 0.74 GB |
+| TILIN.tar | `-m5` | `srep+` that chain | 775,062,131 (−37.2 %) | 320 s | 95 s | 2.89 GB |
+| TILIN.tar | `-mx` | `dict:128mb:75%:l8192:m800:s250+lzp:160mb:90%:145:h23:d1mb+ppmd:18:512mb` (text) | 1,102,292,716 | 713 s | 684 s | 1.16 GB |
+| TILIN.tar | `-mx` | `srep+` that chain | 781,649,863 (−29.1 %) | 519 s | 495 s | 2.90 GB |
+| tilin_512m.tar | `-m5` | text chain as above | 257,343,898 | 115 s | 55 s | 0.79 GB |
+| tilin_512m.tar | `-m5` | `srep+` that chain | 256,878,319 (−0.18 %) | 62 s | 40 s | 1.33 GB |
+| tilin_512m.tar | `-mx` | `orep:518mb:l512+exe+delta+lzma:254mb:normal:bt4:128` | 246,664,974 | 111 s | 12.1 s | 3.38 GB |
+| tilin_512m.tar | `-mx` | `srep+` that chain | 247,016,731 (+0.14 %) | 125 s | 13.5 s | 3.75 GB |
+| tilin_512m.tar | `-mx` | `srep` instead of `orep` | 246,942,572 (+0.11 %) | 118 s | 12.8 s | 3.23 GB |
+| mixed.tar | `-m5` | `orep:96mb:l512+exe+delta+4x4:lzma:24mb:normal:bt4:32:mc8:lc4` | 209,426,877 | 32.1 s | 3.0 s | 1.29 GB |
+| mixed.tar | `-m5` | `srep+` that chain | 209,400,485 (−0.01 %) | 48.8 s | 3.8 s | 1.66 GB |
+| mixed.tar | `-m5` | `srep` instead of `orep` | 209,422,221 (−0.002 %) | 44.7 s | 6.9 s | 1.54 GB |
+| mixed.tar | `-mx` | `orep:457mb:l512+exe+delta+lzma:254mb:normal:bt4:128` | 207,038,453 | 94.6 s | 12.3 s | 3.32 GB |
+| mixed.tar | `-mx` | `srep+` that chain | 207,007,371 (−0.02 %) | 119 s | 14.5 s | 3.62 GB |
+| mixed.tar | `-mx` | `srep` instead of `orep` | 207,042,989 (+0.002 %) | 140 s | 13.7 s | 3.16 GB |
+
+Reading: the whole TILIN.tar is detected as text at `-m5` and `-mx` (dict+lzp+ppmd, windows of
+64–160 MB, no `orep`), and `srep` in front of that chain takes it from 1.23 GB to 775 MB at `-m5`
+(−37 %) and from 1.10 GB to 782 MB at `-mx` (−29 %), and is faster (fewer bytes reach ppmd), at
+about 2.9 GB of RSS instead of 0.7–1.2 GB. On the 512 MB slice of TILIN, and on the mixed set,
+srep changes the size by −0.18 %…+0.14 % for up to +50 % of time and +0.4 GB of RSS: what it
+adds is the matches farther than the text chain's windows; where the chain has `orep` with a
+window of the block size, srep has nothing left to find. A preset change would be "srep in front
+of the text chain when the block is much larger than its windows"; it is left open (no preset
+was changed).
 
 ## REP replaced by OREP (2026-11-18)
 
@@ -2123,14 +2199,13 @@ PARC_THREADS=4 build/tests/test_jobfree
 ## Known limitations
 
 - `.arc` is neither read nor written (by design; use FreeArc-ex).
-- SREP: reads v1–v4 and writes v3; method options are not interpreted when compressing
-  (`-m0o`, `-m3f`, etc.) and the ratio is greedy (lazy matching, 4 candidates per hash).
+- `srep` (OSREP -m6) keeps the whole solid block, its output and its index in memory while
+  compressing (about 2.1 times the block); the decoder the stream and the output.
 - FreeArc external compressors (precomp, ECM, JPG, PPMonstr, Durilca, CCM, etc.): out of
   scope.
 - `reference/` keeps only `Compression/`; the rest of the source is in git history.
 
 ## Possible next steps
 
-1. SREP: honor compression options and write v4/Index-LZ (optional).
-2. `.parc`-specific fuzzing (updates and damage) plus volume/encryption tests in the suite.
-3. Ideas for format v2 (stronger per-file hash, ACLs/xattrs).
+1. `.parc`-specific fuzzing (updates and damage) plus volume/encryption tests in the suite.
+2. Ideas for format v2 (stronger per-file hash, ACLs/xattrs).

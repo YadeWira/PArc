@@ -834,3 +834,42 @@ around a run keep their common context. The stream depends on the data, the para
 block size only; the block size depends on `PARC_THREADS` only through the PArc-wide rules for
 fast inner methods (`Adaptive4x4Block`, `Balance4x4` and, with 2+ threads, equal blocks for the
 tail of a solid block whose size is known).
+
+### 6.13 `srep` (since 2026-11-26): OSREP -m6, replaces FreeArc's SREP
+
+`srep` is OSREP's long-range method `-m6` (OSREP 0.0.16 by osrep, MIT; the embeddable unit is
+vendored unchanged in `src/osrep/`, version and commit in `src/osrep/VERSION`; glue in
+`src/parc_osrep.pas`). It replaced the port of FreeArc's SREP 3.93 (GPL): **`srep` blocks written
+before this change do not decode** (a block that holds a FreeArc SREP stream fails with "this
+srep block is FreeArc SREP, which is no longer supported"; extract it with PArc 0.0.5). `osrep`
+is accepted as another name of the same method and is stored as `srep`.
+
+Method string: `srep[:<min length>][:l<n>][:a<n>][:b<mem>]`
+
+| parameter | meaning | default | range |
+|---|---|---|---|
+| `l<n>` or a bare integer | shortest match | 512 | 32 .. 65536 |
+| `a<n>` | match lengths are multiples of `a` (16 keeps the position modulo 16 that lzma models; 1 with no backend or a plain LZ) | 16 | 1 .. 4096 |
+| `b<mem>` | literal block of the stream (does not change the matches) | 8mb | 64kb .. 256mb |
+| `m…` | FreeArc SREP's mode (`m3f`…): accepted and ignored | | |
+
+The stored (canonical) string has only the parameters that differ from the defaults
+(`srep`, `srep:l64:a1`, `srep:l128:a1:b1mb`).
+
+Block: empty for an empty input; otherwise one flag byte and the payload:
+
+| flag | payload |
+|---|---|
+| 0 | the input as is (when the OSREP stream would not be smaller) |
+| 1 | an OSREP `.osr` v7 stream of the whole input (`spec/format-v7.md` of OSREP, frozen; the `osrep` CLI decodes it with `osrep -d`), written without the per-block VHASH-128 digest: the stream table and every stream block still carry a CRC-32C, and the PArc block its own CRC |
+
+The encoder needs the whole solid block in memory: the stage collects it and calls
+`OsrepM6Encode` when the block ends, on the thread that writes the block (OSREP starts no
+thread, so it uses one token of `PARC_THREADS`). The stream depends on the data and the
+parameters only (not on `PARC_THREADS` or the write sizes), and the native C core and the Pascal
+reference (`-dOSREP_NO_NATIVE`) give the same bytes on every platform. Sizes are 64-bit: a solid
+block over 4 GiB works on 64-bit builds. Memory: the block, the output (`OsrepM6Bound`, the block
+plus a few bytes per 8 MB) and `OsrepM6EncMem` (hash table, bit filter and match list: about
+5–10 % of the block with `l512`, counted at its worst case). The decoder reads the whole stream,
+checks header, table and footer (`OsrepM6OrigSize`), allocates the original size and decodes in
+place (`OsrepM6Decode`, ~1 MB besides the stream and the output); a damaged stream is an error.

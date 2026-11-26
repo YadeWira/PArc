@@ -397,7 +397,7 @@ each method chain needs (all stages of a chain run together: lzma by its exact e
 match finder included; orep window ring and anchor table (`OrepEncMemory`); PPMd model; plz window and tables; lzp/dict/bwt
 blocks; `4x4` counts one inner encoder per thread plus its blocks; `cm` its model (`cm:<level>`,
 level 6 ≈ 170 MB, less for blocks under 1 MB) plus up to 64 MB of input; `srep` keeps the whole
-block in memory) and, if a block's chain does not fit, shrinks the largest consumer first
+block and its output in memory, plus OSREP's index, about 5–10 % of the block) and, if a block's chain does not fit, shrinks the largest consumer first
 (dictionaries, windows, the PPMd model) until it fits, like FreeArc's memory limiting. Blocks
 compressed in parallel are also limited so that their sum fits. The reduced method is what the
 archive stores (`parc lb` shows it), so decompression needs less memory too. `cm`, `srep` and the

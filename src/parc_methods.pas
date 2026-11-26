@@ -57,7 +57,7 @@ implementation
 
 uses
   parc_crypt, StrUtils, parc_os, parc_lzma, parc_filters, parc_delta, parc_lz4, parc_orep, parc_lzp, parc_ppmd,
-  parc_dict, parc_bwt, parc_parallel, parc_tta, parc_mm, parc_dispack, parc_srep, parc_cm,
+  parc_dict, parc_bwt, parc_parallel, parc_tta, parc_mm, parc_dispack, parc_osrep, parc_cm,
   parc_bcj2, parc_plz, parc_4x4;
 
 var
@@ -245,8 +245,12 @@ begin
       end;
     'dispack', 'dispack070':
       Result := TDisPackStage.Create(Source, DispackBlockSize(Params));
-    'srep':
-      Result := TSrepStage.Create(Source);
+    'srep', 'osrep':
+      // OSREP desde PArc 0.0.6 (el stream dice lo suyo; los parámetros solo se validan)
+      begin
+        ParseSrepMethod(Params);
+        Result := TSrepDecStage.Create(Source);
+      end;
     'cm':
       Result := TCmDecStage.Create(Source);
   else
@@ -342,6 +346,14 @@ begin
         on EUnsupportedMethod do StageMax := 0;   // lo informa el decodificador
       end;
       if StageMax > Cap then StageMax := Cap;
+      Inc(Result, StageMax);
+      Continue;
+    end;
+    if (Params[0] = 'srep') or (Params[0] = 'osrep') then
+    begin
+      // OSREP: todo el bloque (la salida y el stream, que no es más grande) y sus búferes
+      StageMax := SrepDecMemory;
+      if Cap < High(Int64) div 4 then Inc(StageMax, 2 * Cap);
       Inc(Result, StageMax);
       Continue;
     end;
