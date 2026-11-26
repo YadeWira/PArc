@@ -18,6 +18,7 @@ run() {   # run <target> args...
   case $t in
     linuxarm64) QEMU_LD_PREFIX=/usr/aarch64-linux-gnu qemu-aarch64 "$ROOT/build/$t/parc" "$@" --no-progress </dev/null ;;
     win64|win32) wine "$ROOT/build/$t/parc.exe" "$@" --no-progress </dev/null ;;
+    linux64) "${PARC_BIN:-$ROOT/build/linux64/parc}" "$@" --no-progress </dev/null ;;
     *) "$ROOT/build/$t/parc" "$@" --no-progress </dev/null ;;
   esac
 }

@@ -135,7 +135,12 @@ When updating (`a`, `u`, `f`), solid blocks that remain intact are copied withou
 A block that loses files, or has a file replaced by a newer one, is rewritten: its remaining
 files in their order, the new version in the place of the old one, with the preset's method of
 the same kind (or the block's old method). New files that replace nothing go into new blocks,
-so adding files never rewrites existing blocks. `--recompress` forces rebuilding everything.
+so adding files never rewrites existing blocks. When an update only adds files (nothing
+replaced or deleted) to a single-file archive without a recovery record, PArc appends in place:
+the new blocks and a new index go after the end of the archive and the old bytes are not even
+read, so adding a file to a huge archive takes as long as compressing that file. If it fails or
+is cancelled, the archive is cut back to exactly what it was. The old index stays inside as a
+few dead bytes; `ch` rewrites the archive compactly. `--recompress` forces rebuilding everything.
 With `d` and an explicit `-m`, the whole archive is recompressed with that method (a "copying"
 command, as in FreeArc).
 
