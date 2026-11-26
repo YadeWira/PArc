@@ -755,7 +755,48 @@ the data repeats best), the predictor and cross with the smallest residual cost 
 filtered than raw (synthetic and palette images often compress better as they are). Packed
 16-bit pixels (RGB555/565) and colour-mapped TGA are stored.
 
-### 6.11 `4x4` (since 2026-11)
+### 6.11 `lzma` encoder (since 2026-11): no FreeArc code
+
+The `lzma` **stream does not change**: LZMA1 raw with the end marker, properties taken from the
+method string, exactly as before (blocks written by any PArc decode, and the new streams decode
+with liblzma). What changed is the encoder (`src/parc_lzmaenc.pas`, `src/parc_lzmarf.inc`): it is
+the public-domain LZMA SDK 26.03 plus PArc's own code; the parts that came from FreeArc 0.67
+(the `ht4` hash-table finder and its multi-thread match list, the default-cycles formula, the
+`:fast` parser additions and the method-string parser) were removed without reading them and
+replaced. Method string, parsed in order, case-insensitive (`*...` is ignored):
+
+| Parameter | Meaning |
+|---|---|
+| `<n>` (digits only) | fast bytes (5..273) |
+| `<size>`, `d<size>` | dictionary (`96m`, `1gb`, `64kb`, `512b`; digits without a suffix after `d` = 2^n) |
+| `fb<n>`, `mc<n>`, `lc<n>` (0..8), `lp<n>` (0..4), `pb<n>` (0..4), `a<n>` | fast bytes, cycles, literal/position contexts, algorithm (0 = fast parser, ≥ 1 = optimal) |
+| `bt2`, `bt3`, `bt4`, `hc4`, `ht4`, `mf=<finder>` | match finder |
+| `fastest` / `fast` / `normal` / `max` / `ultra` | a0 fb5 mc1 / a0 fb32 / a1 fb32 / a1 fb128 / a1 fb128 mc128; `ht4` (`bt4` for max/ultra) if no finder was given yet |
+| `h<size>` | memory for the `ht4` rows (default: 3/4 of the dictionary or of the input; all of it for the 24-bit row shapes and dictionaries up to 32 MB) |
+
+`mc` = 0 picks 16 + fb/2 for `bt2`/`bt3`/`bt4`, half of that for `hc4` (the SDK's
+`LzmaEncProps_Normalize`) and 4 + fb/8 for `ht4`. In `ht4`, `mc` is the number of candidates whose
+4 bytes match that are verified per position (at most the row's capacity).
+
+`ht4` (own design): a 64-bit multiplicative hash of 4 bytes picks a row of 16, 32 or 64 bytes
+(cache-line aligned); the row is a ring of the most recent positions that fell into it, each
+with a tag of 4, 6 or 8 other hash bits; the tags of a row are compared all at once inside one
+64-bit word (SWAR), rotated so the newest comes first, and only the candidates with the right
+tag read the window; the search stops at the first one out of the window. Row shapes: 32 bytes
+with 7 tags of 4 bits and 32-bit positions; 64 bytes with 14; 32 bytes with 6 tags of 8 bits
+(the `:fast` parser); and, for dictionaries up to 16 MB, 16 bytes with 4 entries and 32 bytes
+with 8, 6-bit tags and 24-bit positions (the position modulo 2^24: every candidate is verified
+against the window and the distance never exceeds the dictionary, so the stream is valid even
+past 2^24 positions; with a dictionary of at most 16 MB no in-window distance is lost). Pairs come out in increasing length like `bt4`'s, so the
+multi-thread finder (a thread searches the rows from length 3, the compressing thread keeps
+the pairs longer than its hash2/hash3 matches) writes the same stream as one thread.
+
+`:fast` parser: the SDK's `GetOptimumFast` with own thresholds: a match of 3 at distance ≥ 2 KB
+or of 4 at ≥ 64 KB is coded as a literal, `ChangePair` takes the shorter match when the longer
+one is more than 32 times farther (SDK: 128), and a rep of length L wins over a match of L + 4
+at distance ≥ 16 KB. The window keeps 1/4 of slack instead of the SDK's 1/2.
+
+### 6.12 `4x4` (since 2026-11)
 
 `4x4` is PArc's own parallel block stage (`src/parc_4x4.pas`), replacing FreeArc's 4x4 (GPL;
 nothing is derived from it). **`4x4` blocks written before this change do not decode.** Method

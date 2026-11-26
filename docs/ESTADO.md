@@ -1,4 +1,4 @@
-# PArc status (2026-11-20)
+# PArc status (2026-11-24)
 
 PArc is an archiver written in **Free Pascal** with its own format, **`.parc`**, for Windows 7+
 (x86/x64) and Linux x64. It does not read or write `.arc` and has no GUI: support for `.arc`
@@ -47,8 +47,10 @@ The rest of the FreeArc 0.67 tree is in git history (commit `82ea8d9`) and in Fr
   the presets (`-m1`/`-m2`, `$compressed` up to `-m4`, `3xt`) and Tornado (`tor`) is gone: see
   "plz" and "Tornado removed" below for the design and the measurements; stream format in
   `formato/FORMATO-PARC.md` §6.2.
-- FreeArc built-in presets ported: `-m0`…`-m9`, `-mx`, `-mxx` and the `d/t/xt/xb/binary` families
-  (the `rep` family is now `orep`: `-m5orep` = `orep:96m:l512`).
+- Presets `-m0`…`-m9`, `-mx`, `-mxx` and the `d/t/xt/xb/binary/ex` families (the `rep` family
+  is now `orep`: `-m5orep` = `orep:96m:l512`), with the same syntax as FreeArc's; since
+  2026-11-24 the preset table, the file groups, the canonical method text and the data-type
+  detector are PArc's own code (see "Own policy layer" below).
 - `ppmd` (2026-11) is PPMd var.I from the public-domain LZMA SDK (`Ppmd8`), ported to Pascal
   with x86-64 assembler for the symbol coder and `UpdateModel`; it replaced FreeArc's PPMd (a
   step towards relicensing). Same ratio as before plus an 8-byte stream header; `ppmd` blocks
@@ -104,13 +106,10 @@ What makes this possible (all inside `.parc`; the codecs are unchanged):
 - **Buffered output**: `TStreamSink` accumulates 64 KB before writing. Codecs emitted many
   small pieces (especially PPMd's range coder) and ~14% of the time went into `write`. PPMd on
   20 MB of text dropped from 4.6 s to ~2.7–3.5 s (FreeArc: 2.86 s).
-- **LZMA `fast`**: FreeArc's additions to `GetOptimumFast` were ported (main-match pruning by
-  length/distance and relaxed rep-match acceptance). `-m3` used to lose 0.8% on binaries; now
-  it wins.
-- **LZMA `ht4`**: FreeArc's hash-table match finder (rows of `mc` positions with a hash tag in
-  the high bits, no `son` array) is ported; 0.0.2 mapped `ht4` to `hc4`. `fast`/`normal` (the
-  `ht4` profiles) compress the same as FreeArc and faster. The next position's hash row/head is
-  prefetched in `ht4` and `bt4`. Streams are standard LZMA: 0.0.2 decodes them.
+- **LZMA `fast`**: since 2026-11-23 the SDK's `GetOptimumFast` with own thresholds (FreeArc's
+  additions, ported earlier, were removed; see "LZMA encoder without FreeArc code" below).
+- **LZMA `ht4`**: since 2026-11-23 PArc's own row finder (FreeArc's hash-table finder, ported
+  earlier, was removed). Streams are standard LZMA: 0.0.2 decodes them.
 - **LZMA decoder fast path**: whole symbols are decoded without input checks while 20 or more
   input bytes remain (LzmaDec style); the literal and match symbols are x86-64 assembler with a
   Pascal fallback (i386, or `-dPARC_NOASM`). The stream tail and truncated/corrupt input take
@@ -149,15 +148,9 @@ What makes this possible (all inside `.parc`; the codecs are unchanged):
   (hash head, first tree node, its children), and the optimal parser drops two SDK 18+ speed
   shortcuts that cost ratio (it always prices the literal, tries the short rep like SDK 9.x) and
   refreshes prices every 32 matches. `normal` and `max` are now smaller than FreeArc's.
-- **LZMA multi-thread match finder** (port of LzFindMt, `normal`/`max` only). bt4: same output
-  as one thread. ht4 (the `normal` default): 2 threads, the BT thread walks the HT4 rows and
-  the list of matches is the one of FreeArc's multi-thread finder (rows report every longer
-  match from length 4, hash2/hash3 matches only when closer, skipped positions also search
-  their row), which is smaller than the one-thread list: like FreeArc, ht4 output with 2+
-  threads differs from 1 thread (that one is FreeArc `-mt1`'s). 512 MB TILIN slice,
-  `lzma:8mb:normal`: 1 thread 257,005,522, 2+ threads 256,882,467 (FreeArc `-mt1`
-  257,058,517, `-mt4` 256,920,905); `96mb`: 253,641,041 / 253,540,503 (FreeArc 253,723,647 /
-  253,565,992). Threads: `TLzmaEncParams.NumThreads` = 1 (one thread), 2 (compressing thread
+- **LZMA multi-thread match finder** (port of LzFindMt, `normal`/`max` only). bt4 and (since
+  2026-11-23) the own ht4: same output as one thread (ht4: 2 threads, the BT thread searches the
+  rows). Threads: `TLzmaEncParams.NumThreads` = 1 (one thread), 2 (compressing thread
   + a BT thread that also hashes) or 3 (+ a separate hash thread, like the SDK; the hash
   thread is light); 0 = automatic: the per-thread grant `LzmaEncThreadGrant` if a caller set
   one, otherwise this block's share of the global thread budget (`ThreadShare`, at least 2),
@@ -181,7 +174,7 @@ What makes this possible (all inside `.parc`; the codecs are unchanged):
   the stream before 4x4: the document set's 66 MB binary block became 24+23 MB, two jobs on
   four threads (9.9 s at `-m4`); now 22+22+3, 5.3 s. With J >= N, or a small last block,
   nothing changes: smaller blocks only cost ratio there (executables +0.05..0.7 %).
-- **Presets by thread count** (`src/parc_presets_data.inc`, lines marked `// PARC`): like
+- **Presets by thread count** (then `src/parc_presets_data.inc`; since 2026-11-24 the preset table of `src/parc_presets.pas`): like
   FreeArc's `-mtN`, the `(a|b)` alternatives follow `PARC_THREADS`: one thread uses
   single-stream methods, 2+ threads the 4x4 ones. Binaries (FreeArc's method in brackets):
   `-m1` `rep+tor:4:h4m` [`tor:4`] / `rep+4x4:tor:3` [same]; `-m2` `rep+exe+delta+tor:6`
@@ -238,7 +231,7 @@ What makes this possible (all inside `.parc`; the codecs are unchanged):
   `BudgetWaitBegin`/`End` (also the 2-thread mode's inline hash, run by the BT thread).
 - **Deterministic output**: the same binary, input and `PARC_THREADS` always write the same
   archive (`tests/determinism.sh`). Different N may differ only through the preset
-  alternatives `(a|b||c)` (N=1, 2, ≥3), lzma ht4's 1-thread match list, and the 4x4 block size
+  alternatives `(a|b||c)` (N=1, 2, ≥3) and the 4x4 block size
   for fast inner methods (see block scheduling below); otherwise, with the same method string,
   every codec gives the same stream for any N.
 - **Block scheduling under the budget** (branch perf3/sched):
@@ -259,7 +252,7 @@ What makes this possible (all inside `.parc`; the codecs are unchanged):
     4x4 block is a quarter of what is left, down to a quarter block, so a solid block ends with
     several small pieces instead of one or two big ones. Both depend only on the data and on
     `PARC_THREADS` (and are off with 1 thread): **archive bytes depend on N** (they already did
-    through the `(a|b)` presets and ht4) but are identical across runs with the same N.
+    through the `(a|b)` presets) but are identical across runs with the same N.
   - LZMA `bt4` (same output with any number of threads) always uses its 3 threads when the
     budget has 3 or more, even if the block's share is smaller: the threads hold tokens only
     while they work, so the last block picks up the tokens the others leave.
@@ -1661,7 +1654,7 @@ threads + 1 (`m2`..`m4`), so small pieces queue behind a slow block (ex2t Silesi
 
 FreeArc's 4x4 (GPL; encoder in `parc_encoders`, decoder in `parc_methods`) is gone, removed
 without reading its bodies. `src/parc_4x4.pas` is PArc's own stage (MIT): same method name and
-parameters (`4x4[:b<mem>][:r<N>][:t][:i]:<inner>`), new stream (`formato/FORMATO-PARC.md` §6.11:
+parameters (`4x4[:b<mem>][:r<N>][:t][:i]:<inner>`), new stream (`formato/FORMATO-PARC.md` §6.12:
 `"4X"` + version, stored / packed / mixed records, end record). **Old `4x4` blocks no longer
 decode.** Encoder: one record per block, blocks compressed on a pool of the thread budget and
 written in order (queue = threads; plz engines reused only for blocks <= 2 MB). With a slow inner
@@ -1719,14 +1712,15 @@ merge) are gone. Inventory of what else is FreeArc-derived outside the codecs:
 [`GPL-AUDIT.md`](GPL-AUDIT.md). The replacement is `src/parc_solid.pas` (MIT, own design; the
 header of the unit is the spec):
 
-- *Rules*: the `[File groups]` table compiled once into hashed base names and extensions plus
-  the few wildcard masks; a file gets its set of matching groups and a home group.
-- *Order*: home group, extension, folder, name; then **twins**: a file whose base name appeared
+- *Groups*: from the own file group table of `parc_presets` (`FileGroupMatches`: the set of
+  groups a file matches; `FileGroupRank`: its sort rank), since 2026-11-25 (before that a
+  private compiled copy of `arc.groups`).
+- *Order*: group rank, extension, folder, name; then **twins**: a file whose base name appeared
   earlier in the same (group, extension) run moves right behind the first one, so copies kept in
   several folders (versions, other targets) end up together. With `-s-`/`-s1f` or when
   everything is stored the input order is kept (it does not matter there, and it is cheaper).
 - *Kind*: first group of the `-m` list in the file's set; content decides when the list has
-  `$text`/`$compressed`: 1, 3 or 5 samples of 64 KB (by size), majority vote (unanimous for text
+  `$text`/`$compressed` (detector of `parc_filetype`, at the `-m` level): 1, 3 or 5 samples of 64 KB (by size), majority vote (unanimous for text
   when the default is `lzma:max`, `-m6` and up); small files (runs up to 1 MB, two samples) are
   judged together with their same-extension neighbours; compressed data moves any kind to
   `$compressed`, text only default/compressed files; `$wav`/`$bmp` that do not look like media
@@ -1821,6 +1815,222 @@ Size: smaller in 47 of 50 cells (fpc −0.14..−0.93 %, every level; mixed −0
   this machine's noise. Planning itself is cheaper than before (a `-m` whose groups all store,
   i.e. order + content checks only: fpc 1.34 vs 1.79 s, mixed 1.48 vs 2.09 s at T1).
 - Compression memory at T4 varies ±5 % from run to run in both builds (`fpc -m4` 626/665 MB).
+## Own policy layer: presets, file groups, canonical methods, data-type detection (2026-11-24)
+
+The last FreeArc-derived "policy" code is gone: the port of `decode_method` and its textual
+substitution table (`src/parc_presets_data.inc`, `arc.groups`), the port of `LimitAndCanonize`
+(per-class `ShowCompressionMethod`, dictionary limiting, 32-bit adjustments), the port of
+`detect_datatype` (`mmdet.cpp`) and the `parseMem64`-style helpers. They were replaced from their
+interfaces and their observable output only (the FreeArc sources and the old unit bodies were not
+read beyond the interface sections).
+
+**Presets** (`src/parc_presets.pas`). A table of rows `name [levels] [$group] = chain [from K
+threads: chain]`, where a level family is written with `N` for the digit (`Nbinary`, `exNt`,
+`N`, `Nx`), the chain may name other rows of the same level (`Norep+exe+Nxb`), and the rows of a
+preset in order are its file groups. A small resolver expands `-m` texts: alternatives by threads
+(`(a|b)name`, `a|b|c`), `chain/$group=chain` overrides (a later one replaces and goes last, empty
+removes), `bin/text` shorthand, `name:params` appending the params, `P$group` = that group of
+preset P, unknown names kept for the encoder to reject. `--print-config` prints the rows.
+Result: for all 493 well-formed `-m` texts of `tests/policy_methods.txt` with 1, 2, 3, 4 and 8
+threads the chains are **identical** to the replaced code (2,465 lines). Different only for texts
+the old code turned into nonsense (`5+delta`, `orep+5`, `5/`, `x/$bmp=2`, `5$text`...): now a
+preset inside a longer chain contributes its default chain, `P$group` resolves, `bin/` works.
+
+**File groups**. Own table: each group lists its masks (`*.ext`, globs on the base name such as
+`readme.*`, `*.??_`, `*.ear?`), `<other>` marks where unmatched files sort. Literal extensions go
+through a hash; `?` is one UTF-8 character. Membership (a file can match several groups, the
+lowest one in the preset wins) and the sort order are those of before on the 43,000 names of the
+corpus (only a file literally named like a group header, e.g. `$text`, sorts differently).
+
+**Canonical methods and limits** (`src/parc_canon.pas`). Each stage is parsed with its codec's own
+parser (`ParseLzmaEncParams`, `ParseOrepMethod`, `ParseLzpParams`, `ParseBwtParams`,
+`ParseDictParams`, `ParseLz4EncParams`, `ParseTtaEncParams`, `PlzCanon`, `DispackBlockSize`) and
+written back in one form (units, defaults omitted); windows/dictionaries/blocks are cut to the
+block size + 1 % + 512 bytes, rounded to KB up to 4 MB and to MB above (lzma at least 32 KB,
+lzp/bwt hash bits to the block); a 32-bit build keeps the lzma encoder within 2 GB. For all 343
+preset chains at 11 block sizes (0 B … 5 GB) the stored text is **identical** to before, also
+on linux32. Differences only where the old canonizer misread the codec's syntax (`lzma:24` took 24
+as the dictionary, `fb64`, `d1m`, `mf=bt4`, `dict:b32m` and `lz4:b1m` were ignored, `h20` became
+`h20b`): now the codec's own reading is stored. `CanonStageMem` (shrinking a stage for `-lc` and
+the automatic memory limit) now uses each codec's memory model (`LzmaEncMemory` with dictionaries
+m·2^k, `OrepFitWindow`, `PlzCanon`, lzp/dict/bwt/ppmd/4x4 estimates) instead of fixed fractions,
+so it shrinks less for the same budget; `FitEncodeMem` still re-measures until the chain fits.
+
+**Detector** (`src/parc_filetype.pas`). Answers per 64 KB chunk which chain family suits the bytes.
+`$compressed`: order-0 entropy ≥ 7.62 bits and few byte pairs repeated within 256 bytes (99 %
+agreement with the old detector on 5,826 corpus chunks). `$text`: below 7.6 bits, a linear score
+of order-0 entropy, share of letters (and a step above 30 %), and on a 16 KB sample from the middle
+order-1 entropy, how often the byte that followed the same 3 / 5 bytes last time comes again, and
+greedy-LZ coverage; integer arithmetic only (fixed-point log2 by an integer algorithm), so every
+platform gives the same answer (`tests/policy_cross.sh`). The weights were fitted (weighted
+logistic regression) on 5,826 chunks of a 371 MB corpus sample against the real sizes of the
+`-m5` text and binary chains, with the share sent to ppmd held at the old detector's.
+Its `$text` volume (bytes sent to ppmd) equals the old one's; at the chunk level it ties
+the old detector within ±0.2 % of size depending on the set (the old one, built for the same
+question, is a strong baseline: the oracle is 0.9 % below both at `-m5`).
+
+Detection speed (5,826 chunks of the 371 MB sample, 209 MB, 5 passes, one core): old
+1.59–1.63 s, new 1.29–1.33 s (about 19 % faster; above 7.6 bits only the pair test runs).
+
+Archives, old (`main` e4e76fd) vs new, best of 2, cores 32-39 (`hold` = another corpus sample,
+1,330 files, 185 MB, not used for the fitting; `mixed` = the 371 MB sample the weights were
+fitted on). Sizes in bytes, times in s, memory = peak RSS in MB. Times at T4 below ~3 s vary
+±10 % between runs on this shared machine (the same cells swapped sign between two series).
+
+| set | T | level | size old → new | compress s | decompress s | compress MB | decompress MB |
+|---|---|---|---|---|---|---|---|
+| hold | 1 | -m1 | 101787223 → 101787223 (identical) | 2.41 → 2.48 | 0.75 → 0.77 | 175 → 173 | 115 → 116 |
+| hold | 1 | -m2 | 94092319 → 93907792 (−0.20 %) | 8.14 → 8.13 | 1.84 → 1.85 | 317 → 318 | 206 → 210 |
+| hold | 1 | -m3 | 91013856 → 90745368 (−0.29 %) | 20.20 → 20.09 | 5.18 → 5.12 | 346 → 339 | 210 → 210 |
+| hold | 1 | -m4 | 88630031 → 88390166 (−0.27 %) | 36.44 → 33.77 | 5.88 → 5.85 | 315 → 307 | 210 → 210 |
+| hold | 1 | -m5 | 87644540 → 87523547 (−0.14 %) | 45.42 → 43.35 | 6.44 → 6.55 | 1162 → 1163 | 222 → 234 |
+| hold | 1 | -m9 | 87164750 → 87130285 (−0.04 %) | 68.29 → 66.02 | 7.27 → 7.42 | 1560 → 1551 | 350 → 348 |
+| hold | 1 | -mx | 87164750 → 87130285 (−0.04 %) | 68.83 → 65.97 | 7.37 → 7.44 | 1562 → 1552 | 351 → 346 |
+| hold | 4 | -m1 | 102456171 → 102456171 (identical) | 0.92 → 0.88 | 0.32 → 0.33 | 289 → 277 | 238 → 239 |
+| hold | 4 | -m2 | 98026944 → 97935987 (−0.09 %) | 2.03 → 2.04 | 0.55 → 0.64 | 387 → 441 | 258 → 268 |
+| hold | 4 | -m3 | 89604598 → 89085662 (−0.58 %) | 8.06 → 7.86 | 1.79 → 1.81 | 457 → 471 | 273 → 290 |
+| hold | 4 | -m4 | 88874885 → 88533673 (−0.38 %) | 11.67 → 11.51 | 1.78 → 2.23 | 489 → 502 | 298 → 283 |
+| hold | 4 | -m5 | 87636484 → 87571456 (−0.07 %) | 15.25 → 14.64 | 2.50 → 2.28 | 1150 → 1137 | 389 → 439 |
+| hold | 4 | -m9 | 87164750 → 87130285 (−0.04 %) | 38.27 → 36.42 | 4.38 → 4.35 | 1665 → 1654 | 547 → 545 |
+| hold | 4 | -mx | 87164750 → 87130285 (−0.04 %) | 38.26 → 36.72 | 4.40 → 4.45 | 1660 → 1655 | 557 → 545 |
+| mixed | 4 | -m2 | 195387543 → 195927564 (+0.28 %) | 4.32 → 4.33 | 1.09 → 1.03 | 497 → 499 | 320 → 354 |
+| mixed | 4 | -m3 | 180669163 → 180805156 (+0.08 %) | 15.75 → 15.56 | 2.67 → 2.65 | 536 → 517 | 366 → 363 |
+| mixed | 4 | -m5 | 178213620 → 178463020 (+0.14 %) | 26.40 → 26.24 | 4.47 → 4.37 | 1456 → 1477 | 575 → 524 |
+
+Levels without content detection (`-m1`, explicit methods) give byte-identical archives. With
+the old detector in place, the new presets, groups and canonical text gave byte-identical
+archives at 48 level/thread combinations (`-m4`…`-m9`, `-mx`, `-mxx`, `-m1x`…`-m9x`, `-mex1`…
+`-mex9`, `-m1d`/`5d`/`9d`, `-m2t`/`5t`, `-m3xt`; T1 and T4). The differences above are the
+detector's alone: about 3–6 % of the bytes change group (both ways), so the effect per set is
+±0.3 % in size and mostly noise in time; memory moves with the block layout (e.g. hold `-m5`
+T4: the text block is 15.6 MB instead of 14.1 MB, i.e. three 7 MB ppmd jobs decoded at once
+instead of two: +50 MB decode RSS).
+
+**Remaining gaps.** The detector does not beat the old one everywhere: `mixed` (its own fitting
+set) is +0.08…0.28 % at T4, `hold` −0.04…−0.58 %. A file-level evaluation (each file compressed
+alone with the `-m5` text and binary chains) shows the old detector within 0.2 % of the best
+linear/tree models of these statistics, and both 0.9 % above the oracle: a better answer needs
+better estimates of the two coders (tried: a small PPM and a greedy-LZ cost estimate, too slow
+or not better), or a level-aware bias (`TEXT_LEVEL_BIAS`, wired but all zero: at `-m2` a bwt-vs-plz
+choice would gain ~0.2 % at 1.3x the bwt volume). Decode memory at hold `-m5` T4 (+13 %) and
+`-m2` T4 compression memory (+14 %) are layout effects of that grouping.
+
+## LZMA encoder without FreeArc code (2026-11-23)
+
+The LZMA encoder (`src/parc_lzmaenc.pas`) was the LZMA SDK 26.03 (public domain) plus pieces
+from FreeArc 0.67: the `ht4` hash-table match finder (single and multi-thread match lists), the
+default-cycles (`mc`) formula, the `:fast` parser additions and the method-string parser
+(`parse_LZMA`). Those were removed **without reading their bodies** and replaced; everything
+else is the SDK. The stream is unchanged (standard LZMA1, decoder untouched); the new pieces are
+in `formato/FORMATO-PARC.md` §6.11:
+
+- **`ht4`: own row finder** (`src/parc_lzmarf.inc`, instantiated per row shape with macros): a
+  64-bit multiplicative hash picks a cache-aligned row; the row is a ring of the newest
+  positions with a few hash bits as tags, compared all at once in a 64-bit word (SWAR) so only
+  tag hits read the window; search stops at the first position out of the window. Shapes:
+  32 B × 7 entries / 64 B × 14 (4-bit tags, 32-bit positions) for the optimal parser, 32 B × 6
+  (8-bit tags) for `:fast`, and for dictionaries up to 16 MB (the 4x4 blocks of `-m3`)
+  16 B × 4 / 32 B × 8 with 6-bit tags and **24-bit positions** (4 bytes per entry: the
+  position modulo 2^24, every candidate is verified and the distance bounded by the dictionary,
+  so the stream is always valid). Row memory: 3/4 of the dictionary or input (all of it for the
+  24-bit shapes and for dictionaries up to 32 MB), `h<size>` overrides. `mc` = candidates verified (default 4 + fb/8).
+- **Multi-thread `ht4`** reuses the SDK's LzFindMt pipeline: the BT thread runs the row
+  search from length 3 and the LZ thread keeps the pairs longer than its hash2/hash3 matches,
+  exactly as for `bt4`, so **`ht4` gives the same stream with 1, 2 or 3 threads** (FreeArc's
+  multi-thread list made it depend on N).
+- **`:fast` parser**: the SDK's `GetOptimumFast` with own measured thresholds (len-3 matches at
+  ≥ 2 KB and len-4 at ≥ 64 KB become literals, `ChangePair` at 32× instead of 128×, a rep of L
+  beats a match of L + 4 at ≥ 16 KB).
+- `mc` = 0: bt 16 + fb/2, hc4 half of it (the SDK's `LzmaEncProps_Normalize`; hc4 was
+  16 + fb/4), ht4 4 + fb/8. Method-string parser rewritten from the documented syntax (same
+  strings accepted; `h` is now meaningful).
+- The window keeps 1/4 of slack instead of the SDK's 1/2 (less memory when the input is larger
+  than the dictionary; the block moves twice as often, ~1 ms per MB moved).
+
+Tests: `tests/lzma_enc.sh` (test_lzmaenc full: round trips, LzmaEncodeMem, invalid parameters,
+thread budget, multi-thread == one thread for bt4 and every ht4 shape also with normalization;
+liblzma decodes the dumped streams; assembler == `-dPARC_NOASM`; round trips through `parc` for
+every shape, same archive twice and with 1/4 threads; damaged archives fail cleanly) and
+`tests/lzma_cross.sh` (same streams on linux64, linux32, linuxarm64/QEMU, win64, win32/Wine).
+
+**Measurements** (old = main e4e76fd, new = this branch c749eac; old and new alternate, best of 3
+for times, highest of 3 for memory; all runs pinned to cores 0-11 of the 2.6 GHz Xeon; times in
+s wall, memory = peak RSS in MB, `t` for decompression; sets copied from the corpus:
+`text` = 150 text files (29 MB tar), `bin` = 46 exe/dll/elf (47 MB tar), `mixed` = documents,
+images, audio, fonts, music and some of the other two (89 MB tar); raw data in
+`/mnt/IA_LAB/agentes/PArc/lzma3/final.txt` and `final3.txt`). The presets that only use `bt4`
+(`-m5`…`-m9`, `-m5x`…`-m9x`, `lzma:96m:normal:32:bt4:mc8:lc4:pb1`, `lzma:254m:max`) write
+**identical bytes**; their times stay within ±3 % (noise) and memory within ±1 %. The rows that
+use `ht4` or the `:fast` parser:
+
+| method | T | set | size old | size new | Δ | comp s old/new | comp MB old/new | dec s old/new | dec MB old/new |
+|---|---:|---|---:|---:|---:|---:|---:|---:|---:|
+| -m4x | 1 | text | 3,933,272 | 3,929,406 | -0.098 % | 3.85 / 3.74 | 59 / 72 | 0.35 / 0.38 | 42 / 42 |
+| -m4x | 1 | bin | 21,636,633 | 21,642,669 | +0.028 % | 9.87 / 9.68 | 94 / 97 | 1.21 / 1.24 | 61 / 61 |
+| -m4x | 1 | mixed | 45,422,143 | 45,426,919 | +0.011 % | 22.00 / 19.50 | 164 / 166 | 2.49 / 2.58 | 101 / 100 |
+| -m4x | 4 | text | 3,985,540 | 3,983,776 | -0.044 % | 3.61 / 3.65 | 142 / 143 | 0.35 / 0.33 | 46 / 46 |
+| -m4x | 4 | bin | 22,664,962 | 22,671,586 | +0.029 % | 5.36 / 5.26 | 201 / 202 | 0.77 / 0.78 | 95 / 94 |
+| -m4x | 4 | mixed | 46,567,848 | 46,568,379 | +0.001 % | 5.64 / 5.88 | 349 / 350 | 1.01 / 0.99 | 179 / 179 |
+| -m4 | 1 | text | 3,906,213 | 3,901,763 | -0.114 % | 3.67 / 3.81 | 80 / 93 | 0.39 / 0.37 | 70 / 70 |
+| -m4 | 1 | bin | 21,383,000 | 21,406,966 | +0.112 % | 9.14 / 8.76 | 133 / 136 | 1.27 / 1.24 | 108 / 108 |
+| -m4 | 1 | mixed | 45,328,164 | 45,330,224 | +0.005 % | 17.64 / 17.39 | 249 / 254 | 2.41 / 2.36 | 187 / 187 |
+| -m4 | 4 | text | 3,838,737 | 3,837,668 | -0.028 % | 3.72 / 3.87 | 95 / 96 | 0.35 / 0.35 | 67 / 67 |
+| -m4 | 4 | bin | 21,762,244 | 21,766,719 | +0.021 % | 5.25 / 5.32 | 173 / 175 | 0.80 / 0.81 | 117 / 118 |
+| -m4 | 4 | mixed | 45,380,556 | 45,386,985 | +0.014 % | 5.96 / 5.90 | 342 / 344 | 1.10 / 1.09 | 218 / 217 |
+| -m3 | 1 | text | 4,220,082 | 4,209,289 | -0.256 % | 1.62 / 1.57 | 89 / 87 | 0.35 / 0.35 | 70 / 70 |
+| -m3 | 1 | bin | 21,819,778 | 21,853,378 | +0.154 % | 5.09 / 4.24 | 151 / 137 | 1.21 / 1.20 | 108 / 108 |
+| -m3 | 1 | mixed | 46,372,551 | 46,329,157 | -0.094 % | 11.26 / 8.22 | 235 / 252 | 2.44 / 2.43 | 186 / 186 |
+| -m3 | 4 | text | 3,956,705 | 3,953,881 | -0.071 % | 2.45 / 2.57 | 110 / 110 | 0.29 / 0.29 | 67 / 67 |
+| -m3 | 4 | bin | 21,757,833 | 21,758,239 | +0.002 % | 3.24 / 3.43 | 173 / 170 | 0.64 / 0.66 | 117 / 118 |
+| -m3 | 4 | mixed | 45,568,177 | 45,565,997 | -0.005 % | 4.87 / 5.17 | 314 / 320 | 0.82 / 0.84 | 219 / 219 |
+| -m3x | 1 | text | 4,247,505 | 4,238,131 | -0.221 % | 1.66 / 1.65 | 69 / 65 | 0.34 / 0.34 | 44 / 46 |
+| -m3x | 1 | bin | 22,118,020 | 22,112,693 | -0.024 % | 5.41 / 4.50 | 110 / 98 | 1.21 / 1.20 | 62 / 61 |
+| -m3x | 1 | mixed | 46,484,155 | 46,445,925 | -0.082 % | 11.61 / 8.71 | 150 / 168 | 2.43 / 2.44 | 102 / 100 |
+| -m3x | 4 | text | 4,195,488 | 4,192,552 | -0.070 % | 2.32 / 2.48 | 115 / 117 | 0.25 / 0.25 | 47 / 48 |
+| -m3x | 4 | bin | 23,934,243 | 23,935,249 | +0.004 % | 3.23 / 3.37 | 197 / 198 | 0.60 / 0.59 | 97 / 97 |
+| -m3x | 4 | mixed | 47,112,614 | 47,116,033 | +0.007 % | 4.89 / 5.06 | 312 / 314 | 0.77 / 0.80 | 162 / 162 |
+| `lzma:96m:normal:16:mc8:lc4` | 1 | text | 3,928,562 | 3,925,005 | -0.091 % | 3.45 / 3.39 | 49 / 63 | 0.30 / 0.30 | 33 / 33 |
+| `lzma:96m:normal:16:mc8:lc4` | 1 | bin | 21,705,595 | 21,700,533 | -0.023 % | 8.48 / 7.90 | 85 / 88 | 1.11 / 1.10 | 52 / 52 |
+| `lzma:96m:normal:16:mc8:lc4` | 1 | mixed | 45,995,675 | 46,000,476 | +0.010 % | 19.98 / 17.53 | 155 / 156 | 2.38 / 2.34 | 91 / 91 |
+| `lzma:96m:normal:16:mc8:lc4` | 4 | text | 3,914,082 | 3,925,005 | +0.279 % | 2.72 / 2.93 | 90 / 104 | 0.32 / 0.31 | 33 / 33 |
+| `lzma:96m:normal:16:mc8:lc4` | 4 | bin | 21,688,255 | 21,700,533 | +0.057 % | 5.81 / 5.96 | 157 / 161 | 1.11 / 1.09 | 52 / 52 |
+| `lzma:96m:normal:16:mc8:lc4` | 4 | mixed | 45,980,192 | 46,000,476 | +0.044 % | 11.77 / 12.38 | 229 / 229 | 2.32 / 2.29 | 91 / 91 |
+| `4x4:lzma:24mb:normal:20:mc6:lc5:pb1` | 1 | text | 3,977,052 | 3,976,013 | -0.026 % | 3.96 / 3.98 | 110 / 110 | 0.33 / 0.33 | 36 / 36 |
+| `4x4:lzma:24mb:normal:20:mc6:lc5:pb1` | 1 | bin | 23,001,176 | 23,007,266 | +0.026 % | 8.71 / 8.67 | 131 / 131 | 1.25 / 1.23 | 82 / 82 |
+| `4x4:lzma:24mb:normal:20:mc6:lc5:pb1` | 1 | mixed | 47,123,615 | 47,134,140 | +0.022 % | 15.36 / 15.32 | 135 / 136 | 2.34 / 2.46 | 126 / 126 |
+| `4x4:lzma:24mb:normal:20:mc6:lc5:pb1` | 4 | text | 3,977,052 | 3,976,013 | -0.026 % | 3.13 / 3.19 | 135 / 135 | 0.27 / 0.27 | 39 / 40 |
+| `4x4:lzma:24mb:normal:20:mc6:lc5:pb1` | 4 | bin | 22,997,647 | 23,004,779 | +0.031 % | 4.31 / 4.46 | 195 / 194 | 0.66 / 0.65 | 94 / 94 |
+| `4x4:lzma:24mb:normal:20:mc6:lc5:pb1` | 4 | mixed | 47,123,615 | 47,134,140 | +0.022 % | 4.97 / 5.03 | 329 / 330 | 0.85 / 0.84 | 179 / 179 |
+| `4x4:lzma:16mb:normal:16:mc4:lc4` | 1 | text | 4,189,016 | 4,188,609 | -0.010 % | 3.32 / 3.55 | 79 / 79 | 0.34 / 0.32 | 38 / 37 |
+| `4x4:lzma:16mb:normal:16:mc4:lc4` | 1 | bin | 24,234,845 | 24,237,450 | +0.011 % | 7.90 / 8.55 | 97 / 98 | 1.32 / 1.36 | 79 / 79 |
+| `4x4:lzma:16mb:normal:16:mc4:lc4` | 1 | mixed | 47,752,631 | 47,752,384 | -0.001 % | 13.72 / 14.24 | 99 / 100 | 2.45 / 2.44 | 91 / 91 |
+| `4x4:lzma:16mb:normal:16:mc4:lc4` | 4 | text | 4,189,016 | 4,188,609 | -0.010 % | 2.13 / 2.21 | 105 / 106 | 0.22 / 0.21 | 40 / 40 |
+| `4x4:lzma:16mb:normal:16:mc4:lc4` | 4 | bin | 24,376,057 | 24,379,201 | +0.013 % | 3.11 / 3.24 | 188 / 190 | 0.57 / 0.58 | 97 / 97 |
+| `4x4:lzma:16mb:normal:16:mc4:lc4` | 4 | mixed | 47,752,631 | 47,752,384 | -0.001 % | 4.76 / 5.00 | 300 / 302 | 0.80 / 0.82 | 162 / 160 |
+| `lzma:96m:fast:32:mc6:lc4` | 1 | text | 4,246,687 | 4,237,658 | -0.213 % | 1.41 / 1.33 | 57 / 57 | 0.28 / 0.30 | 33 / 33 |
+| `lzma:96m:fast:32:mc6:lc4` | 1 | bin | 22,167,558 | 22,157,548 | -0.045 % | 4.84 / 3.89 | 100 / 88 | 1.12 / 1.10 | 52 / 52 |
+| `lzma:96m:fast:32:mc6:lc4` | 1 | mixed | 47,079,766 | 47,051,200 | -0.061 % | 11.13 / 7.77 | 140 / 158 | 2.30 / 2.32 | 91 / 91 |
+| `lzma:96m:fast:32:mc6:lc4` | 4 | text | 4,246,687 | 4,237,658 | -0.213 % | 1.42 / 1.33 | 59 / 57 | 0.28 / 0.31 | 33 / 33 |
+| `lzma:96m:fast:32:mc6:lc4` | 4 | bin | 22,167,558 | 22,157,548 | -0.045 % | 4.92 / 3.74 | 101 / 88 | 1.10 / 1.09 | 52 / 52 |
+| `lzma:96m:fast:32:mc6:lc4` | 4 | mixed | 47,079,766 | 47,051,200 | -0.061 % | 10.35 / 7.80 | 140 / 160 | 2.26 / 2.25 | 91 / 91 |
+
+
+Remaining gaps (why):
+- `-m3` T1 `bin` +0.15 % and `-m4` T1 `bin` +0.11 %: on exe-filtered data the row table (3/4 of
+  the input, 4.6–5.3 bytes per entry) keeps fewer positions than FreeArc's 4-byte entries; with
+  the full input as budget `-m3` wins (−0.05 %) but memory goes over main on larger inputs.
+- Memory, T1: rows are sized from the input (3/4, or all of it up to 32 MB) while main rounded
+  its row count down to a power of two per `mc`, so cells land either side: `-m3` T1 `mixed`
+  +17 MB, `-m4` T1 `text` +13 MB, `-m4x` T1 `text` +13 MB; `-m3` T1 `bin` −14 MB, `-m3x` T1 `bin`
+  −12 MB. A power-of-two rule was measured too: it matched main's memory on `-m4` but lost
+  0.3–0.4 % on `bin`.
+- Time, T4 `-m3`/`-m3x` (4x4 of 16 MB, `mc4`): +4–6 %. Same instruction count as main
+  (callgrind), ~5 % more D1/LL misses (cachegrind); not found.
+- `lzma:96m:normal:16:mc8` at T4 (2 match-finder threads): +0.04…+0.28 % because main's 2-thread
+  match list differed from its 1-thread list (and was smaller); the new one is the same as one
+  thread (and as main's T1 it wins or ties).
+- `4x4:lzma:24mb` (`ex4binary`, `-m4` T4): +0.02–0.03 % on `bin`/`mixed`.
+- Everything else ties or wins; `:fast` (`-m3` T1) is 20–30 % faster.
 
 ## Verified platforms (0.0.2)
 
@@ -1865,6 +2075,11 @@ bash tests/filters_cross.sh       # delta/lzp: mismos bytes en linux64/linux32/l
 bash tests/mmtta.sh               # tta/mm: detección, ida y vuelta en todos los niveles, trozos al azar, C con y sin SIMD, dañados, presets
 bash tests/mmtta_cross.sh         # tta/mm: mismos bytes en linux64/linux32/linuxarm64 (QEMU)/win64/win32 (Wine)
 bash tests/cm_cross.sh            # cm: mismos bytes en linux64 (SSE2 y C)/linux32/linuxarm64 (NEON)/win64/win32
+bash tests/policy.sh              # presets, grupos, métodos canónicos, detector, tamaños de memoria (igual que el código reemplazado)
+bash tests/policy_cross.sh        # detector/presets/grupos: misma respuesta en linux64/linux32/linuxarm64/win64/win32
+
+bash tests/lzma_enc.sh            # codificador LZMA: test_lzmaenc, liblzma, asm == Pascal, formas de ht4 por parc, dañados
+bash tests/lzma_cross.sh          # codificador LZMA: mismos streams en linux64/linux32/linuxarm64 (QEMU)/win64/win32
 # plz_bench: cualquier método en memoria por las cadenas (tamaño, CPU y pared)
 fpc -O3 -Fusrc -Fobuild/linux64/units -Flbuild/linux64/units -FUbuild/tests/units -FEbuild/tests tests/plz_bench.lpr
 # liberar/reusar un trabajo del pool apenas termina (ventana ampliada con -dPARC_RACE_TEST)

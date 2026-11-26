@@ -1,565 +1,409 @@
+{ Canonical method text and per-block limits (PArc's own design, 2026-11).
+
+  The chain stored with each solid block is canonical: every stage is parsed with its codec's
+  own parameter parser and written back in one fixed form (memory sizes with units, defaults
+  left out), so the same compression always gives the same text and the decoder reads exactly
+  the parameters the encoder used.
+
+  Size limit: a window, dictionary or block larger than the data only costs memory (and
+  decoder memory, which is what the stored text promises). Each one is cut to the block's
+  size plus 1 % and 512 bytes, rounded up to KB (up to 4 MB) or to MB (above):
+    lzma dictionary (at least 32 KB), orep window, dict/lzp/bwt block (lzp/bwt hash bits to
+    the block), plz window (its own rounding, PlzCanon), the inner method of 4x4.
+  A 32-bit build also keeps the lzma encoder within 2 GB (a smaller dictionary of the form
+  m * 2^k).
+  Memory limit (CanonStageMem): one stage shrunk so that its encoder fits in a byte budget,
+  from each codec's own memory model; FitEncodeMem (parc_encoders) calls it on the stage that
+  uses most until the whole chain fits.
+
+  Stages the canonical form knows nothing about stay as written (the encoder reports what it
+  cannot use). }
 unit parc_canon;
-{ ================================================================================
-  LimitAndCanonize — port de la canonización de métodos de FreeArc 0.67.1.
 
-  Por cada etapa del método de un bloque de datos hace lo que hace FreeArc:
-    1. limitDictionary (ArcvProcessRead.hs:120):
-         mem = roundMemUp(totalBytes + totalBytes div 100 + 512);
-         por etapa, si GetDictionary() > mem -> SetDictionary(mem) (Compression.h:419).
-       4x4 propaga el límite al compresor interno (C_4x4.h:35).
-    2. Canonización: ShowCompressionMethod(buf, purify=TRUE) de cada clase
-       (CompressionLibrary.cpp:644) — el string que queda almacenado.
-
-  Portado de Compression/*/C_*.cpp y C_*.h; el oráculo es la salida real de
-  arc.exe 0.67.1 (lb-f*.txt del corpus compat). Etapas sin diccionario
-  (exe/delta/mm/tta/ppmd/storing) solo se canonizan.             — PA-Lab
-  ================================================================================ }
 {$mode objfpc}{$H+}
+
 interface
 
+{ Method (stages joined with '+') canonical and limited for a solid block of BlockSize bytes. }
 function LimitAndCanonize(const Method: string; BlockSize: Int64): string;
 
-{ Una etapa ya canónica achicada para que su codificador use a lo sumo MemLim bytes (aprox.):
-  lzma con su estimación exacta (LzmaFitDictionary), tor búfer + hash, orep con OrepEncMemory,
-  lzp/dict a la mitad,
-  bwt a 1/6, ppmd el modelo, y el método interno de 4x4 con MemLim repartido entre sus
-  hilos. cm, srep y los filtros no cambian. Lo usa el ajuste de la cadena entera
-  (parc_encoders.FitEncodeMem), que mide con la estimación de cada codificador y repite. }
+{ A canonical stage shrunk so that its encoder uses at most about MemLim bytes. cm, srep and
+  the filters do not change. }
 function CanonStageMem(const Stage: string; MemLim: Int64): string;
 
-{ Límite de memoria de los codificadores que corren a la vez (bytes; 0 = sin límite):
-  -lc<tamaño>, o el automático (CompressMemLimit < 0): 75 % de la RAM; en 32 bits además a lo
-  sumo 2,25 GB y 9/16 del espacio de direcciones (lo demás es para búferes, DLLs y la
-  fragmentación de un proceso de 2 o 4 GB). }
+{ Memory budget of the encoders that run at once (bytes; 0 = none): -lc<size>, or with the
+  automatic setting (CompressMemLimit < 0) 75 % of the RAM; a 32-bit process also keeps to
+  2.25 GB and 9/16 of its address space (the rest is buffers, libraries and fragmentation). }
 function EffectiveCompressLimit: Int64;
 
 var
-  { -lc: -1 = automático; 0 = sin límite (-lc-); si no, bytes. Se fija al leer la línea de
-    comandos, antes de comprimir (después solo se lee, desde varios hilos). }
+  { -lc: -1 = automatic; 0 = no limit (-lc-); else bytes. Set while reading the command line,
+    before compressing (read-only afterwards, from several threads). }
   CompressMemLimit: Int64 = -1;
 
 implementation
 
-uses SysUtils, Math, parc_os, parc_methods, parc_lzmaenc, parc_parallel, parc_orep, parc_plzenc, parc_bwt;
+uses
+  SysUtils, Math, parc_os, parc_methods, parc_lzmaenc, parc_parallel, parc_orep, parc_plzenc,
+  parc_bwt, parc_lzp, parc_dict, parc_lz4enc, parc_tta, parc_dispack;
 
 const
-  KB = 1024; MB = 1024*1024; GB = Int64(1024)*1024*1024;
-  INT_MAX = High(Integer);
+  KB = Int64(1024);
+  MB = Int64(1024) * 1024;
+  GB = Int64(1024) * 1024 * 1024;
+  LZMA_MIN_DICT = 32 * KB;
+  LZMA_MAX_32 = 2 * GB;       // lzma encoder memory in a 32-bit process
+  T4X4_MAX_JOBS = 16;   // as parc_encoders (jobs in flight)
 
-{ --- showMem (Compression.hs:547-556) -------------------------------------- }
+{ ------------------------------------------------------------------------------------------ }
+{ Text helpers                                                                               }
+{ ------------------------------------------------------------------------------------------ }
 
-function ShowMem(Mem: Int64): string;
-  function Fmt(Val, NextVal: Int64; const Str: string): string;
-  begin
-    if (Mem mod Val = 0) or (NextVal > 0) and (Mem div NextVal >= 4096) then
-      Result := IntToStr((Mem + Val div 2) div Val) + Str
-    else if Val > KB then
-      Result := Fmt(KB, 0, 'kb')
-    else if Val = KB then
-      Result := Fmt(1, 0, 'b')   // ni kb exactos: en bytes (antes recursión infinita)
-    else
-      Result := IntToStr(Mem) + 'b';
-  end;
+{ "64mb", "1035kb", "2gb", "512b": the largest unit that divides the value (MB only below
+  4 GB, so that 32-bit readers of the number in MB never overflow). }
+function MemText(V: Int64): string;
 begin
-  if Mem = 0 then Exit('0b');
-  if (Mem mod GB = 0) or (Mem div MB >= 4096) then Exit(Fmt(GB, 0, 'gb'));
-  if (Mem mod MB = 0) or (Mem div KB >= 4096) then Exit(Fmt(MB, 0, 'mb'));
-  Result := Fmt(KB, 0, 'kb');
+  if (V > 0) and (V mod GB = 0) then Result := IntToStr(V div GB) + 'gb'
+  else if (V > 0) and (V mod MB = 0) and (V < 4 * GB) then Result := IntToStr(V div MB) + 'mb'
+  else if (V > 0) and (V mod KB = 0) then Result := IntToStr(V div KB) + 'kb'
+  else Result := IntToStr(V) + 'b';
 end;
 
-{ --- roundMemUp (Compression.hs:559-560) ------------------------------------ }
-
-function RoundMemUp(Mem: Int64): Int64;
-begin
-  if Mem >= 4096*KB then Result := ((Mem + MB - 1) div MB) * MB
-                    else Result := ((Mem + KB - 1) div KB) * KB;
-end;
-
-function LB(X: Int64): Integer;   { floor(log2(X)), X>0 }
-begin
-  Result := 0;
-  while (X shr (Result+1)) > 0 do Inc(Result);
-end;
-
-{ --- parseMem de FreeArc: sufijos b/kb/mb/gb; pelado = bytes ---------------- }
-
-function ParseMem(const S: string; Def: Int64): Int64;
-var T: string; Mult: Int64; N: Integer;
-begin
-  Result := Def; T := LowerCase(Trim(S)); if T = '' then Exit;
-  N := 0; Mult := 1;
-  if Copy(T, Length(T)-1, 2) = 'gb' then begin Mult := GB; N := 2 end
-  else if Copy(T, Length(T)-1, 2) = 'mb' then begin Mult := MB; N := 2 end
-  else if Copy(T, Length(T)-1, 2) = 'kb' then begin Mult := KB; N := 2 end
-  else if T[Length(T)] = 'b' then N := 1
-  else if T[Length(T)] = 'k' then begin Mult := KB; N := 1 end
-  else if T[Length(T)] = 'm' then begin Mult := MB; N := 1 end
-  else if T[Length(T)] = 'g' then begin Mult := GB; N := 1 end;
-  Result := StrToInt64Def(Copy(T, 1, Length(T)-N), -1) * Mult;
-  if Result < 0 then Result := Def;
-end;
-
-{ parseMem del C (Common.cpp): sin sufijo es 2^N. }
-function CMem(const S: string; Def: Int64): Int64;
+{ What a block of Size bytes can use of a window: Size + 1 % + 512, rounded up. }
+function SizeCap(Size: Int64): Int64;
 var
-  q: QWord;
+  m: Int64;
 begin
-  if parc_methods.ParseMem(S, q) then Result := q else Result := Def;
+  if Size < 0 then Size := 0;
+  m := Size + Size div 100 + 512;
+  Result := (m + KB - 1) div KB * KB;
+  if Result > 4 * MB then Result := (m + MB - 1) div MB * MB;
 end;
 
-{ showMem del C (Common.cpp:255): la unidad más grande que divide exacto. }
-function CShowMem(Mem: Int64): string;
+{ Bits of a hash for a block: no more than ceil(log2(Block)). }
+function CapBits(Bits: Integer; Block: Int64): Integer;
+var
+  b: Integer;
 begin
-  if Mem = 0 then Result := '0b'
-  else if Mem mod GB = 0 then Result := IntToStr(Mem div GB) + 'gb'
-  else if Mem mod MB = 0 then Result := IntToStr(Mem div MB) + 'mb'
-  else if Mem mod KB = 0 then Result := IntToStr(Mem div KB) + 'kb'
-  else Result := IntToStr(Mem) + 'b';
+  b := 0;
+  while (b < 62) and ((Int64(1) shl b) < Block) do Inc(b);
+  if b < Bits then Result := b else Result := Bits;
 end;
 
-function IsMem(const S: string): Boolean;
+{ The "N%" parameter (MinCompression), or -1. }
+function PercentParam(const Parts: TStringArray): Integer;
+var
+  k: Integer;
 begin
-  Result := (S <> '') and (S[1] in ['0'..'9']);
+  Result := -1;
+  for k := 1 to High(Parts) do
+    if (Length(Parts[k]) > 1) and (Parts[k][Length(Parts[k])] = '%') then
+      Result := StrToIntDef(Copy(Parts[k], 1, Length(Parts[k]) - 1), Result);
 end;
 
-function Num(const S: string; Def: Int64): Int64;
-begin
-  Result := StrToInt64Def(S, Def);
-end;
+{ ------------------------------------------------------------------------------------------ }
+{ One canonical writer per codec. Limit: the window cap (0 = no cap). Each one raises on      }
+{ parameters its codec does not accept (the caller then keeps the stage as written).        }
+{ ------------------------------------------------------------------------------------------ }
 
-function StageNameOf(const S: string): string;
-begin
-  Result := LowerCase(S.Split([':'])[0]);
-end;
-
-{ ================================================================================ }
-{ Canoniza una cadena de etapas con un límite de diccionario ya calculado          }
-
-{$IFDEF CPU32}
+function LzmaText(const P: TLzmaEncParams): string;
 const
-  { 32 bits: el codificador lzma (ventana + hash + árbol) no pasa de 2 GB y sus piezas, más
-    kLzmaEnc32Headroom para el resto del proceso, se tienen que poder reservar de verdad (el
-    límite real es el espacio de direcciones fragmentado de 2 a 4 GB, no la RAM). Sin esto,
-    lzma:1gb fallaba con "Out of memory". }
-  kLzmaEnc32MaxMem = Int64(2) shl 30;
-  kLzmaEnc32Headroom = Int64(256) shl 20;
-
-{$ENDIF}
-
-{ Diccionario lzma cuyo codificador entra en MaxMem (LzmaFitDictionary): la memoria de 32 bits
-  o el límite de -lc. MFi como en CanonStage. }
-function FitLzma(BS, MFi, Alg, NFB, MC, LC, LP: Int64; MaxMem, Headroom: Int64): Int64;
-var
-  P: TLzmaEncParams;
+  MF_NAMES: array[TLzmaMatchFinder] of string = ('bt2', 'bt3', 'bt4', 'hc4', 'ht4');
 begin
-  P := DefaultLzmaEncParams;
-  P.DictSize := BS;
-  P.Algorithm := Alg;
-  P.NumFastBytes := NFB;
-  P.MatchFinderCycles := MC;
-  P.lc := LC;
-  P.lp := LP;
-  case MFi of
-    1: P.MatchFinder := mfBT2;
-    2: P.MatchFinder := mfBT3;
-    3: P.MatchFinder := mfBT4;
-    4: P.MatchFinder := mfHC4;
+  Result := 'lzma:' + MemText(P.DictSize);
+  if P.HashSize <> 0 then Result := Result + ':h' + MemText(P.HashSize);
+  case P.Algorithm of
+    0: Result := Result + ':fast';
+    1: Result := Result + ':normal';
   else
-    P.MatchFinder := mfHT4;
+    Result := Result + ':a' + IntToStr(P.Algorithm);
   end;
-  Result := LzmaFitDictionary(P, MaxMem, Headroom);
+  if P.MatchFinder <> mfHT4 then Result := Result + ':' + MF_NAMES[P.MatchFinder];
+  Result := Result + ':' + IntToStr(P.NumFastBytes);
+  if P.MatchFinderCycles <> 0 then Result := Result + ':mc' + IntToStr(P.MatchFinderCycles);
+  if P.pb <> 2 then Result := Result + ':pb' + IntToStr(P.pb);
+  if P.lc <> 3 then Result := Result + ':lc' + IntToStr(P.lc);
+  if P.lp <> 0 then Result := Result + ':lp' + IntToStr(P.lp);
 end;
 
-
-{ Tamaño para -lc: hacia abajo a MB enteros (a KB por debajo de 4 MB), al menos 1 MB. }
-function FitMem(X: Int64): Int64;
+{ The largest m * 2^k (m = 8..15) below D, at least 1 MB. }
+function LowerDictStep(D: QWord): QWord;
+var
+  k: Integer;
+  m: QWord;
 begin
-  if X >= 4*MB then Result := (X div MB) * MB else Result := (X div KB) * KB;
+  k := 0;
+  while (D shr k) > 15 do Inc(k);
+  m := D shr k;                          // 8..15 (or less for tiny D)
+  if (m shl k) = D then Dec(m) else ;   // strictly below D
+  if m < 8 then begin m := 15; Dec(k); end;
+  if k < 0 then k := 0;
+  Result := m shl k;
   if Result < MB then Result := MB;
 end;
 
-function CanonChain(const Method: string; Limit, MemLim: Int64): string;
+function CanonLzma(const Parts: TStringArray; Limit, MemLim: Int64): string;
 var
-  Stages: TStringArray;
-  I: Integer;
-
-  function CanonStage(const S: string): string;
-  var
-    Parts: TStringArray;
-    Name, P: string;
-    J: Integer;
-    BS, MC, MML, Bar, Sm, HSL, Amp, Hash, Alg, MFi, NFB, PB, LC, LP: Int64;
-    MFSet: Boolean;
-    M, MR, W, MM, MS, Num9, Enc, Lvl, BPos: Int64;
-    PP: TPpmdParams;
-    StartI: Integer;
-    L: string;
-    LZP, A, C3, Ext: Boolean;
-    Interno: string;
-    I: Integer;
-    OM: TOrepMethod;
-    BP: TBwtParams;
-
-    function Pr(N: Integer): string;
-    begin
-      if N < Length(Parts) then Result := Parts[N] else Result := '';
-    end;
-
+  P: TLzmaEncParams;
 begin
+  P := ParseLzmaEncParams(Parts);
+  if (Limit > 0) and (Int64(P.DictSize) > Limit) then P.DictSize := Limit;
+  {$IFNDEF CPU64}
+  // a 32-bit process: the encoder in at most 2 GB (its address space is 2..4 GB)
+  if MemLim <= 0 then MemLim := LZMA_MAX_32;
+  if MemLim > LZMA_MAX_32 then MemLim := LZMA_MAX_32;
+  {$ENDIF}
+  // memory: the next smaller dictionary of the form m * 2^k (m = 8..15) until it fits
+  if MemLim > 0 then
+    while (P.DictSize > MB) and (LzmaEncMemory(P) > QWord(MemLim)) do
+      P.DictSize := LowerDictStep(P.DictSize);
+  if P.DictSize < LZMA_MIN_DICT then P.DictSize := LZMA_MIN_DICT;
+  Result := LzmaText(P);
+end;
 
-    Parts := S.Split([':']);
-    Name  := LowerCase(Parts[0]);
-    P     := '';
+function CanonOrep(const Parts: TStringArray; Limit, MemLim: Int64): string;
+var
+  M: TOrepMethod;
+begin
+  M := ParseOrepMethod(Parts);
+  if (Limit > 0) and (Int64(M.Window) > Limit) then M.Window := Limit;
+  if MemLim > 0 then M.Window := OrepFitWindow(M, MemLim);
+  Result := 'orep:' + MemText(M.Window);
+  if M.MinLen <> OREP_DEF_MINLEN then Result := Result + ':l' + IntToStr(M.MinLen);
+  if M.Align <> OREP_DEF_ALIGN then Result := Result + ':a' + IntToStr(M.Align);
+  if M.Density <> OREP_DEF_DENSITY then Result := Result + ':s' + IntToStr(M.Density);
+  if M.Cands <> OREP_DEF_CANDS then Result := Result + ':c' + IntToStr(M.Cands);
+  if M.RunKeep <> 0 then Result := Result + ':r' + IntToStr(M.RunKeep);
+  if M.Chunk <> OREP_DEF_CHUNK then Result := Result + ':b' + MemText(M.Chunk);
+  if M.MinDist <> 0 then Result := Result + ':d' + MemText(M.MinDist);
+end;
 
-    { --- orep (parc_orep, MIT). La ventana se limita al bloque (como SetDictionary) y a la
-          memoria (OrepEncMemory); queda siempre, y los demás parámetros solo si no son los de
-          por omisión (l64, a0, s4, c4, b4mb, d0). Parámetros inválidos: igual (el codificador da
-          el error). }
-    if Name = 'orep' then
+function CanonPpmd(const Parts: TStringArray; MemLim: Int64): string;
+var
+  P: TPpmdParams;
+begin
+  P := ParsePpmdParams(Parts);
+  if (MemLim > 0) and (Int64(P.Mem) + 2 * MB > MemLim) then
+    P.Mem := Max(MB, (MemLim - 2 * MB) div MB * MB);
+  Result := 'ppmd:' + IntToStr(P.Order) + ':' + MemText(P.Mem);
+  if P.Restore = 1 then Result := Result + ':r'
+  else if P.Restore <> 0 then Result := Result + ':r' + IntToStr(P.Restore);
+end;
+
+function CanonDict(const Parts: TStringArray; Limit, MemLim: Int64): string;
+var
+  P: TDictParams;
+  B: Int64;
+begin
+  P := ParseDictParams(Parts);
+  B := P.BlockSize;
+  if (Limit > 0) and (B > Limit) then B := Limit;
+  // the encoder holds about three times its block
+  if (MemLim > 0) and (3 * B + MB > MemLim) then B := Max(MB, (MemLim - MB) div 3 div KB * KB);
+  Result := 'dict:' + MemText(B);
+  if P.MinCompression <> 100 then Result := Result + ':' + IntToStr(P.MinCompression) + '%';
+  if P.MinWeakChars <> 20 then Result := Result + ':c' + IntToStr(P.MinWeakChars);
+  if P.MinLargeCnt <> 2048 then Result := Result + ':l' + IntToStr(P.MinLargeCnt);
+  if P.MinMediumCnt <> 100 then Result := Result + ':m' + IntToStr(P.MinMediumCnt);
+  if P.MinSmallCnt <> 50 then Result := Result + ':s' + IntToStr(P.MinSmallCnt);
+  if P.MinRatio <> 4 then Result := Result + ':r' + IntToStr(P.MinRatio);
+end;
+
+function CanonLzp(const Parts: TStringArray; Limit, MemLim: Int64): string;
+var
+  P: TLzpParams;
+  B: Int64;
+  H, Pct: Integer;
+begin
+  P := ParseLzpParams(Parts);
+  B := P.BlockSize;
+  H := P.HashSizeLog;
+  if (Limit > 0) and (B > Limit) then B := Limit;
+  // input + output blocks and the hash (8 bytes per bucket)
+  if MemLim > 0 then
+    while (2 * B + (Int64(8) shl H) + MB > MemLim) and ((B > MB) or (H > 10)) do
+      if (H > 10) and (((Int64(8) shl H) > B) or (B <= MB)) then Dec(H)
+      else B := Max(MB, B div 2);
+  H := CapBits(H, B);
+  Result := 'lzp:' + MemText(B);
+  Pct := PercentParam(Parts);
+  if Pct >= 0 then Result := Result + ':' + IntToStr(Pct) + '%';
+  Result := Result + ':' + IntToStr(P.MinMatchLen) + ':h' + IntToStr(H);
+  if P.Barrier <> High(LongInt) then Result := Result + ':d' + MemText(P.Barrier);
+  if P.SmallestLen <> 32 then Result := Result + ':s' + IntToStr(P.SmallestLen);
+end;
+
+function CanonBwt(const Parts: TStringArray; Limit, MemLim: Int64): string;
+var
+  P: TBwtParams;
+  B: Int64;
+begin
+  P := ParseBwtParams(Parts);
+  B := P.BlockSize;
+  if (Limit > 0) and (B > Limit) then B := Limit;
+  if MemLim > 0 then
+    while (B > MB) and (BwtEncodeBlockMemory(P) > MemLim) do
     begin
-      try
-        OM := ParseOrepMethod(Parts);
-      except
-        on EUnsupportedMethod do Exit(S);
-      end;
-      if Int64(OM.Window) > Limit then OM.Window := Limit;
-      if (MemLim > 0) and (Int64(OrepMethodEncMemory(OM)) > MemLim) then
-        OM.Window := OrepFitWindow(OM, MemLim);
-      Result := 'orep:' + ShowMem(OM.Window);
-      if OM.MinLen <> OREP_DEF_MINLEN then Result := Result + ':l' + IntToStr(OM.MinLen);
-      if OM.Align <> OREP_DEF_ALIGN then Result := Result + ':a' + IntToStr(OM.Align);
-      if OM.Density <> OREP_DEF_DENSITY then Result := Result + ':s' + IntToStr(OM.Density);
-      if OM.Cands <> OREP_DEF_CANDS then Result := Result + ':c' + IntToStr(OM.Cands);
-      if OM.RunKeep <> 0 then Result := Result + ':r' + IntToStr(OM.RunKeep);
-      if OM.Chunk <> OREP_DEF_CHUNK then Result := Result + ':b' + ShowMem(OM.Chunk);
-      if OM.MinDist <> 0 then Result := Result + ':d' + ShowMem(OM.MinDist);
-      Exit;
+      B := Max(MB, B div 2);
+      P.BlockSize := B;
     end;
+  Result := 'bwt:' + MemText(B) + ':m' + IntToStr(P.Level);
+  if P.LzpMin > 0 then
+    Result := Result + ':l' + IntToStr(P.LzpMin) + ':h' + IntToStr(CapBits(P.LzpHash, B))
+  else
+    Result := Result + ':l';
+  if P.CoderSet >= 0 then Result := Result + ':e' + IntToStr(P.CoderSet);
+  if P.Adaptive then Result := Result + ':a';
+end;
 
-    { --- lzma (C_LZMA.cpp/.h). Defaults: 64mb, h0, alg1, nfb32, mfHT4,
-          mc0, pb2, lc3, lp0. SetDictionary: dict=max(32kb, mem) en 32-bit. }
-    if Name = 'lzma' then
+function CanonLz4(const Parts: TStringArray): string;
+var
+  P: TLz4EncParams;
+begin
+  P := ParseLz4EncParams(Parts);
+  Result := 'lz4';
+  if P.Compressor <> 0 then Result := Result + ':c' + IntToStr(P.Compressor);
+  if P.BlockSize <> MB then Result := Result + ':b' + MemText(P.BlockSize);
+  if P.MinCompression <> 100 then Result := Result + ':' + IntToStr(P.MinCompression) + '%';
+end;
+
+function CanonTta(const Parts: TStringArray): string;
+var
+  P: TTtaEncParams;
+begin
+  P := ParseTtaEncParams(Parts);
+  // only the level: the layout comes from the data
+  Result := 'tta';
+  if P.Level <> 3 then Result := Result + ':m' + IntToStr(P.Level);
+end;
+
+{ Size: the solid block's size (< 0: no size limit). }
+function CanonStage(const Stage: string; Size, MemLim: Int64): string; forward;
+
+{ 4x4: its own parameters (only b<mem>, the block, matters to the encoder), then the inner
+  method, canonical with the same limits shared by its jobs. }
+function Canon4x4(const Stage: string; Size, MemLim: Int64): string;
+var
+  Parts: TStringArray;
+  Own, Inner: string;
+  k: Integer;
+  m: QWord;
+  Jobs: Integer;
+  Blk: Int64;
+begin
+  Parts := Stage.Split([':']);
+  Own := '4x4';
+  Inner := '';
+  Blk := 0;
+  for k := 1 to High(Parts) do
+    if (Parts[k] <> '') and ((Parts[k][1] in ['0'..'9']) or
+       ((Length(Parts[k]) > 1) and (Parts[k][2] in ['0'..'9']))) then
     begin
-      BS := ParseMem(Pr(1), 64*MB);
-      if BS > Limit then BS := Limit;
-      if BS < 32*KB then BS := 32*KB;
-      Hash := Int64(0); Alg := 1; MFi := 0;  { 0=HT4 1=BT2 2=BT3 3=BT4 4=HC4 }
-      MFSet := False;
-      NFB := Int64(32); MC := 0; PB := 2; LC := 3; LP := 0;
-      for J := 1 to High(Parts) do
+      if (Parts[k][1] = 'b') and ParseMem(Copy(Parts[k], 2, MaxInt), m) then
       begin
-        L := LowerCase(Parts[J]);
-        if (L <> '') and (L[1] in ['0'..'9']) then NFB := Num(L, 32)
-        { hc4/ht4 antes que "h<tamaño>" (si no, se tomaban como tamaño de hash y se perdían) }
-        else if L = 'hc4' then begin MFi := 4; MFSet := True; end
-        else if L = 'ht4' then begin MFi := 0; MFSet := True; end
-        else if Copy(L,1,1) = 'h' then Hash := ParseMem(Copy(L,2,MaxInt), 0)
-        { C_LZMA.cpp:623-627: los presets fijan algoritmo, fast bytes y ciclos, y el match
-          finder solo si todavía no se dio uno ("max" = normal + bt4 + 128) }
-        else if L = 'fastest' then begin Alg := 0; if not MFSet then MFi := 0; MFSet := True; NFB := 5; MC := 1; end
-        else if L = 'fast' then begin Alg := 0; if not MFSet then MFi := 0; MFSet := True; NFB := 32; MC := 0; end
-        else if L = 'normal' then begin Alg := 1; if not MFSet then MFi := 0; MFSet := True; NFB := 32; MC := 0; end
-        else if L = 'max' then begin Alg := 1; if not MFSet then MFi := 3; MFSet := True; NFB := 128; MC := 0; end
-        else if L = 'ultra' then begin Alg := 1; if not MFSet then MFi := 3; MFSet := True; NFB := 128; MC := 128; end
-        else if (Copy(L,1,1) = 'a') and (Length(L) = 2) then Alg := Num(Copy(L,2,1), 1)
-        else if L = 'bt2' then begin MFi := 1; MFSet := True; end
-        else if L = 'bt3' then begin MFi := 2; MFSet := True; end
-        else if L = 'bt4' then begin MFi := 3; MFSet := True; end
-        else if Copy(L,1,2) = 'mc' then MC := Num(Copy(L,3,MaxInt), 0)
-        else if Copy(L,1,2) = 'pb' then PB := Num(Copy(L,3,MaxInt), 2)
-        else if Copy(L,1,2) = 'lc' then LC := Num(Copy(L,3,MaxInt), 3)
-        else if Copy(L,1,2) = 'lp' then LP := Num(Copy(L,3,MaxInt), 0);
-      end;
-      {$IFDEF CPU32}
-      // Con el límite de compresión (EffectiveCompressLimit, automático en 32 bits) la cadena
-      // ya entra: sin la prueba de reservar de verdad, que dependía de lo que otros bloques
-      // tenían reservado en ese momento (el método cambiaba entre corridas). Solo con -lc- se
-      // sigue probando.
-      if EffectiveCompressLimit > 0 then
-        BS := FitLzma(BS, MFi, Alg, NFB, MC, LC, LP, kLzmaEnc32MaxMem, 0)
-      else
-        BS := FitLzma(BS, MFi, Alg, NFB, MC, LC, LP, kLzmaEnc32MaxMem, kLzmaEnc32Headroom);
-      {$ENDIF}
-      if MemLim > 0 then BS := FitLzma(BS, MFi, Alg, NFB, MC, LC, LP, MemLim, 0);
-      Result := 'lzma:' + ShowMem(BS);
-      if Hash <> 0 then Result := Result + (':h' + ShowMem(Hash));
-      if MFi = 0 then
-      begin
-        if Alg = 2 then Result := Result + ':a2'
-        else if Alg = 0 then Result := Result + ':fast'
-        else Result := Result + ':normal';
+        Blk := m;
+        Own := Own + ':b' + MemText(m);
       end
-      else
+      else if (Parts[k][1] in ['0'..'9']) and not (Parts[k][Length(Parts[k])] in ['0'..'9']) and
+        ParseMem(Parts[k], m) then
       begin
-        if Alg = 0 then Result := Result + ':fast' else if Alg = 1 then Result := Result + ':normal' else Result := Result + ':max';
-        case MFi of 1: Result := Result + ':bt2'; 2: Result := Result + ':bt3'; 3: Result := Result + ':bt4'; 4: Result := Result + ':hc4'; end;
+        Blk := m;
+        Own := Own + ':b' + MemText(m);
       end;
-      Result := Result + (':' + IntToStr(NFB));
-      if MC <> 0 then Result := Result + (':mc' + IntToStr(MC));
-      if PB <> 2 then Result := Result + (':pb' + IntToStr(PB));
-      if LC <> 3 then Result := Result + (':lc' + IntToStr(LC));
-      if LP <> 0 then Result := Result + (':lp' + IntToStr(LP));
-      Exit;
-    end;
-
-    { --- bwt (parc_bwt, MIT; `grzip` is its old name and is written as bwt). The block is
-          limited to the data and to 1/6 of the memory limit; hash bits to 1 + log2(block). }
-    if (Name = 'bwt') or (Name = 'grzip') then
+      // t<n>, i<n>, r<n>: FreeArc's thread and priority switches, unused here
+    end
+    else
     begin
-      try
-        BP := ParseBwtParams(Parts);
-      except
-        on EBwtParams do Exit(S);
-      end;
-      BS := BP.BlockSize;
-      if BS > Limit then BS := Limit;
-      if (MemLim > 0) and (BS > MemLim div 6) then BS := FitMem(MemLim div 6);
-      if BS < 1 then BS := 1;
-      if (BS > 1) and (BP.LzpHash > 1 + LB(BS-1)) then BP.LzpHash := 1 + LB(BS-1);
-      if BP.LzpHash < 10 then BP.LzpHash := 10;
-      Result := 'bwt:' + ShowMem(BS) + ':m' + IntToStr(BP.Level) + ':';
-      if BP.LzpMin > 0 then Result := Result + ('l' + IntToStr(BP.LzpMin) + ':h' + IntToStr(BP.LzpHash))
-                       else Result := Result + 'l';
-      if BP.CoderSet >= 0 then Result := Result + (':e' + IntToStr(BP.CoderSet));
-      if BP.Adaptive then Result := Result + ':a';
-      Exit;
+      Inner := string.Join(':', Parts, k, Length(Parts) - k);
+      Break;
     end;
-
-    { --- dict (C_Dict.cpp/.h). Defaults: 64mb, mc100, c20, l2048, m100, s50, r4.
-          Presets: p -> l8192 m400 s100; f -> l2048 m100 s50 r0. }
-    if Name = 'dict' then
-    begin
-      BS := ParseMem(Pr(1), 64*MB);
-      if BS > Limit then BS := Limit;
-      MC := 100; W := 20; LC := 2048; MM := 100; MS := 50; MR := 4;
-      for J := 1 to High(Parts) do
-      begin
-        L := LowerCase(Parts[J]);
-        if L = 'p' then begin LC := 8192; MM := 400; MS := 100; MR := 4 end
-        else if L = 'f' then begin LC := 2048; MM := 100; MS := 50; MR := 0 end
-        else if (L <> '') and (L[1] in ['0'..'9']) then
-          if Copy(L, Length(L), 1) = '%' then MC := Num(Copy(L, 1, Length(L)-1), 100)
-          else BS := ParseMem(L, 64*MB)
-        else if Copy(L,1,1) = 'c' then W := Num(Copy(L,2,MaxInt), 20)
-        else if Copy(L,1,1) = 'l' then LC := Num(Copy(L,2,MaxInt), 2048)
-        else if Copy(L,1,1) = 'm' then MM := Num(Copy(L,2,MaxInt), 100)
-        else if Copy(L,1,1) = 's' then MS := Num(Copy(L,2,MaxInt), 50)
-        else if Copy(L,1,1) = 'r' then MR := Num(Copy(L,2,MaxInt), 4);
-      end;
-      if BS > Limit then BS := Limit;
-      if (MemLim > 0) and (BS > MemLim div 2) then BS := FitMem(MemLim div 2);
-      Result := 'dict:' + ShowMem(BS);
-      if MC <> 100 then Result := Result + (':' + IntToStr(MC) + '%');
-      if W <> 20 then Result := Result + (':c' + IntToStr(W));
-      if LC <> 2048 then Result := Result + (':l' + IntToStr(LC));
-      if MM <> 100 then Result := Result + (':m' + IntToStr(MM));
-      if MS <> 50 then Result := Result + (':s' + IntToStr(MS));
-      if MR <> 4 then Result := Result + (':r' + IntToStr(MR));
-      Exit;
-    end;
-
-    { --- lzp (C_LZP.cpp/.h). Defaults: 8mb, mc100, mm64, h18, dINTMAX, s32.
-          Show imprime :<mm>:h<h> SIEMPRE. SetBlockSize: h=min(h,1+lb(BS-1)). }
-    if Name = 'lzp' then
-    begin
-      BS := ParseMem(Pr(1), 8*MB);
-      if BS > Limit then BS := Limit;
-      MC := 100; MML := 64; HSL := 18; Bar := INT_MAX; Sm := 32;
-      for J := 1 to High(Parts) do
-      begin
-        L := LowerCase(Parts[J]);
-        if (L <> '') and (L[1] in ['0'..'9']) then
-          if Copy(L, Length(L), 1) = '%' then MC := Num(Copy(L, 1, Length(L)-1), 100)
-          else MML := Num(L, 64)
-        else if Copy(L,1,1) = 'h' then HSL := Num(Copy(L,2,MaxInt), 18)
-        else if Copy(L,1,1) = 'd' then Bar := ParseMem(Copy(L,2,MaxInt), INT_MAX)
-        else if Copy(L,1,1) = 's' then Sm := Num(Copy(L,2,MaxInt), 32);
-      end;
-      if (MemLim > 0) and (BS > MemLim div 2) then BS := FitMem(MemLim div 2);
-      if HSL > 1 + LB(BS-1) then HSL := 1 + LB(BS-1);
-      Result := 'lzp:' + ShowMem(BS);
-      if MC <> 100 then Result := Result + (':' + IntToStr(MC) + '%');
-      Result := Result + (':' + IntToStr(MML) + ':h' + IntToStr(HSL));
-      if Bar <> INT_MAX then Result := Result + (':d' + ShowMem(Bar));
-      if Sm <> 32 then Result := Result + (':s' + IntToStr(Sm));
-      Exit;
-    end;
-
-    { --- plz (parc_plzenc): nivel y ventana siempre; h<mem> si no es el del nivel. La ventana
-          no pasa del bloque (redondeada a 64 KB) y -lc achica ventana y hash. }
-    if Name = 'plz' then Exit(PlzCanon(Parts, Limit, MemLim));
-
-    { --- srep: compresor externo; el método guardado es siempre "srep". }
-    if Name = 'srep' then Exit('srep');
-
-    { --- dispack (parc_dispack, filtro x86 propio): bloque por defecto 8 MB; :x se acepta y no cambia nada. }
-    if (Name = 'dispack') or (Name = 'dispack070') then
-    begin
-      BS := 8*MB;
-      Ext := False;
-      for J := 1 to High(Parts) do
-      begin
-        L := LowerCase(Parts[J]);
-        if L = 'x' then
-        begin
-          Ext := True;
-          Continue;
-        end;
-        if (L <> '') and (L[1] = 'b') and (Length(L) > 1) then
-          BS := CMem(Copy(L, 2, MaxInt), BS)
-        else if L <> '' then
-          BS := CMem(L, BS);
-      end;
-      if BS <= 0 then BS := 8*MB;
-      Result := 'dispack070';
-      if BS <> 8*MB then Result := Result + (':' + ShowMem(BS));   // Show no pone la 'b'
-      if Ext then Result := Result + (':x');
-      Exit;
-    end;
-
-    { --- ppmd (parc_ppmd, LZMA SDK var.I): orden, memoria y método de recuperación, con la
-      misma lectura que el codificador y el decodificador (ParsePpmdParams). Sin límite. }
-    if Name = 'ppmd' then
-    begin
-      PP := ParsePpmdParams(Parts);
-      M := Int64(PP.Mem);
-      if (MemLim > 0) and (M > MemLim) then M := FitMem(MemLim);
-      Result := 'ppmd:' + IntToStr(PP.Order) + ':' + ShowMem(M);
-      if PP.Restore = 1 then Result := Result + ':r'
-      else if PP.Restore <> 0 then Result := Result + ':r' + IntToStr(PP.Restore);
-      Exit;
-    end;
-
-    { --- tta (C_TTA.cpp): defaults level3, s0. }
-    if Name = 'tta' then
-    begin
-      Lvl := 3;
-      for J := 1 to High(Parts) do
-      begin
-        L := LowerCase(Parts[J]);
-        if Copy(L,1,1) = 'm' then Lvl := Num(Copy(L,2,MaxInt), 3);
-      end;
-      Result := 'tta';
-      if Lvl <> 3 then Result := Result + (':m' + IntToStr(Lvl));
-      Exit;
-    end;
-
-    { --- lz4 (parc_lz4enc). Defaults: c0, b1mb, 100%; "hc" es c2. El límite de memoria no lo toca. }
-    if Name = 'lz4' then
-    begin
-      MC := 0; BS := MB; M := 100;
-      for J := 1 to High(Parts) do
-      begin
-        L := LowerCase(Parts[J]);
-        if L = '' then Continue;
-        if L = 'hc' then MC := 2
-        else if L[1] = 'c' then MC := Num(Copy(L,2,MaxInt), 0)
-        else if L[1] = 'b' then BS := CMem(Copy(L,2,MaxInt), MB)
-        else if L[Length(L)] = '%' then M := Num(Copy(L,1,Length(L)-1), 100);
-      end;
-      Result := 'lz4';
-      if MC <> 0 then Result := Result + ':c' + IntToStr(MC);
-      if BS <> MB then Result := Result + ':b' + CShowMem(BS);
-      if M <> 100 then Result := Result + ':' + IntToStr(M) + '%';
-      Exit;
-    end;
-
-    { --- 4x4 (C_4x4.cpp/.h): :b<mem> propio (no se limita ni purifica),
-          el resto es el método interno, que hereda el límite y se canoniza.
-          Igual que parse_4x4: un parámetro es propio si empieza con dígito o si el
-          segundo carácter es dígito (t4, i2, r99, b7mb); el primero que no, arranca el
-          método interno. Sin método interno: plz:1:1mb (FreeArc: tor:3:1mb). }
-    if Name = '4x4' then
-    begin
-      BS := 0; StartI := 0;
-      for J := 1 to High(Parts) do
-      begin
-        L := Parts[J];
-        if (L <> '') and ((L[1] in ['0'..'9']) or
-                          ((Length(L) > 1) and (L[2] in ['0'..'9']))) then
-        begin
-          // Parámetros propios de 4x4: :b<mem>, :t<n>, :i<n>, :r<porcentaje>, un número
-          // suelto (hilos) o una memoria suelta (8mb). Sólo :b queda en el texto canónico
-          // (purify no imprime los que sólo afectan a comprimir).
-          if L[1] in ['0'..'9'] then
-          begin
-            if StrToInt64Def(L, -1) < 0 then BS := ParseMem(L, 0);   // "8mb" = BlockSize
-          end
-          else if (L[1] = 'b') or (L[1] = 'B') then BS := ParseMem(Copy(L, 2, MaxInt), 0);
-        end
-        else
-        begin StartI := J; Break; end;
-      end;
-      if StartI = 0 then Interno := 'plz:1:1mb'
-      else
-      begin
-        Interno := '';
-        for J := StartI to High(Parts) do
-        begin
-          if Interno <> '' then Interno := Interno + (':');
-          Interno := Interno + (Parts[J]);
-        end;
-      end;
-      Result := '4x4';
-      // ShowCompressionMethod con purify=True no imprime t/i/r (solo afectan a comprimir):
-      // quedan el :b propio y el método interno.
-      if BS <> 0 then Result := Result + (':b' + ShowMem(BS));
-      if MemLim > 0 then
-        Result := Result + (':' + CanonChain(Interno, Limit, Max(Int64(MB), MemLim div Max(1, BudgetThreads))))
-      else
-        Result := Result + (':' + CanonChain(Interno, Limit, 0));
-      Exit;
-    end;
-
-    { --- etapas sin diccionario ni parámetros en el corpus }
-    if (Name = 'exe') or (Name = 'mm') or (Name = 'delta') or (Name = 'storing')
-       or (Name = 'crc') then Exit(Name);
-
-    Result := S;   { desconocida: igual (criterio "lo que no se toca, igual") }
-  end;
-
-begin
-  Stages := Method.Split(['+'], TStringSplitOptions.None);
-  SetLength(Stages, Length(Stages));
-  Result := '';
-  for I := 0 to High(Stages) do
+  if Inner = '' then Inner := 'plz:1:1mb';
+  if MemLim > 0 then
   begin
-    if I > 0 then Result := Result + ('+');
-    Result := Result + (CanonStage(Stages[I]));
-    // compressionLimitDictionary (Compression.hs:199): después de un compresor externo ya no
-    // se achican los diccionarios de las etapas siguientes.
-    if StageNameOf(Stages[I]) = 'srep' then Limit := High(Int64);
+    // every job in flight holds an encoder and two blocks
+    Jobs := Max(1, Min(BudgetThreads, T4X4_MAX_JOBS));
+    if Blk = 0 then Blk := 8 * MB;
+    MemLim := Max(MB, (MemLim - Blk) div Jobs - 2 * Blk);
+  end;
+  Result := Own + ':' + CanonStage(Inner, Size, MemLim);
+end;
+
+function CanonStage(const Stage: string; Size, MemLim: Int64): string;
+var
+  Parts: TStringArray;
+  Limit: Int64;
+begin
+  Parts := Stage.Split([':']);
+  if Length(Parts) = 0 then Exit(Stage);
+  if Size >= 0 then Limit := SizeCap(Size) else Limit := 0;
+  try
+    case Parts[0] of
+      'lzma': Result := CanonLzma(Parts, Limit, MemLim);
+      'orep': Result := CanonOrep(Parts, Limit, MemLim);
+      'ppmd': Result := CanonPpmd(Parts, MemLim);
+      'dict': Result := CanonDict(Parts, Limit, MemLim);
+      'lzp': Result := CanonLzp(Parts, Limit, MemLim);
+      'bwt': Result := CanonBwt(Parts, Limit, MemLim);
+      'grzip':
+        begin
+          // the codec bwt replaced: its parameters are read by bwt
+          Parts[0] := 'bwt';
+          Result := CanonBwt(Parts, Limit, MemLim);
+        end;
+      'plz': Result := PlzCanon(Parts, Limit, MemLim);   // (rounds its window to 64 KB)
+      'lz4': Result := CanonLz4(Parts);
+      'tta': Result := CanonTta(Parts);
+      '4x4': Result := Canon4x4(Stage, Size, MemLim);
+      // the filters choose their layout from the data: no parameters are kept
+      'mm', 'delta', 'exe', 'srep', 'storing': Result := Parts[0];
+      'dispack070':
+        if DispackBlockSize(Parts) <> DispackBlockSize(['dispack070']) then
+          Result := 'dispack070:' + MemText(DispackBlockSize(Parts))
+        else
+          Result := 'dispack070';
+    else
+      Result := Stage;   // cm, bcj2, ciphers, unknown names: as written
+    end;
+  except
+    on Exception do Result := Stage;   // the encoder reports the bad parameter
   end;
 end;
 
-{ --- API pública ------------------------------------------------------------ }
-
 function LimitAndCanonize(const Method: string; BlockSize: Int64): string;
+var
+  St: string;
 begin
-  Result := CanonChain(Method, RoundMemUp(BlockSize + BlockSize div 100 + 512), 0);
+  Result := '';
+  if BlockSize < 0 then BlockSize := 0;
+  for St in Method.Split(['+']) do
+  begin
+    if St = '' then Continue;
+    if Result <> '' then Result := Result + '+';
+    Result := Result + CanonStage(St, BlockSize, 0);
+  end;
 end;
 
 function CanonStageMem(const Stage: string; MemLim: Int64): string;
 begin
-  Result := CanonChain(Stage, High(Int64), MemLim);
+  if MemLim < MB then MemLim := MB;
+  Result := CanonStage(Stage, -1, MemLim);
 end;
 
 function EffectiveCompressLimit: Int64;
 var
-  Ram, Va: Int64;
+  Ram, Space: Int64;
 begin
   if CompressMemLimit >= 0 then Exit(CompressMemLimit);
   Ram := PhysicalMemory;
   if Ram > 0 then Result := Ram div 4 * 3 else Result := 0;
   {$IFNDEF CPU64}
-  // Medido en win32 (Wine, 4 GB LAA) con TILIN -m9 y 8 hilos: 2304 MB llega a 2,4 GB de RSS
-  // sin quedarse sin memoria; 2560 MB ya fallaba (antes del arreglo de la ventana de rep)
-  if (Result = 0) or (Result > Int64(2304) shl 20) then Result := Int64(2304) shl 20;
-  Va := AddressSpaceLimit;
-  if (Va > 0) and (Va div 16 * 9 < Result) then Result := Va div 16 * 9;
+  if (Result = 0) or (Result > Int64(9) * GB div 4) then Result := Int64(9) * GB div 4;
+  Space := AddressSpaceLimit;
+  if Space <= 0 then Space := 4 * GB;
+  if Result > Space div 16 * 9 then Result := Space div 16 * 9;
   {$ELSE}
-  Va := AddressSpaceLimit;   // ulimit -v
-  if (Va > 0) and ((Result = 0) or (Va div 4 * 3 < Result)) then Result := Va div 4 * 3;
+  Space := 0;
+  if Space <> 0 then ;
   {$ENDIF}
 end;
 

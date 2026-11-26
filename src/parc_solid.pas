@@ -3,15 +3,12 @@
 
   Planning a set of new files is four steps:
 
-  1. Rules. The `[File groups]` table (parc_presets.ArcGroupLines: "$group" headers followed by
-     masks) is compiled once into three lookups: exact base names, "*.ext" extensions (both
-     hashed) and the few remaining wildcard masks. For each file this gives the set of groups
-     whose masks match it and its "home" group (the group of the first matching line); files
-     that match nothing are in "$default".
+  1. Groups. parc_presets' file group table gives, for each file, the set of groups whose masks
+     match it (FileGroupMatches) and its sort rank (FileGroupRank: the first matching mask).
 
-  2. Order. Files are sorted by home group, lower-case extension, directory and base name.
+  2. Order. Files are sorted by group rank, lower-case extension, directory and base name.
      Then "twins" are pulled together: a file whose base name already appeared earlier in the
-     same (group, extension) run is moved right behind the first file with that name, so the
+     same (rank, extension) run is moved right behind the first file with that name, so the
      copies of a file kept in several directories (versions, other targets, backups) end up
      adjacent, where even a small window sees them. The order does not depend on the thread
      count or the platform (byte comparisons on UTF-8 names). With -s- (or -s1f), or when
@@ -84,9 +81,14 @@ type
   which PArc does not split). False if not understood. }
 function ParseSolidSpec(const Opt: string; out Limits: TSolidLimits): Boolean;
 
-{ Solid blocks for new files with the methods per group GM (DecodeMethod). }
+{ Solid blocks for new files with the methods per group GM (DecodeMethod); Level (1..9) is the
+  preset level for the content detector (SolidLevel). }
 function PlanSolidBlocks(const Files: array of TPlanFile; const GM: TGroupMethods;
-  const Limits: TSolidLimits): TPlanBlocks;
+  const Limits: TSolidLimits; Level: Integer): TPlanBlocks;
+
+{ Preset level of a -m text for the content detector: its digit ("5", "9x", "x5"), 9 for
+  "x"/"mx"/"max", else 5. }
+function SolidLevel(const MainMethod: string): Integer;
 
 { Cuts Files[Order[0..]] (already in order) for Method with Limits and the method's own
   block limits; returns the runs as lists of indices into Files. }
@@ -96,8 +98,7 @@ function SplitRun(const Method: string; const Files: array of TPlanFile;
 { The sort order of step 2 (indices into Files); exposed for tests and the update path. }
 function SolidOrder(const Files: array of TPlanFile): TIntegerDynArray;
 
-{ Home group of a name ('$text', ..., '$default') and lower-case extension (for tests). }
-function HomeGroupOf(const Name: string): string;
+{ Lower-case extension of a stored name. }
 function LowerExt(const Name: string): string;
 
 implementation
@@ -114,31 +115,11 @@ const
   SMALL_FILE = 64 * KB;      // below this, files are judged in runs with their neighbours
   MIN_JUDGE = 4 * KB;        // fewer bytes than this: no verdict (the name decides)
   RUN_FILES = 256;           // at most this many small files per run
-  MAX_GROUPS = 64;
   BWT_SOLID_BLOCKS = 4;      // bwt blocks per solid block
 
 type
   TGroupSet = QWord;
 
-  TWild = record
-    Mask: string;   // lower case
-    Line, Group: Integer;
-  end;
-
-  { compiled [File groups] }
-  TRules = record
-    Loaded: Boolean;
-    GroupNames: TStringArray;     // lower case, with '$'
-    DefaultGroup: Integer;
-    NameMap, ExtMap: TStrIntMap;     // key -> slot in NameHits/ExtHits
-    NameHits, ExtHits: array of record Line, Group: Integer; Groups: TGroupSet; end;
-    NoExt: record Line, Group: Integer; Groups: TGroupSet; end;   // the "*." mask
-    Wild: array of TWild;
-  end;
-
-var
-  R: TRules;
-  RulesLock: TRTLCriticalSection;
 
 { ---------------------------------------------------------------------------------------- }
 { Names                                                                                    }
@@ -187,190 +168,16 @@ begin
   Result := AsciiLower(ExtOfBase(BaseOf(Name)));
 end;
 
-{ '*' = any run, '?' = one character (a whole UTF-8 sequence). Both strings lower case. }
-function WildMatch(const M, S: string): Boolean;
-var
-  mi, si, starM, starS: Integer;
-
-  function NextChar(i: Integer): Integer;
-  begin
-    Result := i + 1;
-    while (Result <= Length(S)) and ((Ord(S[Result]) and $C0) = $80) do Inc(Result);
-  end;
-
-begin
-  mi := 1; si := 1; starM := 0; starS := 0;
-  while si <= Length(S) do
-  begin
-    if (mi <= Length(M)) and (M[mi] = '*') then
-    begin
-      starM := mi; starS := si; Inc(mi);
-    end
-    else if (mi <= Length(M)) and (M[mi] = '?') then
-    begin
-      Inc(mi); si := NextChar(si);
-    end
-    else if (mi <= Length(M)) and (M[mi] = S[si]) then
-    begin
-      Inc(mi); Inc(si);
-    end
-    else if starM > 0 then
-    begin
-      mi := starM + 1;
-      starS := NextChar(starS);
-      si := starS;
-    end
-    else
-      Exit(False);
-  end;
-  while (mi <= Length(M)) and (M[mi] = '*') do Inc(mi);
-  Result := mi > Length(M);
-end;
-
-{ ---------------------------------------------------------------------------------------- }
-{ Rules                                                                                    }
-{ ---------------------------------------------------------------------------------------- }
-
+{ Index of a group name ('$text') in parc_presets' file group table, -1 if it has none. }
 function GroupIndex(const G: string): Integer;
 var
+  Names: TStringArray;
   i: Integer;
 begin
-  for i := 0 to High(R.GroupNames) do
-    if R.GroupNames[i] = G then Exit(i);
+  Names := FileGroupNames;
+  for i := 0 to High(Names) do
+    if LowerCase(Names[i]) = G then Exit(i);
   Result := -1;
-end;
-
-procedure LoadRules;
-var
-  Lines: TStringArray;
-  i, g, k: Integer;
-  L, E: string;
-begin
-  if R.Loaded then Exit;
-  EnterCriticalSection(RulesLock);
-  try
-    if R.Loaded then Exit;
-    R.NameMap.Init;
-    R.ExtMap.Init;
-    R.NoExt.Line := -1;
-    Lines := ArcGroupLines;
-    g := -1;
-    for i := 0 to High(Lines) do
-    begin
-      L := AsciiLower(Trim(Lines[i]));
-      if L = '' then Continue;
-      if L[1] = '$' then
-      begin
-        g := GroupIndex(L);
-        if g < 0 then
-        begin
-          if Length(R.GroupNames) >= MAX_GROUPS then
-            raise Exception.Create('too many file groups');
-          SetLength(R.GroupNames, Length(R.GroupNames) + 1);
-          R.GroupNames[High(R.GroupNames)] := L;
-          g := High(R.GroupNames);
-        end;
-        Continue;
-      end;
-      if g < 0 then Continue;
-      if L = '*.' then
-      begin
-        if R.NoExt.Line < 0 then begin R.NoExt.Line := i; R.NoExt.Group := g; end;
-        R.NoExt.Groups := R.NoExt.Groups or (QWord(1) shl g);
-      end
-      else if (Copy(L, 1, 2) = '*.') and (LastDelimiter('*?/', Copy(L, 3, MaxInt)) = 0) then
-      begin
-        E := Copy(L, 3, MaxInt);
-        k := R.ExtMap.Get(E);
-        if k < 0 then
-        begin
-          k := Length(R.ExtHits);
-          SetLength(R.ExtHits, k + 1);
-          R.ExtHits[k].Line := i; R.ExtHits[k].Group := g; R.ExtHits[k].Groups := 0;
-          R.ExtMap.Put(E, k);
-        end;
-        R.ExtHits[k].Groups := R.ExtHits[k].Groups or (QWord(1) shl g);
-      end
-      else if LastDelimiter('*?', L) = 0 then
-      begin
-        k := R.NameMap.Get(L);
-        if k < 0 then
-        begin
-          k := Length(R.NameHits);
-          SetLength(R.NameHits, k + 1);
-          R.NameHits[k].Line := i; R.NameHits[k].Group := g; R.NameHits[k].Groups := 0;
-          R.NameMap.Put(L, k);
-        end;
-        R.NameHits[k].Groups := R.NameHits[k].Groups or (QWord(1) shl g);
-      end
-      else
-      begin
-        k := Length(R.Wild);
-        SetLength(R.Wild, k + 1);
-        R.Wild[k].Mask := L; R.Wild[k].Line := i; R.Wild[k].Group := g;
-      end;
-    end;
-    R.DefaultGroup := GroupIndex('$default');
-    if R.DefaultGroup < 0 then
-    begin
-      SetLength(R.GroupNames, Length(R.GroupNames) + 1);
-      R.GroupNames[High(R.GroupNames)] := '$default';
-      R.DefaultGroup := High(R.GroupNames);
-    end;
-    WriteBarrier;
-    R.Loaded := True;
-  finally
-    LeaveCriticalSection(RulesLock);
-  end;
-end;
-
-{ Groups matching a lower-case base name with extension LExt; Home = group of the first
-  matching line (the default group if none). }
-function MatchGroups(const LBase, LExt: string; HasDot: Boolean; out Home: Integer): TGroupSet;
-var
-  k, Line: Integer;
-begin
-  LoadRules;
-  Result := 0;
-  Line := MaxInt;
-  Home := R.DefaultGroup;
-  k := R.NameMap.Get(LBase);
-  if k >= 0 then
-  begin
-    Result := Result or R.NameHits[k].Groups;
-    if R.NameHits[k].Line < Line then begin Line := R.NameHits[k].Line; Home := R.NameHits[k].Group; end;
-  end;
-  if HasDot then
-  begin
-    k := R.ExtMap.Get(LExt);
-    if k >= 0 then
-    begin
-      Result := Result or R.ExtHits[k].Groups;
-      if R.ExtHits[k].Line < Line then begin Line := R.ExtHits[k].Line; Home := R.ExtHits[k].Group; end;
-    end;
-  end
-  else if R.NoExt.Line >= 0 then
-  begin
-    Result := Result or R.NoExt.Groups;
-    if R.NoExt.Line < Line then begin Line := R.NoExt.Line; Home := R.NoExt.Group; end;
-  end;
-  for k := 0 to High(R.Wild) do
-    if ((Result and (QWord(1) shl R.Wild[k].Group)) = 0) or (R.Wild[k].Line < Line) then
-      if WildMatch(R.Wild[k].Mask, LBase) then
-      begin
-        Result := Result or (QWord(1) shl R.Wild[k].Group);
-        if R.Wild[k].Line < Line then begin Line := R.Wild[k].Line; Home := R.Wild[k].Group; end;
-      end;
-end;
-
-function HomeGroupOf(const Name: string): string;
-var
-  B: string;
-  Home: Integer;
-begin
-  B := AsciiLower(BaseOf(Name));
-  MatchGroups(B, ExtOfBase(B), Pos('.', B) > 0, Home);
-  Result := R.GroupNames[Home];
 end;
 
 { ---------------------------------------------------------------------------------------- }
@@ -473,7 +280,6 @@ var
   i: Integer;
   B: string;
 begin
-  LoadRules;
   SetLength(Result, Length(Files));
   for i := 0 to High(Files) do
   begin
@@ -481,7 +287,8 @@ begin
     Result[i].Dir := AsciiLower(DirOf(Files[i].Name));
     Result[i].Base := AsciiLower(B);
     Result[i].Ext := ExtOfBase(Result[i].Base);
-    Result[i].Groups := MatchGroups(Result[i].Base, Result[i].Ext, Pos('.', B) > 0, Result[i].Home);
+    Result[i].Home := FileGroupRank(Files[i].Name);
+    Result[i].Groups := FileGroupMatches(Files[i].Name);
   end;
 end;
 
@@ -561,6 +368,7 @@ type
     Units: ^TCheckUnit;
     UFirst, UCount: Integer;
     StrictText: Boolean;
+    Level: Integer;
     procedure Process; override;
   end;
 
@@ -594,12 +402,12 @@ begin
   end;
 end;
 
-function VerdictOf(Buf: PByte; n: Integer): TVerdict;
+function VerdictOf(Buf: PByte; n, Level: Integer): TVerdict;
 var
   T: string;
 begin
   if n < MIN_JUDGE then Exit(vNone);
-  T := DetectDatatype(Buf, n);
+  T := DetectDatatype(Buf, n, Level);
   if Pos('$text', T) > 0 then Result := vText
   else if Pos('$compressed', T) > 0 then Result := vComp
   else Result := vBin;
@@ -674,7 +482,7 @@ begin
               P := (Size - SAMPLE) * k div (Samples - 1);
               n := ReadAt(Fs, P, @Buf[0], SAMPLE);
             end;
-            Inc(Votes[VerdictOf(@Buf[0], n)]);
+            Inc(Votes[VerdictOf(@Buf[0], n, Level)]);
           end;
         finally
           Fs.Free;
@@ -695,7 +503,7 @@ begin
         Size := 0;
         for i := First to First + Count - 1 do Inc(Size, Files[Order[i]].Size);
         if Size <= SAMPLE then
-          Verdict := VerdictOf(@Buf[0], ReadRun(First, SAMPLE))
+          Verdict := VerdictOf(@Buf[0], ReadRun(First, SAMPLE), Level)
         else
         begin
           P := 0;
@@ -705,8 +513,8 @@ begin
             Inc(P, Files[Order[i]].Size);
             Inc(i);
           end;
-          V := VerdictOf(@Buf[0], ReadRun(First, SAMPLE));
-          W := VerdictOf(@Buf[0], ReadRun(i, SAMPLE));
+          V := VerdictOf(@Buf[0], ReadRun(First, SAMPLE), Level);
+          W := VerdictOf(@Buf[0], ReadRun(i, SAMPLE), Level);
           if V = vNone then V := W
           else if (W <> vNone) and (W <> V) then V := vMixed;
           Verdict := V;
@@ -892,7 +700,7 @@ begin
 end;
 
 function PlanSolidBlocks(const Files: array of TPlanFile; const GM: TGroupMethods;
-  const Limits: TSolidLimits): TPlanBlocks;
+  const Limits: TSolidLimits; Level: Integer): TPlanBlocks;
 var
   K: TFileKeys;
   Order: TIntArray;
@@ -1034,6 +842,7 @@ begin
       Jobs[High(Jobs)].UFirst := u;
       Jobs[High(Jobs)].UCount := j - u;
       Jobs[High(Jobs)].StrictText := StrongBinary(GM[0].Method);
+      Jobs[High(Jobs)].Level := Level;
       u := j;
     end;
     Pool := TJobPool.Create(PoolWorkers(32), Length(Jobs));
@@ -1110,6 +919,19 @@ end;
 { -s                                                                                       }
 { ---------------------------------------------------------------------------------------- }
 
+function SolidLevel(const MainMethod: string): Integer;
+var
+  M: string;
+  i: Integer;
+begin
+  M := LowerCase(Trim(MainMethod.Split(['/'])[0]));
+  if (M = 'x') or (M = 'mx') or (M = 'max') or (M = 'xx') then Exit(9);
+  if (Length(M) <= 3) then
+    for i := 1 to Length(M) do
+      if M[i] in ['1'..'9'] then Exit(Ord(M[i]) - Ord('0'));
+  Result := 5;
+end;
+
 function ParseSolidSpec(const Opt: string; out Limits: TSolidLimits): Boolean;
 var
   S: string;
@@ -1174,8 +996,4 @@ begin
   Result := True;
 end;
 
-initialization
-  InitCriticalSection(RulesLock);
-finalization
-  DoneCriticalSection(RulesLock);
 end.

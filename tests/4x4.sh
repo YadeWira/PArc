@@ -1,5 +1,5 @@
 #!/bin/bash
-# tests/4x4.sh — the 4x4 stage (src/parc_4x4.pas, stream in FORMATO-PARC.md §6.11): round trips
+# tests/4x4.sh — the 4x4 stage (src/parc_4x4.pas, stream in FORMATO-PARC.md §6.12): round trips
 # with plz/lz4/lzma/ppmd inside and several block sizes on empty/tiny inputs, text, zeros, random
 # data, every byte value and a mix with repeated random data (mixed records); the same stream for
 # any write sizes and for 1, 4 and 8 threads; random data is stored; damaged streams always give

@@ -1,7 +1,7 @@
 { 4x4: independent blocks compressed in parallel with an inner method (PArc's own code, MIT;
   nothing from FreeArc). The method keeps FreeArc's name `4x4` and its parameter syntax
   (`4x4[:b<mem>][:r<N>][:t<N>][:i<N>]:<inner method>`), but the stream, the encoder and the
-  decoder are new (stream in docs/formato/FORMATO-PARC.md §6.11).
+  decoder are new (stream in docs/formato/FORMATO-PARC.md §6.12).
 
   Stream: "4X" + version byte 1, then records until an end record:
     0                          end of stream

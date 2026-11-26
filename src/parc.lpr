@@ -1154,7 +1154,7 @@ begin
     Files[i].Size := Entries[Idx[i]].Meta.Size;
     if i <= High(Hints) then Files[i].Hint := Hints[i];
   end;
-  AddPlanned(PlanSolidBlocks(Files, GM, EffectiveSolid(MO)), Idx, MO, Groups);
+  AddPlanned(PlanSolidBlocks(Files, GM, EffectiveSolid(MO), SolidLevel(MO.Method)), Idx, MO, Groups);
 end;
 
 procedure GroupNewEntries(const Entries: TWriteEntryArray; const Idx: array of Integer;
@@ -1857,8 +1857,8 @@ begin
   AddArchivePassword(MixKeyFile(S, KeyDigest));   // se suma a las ya dadas (-p y -hp pueden ser distintas)
 end;
 
-{ --print-config: la tabla de sustituciones de métodos, lo que da cada -m con los hilos de
-  ahora, y arc.groups. }
+{ --print-config: the preset table, what each -m gives with the current threads, and the file
+  groups. }
 procedure PrintConfig;
 const
   LEVELS: array[0..11] of string = ('0', '1', '2', '3', '4', '5', '6', '7', '8', '9', 'x', 'xx');
@@ -1868,10 +1868,10 @@ var
   GM: TGroupMethods;
 begin
   OutLn('; PArc ' + PARC_VERSION + ' built-in configuration');
-  OutLn('; Method substitutions (as in FreeArc arc.ini [Compression methods]; "a | b" picks');
-  OutLn('; alternatives by thread count, see -mt / PARC_THREADS)');
+  OutLn('; Preset rows: name [levels] [$group] = chain; N is the level digit; "with K+ threads"');
+  OutLn('; is the variant used with at least K threads (see -mt / PARC_THREADS)');
   OutLn('[Compression methods]');
-  L := MethodSubstLines;
+  L := PresetTableLines;
   for i := 0 to High(L) do OutLn(L[i]);
   OutLn('');
   OutLn(Format('; Presets as resolved now (%d thread(s)); "$group=" lines override the default', [BudgetThreads]));
@@ -1884,9 +1884,9 @@ begin
       else OutLn('-m' + LEVELS[i] + ' ' + GM[k].Group + '=' + GM[k].Method);
   end;
   OutLn('');
-  OutLn('; File groups (arc.groups): "$group" headers followed by their masks');
+  OutLn('; File groups: "$group" headers followed by their masks; <other> = files matching none');
   OutLn('[File groups]');
-  L := ArcGroupLines;
+  L := FileGroupLines;
   for i := 0 to High(L) do OutLn(L[i]);
 end;
 

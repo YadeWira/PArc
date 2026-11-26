@@ -43,9 +43,10 @@ type
     function Bytes: TBytes;
   end;
 
-{ Memory size of a method parameter, like parc_methods.ParseMem (FreeArc's parseMem64: digits
-  and a b/k/m/g suffix; without a suffix a power of 2, "24" = 16 MB; a leading '=' is ignored).
-  Here so that filters need not use parc_methods. }
+{ Memory size of a method parameter: "<digits>[unit]", unit b (bytes), k, m or g (KB, MB, GB;
+  an optional "b" after it: "kb", "mb", "gb"), or none (or "^"): a power of two, "24" = 16 MB.
+  A leading '=' is allowed. False if malformed or above 2^63. Every codec and the presets use
+  this one syntax. }
 function ParseMemSize(const S: string; out Value: QWord): Boolean;
 
 procedure Corrupt(const Msg: string);
@@ -54,34 +55,41 @@ implementation
 
 function ParseMemSize(const S: string; out Value: QWord): Boolean;
 var
-  i: Integer;
+  p, n: Integer;
   Num: QWord;
-  c: Char;
+  Shift: Integer;
+  U: string;
 begin
   Result := False;
-  i := 1;
-  if (i <= Length(S)) and (S[i] = '=') then Inc(i);
-  if (i > Length(S)) or not (S[i] in ['0'..'9']) then Exit;
+  Value := 0;
+  p := 1;
+  n := Length(S);
+  if (p <= n) and (S[p] = '=') then Inc(p);
   Num := 0;
-  while (i <= Length(S)) and (S[i] in ['0'..'9']) do
+  if (p > n) or not (S[p] in ['0'..'9']) then Exit;
+  while (p <= n) and (S[p] in ['0'..'9']) do
   begin
-    if Num > (High(QWord) div 10) then Exit;
-    Num := Num * 10 + Ord(S[i]) - Ord('0');
-    Inc(i);
+    if Num > (QWord(1) shl 63) div 10 then Exit;
+    Num := Num * 10 + QWord(Ord(S[p]) - Ord('0'));
+    Inc(p);
   end;
-  if i <= Length(S) then c := LowerCase(S[i]) else c := '^';
-  case c of
-    'b': Value := Num;
-    'k': Value := Num shl 10;
-    'm': Value := Num shl 20;
-    'g': Value := Num shl 30;
-    '^': begin
-           if Num > 63 then Exit;
-           Value := QWord(1) shl Num;
-         end;
+  U := LowerCase(Copy(S, p, MaxInt));
+  if (U = '') or (U = '^') then
+  begin
+    if Num > 63 then Exit;
+    Value := QWord(1) shl Num;
+    Exit(True);
+  end;
+  case U of
+    'b': Shift := 0;
+    'k', 'kb': Shift := 10;
+    'm', 'mb': Shift := 20;
+    'g', 'gb': Shift := 30;
   else
     Exit;
   end;
+  if Num > (QWord(1) shl 63) shr Shift then Exit;
+  Value := Num shl Shift;
   Result := True;
 end;
 

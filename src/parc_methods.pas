@@ -36,7 +36,8 @@ function CreateDecoderChain(const Method: string; Source: TInStage): TInStage;
 { Descomprime un bloque de control (en memoria) a exactamente OrigSize bytes. }
 function DecompressMem(const Method: string; Src: PByte; SrcLen: SizeInt; OrigSize: SizeInt): TBytes;
 
-{ Tamaño de memoria de FreeArc ("1mb", "244kb", "64m", "512b"; sin sufijo = 2^N: "24" = 16mb). }
+{ Memory size of a method parameter ("1mb", "244kb", "64m", "512b"; no unit = 2^N: "24" = 16mb):
+  parc_bytes.ParseMemSize. }
 function ParseMem(const S: string; out Value: QWord): Boolean;
 
 function IsStoring(const Method: string): Boolean;
@@ -103,39 +104,8 @@ begin
 end;
 
 function ParseMem(const S: string; out Value: QWord): Boolean;
-var
-  i: Integer;
-  Num: QWord;
-  c: Char;
 begin
-  // parseMem64 de FreeArc (Common.cpp:232): dígitos y un sufijo b/k/m/g; SIN sufijo es una
-  // potencia de 2 ('^', el default de todos los métodos): "24" = 16mb, no 24mb. Solo cuenta
-  // la primera letra del sufijo ("mb" = "m"); un '=' inicial se ignora
-  Result := False;
-  i := 1;
-  if (i <= Length(S)) and (S[i] = '=') then Inc(i);
-  if (i > Length(S)) or not (S[i] in ['0'..'9']) then Exit;
-  Num := 0;
-  while (i <= Length(S)) and (S[i] in ['0'..'9']) do
-  begin
-    if Num > (High(QWord) div 10) then Exit;
-    Num := Num * 10 + Ord(S[i]) - Ord('0');
-    Inc(i);
-  end;
-  if i <= Length(S) then c := LowerCase(S[i]) else c := '^';
-  case c of
-    'b': Value := Num;
-    'k': Value := Num shl 10;
-    'm': Value := Num shl 20;
-    'g': Value := Num shl 30;
-    '^': begin
-           if Num > 63 then Exit;
-           Value := QWord(1) shl Num;
-         end;
-  else
-    Exit;
-  end;
-  Result := True;
+  Result := ParseMemSize(S, Value);
 end;
 
 type
@@ -144,37 +114,41 @@ type
     DictSize: QWord;
   end;
 
-{ Parámetros como parse_LZMA (C_LZMA.cpp): con nombre (d, lc, lp, pb, ...) o sin nombre
-  (match finder, entero = numFastBytes, memoria = diccionario). Solo guardamos lo que usa el
-  decodificador. }
+{ What the lzma decoder needs from the stage text: lc<n>, lp<n>, pb<n> and the dictionary
+  (d<mem>, or a memory size with a unit; a plain number is an encoder setting). Defaults
+  lc3 lp0 pb2, 64 MB. A leading '*' (optional parameter) is ignored. }
 function ParseLzmaParams(const Params: TStringArray): TLzmaParams;
 var
   k: Integer;
-  p: string;
+  p, Key, Rest: string;
   m: QWord;
 begin
-  Result.lc := 3; Result.lp := 0; Result.pb := 2;
+  Result.lc := 3;
+  Result.lp := 0;
+  Result.pb := 2;
   Result.DictSize := 64 shl 20;
   for k := 1 to High(Params) do
   begin
     p := Params[k];
-    if (p <> '') and (p[1] = '*') then Delete(p, 1, 1);   // parámetro opcional
+    if (p <> '') and (p[1] = '*') then p := Copy(p, 2, MaxInt);
     if p = '' then Continue;
-    if AnsiStartsStr('lc', p) then Result.lc := StrToIntDef(Copy(p, 3, MaxInt), -1)
-    else if AnsiStartsStr('lp', p) then Result.lp := StrToIntDef(Copy(p, 3, MaxInt), -1)
-    else if AnsiStartsStr('pb', p) then Result.pb := StrToIntDef(Copy(p, 3, MaxInt), -1)
-    else if (p[1] = 'd') and ParseMem(Copy(p, 2, MaxInt), m) then Result.DictSize := m
-    else if (p[1] in ['0'..'9']) and (StrToIntDef(p, -1) < 0) and ParseMem(p, m) then
-      Result.DictSize := m;   // "1mb", "103mb"; un entero pelado es numFastBytes
+    Key := Copy(p, 1, 2);
+    Rest := Copy(p, 3, MaxInt);
+    if Key = 'lc' then Result.lc := StrToIntDef(Rest, -1)
+    else if Key = 'lp' then Result.lp := StrToIntDef(Rest, -1)
+    else if Key = 'pb' then Result.pb := StrToIntDef(Rest, -1)
+    else if (p[1] = 'd') and ParseMemSize(Copy(p, 2, MaxInt), m) then Result.DictSize := m
+    else if (p[1] in ['0'..'9']) and not (p[Length(p)] in ['0'..'9']) and ParseMemSize(p, m) then
+      Result.DictSize := m;
   end;
 end;
 
-{ Parámetros de ppmd: o<N>, m<mem> (o "mem<mem>"), r / r<N> (método de recuperación:
-  0 = restart, 1 = cut-off); sin nombre: entero = orden, memoria = mem. Defaults: orden 10,
-  48mb, restart. c<mem> (el "chunk" de FreeArc) ya no significa nada y se ignora. }
+{ ppmd: o<n> order, m<mem> or mem<mem> model memory, r / r<n> restart method (0 restart,
+  1 cut-off); unnamed: a number is the order, a memory size the model memory. c<mem> (a chunk
+  size of older versions) means nothing. Defaults: order 10, 48 MB, restart. }
 function ParsePpmdParams(const Params: TStringArray): TPpmdParams;
 var
-  k, n: Integer;
+  k: Integer;
   p: string;
   m: QWord;
 begin
@@ -184,19 +158,20 @@ begin
   for k := 1 to High(Params) do
   begin
     p := Params[k];
-    if Copy(p, 1, 3) = 'mem' then Delete(p, 1, 2);   // "mem..." como "m..."
+    if Copy(p, 1, 3) = 'mem' then p := 'm' + Copy(p, 4, MaxInt);
     if p = '' then Continue;
-    if p = 'r' then begin Result.Restore := 1; Continue; end;
-    if Length(p) > 1 then
-      case p[1] of
-        'm': begin if ParseMem(Copy(p, 2, MaxInt), m) then Result.Mem := m; Continue; end;
-        'o': begin Result.Order := StrToIntDef(Copy(p, 2, MaxInt), -1); Continue; end;
-        'r': begin Result.Restore := StrToIntDef(Copy(p, 2, MaxInt), -1); Continue; end;
-        'c': Continue;
-      end;
-    n := StrToIntDef(p, -1);
-    if n >= 0 then Result.Order := n
-    else if ParseMem(p, m) then Result.Mem := m;
+    if p = 'r' then
+      Result.Restore := 1
+    else if (Length(p) > 1) and (p[1] = 'm') then
+    begin
+      if ParseMemSize(Copy(p, 2, MaxInt), m) then Result.Mem := m;
+    end
+    else if (Length(p) > 1) and (p[1] = 'o') then Result.Order := StrToIntDef(Copy(p, 2, MaxInt), -1)
+    else if (Length(p) > 1) and (p[1] = 'r') then Result.Restore := StrToIntDef(Copy(p, 2, MaxInt), -1)
+    else if (Length(p) > 1) and (p[1] = 'c') then
+      // (ignored)
+    else if StrToIntDef(p, -1) >= 0 then Result.Order := StrToInt(p)
+    else if ParseMemSize(p, m) then Result.Mem := m;
   end;
 end;
 
