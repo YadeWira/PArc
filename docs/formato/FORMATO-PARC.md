@@ -161,7 +161,8 @@ almost nothing.
 
 **Appending in place.** When an update only adds files and keeps every file and every block of
 the archive (`a`/`u`/`f` with new names only, no recompression, no password change), the archive
-is a single file without a recovery record, and it was read without warnings, PArc writes after
+is a single file without a recovery record, it was read without warnings, and its index is
+small (at most 4 KB, or 1 % of the archive: it stays as dead bytes), PArc writes after
 the current end of the file: the new data blocks, a new index whose `BLOCKS` has two (or more)
 runs — the old blocks where they are, the new ones after the old locator — and a new locator.
 The old blocks are not read or rewritten; the old index and locator stay as dead bytes between
@@ -373,8 +374,8 @@ record: `N%` of L, `N b/k/m/g` bytes, or `N`/`Ns` = N sectors of 512 bytes (of t
 
 - sector size: given (`;<size>`), or the smallest power of two from 512 bytes whose checks take
   at most 1/8 of the budget (2·N ≤ budget / 8) and with N ≤ 2^25;
-- m: the largest (1…254) whose record fits the budget; at least 1 (a budget below about
-  0.4 % of L plus the checks gives a slightly bigger record than asked);
+- m: the one (1…254) whose record is nearest to the budget (a tie goes below), at least 1 (a
+  budget below about 0.4 % of L plus the checks gives a bigger record than asked);
 - `<count>*<sector>`: that sector size and the smallest m with S·m ≥ count; `0*<sector>` is a
   record of checks only (`-rr0.1%` = `0*4kb`, `-rr0.01%` = `0*64kb`).
 

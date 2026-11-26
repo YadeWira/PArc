@@ -213,20 +213,32 @@ begin
   if m > 0 then Result := 2 else Result := 4;
 end;
 
-{ The largest m (1..254) whose record fits in Budget; 0 if not even m = 1 fits. }
+{ The m (1..254) whose record is nearest to Budget (below or above; a tie goes below); 0 if
+  not even m = 1 fits. }
 function BestParity(N: Int64; SS: Integer; Budget: Int64; out S: Int64): Integer;
 var
   m: Integer;
-  Sm: Int64;
+  Sm, Cur, Nxt: Int64;
 begin
   Result := 0;
   S := 0;
+  Cur := 0;
   for m := 1 to 254 do
   begin
     Sm := RsStripeCount(N, m);
-    if RecordLen(N, SS, m, Sm, 2) > Budget then Break;
+    Nxt := RecordLen(N, SS, m, Sm, 2);
+    if Nxt > Budget then
+    begin
+      if (Result > 0) and (Nxt - Budget < Budget - Cur) then
+      begin
+        Result := m;
+        S := Sm;
+      end;
+      Break;
+    end;
     Result := m;
     S := Sm;
+    Cur := Nxt;
   end;
 end;
 

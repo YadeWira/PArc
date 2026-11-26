@@ -1465,7 +1465,10 @@ begin
     else
       for f := 0 to High(Groups[g].Files) do
         if Entries[Groups[g].Files[f]].SrcArc <> nil then Exit;
-  Result := Next = Length(A.DataBlocks);
+  if Next <> Length(A.DataBlocks) then Exit;
+  // the old index and locator stay as dead bytes: only when they are small next to the archive
+  // (otherwise many appends to an archive of tiny files would double it)
+  Result := (A.IndexBlk.CompSize + 128 <= 4096) or (A.IndexBlk.CompSize + 128 <= (A.ArcSize - A.SFXSize) div 100);
 end;
 
 { a (agregar/reemplazar), u (solo si es más nuevo), f (solo actualizar lo que ya está),
