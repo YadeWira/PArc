@@ -19,9 +19,9 @@ case "$PARC" in /*) ;; *) PARC=$PWD/$PARC ;; esac
 B=$ROOT/build/tests
 W=${LZMA_ENC_WORK:-${TMPDIR:-/tmp}/parc_lzma_enc}
 mkdir -p "$B/lzunits" "$B/lzunits_noasm"
-fpc -O2 -Fu"$ROOT/src" -Fu"$ROOT/src/orep" -Fu"$ROOT/src/bwt" -FU"$B/lzunits" -FE"$B" "$ROOT/tests/test_lzmaenc.lpr" >/dev/null \
+fpc -O2 -Fu"$ROOT/src" -Fu"$ROOT/src/orep" -Fu"$ROOT/src/osrep" -Fu"$ROOT/src/bwt" -FU"$B/lzunits" -FE"$B" "$ROOT/tests/test_lzmaenc.lpr" >/dev/null \
   || { echo "no compila test_lzmaenc"; exit 2; }
-fpc -O2 -dPARC_NOASM -Fu"$ROOT/src" -Fu"$ROOT/src/orep" -Fu"$ROOT/src/bwt" -FU"$B/lzunits_noasm" -FE"$B" -otest_lzmaenc_noasm \
+fpc -O2 -dPARC_NOASM -Fu"$ROOT/src" -Fu"$ROOT/src/orep" -Fu"$ROOT/src/osrep" -Fu"$ROOT/src/bwt" -FU"$B/lzunits_noasm" -FE"$B" -otest_lzmaenc_noasm \
   "$ROOT/tests/test_lzmaenc.lpr" >/dev/null || { echo "no compila test_lzmaenc (noasm)"; exit 2; }
 rm -rf -- "${W:?}"; mkdir -p "$W" && cd "$W" || exit 2
 fail=0; pass=0

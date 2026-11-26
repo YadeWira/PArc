@@ -19,7 +19,7 @@ B=$ROOT/build/tests
 T=$B/test_policy
 W=${POLICY_WORK:-${TMPDIR:-/tmp}/parc_policy}
 mkdir -p "$B/policyunits"
-fpc -O2 -Fu"$ROOT/src" -Fu"$ROOT/src/orep" -Fu"$ROOT/src/bwt" -Fu"$ROOT/src/cm" -Fu"$ROOT/src/tta" \
+fpc -O2 -Fu"$ROOT/src" -Fu"$ROOT/src/orep" -Fu"$ROOT/src/osrep" -Fu"$ROOT/src/bwt" -Fu"$ROOT/src/cm" -Fu"$ROOT/src/tta" \
     -Fl"$ROOT/build/linux64/units" -Fo"$ROOT/build/linux64/units" -FU"$B/policyunits" -FE"$B" \
     "$ROOT/tests/test_policy.lpr" >/dev/null || { echo "test_policy does not compile (build.sh linux64 first)"; exit 2; }
 rm -rf -- "${W:?}"; mkdir -p "$W" && cd "$W" || exit 2

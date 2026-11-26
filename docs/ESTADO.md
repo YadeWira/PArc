@@ -2123,14 +2123,13 @@ PARC_THREADS=4 build/tests/test_jobfree
 ## Known limitations
 
 - `.arc` is neither read nor written (by design; use FreeArc-ex).
-- SREP: reads v1–v4 and writes v3; method options are not interpreted when compressing
-  (`-m0o`, `-m3f`, etc.) and the ratio is greedy (lazy matching, 4 candidates per hash).
+- `srep` (OSREP -m6) keeps the whole solid block, its output and its index in memory while
+  compressing (about 2.1 times the block); the decoder the stream and the output.
 - FreeArc external compressors (precomp, ECM, JPG, PPMonstr, Durilca, CCM, etc.): out of
   scope.
 - `reference/` keeps only `Compression/`; the rest of the source is in git history.
 
 ## Possible next steps
 
-1. SREP: honor compression options and write v4/Index-LZ (optional).
-2. `.parc`-specific fuzzing (updates and damage) plus volume/encryption tests in the suite.
-3. Ideas for format v2 (stronger per-file hash, ACLs/xattrs).
+1. `.parc`-specific fuzzing (updates and damage) plus volume/encryption tests in the suite.
+2. Ideas for format v2 (stronger per-file hash, ACLs/xattrs).

@@ -15,7 +15,7 @@ ck() { if eval "$2"; then pass=$((pass+1)); else fail=$((fail+1)); echo "  FAIL 
 build() {   # build <name> <fpc> [options]
   local n=$1 c=$2; shift 2
   mkdir -p "$B/$n/units"
-  "$c" -O2 "$@" -Fu"$ROOT/src" -Fu"$ROOT/src/orep" -Fu"$ROOT/src/bwt" -FU"$B/$n/units" -FE"$B/$n" \
+  "$c" -O2 "$@" -Fu"$ROOT/src" -Fu"$ROOT/src/orep" -Fu"$ROOT/src/osrep" -Fu"$ROOT/src/bwt" -FU"$B/$n/units" -FE"$B/$n" \
     "$ROOT/tests/test_lzmaenc.lpr" >"$B/$n/build.log" 2>&1 ||
     { echo "no compila test_lzmaenc para $n (ver $B/$n/build.log)"; return 1; }
 }

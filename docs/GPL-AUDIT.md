@@ -26,7 +26,7 @@ which files go together) is fine; porting the code is not.
 | `src/parc_parallel.pas:21-25, 126-160, 794-941` `TParallelBlockStage` | ordered parallel block decoding | "como el MTCompressor de FreeArc" (idea: decode blocks in a pool, deliver in order); the pool, budget and job ring are our own code (git: 0bbbbbd, eb2f7d7, 45f1ddf, written for PArc) | low | comment reworded; nothing to port |
 | `src/parc_parallel.pas:1-20, 160-790` budget, `TJobPool` | thread budget, pools | own (PArc) | none | — |
 | `src/parc_encoders.pas:85-125, 689-1125` (non-4x4) | chain builder, memory estimates, `FitEncodeMem`, `LimitMethodToSize`, srep/bcj/orep stages | own code; *behaviour* of FreeArc's `SetDictionary`/`limit_compression_memory` (comments at :90, :101) | low | keep; reword comments |
-| `src/parc_encoders.pas:961-1030` `TSrepEncStage` | 1-byte srep header (`1` = srep stream, `0` = stored) | FreeArc's SREP framing | medium | goes with the SREP codec rewrite (codec, out of this scope) |
+| `src/parc_encoders.pas:961-1030` `TSrepEncStage` | 1-byte srep header (`1` = srep stream, `0` = stored) | FreeArc's SREP framing | medium | **done** (2026-11-26): the stage moved to the own `parc_osrep.pas` with the SREP codec rewrite; the block is now an OSREP v7 stream (MIT) behind PArc's own flag byte (FORMATO-PARC §6.13) |
 | `src/parc_archive.pas:1-492` | reader of the container: end descriptor, FOOTER, DIR_BLOCK columns, signature `ArC\x01` | written from FreeArc's *format description* ("el formato base de FreeArc", FreeArc-ex doc §3/§5/§6); code is ours | medium (format), low (code) | own container format later (see §3) |
 | `src/parc_writer.pas:114-150, 336-470` | local descriptor, DIR_BLOCK, FOOTER serialization; `enumDirectories` order (:380); "provisional footer first" like `ArcvProcessRead.hs` (:1235) | same format description; the directory-numbering and provisional-footer steps follow the `.hs` structure | medium | own container format later (see §3) |
 | `src/parc_writer.pas:150-200` | recovery record = two storing `RECOVERY_BLOCK`s | layout of `ArcRecover.hs` | medium | with §3 |
@@ -42,9 +42,10 @@ which files go together) is fine; porting the code is not.
 | `src/parc_console.pas:28-40` | output format (thousand separators, timing line) | behaviour | low | keep |
 | `src/parc_volume.pas`, `parc_stream.pas`, `parc_outstream.pas`, `parc_progress.pas`, `parc_strmap.pas`, `parc_os.pas`, `parc_crc.pas`, `parc_rs.pas`, `parc_crypt.pas`, `parc_aes.pas`, `parc_chacha.pas`, `parc_blake2.pas` | — | own code / specs | none | — |
 
-Codecs and policy (outside this audit, listed for completeness): `parc_srep.pas` (SREP 3.93
-port, high) and `parc_dict.pas`/`parc_dictenc.pas` (Dict port, high) remain. **Done** (main
-`313a124`): the LZMA encoder without FreeArc's `fast` additions (`parc_lzmaenc.pas`, own `ht4`
+Codecs and policy (outside this audit, listed for completeness): `parc_dict.pas`/`parc_dictenc.pas`
+(Dict port, high) remain. **Done** (2026-11-26): `parc_srep.pas` (SREP 3.93 port) was deleted;
+`srep` is now OSREP -m6 (MIT, vendored in `src/osrep/`, glue in `parc_osrep.pas`, FORMATO-PARC
+§6.13). **Done** (main `313a124`): the LZMA encoder without FreeArc's `fast` additions (`parc_lzmaenc.pas`, own `ht4`
 row finder and parser, FORMATO-PARC §6.11); the policy layer — own preset and file group tables
 and resolver (`parc_presets.pas`; `parc_presets_data.inc`, FreeArc's `arc.ini`/`arc.groups` text,
 deleted), own canonical methods and limits (`parc_canon.pas`), own data-type detector
@@ -72,11 +73,12 @@ deleted), own canonical methods and limits (`parc_canon.pas`), own data-type det
   as with `82ea8d9`). While any GPL-derived file remains it must stay (it carries the notices).
 - **`LICENSE`**: replace GPL-2.0 by MIT (copyright holder: PArc authors). Keep third-party
   notices next to their code: LZMA SDK (public domain, statement only), LZ4 (BSD-2, notice
-  required), libsais / libbsc QLFC (Apache-2.0, `src/bwt/NOTICE`), OREP (MIT).
+  required), libsais / libbsc QLFC (Apache-2.0, `src/bwt/NOTICE`), OREP (MIT), OSREP (MIT,
+  `src/osrep/LICENSE`).
 - **`README.md`** license table (`rep, 4x4, dict, mm, tta, srep` row, `cm` row) and the
   "License" paragraph; **`docs/LIBRERIAS.md`**: drop FreeArc as a source; **`docs/ESTADO.md`**
   "Ported codecs" row; source headers that say "port de"/"como FreeArc" (reword to describe the
   behaviour only).
 - `parc_presets_data.inc` (FreeArc's `arc.ini`/`arc.groups` text) is already gone (main
-  `313a124`). What is left before the switch: SREP and Dict (codecs), then the container and
+  `313a124`) and SREP is replaced by OSREP (2026-11-26). What is left before the switch: Dict (codec), then the container and
   recovery layouts (§1) and the notices/LICENSE steps above.

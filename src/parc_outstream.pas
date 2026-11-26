@@ -150,6 +150,8 @@ begin
 end;
 
 procedure TStreamSink.DoWrite(Buf: PByte; Count: SizeInt);
+var
+  n: SizeInt;
 begin
   Inc(FBytes, Count);
   // Los codecs emiten muchos pedazos chicos (el rango-coder de PPMd, por ejemplo): juntarlos
@@ -157,7 +159,16 @@ begin
   if Count >= Length(FBuf) then
   begin
     Flush;
-    FStream.WriteBuffer(Buf^, Count);
+    // de a 1 GB: TStream.WriteBuffer toma un Longint (un pedazo de más de 2 GB, como la
+    // salida de srep de un bloque grande, se cortaría)
+    while Count > 0 do
+    begin
+      n := Count;
+      if n > 1 shl 30 then n := 1 shl 30;
+      FStream.WriteBuffer(Buf^, n);
+      Inc(Buf, n);
+      Dec(Count, n);
+    end;
     Exit;
   end;
   if FUsed + Count > Length(FBuf) then Flush;

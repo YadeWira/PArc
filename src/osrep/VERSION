@@ -1,0 +1,30 @@
+OSREP 0.0.16, embeddable -m6 API (osrep_m6.pas), stream format .osr v7 (frozen) — MIT,
+Copyright (c) 2026 Yade E. Bravo; written by osrep. Used by PArc as the `srep` method.
+
+Source: https://github.com/YadeWira/omega-srep, branch osrep, tag v0.0.16
+        (commit 0f0298963dadc87bbaaf4ed33d30a626d0bea64e), release asset osrep-unit-0.0.16.tar.gz
+        (sha256 697e530c54616552cca7bada0c31596e5359ba26cb7cfde0fb5218b080dbc797).
+
+Files copied unchanged from osrep-unit-0.0.16.tar.gz:
+  osrep_m6.pas         the API (encode/decode memory to memory, bounds, memory)
+  osrep_encoder.pas    the encoder (-m6 = the long-range finder of osrep_lr.c)
+  osrep_decoder.pas    the .osr decoder
+  osrep_format.pas     the container (header, table, blocks)
+  osrep_crc.pas        CRC-32C
+  osrep_vhash.pas      VHASH-128 (the optional digest; PArc writes no digest)
+  osrep_aes.pas        AES (used by the VHASH key schedule)
+  osrep_lr.c           native -m6 long-range finder          (freestanding C, no libc)
+  osrep_match.c        native match finder of the other methods
+  osrep_vhash_nh.c     native VHASH NH
+  osrep_crc_native.c   CRC-32C (SSE4.2 crc32 when present)
+  README.md            the tarball's README
+  LICENSE              MIT
+  osrep-m6-api.md      docs/osrep-m6-api.md of the tag (Spanish; not in the tarball)
+
+No change was needed: the units link the objects with plain {$L osrep_*.o}, which FPC finds
+on the object path. The prebuilt objects of the tarball (obj/<target>/*.o; there is none for
+darwin) are not vendored: build.sh compiles the four C files for every target with the
+compiler of that target (README flags -O3 -fno-builtin -fno-stack-protector, plus
+-ffreestanding and, with gcc, -fno-tree-loop-distribute-patterns, so no libc call is
+generated). -dOSREP_NO_NATIVE uses the Pascal reference instead (same bytes; tests/srep.sh
+checks it). Do not edit these files: update them from a new OSREP release.

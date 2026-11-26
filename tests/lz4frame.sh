@@ -10,7 +10,7 @@ ROOT=$(cd "$(dirname "$0")/.." && pwd)
 T=$ROOT/build/tests/test_lz4frame
 W=${LZ4FRAME_WORK:-${TMPDIR:-/tmp}/parc_lz4frame}
 mkdir -p "$ROOT/build/tests/units"
-fpc -O2 -Fu"$ROOT/src" -Fu"$ROOT/src/orep" -Fo"$ROOT/build/linux64/units" -FU"$ROOT/build/tests/units" -FE"$ROOT/build/tests" "$ROOT/tests/test_lz4frame.lpr" >/dev/null || { echo "no compila test_lz4frame"; exit 2; }
+fpc -O2 -Fu"$ROOT/src" -Fu"$ROOT/src/orep" -Fu"$ROOT/src/osrep" -Fo"$ROOT/build/linux64/units" -FU"$ROOT/build/tests/units" -FE"$ROOT/build/tests" "$ROOT/tests/test_lz4frame.lpr" >/dev/null || { echo "no compila test_lz4frame"; exit 2; }
 rm -rf -- "${W:?}"; mkdir -p "$W" && cd "$W" || exit 2
 fail=0; pass=0
 ck() { if eval "$2"; then pass=$((pass+1)); echo "  ok   $1"; else fail=$((fail+1)); echo "  FAIL $1"; fi; }

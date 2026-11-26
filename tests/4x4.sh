@@ -16,7 +16,7 @@ FUZZ=${FX_FUZZ:-200}
 P=$ROOT/build/linux64/parc
 [ -f "$ROOT/build/linux64/units/orep_core.o" ] || { echo "run ./build.sh first"; exit 2; }
 mkdir -p "$B/fxunits"
-fpc -O2 -Fu"$ROOT/src" -Fu"$ROOT/src/orep" -Fu"$ROOT/src/bwt" -Fo"$ROOT/build/linux64/units" \
+fpc -O2 -Fu"$ROOT/src" -Fu"$ROOT/src/orep" -Fu"$ROOT/src/osrep" -Fu"$ROOT/src/bwt" -Fo"$ROOT/build/linux64/units" \
   -FU"$B/fxunits" -FE"$B" "$ROOT/tests/test_4x4.lpr" >/dev/null || { echo "no compila test_4x4"; exit 2; }
 rm -rf -- "${W:?}"; mkdir -p "$W" && cd "$W" || exit 2
 fail=0; pass=0

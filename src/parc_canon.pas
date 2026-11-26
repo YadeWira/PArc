@@ -44,7 +44,7 @@ var
 implementation
 
 uses
-  SysUtils, Math, parc_os, parc_methods, parc_lzmaenc, parc_parallel, parc_orep, parc_plzenc,
+  SysUtils, Math, parc_os, parc_methods, parc_lzmaenc, parc_parallel, parc_orep, parc_osrep, parc_plzenc,
   parc_bwt, parc_lzp, parc_dict, parc_lz4enc, parc_tta, parc_dispack;
 
 const
@@ -355,7 +355,9 @@ begin
       'tta': Result := CanonTta(Parts);
       '4x4': Result := Canon4x4(Stage, Size, MemLim);
       // the filters choose their layout from the data: no parameters are kept
-      'mm', 'delta', 'exe', 'srep', 'storing': Result := Parts[0];
+      'mm', 'delta', 'exe', 'storing': Result := Parts[0];
+      // OSREP: los parámetros que no son los de por defecto (`osrep` es el mismo método)
+      'srep', 'osrep': Result := SrepMethodText(ParseSrepMethod(Parts));
       'dispack070':
         if DispackBlockSize(Parts) <> DispackBlockSize(['dispack070']) then
           Result := 'dispack070:' + MemText(DispackBlockSize(Parts))

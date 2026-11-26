@@ -28,11 +28,11 @@ OBJ=$ROOT/build/linux64/units
 [ -f "$OBJ/orep_core.o" ] || { echo "falta $OBJ/orep_core.o: ./build.sh linux64"; exit 2; }
 for v in nat pas; do
   d=""; [ $v = pas ] && d=-dOREP_NO_NATIVE
-  fpc -O3 $d -Fu"$ROOT/src" -Fu"$ROOT/src/orep" -Fo"$OBJ" -FU"$W/$v" -FE"$W/$v" \
+  fpc -O3 $d -Fu"$ROOT/src" -Fu"$ROOT/src/orep" -Fu"$ROOT/src/osrep" -Fo"$OBJ" -FU"$W/$v" -FE"$W/$v" \
     "$ROOT/tests/test_orep.lpr" > "$W/$v.log" 2>&1 || { echo "no compila test_orep ($v)"; tail -5 "$W/$v.log"; exit 2; }
 done
 # parc con la referencia en Pascal (para comparar bytes)
-fpc -O3 -Xs -dOREP_NO_NATIVE -Fu"$ROOT/src" -Fu"$ROOT/src/orep" -Fo"$OBJ" -FU"$W/ref" -FE"$W/ref" \
+fpc -O3 -Xs -dOREP_NO_NATIVE -Fu"$ROOT/src" -Fu"$ROOT/src/orep" -Fu"$ROOT/src/osrep" -Fo"$OBJ" -FU"$W/ref" -FE"$W/ref" \
   "$ROOT/src/parc.lpr" > "$W/ref.log" 2>&1 || { echo "no compila parc -dOREP_NO_NATIVE"; tail -5 "$W/ref.log"; exit 2; }
 REF=$W/ref/parc
 
