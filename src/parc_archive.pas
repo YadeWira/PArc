@@ -44,6 +44,7 @@ const
   SEC_RECOVERY = $82;
 
   ARC_FLAG_LOCKED = 1;
+  SIZES_LEB = $FF;             // SIZES: LEB128 column instead of a fixed width
 
   KIND_FILE = 0;
   KIND_DIR = 1;
@@ -241,6 +242,18 @@ begin
   D.CheckWidth := P[30];
   Result := (D.ProtLen > 0) and (D.RecLen >= 2 * REC_DESC_SIZE) and (D.SectorSize >= 512) and
             (D.Stripes >= 0) and (D.Parity <= 254) and ((D.CheckWidth = 2) or (D.CheckWidth = 4));
+end;
+
+{ A base name that SanitizePath would leave as it is (the usual case: no separators, not "."
+  or "..", no drive). }
+function PlainName(const S: string): Boolean;
+var
+  i: Integer;
+begin
+  Result := (S <> '') and (S <> '.') and (S <> '..') and not ((Length(S) >= 2) and (S[2] = ':'));
+  if Result then
+    for i := 1 to Length(S) do
+      if (S[i] = '/') or (S[i] = '\') then Exit(False);
 end;
 
 constructor TArchive.Open(const AFileName: string);
@@ -512,6 +525,8 @@ var
   Dirs: array of RawByteString;
   Prev, Suffix: RawByteString;
   DirIdx: Int64;
+  IdxMode: Byte;
+  Ns: Int64;
   W, Wk, Ws: Integer;
   BaseSec, Sec: Int64;
   Sub: QWord;
@@ -651,14 +666,22 @@ begin
             Dirs[i] := Copy(Prev, 1, Shared) + Suffix;
             Prev := Dirs[i];
           end;
+          for i := 0 to D - 1 do Dirs[i] := SanitizePath(Dirs[i]);
           for i := 0 to N - 1 do Files[i].Name := s.ZStr;
+          IdxMode := s.U8;
+          if IdxMode > 1 then Corrupt('invalid directory index encoding');
           DirIdx := 0;
           for i := 0 to N - 1 do
           begin
-            Inc(DirIdx, s.Sv);
+            if IdxMode = 0 then DirIdx := Int64(s.Uv and $7FFFFFFFFFFFFFFF)
+            else Inc(DirIdx, s.Sv);
             if (DirIdx < 0) or (DirIdx >= D) then Corrupt('invalid directory index');
-            if Dirs[DirIdx] <> '' then Files[i].Name := Dirs[DirIdx] + '/' + Files[i].Name;
-            Files[i].Name := SanitizePath(Files[i].Name);
+            if not PlainName(Files[i].Name) then Files[i].Name := SanitizePath(Files[i].Name);
+            if Dirs[DirIdx] <> '' then
+            begin
+              if Files[i].Name <> '' then Files[i].Name := Dirs[DirIdx] + '/' + Files[i].Name
+              else Files[i].Name := Dirs[DirIdx];
+            end;
           end;
         end;
       SEC_KINDS:
@@ -678,10 +701,10 @@ begin
           NeedArchive;
           HaveSizes := True;
           W := s.U8;
-          if W > 8 then Corrupt('invalid size width');
+          if (W > 8) and (W <> SIZES_LEB) then Corrupt('invalid size width');
           for i := Z to N - 1 do
           begin
-            Files[i].Size := Int64(s.UBE(W));
+            if W = SIZES_LEB then Files[i].Size := Int64(s.Uv) else Files[i].Size := Int64(s.UBE(W));
             if Files[i].Size < 0 then Corrupt('invalid file size');
           end;
         end;
@@ -697,6 +720,24 @@ begin
         begin
           NeedArchive;
           HaveTimes := True;
+          IdxMode := s.U8;
+          if IdxMode = 1 then
+          begin
+            // each time in ns as a delta from the previous one
+            Ns := 0;
+            for i := 0 to N - 1 do
+            begin
+              Ns := Int64(QWord(Ns) + QWord(s.Sv));
+              Files[i].MTimeNs := Ns;
+              Sec := Ns div 1000000000;
+              if (Ns < 0) and (Ns mod 1000000000 <> 0) then Dec(Sec);
+              Files[i].Time := Sec;
+              Files[i].HasMTimeNs := True;
+            end;
+          end
+          else if IdxMode <> 0 then Corrupt('invalid time encoding')
+          else
+          begin
           BaseSec := s.Sv;
           W := s.U8;
           if W > 8 then Corrupt('invalid time width');
@@ -715,6 +756,7 @@ begin
             if Sub >= 1000000000 then Corrupt('invalid sub-second time');
             Files[i].MTimeNs := Files[i].Time * 1000000000 + Int64(Sub);
             Files[i].HasMTimeNs := True;
+          end;
           end;
         end;
       SEC_UNIXMODE, SEC_WINATTR:

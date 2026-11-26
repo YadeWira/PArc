@@ -1740,6 +1740,11 @@ begin
     RRSize := 0;
     for i := 0 to High(Entries) do Inc(RRSize, Entries[i].Meta.Size);
     Opt.Recovery := ResolveRecovery(MO.Recovery, OldRR, RRSize);
+    if (Opt.Recovery <> '') and not RecoverySpecValid(Opt.Recovery) then
+    begin
+      ErrLn('ERROR: invalid -rr specification: "' + Opt.Recovery + '" (see docs/USO.md)');
+      Exit(1);
+    end;
     Opt.Encryption := MO.Encryption;
     Opt.DataPassword := MO.DataPassword;
     Opt.HeadersPassword := MO.HeadersPassword;

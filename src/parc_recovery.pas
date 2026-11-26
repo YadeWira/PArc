@@ -257,50 +257,25 @@ begin
   end;
   if R.Kind = rkPercent then Budget := Round(ProtLen * R.Percent / 100.0)
   else Budget := R.Bytes;
-  // The sector size that gives the most parity bytes within the budget (ties: the smaller one,
-  // which tolerates more scattered damage). Given: only that one.
-  Best := -1; BestSS := 0; BestM := 0; BestS := 0;
-  SS := MIN_SECTOR;
-  if R.Sector > 0 then SS := R.Sector;
-  repeat
-    N := (ProtLen + SS - 1) div SS;
-    if (N <= MAX_AUTO_SECTORS) or (R.Sector > 0) then
-    begin
-      m := BestParity(N, SS, Budget, S);
-      Value := S * m * Int64(SS);
-      if (m > 0) and (Value > Best) then
-      begin
-        Best := Value; BestSS := SS; BestM := m; BestS := S;
-      end;
-    end;
-    if R.Sector > 0 then Break;
-    SS := SS * 2;
-  until (SS > MAX_SECTOR) or ((SS > ProtLen) and (Best >= 0)) or (SS div 2 >= ProtLen);
-  if Best < 0 then
+  // Sector size: the smallest (from 512 bytes, powers of two) whose checks take at most 1/8 of
+  // the budget, and with at most 32 Mi sectors; given with ";<size>": that one. Then as many
+  // parity sectors per stripe as fit (at least one).
+  if R.Sector > 0 then SS := R.Sector
+  else
   begin
-    // the budget does not reach one parity per stripe: one anyway, with the sector size that
-    // makes the record smallest (sectors limited as above)
     SS := MIN_SECTOR;
-    if R.Sector > 0 then SS := R.Sector
-    else
-      while ((ProtLen + SS - 1) div SS > MAX_AUTO_SECTORS) and (SS < MAX_SECTOR) do SS := SS * 2;
-    BestSS := SS;
+    while (SS < MAX_SECTOR) and (((ProtLen + SS - 1) div SS > MAX_AUTO_SECTORS) or
+                                 (2 * ((ProtLen + SS - 1) div SS) > Budget div 8)) do
+      SS := SS * 2;
+  end;
+  N := (ProtLen + SS - 1) div SS;
+  BestSS := SS;
+  BestM := BestParity(N, SS, Budget, BestS);
+  if BestM = 0 then
+  begin
+    // the budget does not reach one parity sector per stripe: one anyway
     BestM := 1;
-    BestS := RsStripeCount((ProtLen + SS - 1) div SS, 1);
-    if R.Sector = 0 then
-    begin
-      // a smaller record with bigger sectors, while it still fits the protected size
-      Value := RecordLen((ProtLen + SS - 1) div SS, SS, 1, BestS, 2);
-      while SS * 2 <= MAX_SECTOR do
-      begin
-        N := (ProtLen + SS * 2 - 1) div (SS * 2);
-        S := RsStripeCount(N, 1);
-        if RecordLen(N, SS * 2, 1, S, 2) >= Value then Break;
-        SS := SS * 2;
-        Value := RecordLen(N, SS, 1, S, 2);
-        BestSS := SS; BestS := S;
-      end;
-    end;
+    BestS := RsStripeCount(N, 1);
   end;
   SectorSize := BestSS;
   Parity := BestM;
@@ -380,6 +355,8 @@ var
   R: TRecData;
   SS, m, j, Got, n, x: Integer;
   Stripes, RecLen, k, Sector, si, pi, i: Int64;
+  ii: SizeInt;
+  jj: Integer;
   Buf, Pad: TBytes;
   Base: Int64;
   Written: Int64;
@@ -403,7 +380,7 @@ begin
   R.N := (ProtLen + SS - 1) div SS;
   R.P := Stripes * m;
   SetLength(R.StripeCrc, Stripes);
-  for i := 0 to Stripes - 1 do R.StripeCrc[i] := CRC_INIT;
+  for ii := 0 to Stripes - 1 do R.StripeCrc[ii] := CRC_INIT;
   SetLength(R.Checks, (R.N + R.P) * R.D.CheckWidth);
   SetLength(R.Parity, R.P * SS);
   if Length(R.Parity) > 0 then FillChar(R.Parity[0], Length(R.Parity), 0);
@@ -436,12 +413,12 @@ begin
           // the last sector, zero-padded
           FillChar(Pad[0], SS, 0);
           Move(Buf[x], Pad[0], j);
-          for k := 0 to m - 1 do
-            RsMulAdd(RsCoef(k, pi), @Pad[0], @R.Parity[(k * Stripes + si) * SS], SS);
+          for jj := 0 to m - 1 do
+            RsMulAdd(RsCoef(jj, pi), @Pad[0], @R.Parity[(jj * Stripes + si) * SS], SS);
         end
         else
-          for k := 0 to m - 1 do
-            RsMulAdd(RsCoef(k, pi), @Buf[x], @R.Parity[(k * Stripes + si) * SS], SS);
+          for jj := 0 to m - 1 do
+            RsMulAdd(RsCoef(jj, pi), @Buf[x], @R.Parity[(jj * Stripes + si) * SS], SS);
       end;
       Inc(x, j);
       Inc(Sector);
@@ -449,8 +426,8 @@ begin
     Inc(Base, Got);
     CheckCancel;
   end;
-  for i := 0 to Stripes - 1 do R.StripeCrc[i] := R.StripeCrc[i] xor CRC_INIT;
-  for i := 0 to R.P - 1 do PutCheck(R, R.N + i, CalcCRC(@R.Parity[i * SS], SS));
+  for ii := 0 to Stripes - 1 do R.StripeCrc[ii] := R.StripeCrc[ii] xor CRC_INIT;
+  for ii := 0 to R.P - 1 do PutCheck(R, R.N + ii, CalcCRC(@R.Parity[ii * SS], SS));
   S.Position := ProtLen;
   Written := 0;
   EmitRecord(R, @Put);
@@ -526,6 +503,7 @@ var
   Outp: TFileStream;
   R: TRecData;
   RecPos, Start, N, P, S, k, i, st, idx, Base, TabLen, CmpPos: Int64;
+  ii: SizeInt;
   SS, m, W, kk, q, j, Got, x, nchunk, Try_, Len: Integer;
   DescOk, TabOk, Fixed, Differs: Boolean;
   TA, TB, Saved, Buf, Mem, Cmp: TBytes;
@@ -632,7 +610,7 @@ begin
       else TabOk := False;
       SetLength(R.StripeCrc, S);
       if TabOk then
-        for i := 0 to S - 1 do R.StripeCrc[i] := GetU32(@Saved[4 * i]);
+        for ii := 0 to S - 1 do R.StripeCrc[ii] := GetU32(@Saved[4 * ii]);
       SetLength(R.Checks, (N + P) * W);
       ReadFull(F, RecPos + REC_DESC_SIZE + TabLen, PByte(R.Checks), Length(R.Checks));
       SetLength(R.Parity, P * SS);
@@ -643,7 +621,7 @@ begin
       SetLength(BadPar, P);
       SetLength(PerStripe, S);
       SetLength(Computed, S);
-      for i := 0 to S - 1 do Computed[i] := CRC_INIT;
+      for ii := 0 to S - 1 do Computed[ii] := CRC_INIT;
       nchunk := (IO_CHUNK div SS) * SS;
       if nchunk < SS then nchunk := SS;
       SetLength(Buf, nchunk);
@@ -674,18 +652,18 @@ begin
         CheckCancel;
       end;
       Buf := nil;
-      for i := 0 to S - 1 do Computed[i] := Computed[i] xor CRC_INIT;
+      for ii := 0 to S - 1 do Computed[ii] := Computed[ii] xor CRC_INIT;
       if not TabOk then
       begin
         Inc(Res.BadRecord);
-        for i := 0 to S - 1 do R.StripeCrc[i] := Computed[i];
+        for ii := 0 to S - 1 do R.StripeCrc[ii] := Computed[ii];
       end;
-      for i := 0 to P - 1 do
+      for ii := 0 to P - 1 do
       begin
-        BadPar[i] := not CheckMatches(R, N + i, CalcCRC(@R.Parity[i * SS], SS));
-        if BadPar[i] then
+        BadPar[ii] := not CheckMatches(R, N + ii, CalcCRC(@R.Parity[ii * SS], SS));
+        if BadPar[ii] then
         begin
-          Inc(PerStripe[i mod S]);
+          Inc(PerStripe[ii mod S]);
           Inc(Res.BadRecord);
         end;
       end;

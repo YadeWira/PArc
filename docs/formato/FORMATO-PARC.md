@@ -1,89 +1,169 @@
-# `.parc` format — specification v1 (draft, 2026-09-24)
+# `.parc` format — specification, container version 2 (2026-11-26)
 
-`.parc` is PArc's native format. It takes FreeArc 0.67's container structure (blocks,
-descriptors, VInts, footer, column-oriented directory and method strings) and adds its own
-fields. The base container specification lives in the FreeArc-ex repo
-(`docs/FORMATO-ARC.md`) and in the original FreeArc distribution.
+`.parc` is PArc's native format. Since container version 2 (PArc after 0.0.5) the container —
+how blocks, the directory, the archive properties and the recovery record are laid out and
+found — is PArc's own design; it no longer follows FreeArc's (descriptors, footer, `DIR_BLOCK`
+columns, FreeArc's VInt). Method strings (`lzma:...`, `orep:...+...`) and the codec streams of
+§6 are unchanged. There is no backward compatibility (pre-1.0): archives written by PArc 0.0.5
+and earlier are rejected with the error *old PArc format* (§2.5), and PArc never reads or writes
+FreeArc `.arc` files.
 
-PArc reads and writes only `.parc`; it neither produces nor accepts `.arc`.
+## 1. Overview
 
-## 1. Own signature
+### 1.1 Layout
 
-| | `.arc` | `.parc` |
+```
+[SFX stub]                 optional, anything; not part of the archive (§2.5)
+head                       16 bytes (§2.1)
+data blocks                back to back, no per-block header (§2.2)
+index                      header + payload: the directory and the archive properties (§2.3, §3)
+end locator                24 bytes (§2.4)
+[recovery record]          optional (§5); protects everything from the head to the locator
+```
+
+Every position stored in the archive is counted **from the start of the head** ("archive
+position"), never from the start of the file: a stub can be prepended (or removed) without
+touching the archive, and a multi-volume archive (`-v`, `name.parc.001`, `.002`...) is the same
+byte stream cut into pieces.
+
+### 1.2 Primitives
+
+| name | encoding |
+|---|---|
+| `U8`, `U16`, `U32`, `U64` | unsigned, little-endian, fixed size |
+| `Uv` | unsigned LEB128: 7 bits per byte, least significant group first, bit 7 set on every byte but the last; at most 10 bytes (values < 2^64). Writers use the shortest form; readers reject a longer one (a last byte 0x00 after the first) and anything above 2^64−1 |
+| `Sv` | signed: zigzag (`v ≥ 0 → 2v`, `v < 0 → −2v − 1`) then `Uv` |
+| `UBE(w)` | unsigned in exactly `w` bytes (0…8), **big-endian**: used for fixed-width columns, which a general-purpose compressor models better than varints |
+| `Str` | `Uv` length + that many bytes (UTF-8 for text) |
+| `ZStr` | bytes up to a 0x00 byte. Only in path columns (file and directory names cannot contain NUL); NUL-terminated names compress ~6 % better than length-prefixed ones in the index |
+
+### 1.3 Checksums
+
+CRC-32 is the IEEE / zlib polynomial (reflected 0xEDB88320, init and final xor 0xFFFFFFFF),
+`src/parc_crc.pas`. Every control structure carries one: the head, the index header (its own
+bytes, the stored payload and the decoded payload), the end locator, and the recovery record's
+descriptors and stripe tables (§5). Data blocks have no checksum of their own; each file has
+the CRC-32 of its contents in the index, and encrypted blocks are authenticated (§3b).
+
+## 2. Container structures
+
+### 2.1 Head (16 bytes, archive position 0)
+
+| offset | field |
+|---|---|
+| 0 | magic `50 41 72 63 0D 0A 1A 0A` ("PArc\r\n\x1a\n": the CR LF / EOF / LF bytes reveal a text-mode transfer) |
+| 8 | `U16` container version = 2 |
+| 10 | `U16` flags = 0 (a reader rejects other values) |
+| 12 | `U32` CRC-32 of bytes 0…11 |
+
+A version above the reader's is rejected ("container version N: this PArc understands up to M").
+The index does not depend on the head: a damaged head is reported as a warning, the archive is
+still read.
+
+### 2.2 Data blocks
+
+A data block is the output of its method string's encoder chain (compression stages, then the
+cipher stage with `-p`, §3b) over the concatenation of its files, in index order. Blocks have no
+header: the index lists, per block, its method, its number of files and its stored size, and
+the blocks of a *run* are stored back to back from the run's start. PArc writes one run that
+starts right after the head. A block may be empty (0 stored bytes).
+
+Entries without data — directories and symbolic links — are not in any block (§3, `ARCHIVE`).
+
+### 2.3 Index header
+
+The index is a header followed by its payload; the header is never compressed or encrypted.
+
+| field | |
+|---|---|
+| `U32` | magic "PAix" (`50 41 69 78`) |
+| `Uv` | archive position of this header (lets a reader that found the header by scanning compute where the archive starts) |
+| `Uv` | stored payload length |
+| `Uv` | decoded payload length |
+| `Str` | method of the payload: `lzma:1mb:normal:bt4:32` by default, `storing` when compressing does not make it smaller, plus the cipher stage `+xchacha20:…:h` / `+aes256gcm:…:h` with `-hp` |
+| `U32` | CRC-32 of the stored payload |
+| `U32` | CRC-32 of the decoded payload |
+| `U32` | CRC-32 of the header from the magic up to here |
+
+The stored payload follows immediately.
+
+### 2.4 End locator (24 bytes)
+
+| offset | field |
+|---|---|
+| 0 | `U64` archive position of the index header |
+| 8 | `U64` archive length: from the head to the end of this locator |
+| 16 | `U32` CRC-32 of bytes 0…15 and 20…23 |
+| 20 | magic "PAel" (`50 41 65 6C`) |
+
+### 2.5 Finding the index
+
+1. If the file ends with a valid recovery descriptor (§5.1: magic "PArr" at its end, its CRC,
+   version 1), the record occupies the last `record length` bytes and the locator ends where the
+   record starts; otherwise the locator is the last 24 bytes of the file.
+2. Locator valid (magic, CRC, `index position < archive length ≤ bytes before it`): the archive
+   starts at `end of locator − archive length` (anything before is the SFX stub) and the index
+   header is at `start + index position`; its own position field must match.
+3. Otherwise (damaged or cut tail): if the file starts with `PAr\x01`, or its last 4096 bytes
+   contain `PAr\x01\x08` (the footer descriptor of the old container), it is an archive of PArc
+   0.0.5 or earlier: error *old PArc format*. If not, the file is scanned **backwards** for "PAix";
+   the first candidate whose header CRC and stored-payload CRC match is the index, and the
+   archive starts at `candidate − its position field`. The archive is then read normally, with
+   the warning *the end of the archive is damaged (index found by scanning)*, and `parc r`
+   is suggested when there is a recovery record.
+4. Nothing found: *not a .parc archive, or its end is damaged*. A volume set whose last volume is
+   missing says which volumes were read.
+
+## 3. Index payload
+
+The decoded payload is a sequence of sections ended by the byte 0:
+
+```
+repeat:  U8 id (0 = end) · Uv length · length bytes
+```
+
+A section must be parsed to exactly its length. Unknown ids with bit 7 set (`0x80…0xFF`) are
+skipped; any other unknown id makes the archive unreadable (*unknown mandatory section: written
+by a newer PArc?*). `ARCHIVE` must come first; a section appears at most once; nothing may
+follow the end byte.
+
+**Entry order.** `N` entries: first the `Z` entries without data (directories and links), then
+the files of data block 0, of block 1, ... in the order they are stored in their block. A file's
+offset inside its decoded block is the sum of the sizes of the files before it in that block.
+
+| id | name | content |
 |---|---|---|
-| descriptor / HEADER signature | `41 72 43 01` ("ArC\x01") | `50 41 72 01` ("PAr\x01") |
-| HEADER version | `00 00 06 07` (0.67) | `01 00 00 00` (format 1, U32 LE) |
+| 1 | `ARCHIVE` | `Uv` flags (bit 0: locked — `-k`/`k`; PArc refuses to modify the archive; other bits must be 0) · `Uv N` · `Uv Z` · `Uv B` (data blocks) |
+| 2 | `BLOCKS` | `Uv R` runs, R × (`Uv` start position, `Uv` block count) — the counts add up to B · `Uv M` methods, M × `Str` method string · B × `Uv` method index · B × `Uv` file count (they add up to N − Z) · B × `Uv` stored size. Required when B > 0 |
+| 3 | `NAMES` | `Uv D` directories, D × (`Uv` bytes shared with the previous directory name, `ZStr` rest) in order of first use · N × `ZStr` base name · N × `Sv` directory index, as a difference from the previous entry's (the first from 0). The path is `directory/base` (just `base` for the empty directory name). Required when N > 0 |
+| 4 | `KINDS` | Z × `U8`: 0 empty file, 1 directory, 2 symbolic link, 3 symbolic link to a directory (Windows: created as a directory link). Required when Z > 0 |
+| 5 | `SIZES` | `U8 w` · (N − Z) × `UBE(w)` file size (entries without data have size 0). Required when N > Z |
+| 6 | `CRCS` | `U32` CRC-32 of the contents of every file in a block whose size is not 0 (an empty file's CRC is 0 and is not stored). After `SIZES`. Required when N > Z |
+| 7 | `MTIME` | `Sv` base second · `U8 w` · N × `UBE(w)` second − base · `U8 k` (0…9) · `U8 ws` (0…4) · N × `UBE(ws)` sub-second part in units of 10^k ns. mtime = (base + second) · 10^9 + part · 10^k ns since 1970-01-01 UTC, the second being the floor. A part · 10^k ≥ 10^9 is damage. Required when N > 0 |
+| 8 | `UNIXMODE` | N × `Uv` `st_mode` (type and permissions). Only when every entry has one |
+| 9 | `WINATTR` | N × `Uv` Windows attributes (`FILE_ATTRIBUTE_*`). Only when every entry has them |
+| 10 | `LINKS` | for every entry of kind 2 or 3, in order: `Str` link target (UTF-8, `/`, as it was in the link) |
+| 0x81 | `COMMENT` | the archive comment, raw bytes (UTF-8 by convention, may contain NUL) |
+| 0x82 | `RECOVERY` | the `-rr` specification used (kept when the archive is updated without `-rr`) |
 
-**Why change the signature and not just the version:** FreeArc locates the footer by its
-signature in the last 4096 bytes. With the same signature, an old FreeArc would try to read a
-`.parc` and fail halfway, or worse, silently ignore what it does not understand (64-bit dates,
-attributes). With a different signature it says "not a FreeArc archive", which is the correct
-error.
+Paths are UTF-8 with `/`, relative, without `.`/`..` components or a root; a reader sanitizes
+them again before extracting. The writer picks the encodings that compress best with the
+index's method: fixed-width big-endian columns for sizes and seconds (measured on 10,000 files:
+sizes 1.5 % and seconds 15 % smaller than LEB128 deltas after lzma), front-coded directory names
+and delta-coded directory indexes.
 
-The reader identifies the format by the footer descriptor signature. The HEADER version says
-which extensions may appear: a version-N reader rejects a newer file with a clear error.
+Why the order and the separate kinds: entries without data need no size, CRC or block; files
+need no kind. Directory and file times share one column so that runs of equal dates compress to
+almost nothing.
 
-## 2. Directory: optional fields (implemented)
+### 3a. Updating
 
-`.arc` defines an optional-field mechanism at the end of DIR_BLOCK (the base container), which
-FreeArc 0.67 never used: it only writes `tag_end = 0`. `.parc` uses it like this:
-
-```
-repeat:
-  VInt  tag          (0 = end)
-  Bool  mandatory    (1 = a reader that does not know the tag must fail)
-  VInt  len          (data bytes for this field)
-  len bytes
-```
-
-A reader skips unknown non-mandatory tags and fails on mandatory ones. All per-file arrays use
-the same order as the directory columns (N = number of files in the block).
-
-| tag | name | mandatory | data | use |
-|---|---|---|---|---|
-| 1 | `MTIME_NS` | 0 | N × Int64 LE | mtime in **nanoseconds** since 1970-01-01 UTC. Replaces the 32-bit `Time` column, which is still written truncated to the Int32 range |
-| 2 | `WIN_ATTR` | 0 | N × U32 LE | Windows attributes (`FILE_ATTRIBUTE_*`) |
-| 3 | `UNIX_MODE` | 0 | N × U32 LE | `st_mode` (permissions and type) |
-| 4 | `CTIME_NS` | 0 | N × Int64 LE | reserved (creation) |
-| 5 | `ATIME_NS` | 0 | N × Int64 LE | reserved (access) |
-| 6 | `SYMLINK` | 0 | VInt K, then K times: VInt index, CStr target, U8 to_directory | symbolic links (and Windows junctions). The entry is a zero-size file with no data, placed in the directory block. Target in UTF-8 with `/`, as it was in the link (relative or absolute) |
-| 7 | `MTIME_NS_DELTA` | 0 | N × VInt (zigzag) | like `MTIME_NS`, but each value is the signed delta from the previous file (the first one from 0). Zero precision loss; very small when many consecutive files share a date. An old reader that does not know this tag falls back to the `Time` column (seconds) |
-| 8 | `MTIME_SUBSEC` | 0 | U8 k, U8 W, then N × W bytes (LE) | only the sub-second part of each mtime, in units of 10^k ns (k = 0…9; 2 for NTFS's 100 ns); W = 0…4 bytes per value (0: every file has whole seconds). The seconds come from the `Time` column, so mtime = Time × 10^9 + value × 10^k ns, again with zero loss. A value × 10^k ≥ 10^9 is a damaged archive; a field whose length is not 2 + W·N, or with k > 9 or W > 4, is ignored |
-
-A reader that does not know `SYMLINK` extracts an empty file instead of the link. When
-extracting, PArc creates links at the end and does not create ones that point outside the
-destination (absolute, or with `..` escaping the root) unless `-snld` is given.
-
-`MTIME_NS`/`MTIME_NS_DELTA` cover ±292 years around 1970, so they solve the 2038 problem of
-the `Time` column (Int32) and keep NTFS (100 ns) and ext4 (1 ns) precision. PArc still reads
-`MTIME_NS` from archives already created.
-
-What PArc writes (after 0.0.2): one of `MTIME_NS_DELTA` or `MTIME_SUBSEC` per directory block,
-whichever compresses smaller with the directory method (measured on the first 65,536 files).
-`MTIME_SUBSEC` is only a candidate when every file's seconds fit in the `Time` column
-(1901–2038); otherwise `MTIME_NS_DELTA` is written. With random nanoseconds (files copied on
-ext4/NTFS) `MTIME_SUBSEC` makes the directory 6–10 % smaller; with runs of identical dates
-(package installs) `MTIME_NS_DELTA` wins and the output is the same as before.
-
-Compatibility: PArc 0.0.2 and earlier do not know tag 8 (it is not mandatory), so they list,
-test and extract such archives normally, using the `Time` column: mtimes come out with
-second precision. If 0.0.2 *updates* such an archive, the files it keeps lose their
-sub-second part. Archives written with `MTIME_NS_DELTA` are unchanged for old readers.
-
-`WIN_ATTR`/`UNIX_MODE` stay as fixed U32 columns: the directory compressor already reduces
-them to almost nothing (removing `UNIX_MODE` entirely saved 47–124 bytes on 5,000–40,000
-files), so a compact encoding is not worth a new tag.
-
-## 3. Rest of the container (FreeArc base)
-
-- **Blocks**: HEADER, DATA, DIR, FOOTER and RECOVERY, with the same type numbers.
-- **Descriptors**: the same fields and the same CRC; only the signature changes.
-- **Methods**: the same strings (`lzma:...`, `orep:...+...`, `4x4:...`); see §6 for the streams
-  that are PArc's own (`ppmd`, `orep`).
-- **Footer**: the same fields, including `locked`, `recovery` and `comment`. `locked` (one byte,
-  0 or 1) is written as 1 by `-k`/`k`; PArc then refuses every command that would modify the
-  archive.
-- **Encryption**: its own scheme, not FreeArc's; see §3b.
+PArc rewrites an archive into a temporary file and replaces it at the end. Blocks whose files all
+stay are **copied as stored bytes** (never decompressed or recompressed; encrypted blocks keep
+their cipher stage and nonce); blocks that lose files are repacked. The index, the locator and
+the recovery record are always rebuilt. The format also allows appending in place (new blocks
+after the old locator, a second run in `BLOCKS`, a new index and locator at the end); PArc does
+not do it yet.
 
 ## 3b. Encryption (scheme 1)
 
@@ -105,7 +185,7 @@ aes256gcm:t<T>:m<M>:p<P>:s<salt>:c<check>:n<nonce>[:h]     AES-256-GCM (-ae=aes)
 | `s` | Argon2 salt, 16 bytes, lowercase hex. Random per archive (see "Keys") |
 | `c` | password check value, 8 bytes, hex |
 | `n` | block nonce, 16 bytes, hex. Random for **every** block |
-| `h` | (no value) the block is a control block: directory or footer (`-hp`) |
+| `h` | (no value) the stage encrypts the index (`-hp`) |
 
 Every parameter except `h` is mandatory; an unknown or repeated parameter, wrong hex length, or a
 cost outside `1 ≤ t ≤ 64`, `1 ≤ p ≤ 64`, `8·p ≤ m ≤ 4194304` (4 GiB) makes the block unreadable
@@ -171,17 +251,17 @@ For AES-GCM the per-block key keeps every (key, nonce) pair unique without rando
 
 - Nothing depends on the block's absolute position, so blocks are **copied unchanged** when an
   archive is updated (`a`, `u`, `f`, `d` keep intact solid blocks), with their stage strings.
-- The block nonce lives in the method string, which the directory stores: a block moved to
+- The block nonce lives in the method string, which the index stores: a block moved to
   another block's place (or replaced by another block of the same archive) decrypts with the wrong
-  nonce and fails. With `-hp` the directory and footer are themselves authenticated (header key),
-  so the whole archive structure is covered; the HEADER block (signature and version) and the
-  descriptors stay in clear. The footer's descriptor necessarily exposes the footer's stage
-  (salt, check, nonce, costs).
+  nonce and fails. With `-hp` the index payload is itself authenticated (header key), so the whole
+  archive structure is covered; the head, the index header, the end locator and the recovery
+  record stay in clear. The index header necessarily exposes the index's stage (salt, check,
+  nonce, costs) and the sizes of the stored and decoded index.
 - With `-p` alone the directory is plaintext and not authenticated: names, sizes, dates and the
   compression part of each method can be read and changed. A changed method or block list makes
   decompression or the per-file CRC fail; it cannot reveal or forge encrypted data. An attacker can
-  also replace the whole archive, or roll back the footer of an `-hp` archive to an older one.
-- Data and control blocks use different keys, so a data block cannot stand in for a directory.
+  also replace the whole archive, or put back an older index of an `-hp` archive.
+- Data blocks and the index use different keys, so a data block cannot stand in for an index.
 
 ### Updating
 
@@ -189,43 +269,114 @@ Updating an encrypted archive needs the password of its data blocks: if `-p` is 
 archive already has encrypted data blocks, the password is checked first against their stage; a
 different password is rejected as a **wrong password** (exit 5) and the archive is left untouched,
 so the data of an archive never mixes passwords. Blocks that are recompressed (`d` in a solid block,
-`--recompress`) are encrypted again, with a new nonce, even when `-p` is not repeated. The directory
-and footer are always rewritten, with the `-hp` password given for that run.
+`--recompress`) are encrypted again, with a new nonce, even when `-p` is not repeated. The index
+is always rewritten, with the `-hp` password given for that run.
 
 ## 4. Writing: invariants PArc must satisfy
 
-- VInts are always written in the shortest form (like FreeArc).
-- Descriptor `compsize` and `origsize` must match what was written.
-- Each file CRC is that of its original data; each control block CRC is that of its
-  uncompressed data.
-- The footer `rel_pos` and the directory `rel_offsets` are relative to the position of the
-  containing block.
+- `Uv` in the shortest form; every length and count matches what follows.
+- Data blocks of a run are contiguous and in index order; the index follows the last data block,
+  the end locator follows the index, and the recovery record (if any) follows the locator and
+  ends the file.
+- Each file CRC is that of its original data; the index header's CRCs are those of the stored
+  and the decoded payload.
 - Names are UTF-8 with `/` as separator, relative, without `..` or a root. On Windows, `\` is
   converted to `/`.
-- The directory is written **after** the data blocks it describes. An archive may contain
-  several DIR_BLOCKs, and all of them are listed in the footer.
-- The footer descriptor must end within the last 4096 bytes.
+- The same input and options give the same bytes on every platform (except the random salt and
+  nonces of encrypted archives): `tests/container_cross.sh`.
 
-## 5. Pending
+## 5. Recovery record (`parc-rr1`)
 
-## 5b. `.parc` recovery record: Reed-Solomon (`parc-rs1`)
+Own layout around the Reed-Solomon erasure code of `src/parc_rs.pas` (GF(2^8), polynomial 0x11D,
+scaled Cauchy matrix: any m missing sectors of a stripe are rebuilt). It protects the archive
+from the head to the end of the locator (*protected length* L), and itself.
 
-Two RECOVERY_BLOCKs (sectors first, then info+CRCs), containing:
+### 5.1 Layout
 
-- addinfo: version `parc-rs1`, `arcsize`, `offset` and **two** pairs: `(sector_size,
-  rec_sectors)` and `(m, S)`, with `rec_sectors = S × m`;
-- the N sectors of the protected area (the last one zero-padded to `sector_size`) are split
-  into S = ⌈N / (255 − m)⌉ stripes: sector i is data i div S of stripe i mod S;
-- parity j of stripe s (RS erasure code over GF(2^8), polynomial 0x11D, scaled Cauchy matrix:
-  `src/parc_rs.pas`) is sector j·S + s of the sector block;
-- CRCs are one per data sector and one per parity sector, and mark which sectors are missing.
-  A stripe is repaired with at most m damaged sectors.
+```
+descriptor                48 bytes
+stripe table              S × U32 + U32
+checks                    (N + S·m) × W bytes
+parity sectors            S·m × sector size
+stripe table (copy)       S × U32 + U32
+descriptor (copy)         48 bytes
+```
 
-m is the smallest number that provides at least the recovery sectors requested by `-rr` using
-FreeArc's calculation.
+**Descriptor** (identical at both ends):
 
-- Stronger per-file hash than CRC-32 (e.g. a `BLAKE2B` tag)? To be decided.
-- Hard links, ACLs, extended attributes: future tags.
+| offset | field |
+|---|---|
+| 0 | `U64` protected length L |
+| 8 | `U64` record length (all of the above) |
+| 16 | `U64` stripes S |
+| 24 | `U32` sector size (≥ 512) |
+| 28 | `U16` m: parity sectors per stripe (0 = checks only: detects, does not repair) |
+| 30 | `U8` W: bytes per check (2 when m > 0, 4 when m = 0) |
+| 31 | `U8` record version = 1 |
+| 32 | 8 zero bytes |
+| 40 | `U32` CRC-32 of bytes 0…39 and 44…47 |
+| 44 | magic "PArr" (`50 41 72 72`) |
+
+**Sectors and stripes.** The protected area is cut into N = ⌈L / sector size⌉ sectors (the last
+one shorter, zero-padded for the parity). Sector i belongs to stripe i mod S at position i div S;
+S = ⌈N / (255 − m)⌉, so a stripe has at most 255 − m data sectors and m parity sectors. Parity j
+of stripe s is parity sector j·S + s, and its value is `Σ coef(j, p) · data(p)` over the stripe's
+positions p (`RsCoef` in `parc_rs`). Interleaving spreads a contiguous damage of up to S·m
+sectors over all stripes with at most m in each.
+
+**Checks.** One per data sector, then one per parity sector: the low W bytes (little-endian) of
+the sector's CRC-32 (of its real length). A check that does not match marks the sector as
+missing. A damaged check only marks a good sector as missing (it is rebuilt to the same bytes).
+
+**Stripe table.** The CRC-32 of each stripe's data sectors concatenated in position order (real
+lengths), then the CRC-32 of the S values. After rebuilding a stripe the reader compares it
+with this CRC; if it differs and the stripe has a spare parity, each other sector is tried as
+the one whose damage the 16-bit check missed (probability 2^-16 per damaged sector). Two copies
+(the first valid one is used; with both damaged, rebuilt stripes are not verified).
+
+### 5.2 Finding and repairing
+
+The record is found by the descriptor at the end of the file, or, if that one is damaged, by
+scanning backwards for the first descriptor (magic + CRC). The archive starts at `record start
+− L` (an SFX stub before it is neither protected nor needed). `parc r`:
+
+1. reads both stripe tables, the checks and the parity;
+2. reads the protected area once, comparing each sector with its check and computing each
+   stripe's CRC;
+3. rebuilds every stripe with damaged sectors (data or parity) or with a CRC mismatch, if it
+   has at most m damaged sectors, and verifies it;
+4. writes `fixed.<name>` (a copy; the original is never modified) with the rebuilt sectors and
+   the record rewritten as it must be (descriptors, tables, checks, parity), so a repaired
+   archive is byte-identical to the original. A volume set is repaired into one file.
+
+Exit 0 if everything was repaired (or nothing was damaged), 2 if some stripe had more than m
+damaged sectors (they are listed; a partial copy is still written if something was repaired),
+1 if there is no record. A record with m = 0 reports the damaged sectors and exits 2.
+
+### 5.3 Sizing (`-rr`)
+
+Syntax in `docs/USO.md`. Every form except `<count>*<sector>` gives a **budget** for the whole
+record: `N%` of L, `N b/k/m/g` bytes, or `N`/`Ns` = N sectors of 512 bytes (of the given size with
+`;<sector>`). Then:
+
+- sector size: given (`;<size>`), or the smallest power of two from 512 bytes whose checks take
+  at most 1/8 of the budget (2·N ≤ budget / 8) and with N ≤ 2^25;
+- m: the largest (1…254) whose record fits the budget; at least 1 (a budget below about
+  0.4 % of L plus the checks gives a slightly bigger record than asked);
+- `<count>*<sector>`: that sector size and the smallest m with S·m ≥ count; `0*<sector>` is a
+  record of checks only (`-rr0.1%` = `0*4kb`, `-rr0.01%` = `0*64kb`).
+
+With the default `-rr` (4 %, 2 % or 1 % by size) on a 10 MB archive: 1 % → 40 parity sectors of
+2048 bytes (20 stripes, m = 2: any 2 sectors per stripe, or one contiguous damage of 80 KB);
+5 % → 891 sectors of 512 bytes (81 stripes, m = 11). Compared with the record of PArc 0.0.5
+(same RS code, FreeArc's two-block layout and 32-bit CRCs), the same parity costs 9.9 KB (1 %)
+and 40 KB (5 %) less, because checks are 16-bit and verified per stripe.
+
+## 5c. Pending
+
+- Stronger per-file hash than CRC-32 (e.g. a BLAKE2b section)? To be decided.
+- Hard links, ACLs, extended attributes: future optional sections.
+- Appending in place (§3a).
 
 ## 6. Codec streams that differ from FreeArc
 

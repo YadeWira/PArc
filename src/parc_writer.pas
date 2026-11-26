@@ -116,6 +116,7 @@ begin
 end;
 
 const
+  ENC_SAMPLE = 32768;   // entries compressed to choose between two encodings of a column
   POW10: array[0..9] of LongWord = (1, 10, 100, 1000, 10000, 100000, 1000000, 10000000,
     100000000, 1000000000);
 
@@ -149,6 +150,17 @@ var
   AllWin, AllUnix: Boolean;
   Flags: QWord;
   Kind: Byte;
+  ca, cb, sa: TByteWriter;
+  la, lb: SizeInt;
+  Sample: Integer;
+  Prev64: Int64;
+
+  { True if A's first LA bytes compress (with the index's method) to no more than B's first LB. }
+  function Smaller(const A: TByteWriter; LA: SizeInt; const B: TByteWriter; LB: SizeInt): Boolean;
+  begin
+    Result := Length(CompressMem(Opt.DirMethod, PByte(A.Data), LA)) <=
+              Length(CompressMem(Opt.DirMethod, PByte(B.Data), LB));
+  end;
 
   procedure Section(Id: Byte; const Body: TByteWriter);
   begin
@@ -177,6 +189,8 @@ begin
     B0 := 1;
   end;
   NB := Length(Blocks) - B0;
+  Sample := n;
+  if Sample > ENC_SAMPLE then Sample := ENC_SAMPLE;
 
   w.Clear;
   // 1. ARCHIVE: flags, entries, entries without data, blocks
@@ -255,12 +269,22 @@ begin
     Prev := DirNames[i];
   end;
   for i := 0 to n - 1 do f.ZStr(BaseOf(Entries[All[i].Entry].StoredName));
+  // directory of each entry: absolute (Uv) or as a delta from the previous one (Sv), whichever
+  // compresses smaller
+  ca.Clear;
+  cb.Clear;
+  la := -1; lb := -1;
   k := 0;
   for i := 0 to n - 1 do
   begin
-    f.Sv(DirIdx[i] - k);
+    ca.Uv(DirIdx[i]);
+    cb.Sv(DirIdx[i] - k);
     k := DirIdx[i];
+    if i = Sample - 1 then begin la := ca.Len; lb := cb.Len; end;
   end;
+  if la < 0 then begin la := ca.Len; lb := cb.Len; end;
+  if Smaller(ca, la, cb, lb) then begin f.U8(0); f.Raw(PByte(ca.Data), ca.Len); end
+  else begin f.U8(1); f.Raw(PByte(cb.Data), cb.Len); end;
   Section(SEC_NAMES, f);
 
   // 4. KINDS of the entries without data
@@ -288,9 +312,20 @@ begin
     for i := Z to n - 1 do
       if All[i].Size > MaxSize then MaxSize := All[i].Size;
     Wd := UBEWidth(QWord(MaxSize));
+    // fixed width (big-endian) or LEB128, whichever compresses smaller
+    ca.Clear;
+    cb.Clear;
+    la := -1; lb := -1;
+    for i := Z to n - 1 do
+    begin
+      ca.UBE(QWord(All[i].Size), Wd);
+      cb.Uv(QWord(All[i].Size));
+      if i - Z = Sample - 1 then begin la := ca.Len; lb := cb.Len; end;
+    end;
+    if la < 0 then begin la := ca.Len; lb := cb.Len; end;
     f.Clear;
-    f.U8(Wd);
-    for i := Z to n - 1 do f.UBE(QWord(All[i].Size), Wd);
+    if Smaller(ca, la, cb, lb) then begin f.U8(Wd); f.Raw(PByte(ca.Data), ca.Len); end
+    else begin f.U8(SIZES_LEB); f.Raw(PByte(cb.Data), cb.Len); end;
     Section(SEC_SIZES, f);
     f.Clear;
     for i := Z to n - 1 do
@@ -323,13 +358,46 @@ begin
   if MaxSub = 0 then Unit10 := 0;
   Ws := UBEWidth(MaxSub div POW10[Unit10]);
   Wd := UBEWidth(QWord(MaxRel));
+  // mode 0: seconds and sub-second parts in two fixed-width columns; mode 1: each time in ns
+  // as a delta from the previous one. Whichever compresses smaller (the seconds and the parts
+  // are compared together)
+  ca.Clear;
+  sa.Clear;
+  ca.Sv(MinSec);
+  ca.U8(Wd);
+  for i := 0 to n - 1 do
+  begin
+    ca.UBE(QWord(Secs[i] - MinSec), Wd);
+    if i < Sample then sa.UBE(QWord(Secs[i] - MinSec), Wd);
+  end;
+  ca.U8(Unit10);
+  ca.U8(Ws);
+  for i := 0 to n - 1 do
+  begin
+    ca.UBE(Subs[i] div POW10[Unit10], Ws);
+    if i < Sample then sa.UBE(Subs[i] div POW10[Unit10], Ws);
+  end;
   f.Clear;
-  f.Sv(MinSec);
-  f.U8(Wd);
-  for i := 0 to n - 1 do f.UBE(QWord(Secs[i] - MinSec), Wd);
-  f.U8(Unit10);
-  f.U8(Ws);
-  for i := 0 to n - 1 do f.UBE(Subs[i] div POW10[Unit10], Ws);
+  if Ws = 0 then
+  begin
+    f.U8(0);
+    f.Raw(PByte(ca.Data), ca.Len);
+  end
+  else
+  begin
+    cb.Clear;
+    lb := -1;
+    Prev64 := 0;
+    for i := 0 to n - 1 do
+    begin
+      cb.Sv(Entries[All[i].Entry].Meta.MTimeNs - Prev64);
+      Prev64 := Entries[All[i].Entry].Meta.MTimeNs;
+      if i = Sample - 1 then lb := cb.Len;
+    end;
+    if lb < 0 then lb := cb.Len;
+    if Smaller(sa, sa.Len, cb, lb) then begin f.U8(0); f.Raw(PByte(ca.Data), ca.Len); end
+    else begin f.U8(1); f.Raw(PByte(cb.Data), cb.Len); end;
+  end;
   Section(SEC_MTIME, f);
 
   // 8/9. Attributes, when every entry has them
