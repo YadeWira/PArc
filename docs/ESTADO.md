@@ -1815,6 +1815,39 @@ Size: smaller in 47 of 50 cells (fpc −0.14..−0.93 %, every level; mixed −0
   this machine's noise. Planning itself is cheaper than before (a `-m` whose groups all store,
   i.e. order + content checks only: fpc 1.34 vs 1.79 s, mixed 1.48 vs 2.09 s at T1).
 - Compression memory at T4 varies ±5 % from run to run in both builds (`fpc -m4` 626/665 MB).
+**After merging main `313a124` (2026-11-25).** The own group table (`FileGroupMatches`,
+`FileGroupRank`) replaced the private copy of `arc.groups`, and the new detector (with the `-m`
+level, `SolidLevel`) replaced the old one. With the new detector two rules were added (measured
+on the three sets): a file whose first sample is text and has no compressed sample goes to text
+below `-m6`; an extension with 8 or more files of one kind keeps one verdict when it covers 90 %
+of the class bytes (big FPC `.ppu` units that look like text in places stay with the binaries).
+Sizes against main `313a124` (its own copy of the old planner, same codecs), one run each:
+
+| set | T | -m | main 313a124 | this branch | Δ |
+|---|---|---|---|---|---|
+| fpc | 1 | 2 | 29724688 | 29466260 | -0.87% |
+| fpc | 4 | 2 | 31386298 | 31128376 | -0.82% |
+| fpc | 1 | 5 | 24696924 | 24585327 | -0.45% |
+| fpc | 4 | 5 | 25135559 | 24857388 | -1.11% |
+| fpc | 1 | 9 | 22867148 | 22733997 | -0.58% |
+| fpc | 4 | 9 | 22867148 | 22733997 | -0.58% |
+| mixed | 1 | 2 | 178429880 | 177930391 | -0.28% |
+| mixed | 4 | 2 | 183108771 | 182066162 | -0.57% |
+| mixed | 1 | 5 | 167413161 | 167554801 | +0.08% |
+| mixed | 4 | 5 | 173902238 | 167436888 | -3.72% |
+| mixed | 1 | 9 | 166482756 | 165738921 | -0.45% |
+| mixed | 4 | 9 | 166482756 | 165738921 | -0.45% |
+| txt | 1 | 2 | 67783723 | 67196240 | -0.87% |
+| txt | 4 | 2 | 67273773 | 66909458 | -0.54% |
+| txt | 1 | 5 | 57415272 | 57491896 | +0.13% |
+| txt | 4 | 5 | 57358551 | 57376071 | +0.03% |
+| txt | 1 | 9 | 56615117 | 56371470 | -0.43% |
+| txt | 4 | 9 | 56615117 | 56371470 | -0.43% |
+
+Not won: `mixed -m5` T1 +0.08 %, `txt -m5` T1 +0.13 % and T4 +0.03 % (the text/binary choice
+on a few files; other rules tried lost more elsewhere). The table above (against `e4e76fd`) is
+from before the merge; the codec changes of `313a124` move every cell by up to ±2 %.
+
 ## Own policy layer: presets, file groups, canonical methods, data-type detection (2026-11-24)
 
 The last FreeArc-derived "policy" code is gone: the port of `decode_method` and its textual
