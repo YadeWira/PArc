@@ -19,8 +19,9 @@
      list (after the default) that is in the file's group set, otherwise the default. If the
      list has a `$text` or `$compressed` method, the content is checked: big files are sampled
      at 3 (from 128 KB) or 5 (from 8 MB) evenly spread places, 64 KB each, and the verdict of
-     more than half of the samples counts (all of them for text when the default method is
-     lzma in its max mode, -m6 and up: against it the text methods only win on clear text);
+     more than half of the samples counts, and a file whose first sample is text and has no
+     compressed sample goes to text; when the default method is lzma in its max mode (-m6 and
+     up) text needs every sample (against it the text methods only win on clear text);
      small files are judged together with their
      neighbours of the same kind and extension (runs of up to 1 MB: whole files from the
      start of the run, and from its middle file, until 64 KB each; both must agree). Text moves default
@@ -419,7 +420,7 @@ var
   u, i, n, k, Samples: Integer;
   Fs: TFileStream;
   Size, P: Int64;
-  V, W: TVerdict;
+  V, W, FirstV: TVerdict;
   Votes: array[TVerdict] of Integer;
   F: ^TPlanFile;
 
@@ -482,7 +483,9 @@ begin
               P := (Size - SAMPLE) * k div (Samples - 1);
               n := ReadAt(Fs, P, @Buf[0], SAMPLE);
             end;
-            Inc(Votes[VerdictOf(@Buf[0], n, Level)]);
+            W := VerdictOf(@Buf[0], n, Level);
+            if k = 0 then FirstV := W;
+            Inc(Votes[W]);
           end;
         finally
           Fs.Free;
@@ -494,6 +497,9 @@ begin
           if 2 * Votes[W] > Samples then V := W;
         // against a strong binary method, text has to be text everywhere
         if (V = vText) and StrictText and (Votes[vText] < Samples) then V := vMixed;
+        // otherwise a file that starts as text and has no compressed part goes to text (the
+        // detector of parc_filetype is tuned on whole-file results where the start weighs most)
+        if (FirstV = vText) and (Votes[vComp] = 0) and not StrictText then V := vText;
         Verdict := V;
       end
       else
