@@ -1001,7 +1001,7 @@ tail of a solid block whose size is known).
 
 ### 6.13 `srep` (since 2026-11-26): OSREP -m6, replaces FreeArc's SREP
 
-`srep` is OSREP's long-range method `-m6` (OSREP 0.0.16 by osrep, MIT; the embeddable unit is
+`srep` is OSREP's long-range method `-m6` (OSREP 0.0.18 by osrep, MIT; the embeddable unit is
 vendored unchanged in `src/osrep/`, version and commit in `src/osrep/VERSION`; glue in
 `src/parc_osrep.pas`). It replaced the port of FreeArc's SREP 3.93 (GPL): **`srep` blocks written
 before this change do not decode** (a block that holds a FreeArc SREP stream fails with "this

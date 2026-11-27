@@ -196,7 +196,7 @@ the code derived from GPL sources; the current inventory:
 | `bwt` (block sorting of the text and bitmap presets; replaced GRZip, 2026-11-23) | own code + libsais 2.12.2 (unchanged) + libbsc 3.4.1's QLFC coders (translated to C) | own (MIT-ready) + Apache-2.0 (notices in `src/bwt/`) |
 | `4x4` (parallel blocks with an inner method; replaced FreeArc's, 2026-11-23) | own code | own (MIT-ready) |
 | `rep`, `dict`, `mm`, `tta` | ports of FreeArc 0.67 `Compression/` | GPL-derived, pending rewrite |
-| `srep` (OSREP -m6, replaced FreeArc's SREP 2026-11-26) | OSREP 0.0.16 by osrep, vendored in `src/osrep/` | MIT (`src/osrep/LICENSE`) |
+| `srep` (OSREP -m6, replaced FreeArc's SREP 2026-11-26) | OSREP 0.0.18 by osrep, vendored in `src/osrep/` | MIT (`src/osrep/LICENSE`) |
 | `cm` | lpaq1 (Matt Mahoney) | GPL-2.0-derived, pending rewrite |
 
 The FreeArc-derived codec ports come from FreeArc 0.67 sources by Bulat Ziganshin and

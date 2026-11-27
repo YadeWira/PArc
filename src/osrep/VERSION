@@ -1,11 +1,11 @@
-OSREP 0.0.16, embeddable -m6 API (osrep_m6.pas), stream format .osr v7 (frozen) — MIT,
+OSREP 0.0.18, embeddable -m6 API (osrep_m6.pas), stream format .osr v7 (frozen) — MIT,
 Copyright (c) 2026 Yade E. Bravo; written by osrep. Used by PArc as the `srep` method.
 
-Source: https://github.com/YadeWira/omega-srep, branch osrep, tag v0.0.16
-        (commit 0f0298963dadc87bbaaf4ed33d30a626d0bea64e), release asset osrep-unit-0.0.16.tar.gz
-        (sha256 697e530c54616552cca7bada0c31596e5359ba26cb7cfde0fb5218b080dbc797).
+Source: https://github.com/YadeWira/omega-srep, branch osrep, tag v0.0.18
+        (commit da1e692b353b044dd3c3c8d565431ca1289e12b9), release asset osrep-unit-0.0.18.tar.gz
+        (sha256 9353150e5db470436e2051d247d9bffacfed56681d1ed72c862789d783cc73b3).
 
-Files copied unchanged from osrep-unit-0.0.16.tar.gz:
+Files copied unchanged from osrep-unit-0.0.18.tar.gz:
   osrep_m6.pas         the API (encode/decode memory to memory, bounds, memory)
   osrep_encoder.pas    the encoder (-m6 = the long-range finder of osrep_lr.c)
   osrep_decoder.pas    the .osr decoder
