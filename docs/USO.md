@@ -135,7 +135,13 @@ When updating (`a`, `u`, `f`), solid blocks that remain intact are copied withou
 A block that loses files, or has a file replaced by a newer one, is rewritten: its remaining
 files in their order, the new version in the place of the old one, with the preset's method of
 the same kind (or the block's old method). New files that replace nothing go into new blocks,
-so adding files never rewrites existing blocks. `--recompress` forces rebuilding everything.
+so adding files never rewrites existing blocks. When an update only adds files (nothing
+replaced or deleted) to a single-file archive without a recovery record whose index is small
+(at most 4 KB or 1 % of the archive), PArc appends in place:
+the new blocks and a new index go after the end of the archive and the old bytes are not even
+read, so adding a file to a huge archive takes as long as compressing that file. If it fails or
+is cancelled, the archive is cut back to exactly what it was. The old index stays inside as a
+few dead bytes; `ch` rewrites the archive compactly. `--recompress` forces rebuilding everything.
 With `d` and an explicit `-m`, the whole archive is recompressed with that method (a "copying"
 command, as in FreeArc).
 
@@ -213,30 +219,35 @@ threads are used inside each block (4x4, multithreaded LZMA). Use `-s-`, `-s...`
 
 ### Recovery record: `-rr`
 
-Adds parity data that lets `parc r` (or `arc r`) repair damaged sectors.
+Adds parity data that lets `parc r` repair damaged sectors anywhere in the archive: data,
+index, locator, and the record itself. The size is the size of the **whole record**.
 
 | option | effect |
 |---|---|
-| `-rr` | recommended by size: 4%, 2% or 1% |
-| `-rr<N>%` | N percent of the archive |
-| `-rr<N>` or `-rr<N>s` | N sectors of 512 bytes |
-| `-rr<N>b`, `-rr<N>k`, `-rr<N>m` | that many bytes |
-| `-rr<amount>;<sector>` | an amount as above, with sectors of that size |
-| `-rr<N>*<sector>` | exactly N sectors of that size |
-| `-rr0.1%` / `-rr0.01%` | only CRCs for 4 KB / 64 KB sectors: detect damage, do not repair |
+| `-rr` | recommended by size: 4% (archives under 300 KB), 2% (under 2 MB) or 1% |
+| `-rr<N>%` | N percent of the archive (decimals allowed: `-rr2.5%`) |
+| `-rr<N>` or `-rr<N>s` | N sectors of 512 bytes (`-rr<N>;<sector>`: of that size) |
+| `-rr<N>b`, `-rr<N>k`, `-rr<N>m`, `-rr<N>g` | that many bytes (`kb`, `mb`, `gb` also accepted) |
+| `-rr<amount>;<sector>` | an amount as above, with sectors of that size (`-rr2%;4k`) |
+| `-rr<N>*<sector>` | at least N parity sectors of that size (rounded up to whole stripes) |
+| `-rr0.1%` / `-rr0.01%` | only checks for 4 KB / 64 KB sectors: detect damage, do not repair (`0*4kb`, `0*64kb`) |
 | `-rr-` | remove the record when updating |
 
-Without `-rr`, updating an archive keeps whatever it had. Sectors smaller than 512 bytes are
-rejected (FreeArc runs out of memory with them).
+Without `-rr`, updating an archive keeps whatever it had (the specification is stored in the
+archive). Sectors smaller than 512 bytes are rejected; an invalid specification is an error
+before anything is written.
 
 The record is Reed-Solomon: it splits the archive into stripes of up to 255 sectors, each with
 `m` parity sectors. It repairs up to `m` damaged sectors per stripe, at any position, including
 parity itself. Sectors are interleaved across stripes, so a contiguous damaged range of up to
-stripes × `m` sectors is also repaired.
+stripes × `m` sectors is also repaired. Unless a sector size is given, PArc picks the smallest one
+(from 512 bytes) whose checks take at most 1/8 of the record, and then as much parity as fits.
 
-With `-rr1%` there are about 2 or 3 parities per stripe, and with `-rr5%` about 12. The more
-scattered damage you want to tolerate, the higher the percentage. `parc r` reports which
-sectors it could not repair.
+On a 10 MB archive `-rr1%` gives 2 parities per stripe of 2048-byte sectors (20 stripes: 80 KB
+of contiguous damage), and `-rr5%` gives 11 per stripe of 512-byte sectors. The more scattered
+damage you want to tolerate, the higher the percentage. `parc r` writes `fixed.<name>`, which is
+byte-identical to the archive before it was damaged; it reports which sectors it could not repair
+(exit code 2). Format: [FORMATO-PARC.md §5](formato/FORMATO-PARC.md).
 
 ### Volumes: `-v` (`.parc` only)
 
@@ -449,6 +460,12 @@ If a block is damaged, extraction continues with the others. For that block PArc
 file it could not extract; a file that was being written, or that came out with a wrong CRC, is
 deleted (FreeArc's behaviour) unless `-kb` is given, which keeps whatever was recovered. If the
 archive has a recovery record, PArc suggests `parc r`.
+
+If the end of the archive is damaged or cut (the end locator), PArc finds the index by scanning
+backwards and reads the archive with a warning. If the index itself is damaged the archive cannot
+be listed: repair it with `parc r` if it has a recovery record. Archives written by PArc 0.0.5
+and earlier use the old container and are rejected ("old PArc format"): extract them with
+PArc 0.0.5.
 
 ### Progress and cancellation
 

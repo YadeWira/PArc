@@ -15,7 +15,7 @@ const
   PARC_VERSION = '0.0.5';
   // Método por defecto: el mismo que FreeArc (-m4)
   DEFAULT_METHOD = '4';
-  // Directorio y footer: lo mismo que usa FreeArc
+  // Índice del archivo (FORMATO-PARC.md §2.3)
   DIR_METHOD = 'lzma:1mb:normal:bt4:32';
   EXIT_NOMEM = 7;      // algún bloque pide más memoria que -ld
 
@@ -364,7 +364,6 @@ begin
     [A.FileName, A.ArcSize, A.SFXSize, BoolToStr(A.Locked, 'yes', 'no'), A.Recovery]));
   OutLn('Control blocks:');
   for i := 0 to High(A.ControlBlocks) do PrintBlock(A.ControlBlocks[i]);
-  PrintBlock(A.Footer);
   OutLn('Data blocks:');
   for i := 0 to High(A.DataBlocks) do
   begin
@@ -409,22 +408,39 @@ begin
     ErrLn('ERROR: ' + ArcName + ' has no recovery record (create one with -rr)');
     Exit(1);
   end;
-  OutLn(Format('Recovery record %s: %d sector(s) of %d bytes',
-    [Res.Info.Version, Res.Info.RecSectors, Res.Info.SectorSize]));
-  if Length(Res.BadSectors) = 0 then
+  if Res.Info.Parity > 0 then
+    OutLn(Format('Recovery record %s: %d parity sector(s) of %d bytes (%d stripe(s), %d per stripe), %s bytes protected',
+      [Res.Info.Version, Res.Info.RecSectors, Res.Info.SectorSize, Res.Info.Stripes, Res.Info.Parity, Num(Res.Info.ProtLen)]))
+  else
+    OutLn(Format('Recovery record %s: checks only (sectors of %d bytes), %s bytes protected: it detects damage but cannot repair it',
+      [Res.Info.Version, Res.Info.SectorSize, Num(Res.Info.ProtLen)]));
+  if (Length(Res.BadSectors) = 0) and (Res.BadRecord = 0) and (Length(Res.Unrecoverable) = 0) then
   begin
     OutLn('No damaged sectors.');
     Exit(0);
   end;
-  L := '';
-  for i := 0 to High(Res.BadSectors) do L := L + ' ' + IntToStr(Res.BadSectors[i]);
-  OutLn(Format('Damaged sectors (%d):%s', [Length(Res.BadSectors), L]));
+  if Length(Res.BadSectors) > 0 then
+  begin
+    L := '';
+    for i := 0 to High(Res.BadSectors) do
+      if i < 200 then L := L + ' ' + IntToStr(Res.BadSectors[i]);
+    if Length(Res.BadSectors) > 200 then L := L + ' ...';
+    OutLn(Format('Damaged sectors (%d):%s', [Length(Res.BadSectors), L]));
+  end;
+  if Res.BadRecord > 0 then OutLn('The recovery record itself was damaged too.');
   if Length(Res.Unrecoverable) > 0 then
   begin
     L := '';
-    for i := 0 to High(Res.Unrecoverable) do L := L + ' ' + IntToStr(Res.Unrecoverable[i]);
-    ErrLn(Format('ERROR: %d unrecoverable sector(s) (too many damaged sectors in the same group for the record to repair):%s',
-      [Length(Res.Unrecoverable), L]));
+    for i := 0 to High(Res.Unrecoverable) do
+      if i < 200 then L := L + ' ' + IntToStr(Res.Unrecoverable[i]);
+    if Length(Res.Unrecoverable) > 200 then L := L + ' ...';
+    if Res.Info.Parity = 0 then
+      ErrLn(Format('ERROR: %d damaged sector(s); this record has no parity (only checks) and cannot repair them',
+        [Length(Res.Unrecoverable)]))
+    else
+      ErrLn(Format('ERROR: %d unrecoverable sector(s) (more damage in the same stripe than the record can repair):%s',
+        [Length(Res.Unrecoverable), L]));
+    if Dest <> '' then ErrLn('A partially repaired copy was written to ' + Dest);
     Exit(2);
   end;
   OutLn(Format('Repaired %d sector(s) -> %s', [Length(Res.Repaired), Dest]));
@@ -1422,6 +1438,39 @@ begin
   end;
 end;
 
+{ ¿Se puede agregar en el lugar (FORMATO-PARC.md §3a)? Solo a/u/f que conservan todos los
+  archivos y todos los bloques enteros, en orden, sin recomprimir ni cambiar contraseñas, en un
+  archivo de una pieza sin registro de recuperación (lo dejaría como espacio muerto) y que se
+  leyó sin avisos (un final dañado se limpia reescribiendo). Lo nuevo va al final del archivo. }
+function CanAppendInPlace(A: TArchive; const Cmd, ArcName: string; const Entries: TWriteEntryArray;
+  const Groups: TSolidGroupArray; Removed, Replaced: Integer; Recompress, ChangeData: Boolean;
+  VolumeSize: Int64): Boolean;
+var
+  g, f, Next: Integer;
+  VolBase: string;
+begin
+  Result := False;
+  if (A = nil) or (A.Notice <> '') or A.HasRecovery then Exit;
+  if not ((Cmd = 'a') or (Cmd = 'u') or (Cmd = 'f')) then Exit;
+  if Recompress or ChangeData or (Removed > 0) or (Replaced > 0) then Exit;
+  if (VolumeSize > 0) or IsVolumeSet(ArcName, VolBase) then Exit;
+  if GetEnvironmentVariable('PARC_NO_APPEND') <> '' then Exit;   // (tests: force a rewrite)
+  Next := Ord(A.HasNoDataBlock);
+  for g := 0 to High(Groups) do
+    if Groups[g].CopyFrom <> nil then
+    begin
+      if (Groups[g].CopyFrom <> A) or (Groups[g].CopyBlock <> Next) then Exit;
+      Inc(Next);
+    end
+    else
+      for f := 0 to High(Groups[g].Files) do
+        if Entries[Groups[g].Files[f]].SrcArc <> nil then Exit;
+  if Next <> Length(A.DataBlocks) then Exit;
+  // the old index and locator stay as dead bytes: only when they are small next to the archive
+  // (otherwise many appends to an archive of tiny files would double it)
+  Result := (A.IndexBlk.CompSize + 128 <= 4096) or (A.IndexBlk.CompSize + 128 <= (A.ArcSize - A.SFXSize) div 100);
+end;
+
 { a (agregar/reemplazar), u (solo si es más nuevo), f (solo actualizar lo que ya está),
   d (borrar). Sobre un archivo existente, los bloques que se conservan enteros se copian tal
   cual y los que pierden archivos se reempaquetan; se escribe un temporal que reemplaza al
@@ -1514,6 +1563,7 @@ begin
   Skipped := TStringList.Create;
   Skipped.Sorted := True;
   if Exists then A := TArchive.Open(ArcName);
+  if (A <> nil) and (A.Notice <> '') then ErrLn('Warning: ' + A.Notice);
   try
     // PArc ya no crea autoextraíbles, pero si el archivo ya traía un módulo delante se
     // guarda (lo que va antes del archivo) y se vuelve a poner al actualizarlo.
@@ -1727,17 +1777,22 @@ begin
     RRSize := 0;
     for i := 0 to High(Entries) do Inc(RRSize, Entries[i].Meta.Size);
     Opt.Recovery := ResolveRecovery(MO.Recovery, OldRR, RRSize);
+    if (Opt.Recovery <> '') and not RecoverySpecValid(Opt.Recovery) then
+    begin
+      ErrLn('ERROR: invalid -rr specification: "' + Opt.Recovery + '" (see docs/USO.md)');
+      Exit(1);
+    end;
     Opt.Encryption := MO.Encryption;
     Opt.DataPassword := MO.DataPassword;
     Opt.HeadersPassword := MO.HeadersPassword;
     // Un archivo con -hp sigue con los encabezados cifrados aunque al actualizarlo no se repita
     // -hp (antes quedaban en claro): con la contraseña principal, si es la que los abre
     if (A <> nil) and (MO.HeadersPassword = '') and not MO.NoDataPwd and not MO.NoHeadPwd and
-       (WithoutCipher(A.Footer.Method) <> A.Footer.Method) then
+       (WithoutCipher(A.IndexBlk.Method) <> A.IndexBlk.Method) then
     begin
       if ChangeData and (MO.DataPassword <> '') then
         Opt.HeadersPassword := MO.DataPassword    // ch -p<nueva>: los encabezados también
-      else if (ArchivePassword <> '') and CryptMethodPasswordOk(A.Footer.Method, ArchivePassword) then
+      else if (ArchivePassword <> '') and CryptMethodPasswordOk(A.IndexBlk.Method, ArchivePassword) then
         Opt.HeadersPassword := ArchivePassword
       else
         ErrLn('Warning: the archive headers were encrypted with another password; give it with -hp to keep them encrypted');
@@ -1749,6 +1804,11 @@ begin
     Newest := 0;
     for i := 0 to High(Entries) do
       if Entries[i].Meta.MTimeNs > Newest then Newest := Entries[i].Meta.MTimeNs;
+    if CanAppendInPlace(A, Cmd, ArcName, Entries, Groups, Removed, Replaced, Recompress, ChangeData, Opt.VolumeSize) then
+    begin
+      Opt.AppendTo := A;
+      SfxPrefix := nil;   // the stub stays where it is
+    end;
     T0 := GetTickCount64;
     Cpu0 := ProcessCpuMs;
     St := WriteArchive(ArcName, Entries, Groups, Opt, @LogLine);
@@ -1759,7 +1819,7 @@ begin
     for i := 0 to High(JoinArcs) do JoinArcs[i].Free;
     JoinArcs := nil;
   end;
-  FinishArchive(ArcName, Opt.VolumeSize);
+  if Opt.AppendTo = nil then FinishArchive(ArcName, Opt.VolumeSize);
   FinalName := ArcName;
   // PArc ya no crea autoextraíbles; si el archivo ya traía un módulo delante, se conserva
   if Length(SfxPrefix) > 0 then
@@ -1904,6 +1964,7 @@ begin
   TOpt.ToStdout := False;
   try
     A := TArchive.Open(ArcName);
+    if A.Notice <> '' then ErrLn('Warning: ' + A.Notice);
     try
       Result := CmdExtract(A, 't', TOpt);
     finally
@@ -2526,6 +2587,7 @@ begin
       Retry := False;
       try
         A := TArchive.Open(ArcName);
+        if A.Notice <> '' then ErrLn('Warning: ' + A.Notice);
         try
           if Cmd = 'lb' then CmdBlocks(A)
           else if Cmd = 'lt' then CmdTechList(A)

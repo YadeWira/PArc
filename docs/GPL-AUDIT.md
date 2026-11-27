@@ -27,11 +27,11 @@ which files go together) is fine; porting the code is not.
 | `src/parc_parallel.pas:1-20, 160-790` budget, `TJobPool` | thread budget, pools | own (PArc) | none | — |
 | `src/parc_encoders.pas:85-125, 689-1125` (non-4x4) | chain builder, memory estimates, `FitEncodeMem`, `LimitMethodToSize`, srep/bcj/orep stages | own code; *behaviour* of FreeArc's `SetDictionary`/`limit_compression_memory` (comments at :90, :101) | low | keep; reword comments |
 | `src/parc_encoders.pas:961-1030` `TSrepEncStage` | 1-byte srep header (`1` = srep stream, `0` = stored) | FreeArc's SREP framing | medium | **done** (2026-11-26): the stage moved to the own `parc_osrep.pas` with the SREP codec rewrite; the block is now an OSREP v7 stream (MIT) behind PArc's own flag byte (FORMATO-PARC §6.13) |
-| `src/parc_archive.pas:1-492` | reader of the container: end descriptor, FOOTER, DIR_BLOCK columns, signature `ArC\x01` | written from FreeArc's *format description* ("el formato base de FreeArc", FreeArc-ex doc §3/§5/§6); code is ours | medium (format), low (code) | own container format later (see §3) |
-| `src/parc_writer.pas:114-150, 336-470` | local descriptor, DIR_BLOCK, FOOTER serialization; `enumDirectories` order (:380); "provisional footer first" like `ArcvProcessRead.hs` (:1235) | same format description; the directory-numbering and provisional-footer steps follow the `.hs` structure | medium | own container format later (see §3) |
-| `src/parc_writer.pas:150-200` | recovery record = two storing `RECOVERY_BLOCK`s | layout of `ArcRecover.hs` | medium | with §3 |
-| `src/parc_recovery.pas:198-240, 241-400` | writer "espejo de ArcRecover.hs:104-181", `parseNumber` (`Utils.hs`), `-rr` spec parsing "como ArcRecover.hs (writeRecoveryBlocks)" | port of the recovery-record writer structure; the RS math (`parc_rs`, `parc-rs1`) is ours | high (198-240 writer, 274-330 spec) / none (RS) | rewrite with own recovery layout (open) |
-| `src/parc_bytes.pas:1-255` | VInt (shortest form, 0xFF+8 bytes from 2^56, `ByteStream.hs`), CStr, U32 readers/writers | FreeArc's primitive encoding (`ByteStream.hs`), code ours | medium (format) | own container format later (§3) |
+| `src/parc_archive.pas:1-492` | reader of the container: end descriptor, FOOTER, DIR_BLOCK columns, signature `ArC\x01` | written from FreeArc's *format description* ("el formato base de FreeArc", FreeArc-ex doc §3/§5/§6); code is ours | medium (format), low (code) | **done** (2026-11-26): own container, format 2 (FORMATO-PARC §1-§4): 16-byte head, data blocks in runs, index = header + payload of typed sections (archive, blocks with a method table, front-coded directory names, kinds, fixed-width/LEB128 columns chosen by trial, times, attributes, links, comment, -rr spec), 24-byte end locator, backward scan for the index; written without FreeArc's documents or code |
+| `src/parc_writer.pas:114-150, 336-470` | local descriptor, DIR_BLOCK, FOOTER serialization; `enumDirectories` order (:380); "provisional footer first" like `ArcvProcessRead.hs` (:1235) | same format description; the directory-numbering and provisional-footer steps follow the `.hs` structure | medium | **done** (2026-11-26): `BuildIndex`/`WriteIndex`, head and locator; no descriptors, no footer (provisional or final); the recovery record goes after the locator |
+| `src/parc_writer.pas:150-200` | recovery record = two storing `RECOVERY_BLOCK`s | layout of `ArcRecover.hs` | medium | **done** (2026-11-26): replaced by `WriteRecoveryRecord` (own layout, below) |
+| `src/parc_recovery.pas:198-240, 241-400` | writer "espejo de ArcRecover.hs:104-181", `parseNumber` (`Utils.hs`), `-rr` spec parsing "como ArcRecover.hs (writeRecoveryBlocks)" | port of the recovery-record writer structure; the RS math (`parc_rs`, `parc-rs1`) is ours | high (198-240 writer, 274-330 spec) / none (RS) | **done** (2026-11-26): unit rewritten without reading those bodies: own record `parc-rr1` (FORMATO-PARC §5: descriptor at both ends, two stripe CRC tables, 16-bit sector checks with per-stripe CRC-32 verification, parity on `parc_rs`), own `-rr` parser written from the grammar in USO.md, own sizing rule, own repair (rebuilds the record too: byte-identical output) |
+| `src/parc_bytes.pas:1-255` | VInt (shortest form, 0xFF+8 bytes from 2^56, `ByteStream.hs`), CStr, U32 readers/writers | FreeArc's primitive encoding (`ByteStream.hs`), code ours | medium (format) | **done** (2026-11-26): VInt and CStr removed; LEB128 `Uv`, zigzag `Sv`, fixed-width big-endian `UBE`, length-prefixed `Str`, `ZStr` only in name columns |
 | `src/parc_lzma.pas:1-10` | LZMA raw stream "como lzma_decompress2 de FreeArc" (end marker framing) | decoder from LzmaSpec (public domain); only the framing convention is FreeArc's | low | — |
 | `src/parc.lpr:628-700` `CollectEntries.Walk` | directory walk order "como findFiles_FileInfo" | behaviour (order) | low | keep |
 | `src/parc.lpr:1003-1022` `ResolveRecovery` | `-rr` defaults "como ArcRecover.hs" | behaviour | low | keep |
@@ -63,11 +63,21 @@ deleted), own canonical methods and limits (`parc_canon.pas`), own data-type det
 
 ## 3. When the last piece is gone
 
-- **Container format** (`parc_archive`, `parc_writer`, `parc_bytes`, recovery layout) is still
-  FreeArc's on-disk structure (descriptors, footer, DIR_BLOCK columns, VInt). Formats are not
-  code and our implementation is ours, but for a clean MIT story the container should get its
-  own layout (pre-1.0: no compatibility needed). Do this last, together with the recovery
-  record layout.
+- **Container format** (`parc_archive`, `parc_writer`, `parc_bytes`, recovery layout): **done**
+  (2026-11-26, container format 2 and record `parc-rr1`; FORMATO-PARC §1-§5). Archives of PArc
+  0.0.5 and earlier are rejected ("old PArc format"). What still resembles FreeArc, all
+  *observable behaviour or generic technique*, none of it code (confidence low, keep):
+  - the index stores the directory as a table of parent directories plus a base name and a
+    directory number per entry, column by column (FreeArc's `DIR_BLOCK` does too; so do many
+    formats). Ours is front-coded, with the number absolute or delta-coded by trial, and the
+    columns differ (kinds only for entries without data, no CRC for empty files, fixed-width
+    big-endian or LEB128 sizes/times chosen by trial);
+  - data blocks have no local header and are described only by the index (also 7z's choice);
+  - entries without data (directories, links) come first, like FreeArc's first block of
+    directories; in format 2 they are not a block at all;
+  - the method-string syntax (`lzma:1mb+...`), the `-rr` option syntax and the recommended
+    4 %/2 %/1 % (`ResolveRecovery` in `parc.lpr`), the `lb`/`lt` listings, and the path
+    sanitizing rule (`SanitizePath`, like `remove_unsafe_dirs`) are user-visible behaviour.
 - **`reference/freearc-0.67/`** (2.9 MB of FreeArc sources and notices): delete it from the tree
   once no file is derived from it any more (keep only a pointer to the git commit that had it,
   as with `82ea8d9`). While any GPL-derived file remains it must stay (it carries the notices).
@@ -80,5 +90,5 @@ deleted), own canonical methods and limits (`parc_canon.pas`), own data-type det
   "Ported codecs" row; source headers that say "port de"/"como FreeArc" (reword to describe the
   behaviour only).
 - `parc_presets_data.inc` (FreeArc's `arc.ini`/`arc.groups` text) is already gone (main
-  `313a124`) and SREP is replaced by OSREP (2026-11-26). What is left before the switch: Dict (codec), then the container and
-  recovery layouts (§1) and the notices/LICENSE steps above.
+  `313a124`) and SREP is replaced by OSREP (2026-11-26). What is left before the switch: Dict (codec) and the notices/LICENSE steps above (the container
+  and recovery layouts are done, 2026-11-26).

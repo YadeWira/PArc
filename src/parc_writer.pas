@@ -1,7 +1,8 @@
-{ Escritura de archivos .parc (FORMATO-PARC.md).
-  Orden en disco: HEADER + descriptor, bloques de datos (sin descriptor), DIR_BLOCK +
-  descriptor, FOOTER + descriptor. Se escribe a un temporal que se renombra al final: si algo
-  falla a mitad de camino no queda un archivo roto con el nombre final. }
+{ Escritura de archivos .parc (FORMATO-PARC.md §1-§4, contenedor versión 2).
+  Orden en disco: cabeza (16 bytes), bloques de datos uno tras otro, índice (encabezado +
+  secciones), localizador final y, con -rr, el registro de recuperación (parc_recovery). Se
+  escribe a un temporal que se renombra al final: si algo falla a mitad de camino no queda un
+  archivo roto con el nombre final. }
 unit parc_writer;
 
 {$mode objfpc}{$H+}
@@ -33,14 +34,14 @@ type
   TSolidGroupArray = array of TSolidGroup;
 
   TWriteOptions = record
-    DirMethod: string;    // compresión del directorio y del footer
+    DirMethod: string;    // compresión del índice
     Comment: RawByteString;
     Recovery: string;     // especificación del registro de recuperación ('' = sin), ya resuelta
     KeepTemp: Boolean;    // no renombrar: el llamador llama a FinishArchive (p. ej. después de
                           // cerrar el archivo viejo, que en Windows no se puede reemplazar abierto)
     Encryption: string;   // -ae=: "chacha" (XChaCha20-Poly1305) o "aes" (AES-256-GCM), con :t/:m/:p
     DataPassword: RawByteString;     // -p: cifra los bloques de datos ('' = sin cifrar)
-    HeadersPassword: RawByteString;  // -hp: cifra también directorio y footer
+    HeadersPassword: RawByteString;  // -hp: cifra también el índice
     VolumeSize: Int64;    // -v: volúmenes de este tamaño (FileName.001, .002...); solo .parc
     Parallel: Boolean;    // comprimir grupos de datos independientes en paralelo
     Locked: Boolean;      // -k / k: marca de bloqueado en el footer (no se modifica más)
@@ -48,6 +49,11 @@ type
       (-op, consola) y todo se reempaqueta solo con DataPassword ('' = sin cifrar), sin exigir
       que sea la de los bloques viejos. }
     ChangePassword: Boolean;
+    { <> nil: append to this archive in place (FORMATO-PARC.md §3a). Groups that copy one of its
+      blocks (CopyFrom = AppendTo, every block of it, in order) are referenced where they are;
+      the new blocks, a new index and a new locator are written after the end of the file. On
+      failure the file is cut back to its old size. The caller does not call FinishArchive. }
+    AppendTo: TArchive;
   end;
 
   TWriteStats = record
@@ -58,7 +64,7 @@ type
   TLogProc = procedure(const Msg: string);
 
 { Escribe el archivo completo. Los grupos se escriben en orden; los directorios (entradas con
-  Meta.IsDir) van en un bloque inicial sin datos, como hace FreeArc. }
+  Meta.IsDir) y los enlaces van primero en el índice, sin bloque (FORMATO-PARC.md §3). }
 function WriteArchive(const FileName: string; const Entries: TWriteEntryArray;
   const Groups: array of TSolidGroup; const Opt: TWriteOptions; Log: TLogProc): TWriteStats;
 
@@ -86,19 +92,10 @@ uses
   parc_volume, parc_parallel, parc_strmap, parc_crypt, parc_canon;
 
 const
-  VERSION_PARC: array[0..3] of Byte = (PARC_FORMAT_VERSION, 0, 0, 0);
   COPY_BUF = 1 shl 20;
 
 type
-  TBlockInfo = record
-    BlockType: Integer;
-    Method: string;
-    Pos, OrigSize, CompSize: Int64;
-    Crc: LongWord;
-  end;
-  TBlockInfoArray = array of TBlockInfo;
-
-  { Estado de un archivo ya escrito, en el orden del directorio. }
+  { Estado de un archivo ya escrito, en el orden del índice. }
   TDirFile = record
     Entry: Integer;       // índice en Entries
     Size: Int64;          // bytes leídos de verdad (el archivo pudo cambiar)
@@ -110,96 +107,6 @@ type
     Pos, CompSize: Int64;
     Files: array of TDirFile;
   end;
-
-{ Descriptor local (el formato base de FreeArc §3): firma, tipo, método, tamaños, CRC de los datos y
-  CRC del propio descriptor. }
-procedure WriteDescriptor(S: TStream; Parc: Boolean; const B: TBlockInfo);
-var
-  w: TByteWriter;
-begin
-  w.Clear;
-  w.U32(PARC_SIGNATURE);
-  w.VInt(B.BlockType);
-  w.CStr(B.Method);
-  w.VInt(B.OrigSize);
-  w.VInt(B.CompSize);
-  w.U32(B.Crc);
-  w.U32(CalcCRC(PByte(w.Data), w.Len));
-  S.WriteBuffer(w.Data[0], w.Len);
-end;
-
-function WriteControlBlock(S: TStream; Parc: Boolean; BlockType: Integer; const Method: string;
-  const Data: TBytes; const Alg: string = ''; const Pwd: RawByteString = ''): TBlockInfo; forward;
-
-{ Largo del descriptor de un bloque storing de Size bytes (no depende del CRC: siempre 4 bytes). }
-function StoringDescriptorLen(Parc: Boolean; BlockType: Integer; Size: Int64): Integer;
-var
-  w: TByteWriter;
-begin
-  w.Clear;
-  w.U32(PARC_SIGNATURE);
-  w.VInt(BlockType);
-  w.CStr('storing');
-  w.VInt(Size);
-  w.VInt(Size);
-  w.U32(0);
-  w.U32(0);
-  Result := w.Len;
-end;
-
-{ Registro de recuperación (ArcRecover.hs; el formato base de FreeArc §7.4): dos RECOVERY_BLOCK storing,
-  el de sectores y el de CRCs+info, protegiendo todo lo escrito hasta acá. El info guarda la
-  posición del bloque de CRCs, así que hay que saber de antemano cuánto ocupa el de sectores. }
-procedure WriteRecovery(S: TStream; const Spec: string; var Control: TBlockInfoArray);
-var
-  ArcSize, SectorsSize, CrcsSize, PosSectors, PosCrcs: Int64;
-  SectorSize, RecSectors, n: Integer;
-  Sectors, Crcs: TBytes;
-  Info: TRecoveryInfo;
-  B: TBlockInfo;
-begin
-  ArcSize := S.Position;
-  if not RecoveryPlan(ArcSize, Spec, SectorSize, RecSectors, SectorsSize, CrcsSize) then   // .parc: Reed-Solomon
-    raise Exception.CreateFmt('invalid -rr specification: "%s"', [Spec]);
-  PosSectors := S.Position;
-  PosCrcs := PosSectors + SectorsSize + StoringDescriptorLen(True, RECOVERY_BLOCK, SectorsSize);
-  if not RecoveryBuild(S, ArcSize, 0, PosCrcs, Spec, Sectors, Crcs, Info) then
-    raise Exception.Create('could not build the recovery record');
-  S.Position := PosSectors;   // RecoveryBuild lee lo ya escrito
-  // Solo el tamaño de los sectores decide dónde cae el bloque de CRCs; ese bloque lleva además
-  // el addinfo (versión, tamaños) delante de los CRCs, así que mide más que CrcsSize
-  if Length(Sectors) <> SectorsSize then
-    raise Exception.CreateFmt('recovery record: %d sector bytes instead of %d',
-      [Length(Sectors), SectorsSize]);
-  n := Length(Control);
-  SetLength(Control, n + 2);
-  B := WriteControlBlock(S, True, RECOVERY_BLOCK, 'storing', Sectors);
-  Control[n] := B;
-  B := WriteControlBlock(S, True, RECOVERY_BLOCK, 'storing', Crcs);
-  if B.Pos <> PosCrcs then raise Exception.Create('recovery record: CRC block position');
-  Control[n + 1] := B;
-end;
-
-{ Escribe un bloque de control (datos comprimidos + descriptor) y devuelve su información. }
-function WriteControlBlock(S: TStream; Parc: Boolean; BlockType: Integer; const Method: string;
-  const Data: TBytes; const Alg: string; const Pwd: RawByteString): TBlockInfo;
-var
-  Comp: TBytes;
-  EncMethod: string;
-begin
-  Result.BlockType := BlockType;
-  EncMethod := Method;
-  // -hp: como el de datos, pero en el directorio y el footer (con la subclave de cabeceras)
-  if Pwd <> '' then EncMethod := Method + '+' + MakeCipherStage(Alg, Pwd, True);
-  Result.Method := EncMethod;
-  Result.Pos := S.Position;
-  Result.OrigSize := Length(Data);
-  Result.Crc := CalcCRC(PByte(Data), Length(Data));
-  Comp := CompressMem(EncMethod, PByte(Data), Length(Data));
-  Result.CompSize := Length(Comp);
-  if Length(Comp) > 0 then S.WriteBuffer(Comp[0], Length(Comp));
-  WriteDescriptor(S, Parc, Result);
-end;
 
 function ParentOf(const Name: string): string;
 var
@@ -214,158 +121,63 @@ begin
   Result := Copy(Name, LastDelimiter('/', Name) + 1, MaxInt);
 end;
 
-{ Tiempo de la columna Time (CTime de 32 bits con signo): recortado a su rango. }
-function Time32(Ns: Int64): LongWord;
-var
-  Sec: Int64;
-begin
-  Sec := Ns div 1000000000;
-  if (Ns < 0) and (Ns mod 1000000000 <> 0) then Dec(Sec);   // piso, no truncamiento
-  if Sec > High(LongInt) then Sec := High(LongInt);
-  if Sec < Low(LongInt) then Sec := Low(LongInt);
-  Result := LongWord(LongInt(Sec));
-end;
-
-{ ZigZag: mapea Int64 a QWord para que los deltas chicos (positivos o negativos) ocupen
-  pocos bytes en VInt. }
-function ZigZag(V: Int64): QWord;
-begin
-  if V >= 0 then Result := QWord(V) shl 1
-  else Result := (QWord(-V) shl 1) - 1;
-end;
-
 const
+  ENC_SAMPLE = 32768;   // entries compressed to choose between two encodings of a column
   POW10: array[0..9] of LongWord = (1, 10, 100, 1000, 10000, 100000, 1000000, 10000000,
     100000000, 1000000000);
-  SUBSEC_SAMPLE = 65536;   // archivos que se miran para elegir la codificación de las fechas
 
-{ Fechas del directorio: hay dos codificaciones sin pérdida (FORMATO-PARC.md §2).
-  - MTIME_NS_DELTA (7): cada mtime en ns como delta zigzag del anterior. Ideal cuando muchos
-    archivos seguidos tienen la misma fecha (instalaciones, copias sin ns).
-  - MTIME_SUBSEC (8): solo la fracción de segundo; los segundos ya están en la columna Time.
-    Con ns al azar (ext4, NTFS) ocupa bastante menos, y si no hay fracciones casi nada. Solo
-    vale si todos los segundos entran en la columna Time (Int32: 1901-2038).
-  Se elige la que comprimida con el método del directorio sale más chica (sobre los primeros
-  SUBSEC_SAMPLE archivos, para acotar el costo en directorios enormes). Un PArc 0.0.2 no
-  conoce el tag 8: lista y extrae con los segundos de la columna Time. }
-procedure BuildMTimeField(const Ns: array of Int64; const DirMethod: string; out Tag: Integer;
-  out Field: TByteWriter);
-var
-  f7, f8: TByteWriter;
-  i, n, k, W, Sample: Integer;
-  Sec, PrevNs: Int64;
-  Sub: array of LongWord;
-  MaxSub: LongWord;
-  AllFit: Boolean;
-  Len7, Len8: SizeInt;
-
-  procedure PutSub(var Dst: TByteWriter; v: LongWord);
-  var
-    j: Integer;
-  begin
-    for j := 0 to W - 1 do
-    begin
-      Dst.U8(Byte(v));
-      v := v shr 8;
-    end;
-  end;
-
+{ Seconds (floor) and sub-second nanoseconds of a time in ns. }
+procedure SplitNs(Ns: Int64; out Sec: Int64; out Sub: LongWord);
 begin
-  n := Length(Ns);
-  Sample := n;
-  if Sample > SUBSEC_SAMPLE then Sample := SUBSEC_SAMPLE;
-  f7.Clear;
-  PrevNs := 0;
-  Len7 := 0;
-  for i := 0 to n - 1 do
-  begin
-    f7.VInt(ZigZag(Ns[i] - PrevNs));
-    PrevNs := Ns[i];
-    if i = Sample - 1 then Len7 := f7.Len;
-  end;
-  Tag := DIRTAG_MTIME_NS_DELTA;
-  Field := f7;
-  // Fracciones de segundo, si todos los segundos entran en la columna Time
-  SetLength(Sub, n);
-  AllFit := True;
-  for i := 0 to n - 1 do
-  begin
-    Sec := Ns[i] div 1000000000;
-    if (Ns[i] < 0) and (Ns[i] mod 1000000000 <> 0) then Dec(Sec);   // piso, como Time32
-    if (Sec < Low(LongInt)) or (Sec > High(LongInt)) then
-    begin
-      AllFit := False;
-      Break;
-    end;
-    Sub[i] := LongWord(Ns[i] - Sec * 1000000000);
-  end;
-  if not AllFit then Exit;
-  // Unidad común más grande (10^k ns: 100 ns en NTFS, 1 µs...) y bytes por valor
-  k := 9;
-  MaxSub := 0;
-  for i := 0 to n - 1 do
-    if Sub[i] <> 0 then
-    begin
-      while (k > 0) and (Sub[i] mod POW10[k] <> 0) do Dec(k);
-      if Sub[i] > MaxSub then MaxSub := Sub[i];
-    end;
-  if MaxSub = 0 then k := 9;
-  MaxSub := MaxSub div POW10[k];
-  W := 0;
-  while (W < 4) and (QWord(MaxSub) >= QWord(1) shl (8 * W)) do Inc(W);
-  f8.Clear;
-  f8.U8(k);
-  f8.U8(W);
-  for i := 0 to n - 1 do PutSub(f8, Sub[i] div POW10[k]);
-  if W = 0 then
-  begin
-    Tag := DIRTAG_MTIME_SUBSEC;
-    Field := f8;
-    Exit;
-  end;
-  // Comparar comprimidos (sobre una muestra del principio si es muy grande)
-  Len8 := Length(CompressMem(DirMethod, PByte(f8.Data), 2 + Sample * W));
-  Len7 := Length(CompressMem(DirMethod, PByte(f7.Data), Len7));
-  if Len8 < Len7 then
-  begin
-    Tag := DIRTAG_MTIME_SUBSEC;
-    Field := f8;
-  end;
+  Sec := Ns div 1000000000;
+  if (Ns < 0) and (Ns mod 1000000000 <> 0) then Dec(Sec);
+  Sub := LongWord(Ns - Sec * 1000000000);
 end;
 
-{ Serializa el DIR_BLOCK (el formato base de FreeArc §6 + campos opcionales de FORMATO-PARC.md §2). }
-function BuildDirectory(const Entries: array of TWriteEntry; const Blocks: array of TDataBlock;
-  DirPos: Int64; Parc: Boolean; const DirMethod: string): TBytes;
+{ The index payload (FORMATO-PARC.md §3): a list of sections "U8 id · Uv length · bytes",
+  ended by id 0. Entries in index order: the ones without data (directories, links) first,
+  then the files of each data block in block order. NoData: Blocks[0] is the pseudo-block of
+  the entries without data (it has no bytes and is not stored as a block). Base: where the
+  archive starts in the stream (block positions are absolute; runs are made of the blocks
+  that follow each other). }
+function BuildIndex(const Entries: array of TWriteEntry; const Blocks: array of TDataBlock;
+  NoData: Boolean; Base: Int64; const Opt: TWriteOptions): TBytes;
 var
   w, f: TByteWriter;
   All: array of TDirFile;
-  DirMap: TStrIntMap;
-  DirNames: array of string;
-  Parent: string;
+  DirMap, MethMap: TStrIntMap;
+  DirNames, MethNames: array of string;
+  Parent, Prev: string;
   DirIdx: array of Integer;
-  b, i, n, k: Integer;
-  Ns: array of Int64;
-  Tag: Integer;
+  b, i, n, k, Z, B0, NB, Wd, Ws, Unit10: Integer;
+  Secs: array of Int64;
+  Subs: array of LongWord;
+  MinSec, MaxRel, MaxSize: Int64;
+  MaxSub: LongWord;
   AllWin, AllUnix: Boolean;
+  Flags: QWord;
+  Kind: Byte;
+  ca, cb, sa: TByteWriter;
+  la, lb: SizeInt;
+  Sample: Integer;
+  Prev64: Int64;
 
-  procedure OptField(Tag: Integer; const Field: TByteWriter);
+  { True if A's first LA bytes compress (with the index's method) to no more than B's first LB. }
+  function Smaller(const A: TByteWriter; LA: SizeInt; const B: TByteWriter; LB: SizeInt): Boolean;
   begin
-    w.VInt(Tag);
-    w.U8(0);                  // no obligatorio: un lector viejo lo puede saltear
-    w.VInt(Field.Len);
-    w.Raw(PByte(Field.Data), Field.Len);
+    Result := Length(CompressMem(Opt.DirMethod, PByte(A.Data), LA)) <=
+              Length(CompressMem(Opt.DirMethod, PByte(B.Data), LB));
+  end;
+
+  procedure Section(Id: Byte; const Body: TByteWriter);
+  begin
+    w.U8(Id);
+    w.Uv(Body.Len);
+    w.Raw(PByte(Body.Data), Body.Len);
   end;
 
 begin
-  w.Clear;
-  // 1. Bloques de datos
-  w.VInt(Length(Blocks));
-  for b := 0 to High(Blocks) do w.VInt(Length(Blocks[b].Files));
-  for b := 0 to High(Blocks) do w.CStr(Blocks[b].Method);
-  for b := 0 to High(Blocks) do w.VInt(DirPos - Blocks[b].Pos);
-  for b := 0 to High(Blocks) do w.VInt(Blocks[b].CompSize);
-
-  // Todos los archivos en el orden de los bloques
+  // Every entry, in index order
   n := 0;
   for b := 0 to High(Blocks) do Inc(n, Length(Blocks[b].Files));
   SetLength(All, n);
@@ -376,10 +188,77 @@ begin
       All[n] := Blocks[b].Files[i];
       Inc(n);
     end;
+  Z := 0;
+  B0 := 0;
+  if NoData and (Length(Blocks) > 0) then
+  begin
+    Z := Length(Blocks[0].Files);
+    B0 := 1;
+  end;
+  NB := Length(Blocks) - B0;
+  Sample := n;
+  if Sample > ENC_SAMPLE then Sample := ENC_SAMPLE;
 
-  // 2. Directorios únicos, en orden de aparición (enumDirectories de ArhiveDirectory.hs)
-  // Mapa hash en vez de TStringList.IndexOf, que era O(archivos x directorios) con
-  // AnsiCompareStr; igualdad de bytes y el mismo orden de aparición
+  w.Clear;
+  // 1. ARCHIVE: flags, entries, entries without data, blocks
+  f.Clear;
+  Flags := 0;
+  if Opt.Locked then Flags := Flags or ARC_FLAG_LOCKED;
+  f.Uv(Flags);
+  f.Uv(n);
+  f.Uv(Z);
+  f.Uv(NB);
+  Section(SEC_ARCHIVE, f);
+
+  // 2. BLOCKS: one run (they are written back to back), method table, per-block columns
+  if NB > 0 then
+  begin
+    f.Clear;
+    // runs: blocks stored back to back (one, unless the archive was appended to in place)
+    ca.Clear;
+    k := 0;
+    i := B0;
+    for b := B0 to High(Blocks) do
+      if (b = High(Blocks)) or (Blocks[b + 1].Pos <> Blocks[b].Pos + Blocks[b].CompSize) then
+      begin
+        ca.Uv(QWord(Blocks[i].Pos - Base));
+        ca.Uv(b - i + 1);
+        Inc(k);
+        i := b + 1;
+      end;
+    f.Uv(k);
+    f.Raw(PByte(ca.Data), ca.Len);
+    MethMap.Init(64);
+    MethNames := nil;
+    SetLength(DirIdx, NB);
+    for b := B0 to High(Blocks) do
+    begin
+      k := MethMap.Get(Blocks[b].Method);
+      if k < 0 then
+      begin
+        k := MethMap.Count;
+        if k >= Length(MethNames) then SetLength(MethNames, 2 * k + 8);
+        MethMap.Put(Blocks[b].Method, k);
+        MethNames[k] := Blocks[b].Method;
+      end;
+      DirIdx[b - B0] := k;
+    end;
+    f.Uv(MethMap.Count);
+    for i := 0 to MethMap.Count - 1 do f.Str(MethNames[i]);
+    for b := 0 to NB - 1 do f.Uv(DirIdx[b]);
+    for b := B0 to High(Blocks) do f.Uv(Length(Blocks[b].Files));
+    for b := B0 to High(Blocks) do f.Uv(QWord(Blocks[b].CompSize));
+    Section(SEC_BLOCKS, f);
+  end;
+
+  if n = 0 then
+  begin
+    w.U8(SEC_END);
+    Exit(w.Bytes);
+  end;
+
+  // 3. NAMES: parent directories (front-coded against the previous one, in order of first
+  // use), base names, and each entry's directory as a delta from the previous entry's
   DirMap.Init(1024);
   DirNames := nil;
   SetLength(DirIdx, n);
@@ -396,92 +275,223 @@ begin
     end;
     DirIdx[i] := k;
   end;
-  w.VInt(DirMap.Count);
-  for i := 0 to DirMap.Count - 1 do w.CStr(DirNames[i]);
-
-  // 3. Columnas por archivo
-  for i := 0 to n - 1 do w.CStr(BaseOf(Entries[All[i].Entry].StoredName));
-  for i := 0 to n - 1 do w.VInt(DirIdx[i]);
-  for i := 0 to n - 1 do w.VInt(All[i].Size);
-  for i := 0 to n - 1 do w.U32(Time32(Entries[All[i].Entry].Meta.MTimeNs));
-  for i := 0 to n - 1 do w.U8(Ord(Entries[All[i].Entry].Meta.IsDir));
-  for i := 0 to n - 1 do w.U32(All[i].Crc);
-
-  // 4. Campos opcionales (solo .parc)
-  if Parc then
+  f.Clear;
+  f.Uv(DirMap.Count);
+  Prev := '';
+  for i := 0 to DirMap.Count - 1 do
   begin
-    // MTimeNs sin pérdida: delta zigzag (tag 7) o fracciones de segundo (tag 8)
-    SetLength(Ns, n);
-    for i := 0 to n - 1 do Ns[i] := Entries[All[i].Entry].Meta.MTimeNs;
-    BuildMTimeField(Ns, DirMethod, Tag, f);
-    OptField(Tag, f);
-    AllWin := n > 0;
-    AllUnix := n > 0;
-    for i := 0 to n - 1 do
-    begin
-      AllWin := AllWin and Entries[All[i].Entry].Meta.HasWinAttr;
-      AllUnix := AllUnix and Entries[All[i].Entry].Meta.HasUnixMode;
-    end;
-    if AllWin then
-    begin
-      f.Clear;
-      for i := 0 to n - 1 do f.U32(Entries[All[i].Entry].Meta.WinAttr);
-      OptField(DIRTAG_WIN_ATTR, f);
-    end;
-    if AllUnix then
-    begin
-      f.Clear;
-      for i := 0 to n - 1 do f.U32(Entries[All[i].Entry].Meta.UnixMode);
-      OptField(DIRTAG_UNIX_MODE, f);
-    end;
-    // Enlaces simbólicos: solo los que hay (cantidad, y por cada uno índice, destino, ¿a dir?)
     k := 0;
-    for i := 0 to n - 1 do
-      if Entries[All[i].Entry].Meta.IsLink then Inc(k);
-    if k > 0 then
+    while (k < Length(Prev)) and (k < Length(DirNames[i])) and (Prev[k + 1] = DirNames[i][k + 1]) do Inc(k);
+    f.Uv(k);
+    f.ZStr(Copy(DirNames[i], k + 1, MaxInt));
+    Prev := DirNames[i];
+  end;
+  for i := 0 to n - 1 do f.ZStr(BaseOf(Entries[All[i].Entry].StoredName));
+  // directory of each entry: absolute (Uv) or as a delta from the previous one (Sv), whichever
+  // compresses smaller
+  ca.Clear;
+  cb.Clear;
+  la := -1; lb := -1;
+  k := 0;
+  for i := 0 to n - 1 do
+  begin
+    ca.Uv(DirIdx[i]);
+    cb.Sv(DirIdx[i] - k);
+    k := DirIdx[i];
+    if i = Sample - 1 then begin la := ca.Len; lb := cb.Len; end;
+  end;
+  if la < 0 then begin la := ca.Len; lb := cb.Len; end;
+  if Smaller(ca, la, cb, lb) then begin f.U8(0); f.Raw(PByte(ca.Data), ca.Len); end
+  else begin f.U8(1); f.Raw(PByte(cb.Data), cb.Len); end;
+  Section(SEC_NAMES, f);
+
+  // 4. KINDS of the entries without data
+  if Z > 0 then
+  begin
+    f.Clear;
+    for i := 0 to Z - 1 do
+      with Entries[All[i].Entry].Meta do
+      begin
+        if IsLink then
+        begin
+          if LinkToDir then Kind := KIND_LINK_DIR else Kind := KIND_LINK;
+        end
+        else if IsDir then Kind := KIND_DIR
+        else Kind := KIND_FILE;
+        f.U8(Kind);
+      end;
+    Section(SEC_KINDS, f);
+  end;
+
+  // 5. SIZES (fixed width, big-endian) and 6. CRCS (non-empty files) of the files in blocks
+  if n > Z then
+  begin
+    MaxSize := 0;
+    for i := Z to n - 1 do
+      if All[i].Size > MaxSize then MaxSize := All[i].Size;
+    Wd := UBEWidth(QWord(MaxSize));
+    // fixed width (big-endian) or LEB128, whichever compresses smaller
+    ca.Clear;
+    cb.Clear;
+    la := -1; lb := -1;
+    for i := Z to n - 1 do
     begin
-      f.Clear;
-      f.VInt(k);
-      for i := 0 to n - 1 do
-        with Entries[All[i].Entry].Meta do
-          if IsLink then
-          begin
-            f.VInt(i);
-            f.CStr(LinkTarget);
-            f.U8(Ord(LinkToDir));
-          end;
-      OptField(DIRTAG_SYMLINK, f);
+      ca.UBE(QWord(All[i].Size), Wd);
+      cb.Uv(QWord(All[i].Size));
+      if i - Z = Sample - 1 then begin la := ca.Len; lb := cb.Len; end;
+    end;
+    if la < 0 then begin la := ca.Len; lb := cb.Len; end;
+    f.Clear;
+    if Smaller(ca, la, cb, lb) then begin f.U8(Wd); f.Raw(PByte(ca.Data), ca.Len); end
+    else begin f.U8(SIZES_LEB); f.Raw(PByte(cb.Data), cb.Len); end;
+    Section(SEC_SIZES, f);
+    f.Clear;
+    for i := Z to n - 1 do
+      if All[i].Size > 0 then f.U32(All[i].Crc);
+    Section(SEC_CRCS, f);
+  end;
+
+  // 7. MTIME: seconds from the smallest one (fixed width, big-endian), then the sub-second part
+  // in units of 10^k ns (fixed width, 0..4 bytes)
+  SetLength(Secs, n);
+  SetLength(Subs, n);
+  MinSec := High(Int64);
+  for i := 0 to n - 1 do
+  begin
+    SplitNs(Entries[All[i].Entry].Meta.MTimeNs, Secs[i], Subs[i]);
+    if Secs[i] < MinSec then MinSec := Secs[i];
+  end;
+  MaxRel := 0;
+  Unit10 := 9;
+  MaxSub := 0;
+  for i := 0 to n - 1 do
+  begin
+    if Secs[i] - MinSec > MaxRel then MaxRel := Secs[i] - MinSec;
+    if Subs[i] <> 0 then
+    begin
+      while (Unit10 > 0) and (Subs[i] mod POW10[Unit10] <> 0) do Dec(Unit10);
+      if Subs[i] > MaxSub then MaxSub := Subs[i];
     end;
   end;
-  w.VInt(DIRTAG_END);
+  if MaxSub = 0 then Unit10 := 0;
+  Ws := UBEWidth(MaxSub div POW10[Unit10]);
+  Wd := UBEWidth(QWord(MaxRel));
+  // mode 0: seconds and sub-second parts in two fixed-width columns; mode 1: each time in ns
+  // as a delta from the previous one. Whichever compresses smaller (the seconds and the parts
+  // are compared together)
+  ca.Clear;
+  sa.Clear;
+  ca.Sv(MinSec);
+  ca.U8(Wd);
+  for i := 0 to n - 1 do
+  begin
+    ca.UBE(QWord(Secs[i] - MinSec), Wd);
+    if i < Sample then sa.UBE(QWord(Secs[i] - MinSec), Wd);
+  end;
+  ca.U8(Unit10);
+  ca.U8(Ws);
+  for i := 0 to n - 1 do
+  begin
+    ca.UBE(Subs[i] div POW10[Unit10], Ws);
+    if i < Sample then sa.UBE(Subs[i] div POW10[Unit10], Ws);
+  end;
+  f.Clear;
+  if Ws = 0 then
+  begin
+    f.U8(0);
+    f.Raw(PByte(ca.Data), ca.Len);
+  end
+  else
+  begin
+    cb.Clear;
+    lb := -1;
+    Prev64 := 0;
+    for i := 0 to n - 1 do
+    begin
+      cb.Sv(Entries[All[i].Entry].Meta.MTimeNs - Prev64);
+      Prev64 := Entries[All[i].Entry].Meta.MTimeNs;
+      if i = Sample - 1 then lb := cb.Len;
+    end;
+    if lb < 0 then lb := cb.Len;
+    if Smaller(sa, sa.Len, cb, lb) then begin f.U8(0); f.Raw(PByte(ca.Data), ca.Len); end
+    else begin f.U8(1); f.Raw(PByte(cb.Data), cb.Len); end;
+  end;
+  Section(SEC_MTIME, f);
+
+  // 8/9. Attributes, when every entry has them
+  AllWin := True;
+  AllUnix := True;
+  for i := 0 to n - 1 do
+  begin
+    AllWin := AllWin and Entries[All[i].Entry].Meta.HasWinAttr;
+    AllUnix := AllUnix and Entries[All[i].Entry].Meta.HasUnixMode;
+  end;
+  if AllUnix then
+  begin
+    f.Clear;
+    for i := 0 to n - 1 do f.Uv(Entries[All[i].Entry].Meta.UnixMode);
+    Section(SEC_UNIXMODE, f);
+  end;
+  if AllWin then
+  begin
+    f.Clear;
+    for i := 0 to n - 1 do f.Uv(Entries[All[i].Entry].Meta.WinAttr);
+    Section(SEC_WINATTR, f);
+  end;
+
+  // 10. LINKS: the target of each link, in order
+  f.Clear;
+  for i := 0 to Z - 1 do
+    with Entries[All[i].Entry].Meta do
+      if IsLink then f.Str(LinkTarget);
+  if f.Len > 0 then Section(SEC_LINKS, f);
+
+  // Optional: comment and the -rr spec (kept when the archive is updated)
+  if Opt.Comment <> '' then
+  begin
+    f.Clear;
+    f.Raw(PChar(Opt.Comment), Length(Opt.Comment));
+    Section(SEC_COMMENT, f);
+  end;
+  if Opt.Recovery <> '' then
+  begin
+    f.Clear;
+    f.Raw(PChar(Opt.Recovery), Length(Opt.Recovery));
+    Section(SEC_RECOVERY, f);
+  end;
+  w.U8(SEC_END);
   Result := w.Bytes;
 end;
 
-{ FOOTER_BLOCK (el formato base de FreeArc §5.1): bloques de control, locked, comentario viejo (0),
-  recovery ('') y comentario (0 bytes). }
-function BuildFooter(const Control: array of TBlockInfo; FooterPos: Int64; const Comment: RawByteString;
-  const Recovery: string; Locked: Boolean): TBytes;
+{ Writes the index (header and payload) at the current position of S, which is IndexPos from
+  the archive start. The payload is compressed with DirMethod (stored if that does not make it
+  smaller and it is not encrypted); with -hp, encrypted with the header key. }
+procedure WriteIndex(S: TStream; IndexPos: Int64; const Payload: TBytes; const Opt: TWriteOptions);
 var
+  Method: string;
+  Comp: TBytes;
   w: TByteWriter;
-  i: Integer;
 begin
-  w.Clear;
-  w.VInt(Length(Control));
-  for i := 0 to High(Control) do
+  Method := Opt.DirMethod;
+  if Opt.HeadersPassword <> '' then
+    Method := Method + '+' + MakeCipherStage(Opt.Encryption, Opt.HeadersPassword, True);
+  Comp := CompressMem(Method, PByte(Payload), Length(Payload));
+  if (Opt.HeadersPassword = '') and (Length(Comp) >= Length(Payload)) then
   begin
-    w.VInt(Control[i].BlockType);
-    w.CStr(Control[i].Method);
-    w.VInt(FooterPos - Control[i].Pos);
-    w.VInt(Control[i].OrigSize);
-    w.VInt(Control[i].CompSize);
-    w.U32(Control[i].Crc);
+    Method := 'storing';
+    Comp := Payload;
   end;
-  w.U8(Ord(Locked));   // locked (-k): a/u/f/d/ch... se niegan a modificarlo
-  w.VInt(0);      // comentario viejo (UCS-4)
-  w.CStr(Recovery);   // configuración de -rr (para conservarla al actualizar)
-  w.VInt(Length(Comment));   // comentario (UTF-8, puede tener NUL)
-  w.Raw(PChar(Comment), Length(Comment));
-  Result := w.Bytes;
+  w.Clear;
+  w.U32(INDEX_MAGIC);
+  w.Uv(QWord(IndexPos));
+  w.Uv(Length(Comp));
+  w.Uv(Length(Payload));
+  w.Str(Method);
+  w.U32(CalcCRC(PByte(Comp), Length(Comp)));
+  w.U32(CalcCRC(PByte(Payload), Length(Payload)));
+  w.U32(CalcCRC(PByte(w.Data), w.Len));
+  S.WriteBuffer(w.Data[0], w.Len);
+  if Length(Comp) > 0 then S.WriteBuffer(Comp[0], Length(Comp));
 end;
 
 { Comprime los archivos de un grupo como un bloque sólido. }
@@ -529,6 +539,29 @@ begin
     Src.Free;
   end;
   Result.CompSize := S.Position - Result.Pos;
+  SetLength(Result.Files, Length(G.Files));
+  for i := 0 to High(G.Files) do
+    with Entries[G.Files[i]] do
+    begin
+      Result.Files[i].Entry := G.Files[i];
+      Result.Files[i].Size := SrcArc.Files[SrcIndex].Size;
+      Result.Files[i].Crc := SrcArc.Files[SrcIndex].Crc;
+      if Meta.IsDir then Inc(Stats.Dirs)
+      else begin Inc(Stats.Files); Inc(Stats.Bytes, Meta.Size); end;
+    end;
+end;
+
+{ Appending in place: a whole block of the archive, described where it already is. }
+function OldBlockOf(const Entries: array of TWriteEntry; const G: TSolidGroup;
+  var Stats: TWriteStats): TDataBlock;
+var
+  Blk: TArcBlock;
+  i: Integer;
+begin
+  Blk := G.CopyFrom.DataBlocks[G.CopyBlock];
+  Result.Method := Blk.Method;
+  Result.Pos := Blk.Pos;
+  Result.CompSize := Blk.CompSize;
   SetLength(Result.Files, Length(G.Files));
   for i := 0 to High(G.Files) do
     with Entries[G.Files[i]] do
@@ -1017,23 +1050,29 @@ function WriteArchive(const FileName: string; const Entries: TWriteEntryArray;
 var
   Tmp: string;
   S: TStream;
-  Hdr: TByteWriter;
-  Control: TBlockInfoArray;
+  Small: array[0..63] of Byte;
+  IndexPos: Int64;
   Blocks: array of TDataBlock;
   DirGroup: TSolidGroup;
   AllGroups: TSolidGroupArray;
   Jobs: array of TWriteBlockJob;
   Pool: TJobPool;
   i, n, k: Integer;
-  DirData: TBytes;
   Ok, UseParallel: Boolean;
   Total, BlockPos: Int64;
   Window, Workers, Next: Integer;
   Sizes: array of Int64;
   Ahead: Int64;
   HadToken: Boolean;
+  Append: Boolean;
+  Base, OldSize: Int64;
+  OldBlocks: array of TDataBlock;
 begin
   Result := Default(TWriteStats);
+  Append := Opt.AppendTo <> nil;
+  Base := 0;
+  OldSize := 0;
+  OldBlocks := nil;
   if not EncoderAvailable(Opt.DirMethod) then
     raise EUnsupportedEncoder.CreateFmt('cannot compress with "%s" yet', [Opt.DirMethod]);
   for i := 0 to High(Groups) do
@@ -1045,7 +1084,9 @@ begin
   Total := 0;
   for i := 0 to High(Groups) do
     if Groups[i].CopyFrom <> nil then
-      Inc(Total, Groups[i].CopyFrom.DataBlocks[Groups[i].CopyBlock].CompSize)
+    begin
+      if not Append then Inc(Total, Groups[i].CopyFrom.DataBlocks[Groups[i].CopyBlock].CompSize);
+    end
     else
       for n := 0 to High(Groups[i].Files) do
         if not Entries[Groups[i].Files[n]].Meta.IsDir then Inc(Total, Entries[Groups[i].Files[n]].Meta.Size);
@@ -1053,16 +1094,25 @@ begin
   Tmp := TempArchiveName(FileName);
   Ok := False;
   ProgressBegin('Compressing', Total);
-  if Opt.VolumeSize > 0 then S := TVolumeStream.CreateWrite(Tmp, Opt.VolumeSize)
+  if Append then
+  begin
+    // the blocks stay where they are: the archive's own stream is not needed any more
+    Base := Opt.AppendTo.SFXSize;
+    Opt.AppendTo.CloseStream;
+    S := TFileStream.Create(FsPath(FileName), fmOpenReadWrite or fmShareDenyWrite);
+    OldSize := S.Size;
+    S.Position := OldSize;
+  end
+  else if Opt.VolumeSize > 0 then S := TVolumeStream.CreateWrite(Tmp, Opt.VolumeSize)
   else S := TFileStream.Create(FsPath(Tmp), fmCreate);
   try
     try
-      // HEADER: firma + versión, sin comprimir
-      Hdr.Clear;
-      Hdr.U32(PARC_SIGNATURE);
-      Hdr.Raw(@VERSION_PARC[0], 4);
-      SetLength(Control, 1);
-      Control[0] := WriteControlBlock(S, True, HEADER_BLOCK, 'storing', Hdr.Bytes);
+      // Head: magic, container version, CRC
+      if not Append then
+      begin
+        EncodeHead(@Small[0]);
+        S.WriteBuffer(Small[0], HEAD_SIZE);
+      end;
 
       // Directorios primero, en un bloque sin datos (como splitToSolidBlocks de FreeArc)
       DirGroup := Default(TSolidGroup);   // CopyFrom = nil: los registros locales no se inicializan solos
@@ -1087,10 +1137,19 @@ begin
       end;
       for i := 0 to High(Groups) do
         if Length(Groups[i].Files) > 0 then
-        begin
-          AllGroups[n] := Groups[i];
-          Inc(n);
-        end;
+          if Append and (Groups[i].CopyFrom <> nil) then
+          begin
+            // a block of the archive appended to: referenced, not written
+            if Groups[i].CopyFrom <> Opt.AppendTo then raise Exception.Create('append: foreign block');
+            k := Length(OldBlocks);
+            SetLength(OldBlocks, k + 1);
+            OldBlocks[k] := OldBlockOf(Entries, Groups[i], Result);
+          end
+          else
+          begin
+            AllGroups[n] := Groups[i];
+            Inc(n);
+          end;
       SetLength(AllGroups, n);
 
       // Bloques más grandes primero (como la planificación LPT): los hilos empiezan por lo que
@@ -1123,9 +1182,12 @@ begin
             end;
         if n < 2 then UseParallel := False;   // los directorios solos no justifican hilos
       end;
+      // (not when a block reads files of an old block: they are read in order)
       if UseParallel then
-        for i := 0 to High(Entries) do
-          if Entries[i].SrcArc <> nil then UseParallel := False;
+        for i := 0 to High(AllGroups) do
+          for k := 0 to High(AllGroups[i].Files) do
+            with Entries[AllGroups[i].Files[k]] do
+              if (SrcArc <> nil) and not Meta.IsDir and not Meta.IsLink then UseParallel := False;
       if UseParallel then
         for i := 0 to High(AllGroups) do
           if AllGroups[i].CopyFrom <> nil then UseParallel := False;
@@ -1225,34 +1287,40 @@ begin
       CheckCancel;
       Enc4x4TotalHint := 0;
 
-      // Directorio (los offsets de los bloques son relativos a su posición)
-      DirData := BuildDirectory(Entries, Blocks, S.Position, True, Opt.DirMethod);
-      SetLength(Control, 2);
-      Control[1] := WriteControlBlock(S, True, DIR_BLOCK, Opt.DirMethod, DirData, Opt.Encryption, Opt.HeadersPassword);
-
-      if Opt.Recovery <> '' then
+      // appending: the old blocks go first (after the entries without data), where they are
+      if Length(OldBlocks) > 0 then
       begin
-        // Como ArcvProcessRead.hs: primero un footer provisional (encabezado y directorio, sin
-        // recovery), que el registro también protege; al final se repite con la lista entera.
-        // Sin él, los bloques de recuperación caen en otro lugar y la paridad de la cola cambia
-        WriteControlBlock(S, True, FOOTER_BLOCK, Opt.DirMethod, BuildFooter(Control, S.Position, Opt.Comment, '', Opt.Locked),
-          Opt.Encryption, Opt.HeadersPassword);
-        WriteRecovery(S, Opt.Recovery, Control);
+        k := Ord(Length(DirGroup.Files) > 0);
+        n := Length(Blocks);
+        SetLength(Blocks, n + Length(OldBlocks));
+        for i := n - 1 downto k do Blocks[i + Length(OldBlocks)] := Blocks[i];
+        for i := 0 to High(OldBlocks) do Blocks[k + i] := OldBlocks[i];
       end;
-      // Footer (las posiciones de los bloques de control, relativas a la del footer)
-      WriteControlBlock(S, True, FOOTER_BLOCK, Opt.DirMethod, BuildFooter(Control, S.Position, Opt.Comment, Opt.Recovery, Opt.Locked),
-        Opt.Encryption, Opt.HeadersPassword);
-      Result.ArcSize := S.Size;
+
+      // Index, end locator and, with -rr, the recovery record (it protects everything before it)
+      IndexPos := S.Position - Base;
+      WriteIndex(S, IndexPos, BuildIndex(Entries, Blocks, Length(DirGroup.Files) > 0, Base, Opt), Opt);
+      EncodeLocator(@Small[0], IndexPos, S.Position + LOC_SIZE - Base);
+      S.WriteBuffer(Small[0], LOC_SIZE);
+      if Opt.Recovery <> '' then WriteRecoveryRecord(S, Base, S.Position - Base, Opt.Recovery);
+      if Append then S.Size := S.Position;
+      Result.ArcSize := S.Size - Base;
       Ok := True;
     finally
       Enc4x4TotalHint := 0;
+      // a failed append leaves the archive as it was
+      if Append and not Ok then
+        try
+          S.Size := OldSize;
+        except
+        end;
       S.Free;
     end;
   finally
-    if not Ok then
+    if not Ok and not Append then
       if Opt.VolumeSize > 0 then DeleteVolumesFrom(Tmp, 1) else DeleteFile(FsPath(Tmp));
   end;
-  if not Opt.KeepTemp then FinishArchive(FileName, Opt.VolumeSize);
+  if not Opt.KeepTemp and not Append then FinishArchive(FileName, Opt.VolumeSize);
 end;
 
 function TempArchiveName(const FileName: string): string;

@@ -28,7 +28,7 @@ nsalt=$("$PARC" lb c.parc -pClave 2>/dev/null | grep -oE ':s[0-9a-f]{32}' | sort
 nnonce=$("$PARC" lb c.parc -pClave 2>/dev/null | grep -oE ':n[0-9a-f]{32}' | sort -u | wc -l)
 nblk=$("$PARC" lb c.parc -pClave 2>/dev/null | grep -c 'xchacha20:')
 check "una sal para todo el archivo"            '[ "$nsalt" = 1 ]'
-check "un nonce distinto por bloque ($nblk)"     '[ "$nnonce" = "$nblk" ] && [ "$nblk" -ge 23 ]'
+check "un nonce distinto por bloque ($nblk)"     '[ "$nnonce" = "$nblk" ] && [ "$nblk" -ge 22 ]'
 check "una sola derivación al crear 23 bloques (${ta} ms)" '[ "$ta" -lt 3000 ]'
 t0=$(date +%s%N); okt c.parc -pClave; ok=$?; tt=$(ms "$t0")
 check "t sin errores"                           '[ $ok = 0 ]'
@@ -127,8 +127,8 @@ import sys; f = open('alt.parc', 'r+b'); f.seek($pos + $off); b = f.read(1); f.s
 done < blocks.txt
 check "$n bytes alterados en bloques cifrados: todos fallan la autenticación (código 2)" '[ $bad = 0 ] && [ $n -ge 25 ]'
 check "  sin caídas"                            '[ $crash = 0 ]'
-# -hp: un byte del directorio cifrado
-dpos=$("$PARC" lb c.parc -pClave 2>/dev/null | sed -n 's/.*directory *pos=\([0-9]*\).*/\1/p')
+# -hp: un byte del índice cifrado
+dpos=$("$PARC" lb c.parc -pClave 2>/dev/null | sed -n 's/^  index *pos=\([0-9]*\).*/\1/p')
 cp c.parc alt.parc
 python3 -c "
 f = open('alt.parc', 'r+b'); f.seek($dpos + 5); b = f.read(1); f.seek($dpos + 5); f.write(bytes([b[0] ^ 1]))"
@@ -139,9 +139,11 @@ sz=$(stat -c %s p.parc); badt=0
 for cut in 1 17 100 1000 $((sz/2)) $((sz-5000)); do
   head -c $((sz - cut)) p.parc > tr.parc
   rc=$(code t tr.parc -pClave)
-  { [ "$rc" = 2 ] || [ "$rc" = 4 ]; } || badt=$((badt+1))
+  { [ "$rc" = 0 ] || [ "$rc" = 2 ] || [ "$rc" = 4 ]; } || badt=$((badt+1))
+  # un final corto (solo el localizador) se lee igual, con aviso
+  if [ $cut = 1 ]; then [ "$rc" = 0 ] || badt=$((badt+1)); fi
 done
-check "archivo truncado en 6 puntos: error limpio" '[ $badt = 0 ]'
+check "archivo truncado en 6 puntos: error limpio (o leído sin el localizador)" '[ $badt = 0 ]'
 # Dos bloques del mismo tamaño intercambiados: el nonce de cada bloque está en su método
 head -c 70000 /dev/urandom > d2a.bin; head -c 70000 /dev/urandom > d2b.bin
 "$PARC" a sw.parc d2a.bin d2b.bin -s- -m1 -pClave --no-progress >/dev/null 2>&1
